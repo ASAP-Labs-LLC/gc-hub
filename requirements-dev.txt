@@ -1,0 +1,5 @@
+# Dev/test-only dependencies (production deps live in requirements.txt).
+# Run the suite with either:
+#     python -m pytest tests/        (needs pytest, below)
+#     python -m unittest discover -s tests   (stdlib only)
+pytest

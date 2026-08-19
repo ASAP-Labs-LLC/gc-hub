@@ -1,0 +1,18 @@
+flask
+numpy
+scipy
+pandas
+netCDF4
+plotly
+kaleido
+xhtml2pdf
+pystray
+Pillow
+watchdog
+
+# QBench PDF uploader
+selenium
+webdriver-manager
+chromedriver-autoinstaller
+PyJWT
+requests
