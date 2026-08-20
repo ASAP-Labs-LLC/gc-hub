@@ -16,8 +16,10 @@ import requests
 import requests.exceptions
 from requests.adapters import HTTPAdapter
 
-CLIENT_ID = "<removed-from-history>"
-CLIENT_SECRET = "<removed-from-history>"
+import qbench_secrets
+
+CLIENT_ID = qbench_secrets.get_client_id()
+CLIENT_SECRET = qbench_secrets.get_client_secret()
 TOKEN_URL = "https://asaplabs.qbench.net/qbench/oauth2/v1/token"
 API_BASE_URL = "https://asaplabs.qbench.net/qbench/api/v2"
 DEFAULT_TIMEOUT = int(os.getenv("QBENCH_TIMEOUT_SECONDS", "30"))
