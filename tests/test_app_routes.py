@@ -133,5 +133,63 @@ class RouteSurfaceTests(unittest.TestCase):
         self.assertIn("POST", _route_methods().get("/api/library/reindex-times", set()))
 
 
+def _app_run_call() -> ast.Call:
+    """The ``app.run(...)`` call in app.py's __main__ block."""
+    tree = ast.parse((WEBAPP_DIR / "app.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "run"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "app"
+        ):
+            return node
+    raise AssertionError("No app.run(...) call found in app.py")
+
+
+class PortBindingTests(unittest.TestCase):
+    """The port must be resolvable per instance, never hardcoded.
+
+    AST-only: importing app.py starts the Looker and auto-restart threads.
+    """
+
+    def test_app_run_has_no_hardcoded_port(self) -> None:
+        call = _app_run_call()
+        port_kw = next((kw for kw in call.keywords if kw.arg == "port"), None)
+        self.assertIsNotNone(port_kw, "app.run must pass an explicit port=")
+        self.assertNotIsInstance(
+            port_kw.value, ast.Constant,
+            "app.run port= must not be a literal — it has to vary per instance",
+        )
+
+    def test_app_py_imports_instance(self) -> None:
+        tree = ast.parse((WEBAPP_DIR / "app.py").read_text(encoding="utf-8"))
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        self.assertIn("instance", imported)
+
+    def test_instance_is_imported_before_settings(self) -> None:
+        # settings.CONFIG_PATH is computed from GC_PORT at import time, so the
+        # port must be published to the environment first.
+        source = (WEBAPP_DIR / "app.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        instance_line = settings_line = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "instance" and instance_line is None:
+                        instance_line = node.lineno
+                    if alias.name == "settings" and settings_line is None:
+                        settings_line = node.lineno
+        self.assertIsNotNone(instance_line)
+        self.assertIsNotNone(settings_line)
+        self.assertLess(instance_line, settings_line)
+
+
 if __name__ == "__main__":
     unittest.main()

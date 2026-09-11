@@ -49,6 +49,16 @@ from flask import (
 # ---------------------------------------------------------------------------
 # Backend modules (already in the webapp/ folder)
 # ---------------------------------------------------------------------------
+# ── Per-instance identity ─────────────────────────────────────────────────
+# Resolve this instance's port BEFORE importing settings: settings.CONFIG_PATH
+# is derived from GC_PORT at import time, and distill/looker import settings.
+# Publishing it back to the environment means every module — and every
+# subprocess we spawn, including the daily auto-restart — agrees on the port.
+import instance
+
+GC_PORT = instance.resolve_port()
+os.environ["GC_PORT"] = str(GC_PORT)
+
 import distill
 import sample_flags
 import settings as settings_mod
@@ -3714,5 +3724,5 @@ _init_app()
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5560, debug=True, threaded=True,
+    app.run(host="0.0.0.0", port=GC_PORT, debug=True, threaded=True,
             use_reloader=False)  # reloader kills background threads on file changes
