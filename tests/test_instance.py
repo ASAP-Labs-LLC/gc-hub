@@ -8,6 +8,7 @@ into a temp dir.
 
 from __future__ import annotations
 
+import socket
 import sys
 import tempfile
 import unittest
@@ -234,6 +235,26 @@ class RecentPortsTests(unittest.TestCase):
             Path(self._tmp.name) / "no-such-dir" / "ports.json"
         )
         instance.remember_port(5561)  # must not raise
+
+
+class PortInUseTests(unittest.TestCase):
+    def test_free_port_reports_false(self) -> None:
+        # Bind to port 0 to have the OS pick a free port, then release it.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        self.assertFalse(instance.port_in_use(port))
+
+    def test_bound_port_reports_true(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+            held.bind(("", 0))
+            held.listen(1)
+            port = held.getsockname()[1]
+            self.assertTrue(instance.port_in_use(port))
+
+    def test_invalid_port_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            instance.port_in_use("banana")
 
 
 if __name__ == "__main__":

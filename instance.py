@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -154,3 +155,23 @@ def remember_port(port) -> None:
         )
     except Exception:
         pass
+
+
+def port_in_use(port, host: str = "") -> bool:
+    """True if *port* cannot be bound — i.e. something is already serving it.
+
+    The launcher spawns Flask with CREATE_NEW_CONSOLE, so without this check a
+    port clash kills the server inside a console window the operator never
+    sees while the tray icon still looks healthy.
+
+    ``host=""`` means INADDR_ANY, matching ``app.run(host="0.0.0.0")``.
+    SO_REUSEADDR is deliberately NOT set: on Windows it permits binding an
+    address already in use, which would report a busy port as free.
+    """
+    port = validate_port(port)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return True
+    return False
