@@ -170,5 +170,71 @@ class PidfileNameTests(unittest.TestCase):
         )
 
 
+class RecentPortsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._saved = instance.RECENT_PORTS_PATH
+        instance.RECENT_PORTS_PATH = Path(self._tmp.name) / "ports.json"
+
+    def tearDown(self) -> None:
+        instance.RECENT_PORTS_PATH = self._saved
+        self._tmp.cleanup()
+
+    def test_missing_file_gives_empty_defaults(self) -> None:
+        state = instance.load_recent_ports()
+        self.assertEqual(state["recent"], [])
+        self.assertEqual(state["last"], instance.DEFAULT_PORT)
+
+    def test_remember_then_load_roundtrip(self) -> None:
+        instance.remember_port(5561)
+        state = instance.load_recent_ports()
+        self.assertEqual(state["recent"], [5561])
+        self.assertEqual(state["last"], 5561)
+
+    def test_most_recent_first(self) -> None:
+        instance.remember_port(5560)
+        instance.remember_port(5561)
+        instance.remember_port(5562)
+        self.assertEqual(instance.load_recent_ports()["recent"], [5562, 5561, 5560])
+
+    def test_repeat_moves_to_front_without_duplicating(self) -> None:
+        instance.remember_port(5560)
+        instance.remember_port(5561)
+        instance.remember_port(5560)
+        self.assertEqual(instance.load_recent_ports()["recent"], [5560, 5561])
+
+    def test_list_is_capped(self) -> None:
+        for port in range(5560, 5560 + instance.RECENT_LIMIT + 3):
+            instance.remember_port(port)
+        self.assertEqual(
+            len(instance.load_recent_ports()["recent"]), instance.RECENT_LIMIT
+        )
+
+    def test_corrupt_file_degrades_to_defaults(self) -> None:
+        instance.RECENT_PORTS_PATH.write_text("{not json", encoding="utf-8")
+        state = instance.load_recent_ports()
+        self.assertEqual(state["recent"], [])
+        self.assertEqual(state["last"], instance.DEFAULT_PORT)
+
+    def test_garbage_entries_are_dropped(self) -> None:
+        instance.RECENT_PORTS_PATH.write_text(
+            '{"recent": [5561, "banana", 80, 5562], "last": 5561}', encoding="utf-8"
+        )
+        self.assertEqual(instance.load_recent_ports()["recent"], [5561, 5562])
+
+    def test_last_falls_back_when_invalid(self) -> None:
+        instance.RECENT_PORTS_PATH.write_text(
+            '{"recent": [5561], "last": "banana"}', encoding="utf-8"
+        )
+        self.assertEqual(instance.load_recent_ports()["last"], 5561)
+
+    def test_unwritable_path_does_not_raise(self) -> None:
+        # A read-only home must not stop the app launching.
+        instance.RECENT_PORTS_PATH = (
+            Path(self._tmp.name) / "no-such-dir" / "ports.json"
+        )
+        instance.remember_port(5561)  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

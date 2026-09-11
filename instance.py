@@ -11,10 +11,11 @@ tests: ``_init_app()`` starts background threads at import time.)
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 DEFAULT_PORT = 5560
 PORT_MIN = 1024
@@ -23,6 +24,9 @@ PORT_MAX = 65535
 SETTINGS_DIR = Path.home()
 SETTINGS_STEM = ".gc_viewer_settings"
 PIDFILE_STEM = ".gc_server"
+
+RECENT_PORTS_PATH = Path.home() / ".gc_launcher_ports.json"
+RECENT_LIMIT = 8
 
 
 def validate_port(value) -> int:
@@ -100,3 +104,53 @@ def pidfile_name(port=None, env=None) -> str:
     if port == DEFAULT_PORT:
         return f"{PIDFILE_STEM}.pid"
     return f"{PIDFILE_STEM}-{port}.pid"
+
+
+def load_recent_ports() -> Dict[str, object]:
+    """Ports the operator has used before, most recent first.
+
+    Launcher-level and shared by every instance — it is a list of choices,
+    not per-instance config. Any unreadable or malformed file degrades to
+    empty rather than blocking launch.
+    """
+    fallback: Dict[str, object] = {"recent": [], "last": DEFAULT_PORT}
+    try:
+        data = json.loads(RECENT_PORTS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return fallback
+    if not isinstance(data, dict):
+        return fallback
+
+    recent: List[int] = []
+    raw_recent = data.get("recent")
+    if isinstance(raw_recent, list):
+        for item in raw_recent:
+            try:
+                port = validate_port(item)
+            except ValueError:
+                continue
+            if port not in recent:
+                recent.append(port)
+    recent = recent[:RECENT_LIMIT]
+
+    try:
+        last = validate_port(data.get("last"))
+    except ValueError:
+        last = recent[0] if recent else DEFAULT_PORT
+
+    return {"recent": recent, "last": last}
+
+
+def remember_port(port) -> None:
+    """Record *port* as the most recently used. Never raises."""
+    port = validate_port(port)
+    state = load_recent_ports()
+    recent = [p for p in state["recent"] if p != port]
+    recent.insert(0, port)
+    payload = {"recent": recent[:RECENT_LIMIT], "last": port}
+    try:
+        RECENT_PORTS_PATH.write_text(
+            json.dumps(payload, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
