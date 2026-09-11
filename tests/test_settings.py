@@ -138,7 +138,12 @@ class SeedNewInstanceTests(unittest.TestCase):
     two processes appending to it.
     """
 
-    PER_INSTANCE = ("watch_dir", "processed_cdf_dir", "distill_output")
+    PER_INSTANCE = (
+        "watch_dir",
+        "processed_cdf_dir",
+        "distill_output",
+        "export_folder",
+    )
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -162,6 +167,7 @@ class SeedNewInstanceTests(unittest.TestCase):
                     "watch_dir": r"C:\GC\watch-A",
                     "processed_cdf_dir": r"C:\GC\processed-A",
                     "distill_output": r"C:\GC\results-A.csv",
+                    "export_folder": r"C:\GC\exports-A",
                     "analysis_window": "555",
                     "series_colors": "red,blue",
                 }

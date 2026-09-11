@@ -72,8 +72,14 @@ DEFAULTS: Dict[str, str] = {
 # Settings that MUST differ between concurrently running instances. A new
 # instance inherits everything else from the primary (port 5560) config, but
 # these fall back to DEFAULTS so the operator is forced to choose them —
-# two instances sharing distill_output would both append to one results CSV.
-PER_INSTANCE_KEYS = ("watch_dir", "processed_cdf_dir", "distill_output")
+# two instances sharing distill_output would both append to one results CSV,
+# and a shared export_folder mixes two workstations' reports together.
+PER_INSTANCE_KEYS = (
+    "watch_dir",
+    "processed_cdf_dir",
+    "distill_output",
+    "export_folder",
+)
 
 
 # ---------------------------------------------------------------------------

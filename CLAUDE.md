@@ -36,7 +36,7 @@ Several copies can run on one machine — one per GC workstation folder. Double-
 
 Port 5560 keeps the historic filenames, so the existing install needed no migration. Remembered ports live in `~/.gc_launcher_ports.json` (shared by all instances — it is a list of choices, not config).
 
-A new instance's settings are seeded from the 5560 file, **except** `settings.PER_INSTANCE_KEYS` (`watch_dir`, `processed_cdf_dir`, `distill_output`), which reset to defaults so the operator must choose them. Two instances sharing `distill_output` would both append to one results CSV.
+A new instance's settings are seeded from the 5560 file, **except** `settings.PER_INSTANCE_KEYS` (`watch_dir`, `processed_cdf_dir`, `distill_output`, `export_folder`), which reset to defaults so the operator must choose them. Two instances sharing `distill_output` would both append to one results CSV, and a shared `export_folder` mixes two workstations' reports together.
 
 **Give each instance its own watch folder.** The Looker dedupes on `(Lab ID, InjectionDateTime)` within one CSV, not across instances, so two instances watching one folder both process every file.
 
