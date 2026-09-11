@@ -13,11 +13,16 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Optional, Sequence
 
 DEFAULT_PORT = 5560
 PORT_MIN = 1024
 PORT_MAX = 65535
+
+SETTINGS_DIR = Path.home()
+SETTINGS_STEM = ".gc_viewer_settings"
+PIDFILE_STEM = ".gc_server"
 
 
 def validate_port(value) -> int:
@@ -75,3 +80,23 @@ def active_port(env=None) -> int:
         return validate_port(raw)
     except ValueError:
         return DEFAULT_PORT
+
+
+def settings_path(port=None, env=None) -> Path:
+    """Config file for *port*. The default port keeps the historic filename."""
+    port = active_port(env) if port is None else validate_port(port)
+    if port == DEFAULT_PORT:
+        return SETTINGS_DIR / f"{SETTINGS_STEM}.json"
+    return SETTINGS_DIR / f"{SETTINGS_STEM}-{port}.json"
+
+
+def pidfile_name(port=None, env=None) -> str:
+    """Launcher pidfile name for *port*, relative to the webapp folder.
+
+    Per-port so a second launcher's stale-process cleanup cannot kill the
+    first instance's Flask subprocess.
+    """
+    port = active_port(env) if port is None else validate_port(port)
+    if port == DEFAULT_PORT:
+        return f"{PIDFILE_STEM}.pid"
+    return f"{PIDFILE_STEM}-{port}.pid"

@@ -122,5 +122,53 @@ class ActivePortTests(unittest.TestCase):
         )
 
 
+class SettingsPathTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._saved_dir = instance.SETTINGS_DIR
+        instance.SETTINGS_DIR = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        instance.SETTINGS_DIR = self._saved_dir
+        self._tmp.cleanup()
+
+    def test_default_port_keeps_legacy_filename(self) -> None:
+        # The production install must not need a settings migration.
+        path = instance.settings_path(instance.DEFAULT_PORT)
+        self.assertEqual(path.name, ".gc_viewer_settings.json")
+
+    def test_other_port_gets_suffixed_filename(self) -> None:
+        path = instance.settings_path(5561)
+        self.assertEqual(path.name, ".gc_viewer_settings-5561.json")
+
+    def test_reads_env_when_no_argument(self) -> None:
+        path = instance.settings_path(env={"GC_PORT": "5561"})
+        self.assertEqual(path.name, ".gc_viewer_settings-5561.json")
+
+    def test_lives_in_settings_dir(self) -> None:
+        path = instance.settings_path(5561)
+        self.assertEqual(path.parent, Path(self._tmp.name))
+
+
+class PidfileNameTests(unittest.TestCase):
+    def test_default_port_keeps_legacy_name(self) -> None:
+        self.assertEqual(
+            instance.pidfile_name(instance.DEFAULT_PORT), ".gc_server.pid"
+        )
+
+    def test_other_port_gets_suffixed_name(self) -> None:
+        self.assertEqual(instance.pidfile_name(5561), ".gc_server-5561.pid")
+
+    def test_two_ports_never_collide(self) -> None:
+        self.assertNotEqual(
+            instance.pidfile_name(5560), instance.pidfile_name(5561)
+        )
+
+    def test_reads_env_when_no_argument(self) -> None:
+        self.assertEqual(
+            instance.pidfile_name(env={"GC_PORT": "5561"}), ".gc_server-5561.pid"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
