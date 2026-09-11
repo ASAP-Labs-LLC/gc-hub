@@ -69,12 +69,50 @@ DEFAULTS: Dict[str, str] = {
     "bestfit_mix_min_frac": "0.10",
 }
 
+# Settings that MUST differ between concurrently running instances. A new
+# instance inherits everything else from the primary (port 5560) config, but
+# these fall back to DEFAULTS so the operator is forced to choose them —
+# two instances sharing distill_output would both append to one results CSV.
+PER_INSTANCE_KEYS = ("watch_dir", "processed_cdf_dir", "distill_output")
+
 
 # ---------------------------------------------------------------------------
 # I/O helpers
 # ---------------------------------------------------------------------------
 
+def _seed_new_instance() -> None:
+    """First run on a non-default port: copy the primary instance's config,
+    minus the per-instance paths. No-op in every other case.
+    """
+    if instance.active_port() == instance.DEFAULT_PORT:
+        return
+    if CONFIG_PATH.exists():
+        return
+
+    primary = instance.settings_path(instance.DEFAULT_PORT)
+    if primary == CONFIG_PATH or not primary.exists():
+        return
+
+    try:
+        data = json.loads(primary.read_text(encoding="utf-8"))
+    except Exception as exc:
+        LOGGER.warning("Could not seed instance settings from %s: %s", primary, exc)
+        return
+    if not isinstance(data, dict):
+        return
+
+    for key in PER_INSTANCE_KEYS:
+        data.pop(key, None)
+
+    try:
+        CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        LOGGER.info("Seeded new instance settings at %s from %s", CONFIG_PATH, primary)
+    except Exception as exc:
+        LOGGER.warning("Could not write seeded settings to %s: %s", CONFIG_PATH, exc)
+
+
 def load_settings() -> Dict[str, str]:
+    _seed_new_instance()   # no-op unless this is a fresh non-default port
     conf = DEFAULTS.copy()
     if CONFIG_PATH.exists():
         try:

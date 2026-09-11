@@ -131,5 +131,101 @@ class ConfigPathPerPortTests(unittest.TestCase):
         )
 
 
+class SeedNewInstanceTests(unittest.TestCase):
+    """A fresh non-default-port instance inherits tuning but not paths.
+
+    Inheriting distill_output would give two instances one results CSV and
+    two processes appending to it.
+    """
+
+    PER_INSTANCE = ("watch_dir", "processed_cdf_dir", "distill_output")
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+
+        self._saved_env = os.environ.get("GC_PORT")
+        self._saved_settings_dir = settings_mod.instance.SETTINGS_DIR
+        self._saved_cfg = settings_mod.CONFIG_PATH
+        self._saved_comp = settings_mod.DEFAULTS["comparison_defaults_dir"]
+
+        settings_mod.instance.SETTINGS_DIR = tmp
+        settings_mod.DEFAULTS["comparison_defaults_dir"] = str(tmp / "stds")
+
+        # The primary instance's config, as it would exist on the server.
+        self._primary = settings_mod.instance.settings_path(
+            settings_mod.instance.DEFAULT_PORT
+        )
+        self._primary.write_text(
+            json.dumps(
+                {
+                    "watch_dir": r"C:\GC\watch-A",
+                    "processed_cdf_dir": r"C:\GC\processed-A",
+                    "distill_output": r"C:\GC\results-A.csv",
+                    "analysis_window": "555",
+                    "series_colors": "red,blue",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # Act as the second instance.
+        os.environ["GC_PORT"] = "5561"
+        settings_mod.CONFIG_PATH = settings_mod.instance.settings_path(5561)
+
+    def tearDown(self) -> None:
+        if self._saved_env is None:
+            os.environ.pop("GC_PORT", None)
+        else:
+            os.environ["GC_PORT"] = self._saved_env
+        settings_mod.instance.SETTINGS_DIR = self._saved_settings_dir
+        settings_mod.CONFIG_PATH = self._saved_cfg
+        settings_mod.DEFAULTS["comparison_defaults_dir"] = self._saved_comp
+        self._tmp.cleanup()
+
+    def test_inherits_non_path_settings(self) -> None:
+        conf = settings_mod.load_settings()
+        self.assertEqual(conf["analysis_window"], "555")
+        self.assertEqual(conf["series_colors"], "red,blue")
+
+    def test_does_not_inherit_per_instance_paths(self) -> None:
+        conf = settings_mod.load_settings()
+        for key in self.PER_INSTANCE:
+            self.assertEqual(
+                conf[key], settings_mod.DEFAULTS[key],
+                f"{key} must not be inherited from the primary instance",
+            )
+
+    def test_seed_file_is_written_once(self) -> None:
+        settings_mod.load_settings()
+        self.assertTrue(settings_mod.CONFIG_PATH.exists())
+        on_disk = json.loads(settings_mod.CONFIG_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["analysis_window"], "555")
+        for key in self.PER_INSTANCE:
+            self.assertNotIn(key, on_disk)
+
+    def test_operator_edits_survive_reload(self) -> None:
+        conf = settings_mod.load_settings()
+        conf["watch_dir"] = str(Path(self._tmp.name) / "watch-B")
+        settings_mod.save_settings(conf)
+        reloaded = settings_mod.load_settings()
+        self.assertEqual(reloaded["watch_dir"], conf["watch_dir"])
+
+    def test_no_seed_when_primary_absent(self) -> None:
+        self._primary.unlink()
+        conf = settings_mod.load_settings()
+        self.assertEqual(
+            conf["analysis_window"], settings_mod.DEFAULTS["analysis_window"]
+        )
+        self.assertFalse(settings_mod.CONFIG_PATH.exists())
+
+    def test_default_port_never_seeds(self) -> None:
+        # Guards the existing contract that load_settings creates no file.
+        os.environ.pop("GC_PORT", None)
+        settings_mod.CONFIG_PATH = Path(self._tmp.name) / "fresh.json"
+        settings_mod.load_settings()
+        self.assertFalse(settings_mod.CONFIG_PATH.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
