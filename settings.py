@@ -13,9 +13,13 @@ import logging
 from pathlib import Path
 from typing import Dict
 
+import instance
+
 LOGGER = logging.getLogger("settings")
 
-CONFIG_PATH: Path = Path.home() / ".gc_viewer_settings.json"
+# Derived from GC_PORT at import time so several instances can run side by
+# side. Stays a module-level Path (not a call) so tests can redirect it.
+CONFIG_PATH: Path = instance.settings_path()
 
 # ---------------------------------------------------------------------------
 # Default values — update here when adding new settings keys

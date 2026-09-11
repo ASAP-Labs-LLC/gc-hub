@@ -8,6 +8,9 @@ config or creates folders in their home directory.
 
 from __future__ import annotations
 
+import importlib
+import json
+import os
 import sys
 import tempfile
 import unittest
@@ -95,6 +98,37 @@ class RoundTripTests(unittest.TestCase):
         reloaded = settings_mod.load_settings()
         self.assertEqual(reloaded["watch_dir"], conf["watch_dir"])
         self.assertEqual(reloaded["analysis_window"], "555")
+
+
+class ConfigPathPerPortTests(unittest.TestCase):
+    """CONFIG_PATH is computed at import time from GC_PORT."""
+
+    def setUp(self) -> None:
+        self._saved_env = os.environ.get("GC_PORT")
+
+    def tearDown(self) -> None:
+        if self._saved_env is None:
+            os.environ.pop("GC_PORT", None)
+        else:
+            os.environ["GC_PORT"] = self._saved_env
+        importlib.reload(settings_mod)
+
+    def test_default_port_keeps_legacy_filename(self) -> None:
+        os.environ.pop("GC_PORT", None)
+        importlib.reload(settings_mod)
+        self.assertEqual(settings_mod.CONFIG_PATH.name, ".gc_viewer_settings.json")
+
+    def test_explicit_default_port_keeps_legacy_filename(self) -> None:
+        os.environ["GC_PORT"] = "5560"
+        importlib.reload(settings_mod)
+        self.assertEqual(settings_mod.CONFIG_PATH.name, ".gc_viewer_settings.json")
+
+    def test_other_port_gets_its_own_file(self) -> None:
+        os.environ["GC_PORT"] = "5561"
+        importlib.reload(settings_mod)
+        self.assertEqual(
+            settings_mod.CONFIG_PATH.name, ".gc_viewer_settings-5561.json"
+        )
 
 
 if __name__ == "__main__":
