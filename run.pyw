@@ -31,9 +31,17 @@ from pystray import Menu, MenuItem as Item
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-PORT  = 5560
 BASE  = Path(__file__).resolve().parent   # …/webapp/
-_PIDFILE = BASE / ".gc_server.pid"        # tracks the Flask subprocess PID
+
+if str(BASE) not in sys.path:
+    sys.path.insert(0, str(BASE))
+import instance  # noqa: E402  (needs BASE on sys.path first)
+
+# Both are finalised in main() once the operator has picked a port. They stay
+# module-level because the tray callbacks and pidfile helpers read them by
+# name at call time.
+PORT: int = instance.DEFAULT_PORT
+_PIDFILE: Path = BASE / instance.pidfile_name(PORT)   # tracks the Flask subprocess PID
 
 # ── Windows API ────────────────────────────────────────────────────────────
 _user32   = ctypes.windll.user32
@@ -289,10 +297,115 @@ def _run_tray(server: ServerManager) -> None:
     icon.run()
 
 
+# ── Port selection ─────────────────────────────────────────────────────────
+
+def _port_already_decided() -> int | None:
+    """The port when it was chosen for us — an auto-start or scheduled launch.
+
+    Returns None when the operator should be asked. Raises ValueError on a
+    malformed explicit value, which main() surfaces as a message box.
+    """
+    argv = sys.argv[1:]
+    if any(a == "--port" or a.startswith("--port=") for a in argv):
+        return instance.resolve_port(argv=argv)
+    raw = (os.environ.get("GC_PORT") or "").strip()
+    if raw:
+        return instance.validate_port(raw)
+    return None
+
+
+def _prompt_for_port() -> int | None:
+    """Modal port picker. Returns the chosen port, or None if cancelled.
+
+    tkinter is imported here, not at module scope, so instance.py and the test
+    suite stay importable on machines without it.
+    """
+    import tkinter as tk
+    from tkinter import ttk
+
+    state = instance.load_recent_ports()
+    choices = [str(p) for p in state["recent"]] or [str(instance.DEFAULT_PORT)]
+    chosen: list[int] = []
+
+    root = tk.Tk()
+    root.title("GC Viewer — Start Instance")
+    root.resizable(False, False)
+
+    frame = ttk.Frame(root, padding=16)
+    frame.grid(sticky="nsew")
+    frame.columnconfigure(0, weight=1)
+    frame.columnconfigure(1, weight=1)
+
+    ttk.Label(frame, text="Port for this instance:").grid(
+        row=0, column=0, columnspan=2, sticky="w"
+    )
+
+    var = tk.StringVar(value=str(state["last"]))
+    combo = ttk.Combobox(frame, textvariable=var, values=choices, width=14)
+    combo.grid(row=1, column=0, columnspan=2, sticky="we", pady=(6, 2))
+    combo.focus_set()
+    combo.select_range(0, tk.END)
+
+    error = ttk.Label(frame, text="", foreground="#b00020", wraplength=260)
+    error.grid(row=2, column=0, columnspan=2, sticky="w")
+
+    def start(*_args) -> None:
+        try:
+            port = instance.validate_port(var.get())
+        except ValueError as exc:
+            error.config(text=str(exc))
+            return
+        if instance.port_in_use(port):
+            error.config(text=f"Port {port} is already in use — pick another.")
+            return
+        chosen.append(port)
+        root.destroy()
+
+    def cancel(*_args) -> None:
+        root.destroy()
+
+    ttk.Button(frame, text="Start", command=start).grid(
+        row=3, column=0, sticky="we", pady=(12, 0)
+    )
+    ttk.Button(frame, text="Cancel", command=cancel).grid(
+        row=3, column=1, sticky="we", pady=(12, 0), padx=(6, 0)
+    )
+
+    root.bind("<Return>", start)
+    root.bind("<Escape>", cancel)
+    root.protocol("WM_DELETE_WINDOW", cancel)
+    root.mainloop()
+
+    return chosen[0] if chosen else None
+
+
+def _choose_port() -> int | None:
+    """Decide the port: an explicit one if given, otherwise ask the operator."""
+    decided = _port_already_decided()
+    if decided is not None:
+        return decided
+    return _prompt_for_port()
+
+
 # ── Entry point ────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # Kill any Flask process left over from a previous launcher session
+    global PORT, _PIDFILE
+
+    try:
+        port = _choose_port()
+    except ValueError as exc:
+        _user32.MessageBoxW(None, str(exc), "GC Viewer", 0x10)  # MB_ICONERROR
+        return
+    if port is None:
+        return                                  # operator cancelled
+
+    PORT = port
+    os.environ["GC_PORT"] = str(PORT)           # inherited by the Flask subprocess
+    _PIDFILE = BASE / instance.pidfile_name(PORT)
+    instance.remember_port(PORT)
+
+    # Kill any Flask process left over from a previous session *of this port*
     _cleanup_stale_server()
 
     server = ServerManager()
