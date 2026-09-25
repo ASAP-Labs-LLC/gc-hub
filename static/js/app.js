@@ -3782,52 +3782,98 @@ async function refreshRestartLabel() {
     if (tb) tb.textContent = label === 'Restart' ? 'Restart Server' : label;
 }
 
+const RESTART_NOTICE_KEY = 'gc-restart-notice';
+
+function _setRestartButtonsBusy(busy) {
+    for (const id of ['btn-restart', 'btn-restart-server']) {
+        const b = document.getElementById(id);
+        if (!b) continue;
+        b.disabled = busy;
+        if (busy) b.textContent = 'Restarting…';
+    }
+    if (!busy) refreshRestartLabel();
+}
+
+async function _fetchHealthz(timeoutMs) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+        const resp = await fetch('/healthz', { method: 'GET', cache: 'no-store', signal: ctl.signal });
+        return resp.ok ? await resp.json() : null;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 async function restartServer() {
     await refreshRestartLabel();
     if (!confirm(restartConfirmText(_restartDecision))) {
         return;
     }
+    let oldVersion = null;
+    try {
+        const h = await _fetchHealthz(3000);
+        oldVersion = h ? h.version : null;
+    } catch (_) { /* not needed to restart */ }
     try {
         const res = await apiPost('/api/restart', {});
         const installing = res && res.mode === 'switch' && res.tag;
         showNotification(installing
             ? `Restarting and installing ${res.tag}… this page will reconnect`
             : 'Restarting… this page will reconnect', 'info');
-        for (const id of ['btn-restart', 'btn-restart-server']) {
-            const b = document.getElementById(id);
-            if (b) { b.disabled = true; b.textContent = 'Restarting…'; }
-        }
-        _waitForServerAndReload(res ? res.pid : null);
+        _setRestartButtonsBusy(true);
+        _waitForServerAndReload(res ? res.pid : null, oldVersion, installing ? res.tag : null);
     } catch (e) {
         showNotification('Restart failed: ' + e.message, 'error');
     }
 }
 
-// Poll /healthz every 2 s and reload once a *different* process answers:
-// while a switch is pending the old process keeps serving until the updater
-// stops it, and the updater then health-checks the new release before
-// starting it — allow a few minutes before giving up.
-function _waitForServerAndReload(oldPid) {
+// Poll /healthz every 2 s (each poll abandoned after 3 s) and reload once a
+// *different* process answers: while a switch is pending the old process
+// keeps serving until the updater stops it, and the updater then
+// health-checks the new release before starting it — allow a few minutes.
+function _waitForServerAndReload(oldPid, oldVersion, expectedTag) {
     let attempts = 0;
+    let busy = false;
     const maxAttempts = 150; // ~5 minutes at 2 s
     const interval = setInterval(async () => {
+        if (busy) return;
         attempts++;
         if (attempts > maxAttempts) {
             clearInterval(interval);
+            _setRestartButtonsBusy(false);
             showNotification('Server did not come back — try refreshing manually', 'error');
             return;
         }
+        busy = true;
         try {
-            const resp = await fetch('/healthz', { method: 'GET', cache: 'no-store' });
-            if (resp.ok && serverReplaced(oldPid, await resp.json())) {
+            const body = await _fetchHealthz(3000);
+            if (serverReplaced(oldPid, body, oldVersion)) {
                 clearInterval(interval);
+                const notice = switchOutcomeNotice(expectedTag, body.version);
+                if (notice) {
+                    try { sessionStorage.setItem(RESTART_NOTICE_KEY, notice); } catch (_) { /* shown now instead */ }
+                    showNotification(notice, 'warning');
+                }
                 // Small extra delay so the server finishes initialising
                 setTimeout(() => location.reload(), 1500);
             }
         } catch (_) {
-            // Server still down — keep polling
+            // Server still down (or poll timed out) — keep polling
+        } finally {
+            busy = false;
         }
     }, 2000);
+}
+
+// A notice carried across the post-restart reload (see above).
+function showPendingRestartNotice() {
+    let notice = null;
+    try {
+        notice = sessionStorage.getItem(RESTART_NOTICE_KEY);
+        sessionStorage.removeItem(RESTART_NOTICE_KEY);
+    } catch (_) { return; }
+    if (notice) showNotification(notice, 'warning');
 }
 
 /* ===================================================================
@@ -4170,6 +4216,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Set up event listeners
     setupEventListeners();
+    showPendingRestartNotice();
 
     // Populate analysis parameter inputs with defaults
     populateAnalysisParamInputs();

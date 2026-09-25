@@ -14,6 +14,10 @@ taken the request this process never spawns a replacement.
 
 Stdlib + restart_update only, no import-time side effects, so it is
 unit-testable without importing app.
+
+``restart_update`` logs as ``"coa.restart"`` here too. That is by design: the
+file must stay byte-identical to coa-reviewer's (the updater imports whichever
+app's copy it finds first), so it cannot be renamed for gc.
 """
 from __future__ import annotations
 
@@ -40,6 +44,17 @@ ACCEPTED_WAIT_SECONDS = 45.0
 UNKNOWN_CLAIM_POLLS = 3
 WITHDRAW_ATTEMPTS = 3
 MARKER_READ_LIMIT_BYTES = 4096
+
+# Daily auto-restart (ported from coa-reviewer's _should_auto_restart).
+AUTO_RESTART_HOUR = 3                   # 3 AM local time
+# The storm guard: the once-a-day flag lives in memory and a fresh process
+# starts idle, so without this a just-restarted process restarts again as soon
+# as it has been idle long enough — several times through the 3 AM hour, each
+# exit spending one of the updater's supervision starts.
+AUTO_RESTART_MIN_UPTIME_SECONDS = 3600
+# Under the updater, a manual restart this soon after starting is refused:
+# the updater allows only a few starts per 15 minutes before giving up.
+MANUAL_RESTART_MIN_UPTIME_SECONDS = 300
 
 
 def restart_mode(env: Optional[Mapping[str, str]] = None) -> str:
@@ -82,6 +97,39 @@ def may_respawn(data_dir: Path) -> bool:
         logger.warning("Not respawning: a switch request the updater could still take exists")
         return False
     return True
+
+
+def should_respawn(data_dir: Path, env: Optional[Mapping[str, str]] = None) -> bool:
+    """Whether a restart should spawn its own replacement before exiting.
+
+    Legacy: yes, unless a switch is under way (``may_respawn``). Under the
+    updater: no — it relaunches us — except while it is ``paused`` (and not
+    mid-switch), when it supervises nothing and exiting would leave the app
+    down (coa-reviewer's _exit_for_updater)."""
+    d = Path(data_dir)
+    if restart_mode(env) == "exit":
+        if not (d / "paused").exists() or (d / "switching").exists():
+            return False
+        logger.warning("The updater is paused and will not restart the app — "
+                       "restarting it ourselves")
+    return may_respawn(d)
+
+
+def should_auto_restart(*, hour: int, today: str, done_today: Optional[str],
+                        uptime_seconds: float, idle: bool) -> bool:
+    """Whether the daily auto-restart fires now."""
+    if hour != AUTO_RESTART_HOUR or done_today == today:
+        return False
+    if uptime_seconds < AUTO_RESTART_MIN_UPTIME_SECONDS:
+        return False
+    return bool(idle)
+
+
+def manual_restart_wait(mode: str, uptime_seconds: float) -> Optional[int]:
+    """Seconds until a manual restart is allowed, or None if it is now."""
+    if mode != "exit" or uptime_seconds >= MANUAL_RESTART_MIN_UPTIME_SECONDS:
+        return None
+    return max(1, int(-(-(MANUAL_RESTART_MIN_UPTIME_SECONDS - uptime_seconds) // 1)))
 
 
 def decide(data_dir: Optional[Path], current_version: str) -> Tuple[str, Optional[str]]:

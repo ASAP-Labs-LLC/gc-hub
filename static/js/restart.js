@@ -19,18 +19,29 @@
         return 'Restart the server? The page will reload automatically once the server is back up.';
     }
 
-    /** True once /healthz answers from a different process than ``oldPid``.
-        The old process keeps answering while it waits to be stopped, so
-        "answers at all" is not enough. */
-    function serverReplaced(oldPid, body) {
+    /** True once /healthz answers from a different process than ``oldPid``
+        (or a different version than ``oldVersion``, should the OS reuse the
+        pid). The old process keeps answering while it waits to be stopped,
+        so "answers at all" is not enough. */
+    function serverReplaced(oldPid, body, oldVersion) {
         if (!body || body.status !== 'ok') return false;
-        return oldPid == null || body.pid !== oldPid;
+        if (oldPid == null) return true;
+        if (body.pid !== oldPid) return true;
+        return oldVersion != null && body.version != null && body.version !== oldVersion;
+    }
+
+    /** After a restart that asked the updater to install ``expectedTag``:
+        a notice when the process that came back runs something else. */
+    function switchOutcomeNotice(expectedTag, runningVersion) {
+        if (!expectedTag || runningVersion === expectedTag) return null;
+        return `Update was not installed (refused) — still on ${runningVersion}`;
     }
 
     root.restartLabel = restartLabel;
     root.restartConfirmText = restartConfirmText;
     root.serverReplaced = serverReplaced;
+    root.switchOutcomeNotice = switchOutcomeNotice;
     if (typeof module !== 'undefined' && module.exports) {
-        module.exports = { restartLabel, restartConfirmText, serverReplaced };
+        module.exports = { restartLabel, restartConfirmText, serverReplaced, switchOutcomeNotice };
     }
 })(typeof window !== 'undefined' ? window : globalThis);

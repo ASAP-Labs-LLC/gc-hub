@@ -244,7 +244,7 @@ _last_activity_lock = threading.Lock()
 _recent_clients: dict[str, float] = {}   # remote_addr -> last-seen time, for /healthz active_sessions
 _server_start_time: float = time.time()
 _auto_restart_done_today: str = ""          # date string e.g. "2026-05-07"
-AUTO_RESTART_HOUR = 3            # 3 AM local time
+AUTO_RESTART_HOUR = restart_policy.AUTO_RESTART_HOUR   # 3 AM local time
 AUTO_RESTART_IDLE_SECONDS = 600  # 10 minutes with no requests
 
 
@@ -912,10 +912,16 @@ def _claim_restart() -> bool:
         return True
 
 
-def _do_restart(reason: str = "restart", *, allow_respawn: bool = True) -> None:
-    """Exit so a fresh process takes over — the updater's relaunch when
-    deployed, a self-spawned copy in legacy mode. ``allow_respawn=False``
-    means the updater has (or may have) a switch request: exit, never spawn."""
+CSV_LOCK_EXIT_TIMEOUT_SECONDS = 30.0
+
+
+def _do_restart(reason: str = "restart") -> None:
+    """Exit so a fresh process takes over: the updater relaunches us when
+    deployed; legacy mode (or a paused updater) spawns its own replacement
+    first — never while a switch is under way (restart_policy.should_respawn).
+
+    Holds distill._CSV_LOCK through the exit so os._exit cannot land in the
+    middle of a results-CSV write."""
     global _restart_claimed
     LOGGER.info("=== SERVER RESTART INITIATED (%s) ===", reason)
     # Give a moment for any in-flight response to finish
@@ -929,38 +935,47 @@ def _do_restart(reason: str = "restart", *, allow_respawn: bool = True) -> None:
                 pass
         os._exit(0)
 
-    if not allow_respawn or restart_policy.restart_mode() == "exit":
-        LOGGER.info("Exiting without a respawn; the updater restarts the app")
-        _exit()
     try:
-        spawn = restart_policy.may_respawn(paths.data_dir() or APP_DIR)
+        spawn = restart_policy.should_respawn(paths.data_dir() or APP_DIR)
     except Exception:
         LOGGER.exception("could not decide whether to respawn — not respawning")
         spawn = False
-    if spawn:
-        try:
-            # Spawn a new process *then* exit.  On Windows os.execv can be
-            # unreliable, so use subprocess + os._exit instead.
-            subprocess.Popen(
-                [_sys.executable] + _sys.argv,
-                close_fds=True,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-                if platform.system() == "Windows" else 0,
-            )
-        except Exception:
-            LOGGER.exception("Failed to spawn new server process")
-            with _restart_lock:   # stay up; a later request may try again
-                _restart_claimed = False
-            return  # don't exit if we couldn't start the replacement
-        LOGGER.info("New process spawned — shutting down old process")
+
+    csv_locked = distill._CSV_LOCK.acquire(timeout=CSV_LOCK_EXIT_TIMEOUT_SECONDS)
+    if not csv_locked:
+        LOGGER.error("Results CSV still busy after %.0fs — restarting anyway",
+                     CSV_LOCK_EXIT_TIMEOUT_SECONDS)
+    if not spawn:
+        LOGGER.info("Exiting without a respawn; the updater restarts the app")
+        _exit()
+    try:
+        # Spawn a new process *then* exit.  On Windows os.execv can be
+        # unreliable, so use subprocess + os._exit instead. Absolute script
+        # path and cwd: run.pyw's runpy bootstrap leaves sys.argv[0] == "-c".
+        subprocess.Popen(
+            [_sys.executable, str(APP_DIR / "app.py"), *_sys.argv[1:]],
+            cwd=str(APP_DIR),
+            close_fds=True,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+            if platform.system() == "Windows" else 0,
+        )
+    except Exception:
+        LOGGER.exception("Failed to spawn new server process")
+        if csv_locked:
+            distill._CSV_LOCK.release()
+        with _restart_lock:   # stay up; a later request may try again
+            _restart_claimed = False
+        return  # don't exit if we couldn't start the replacement
+    LOGGER.info("New process spawned — shutting down old process")
     _exit()
 
 
 def _await_switch_then_restart(data_dir: Path, tag: str, at: float) -> None:
-    """Watch for the updater's answer; restart normally unless it has the
-    request (then exit without a respawn and let it start the new release)."""
+    """Watch for the updater's answer, then restart. When it has the request
+    this only exits (should_respawn: the switch files are gone by now, so
+    only a paused updater makes us start our own replacement)."""
     action = restart_policy.await_switch(data_dir, tag, at)
-    _do_restart(f"switch to {tag}: {action}", allow_respawn=(action == "restart"))
+    _do_restart(f"switch to {tag}: {action}")
 
 
 def request_restart(by: str) -> tuple:
@@ -1007,16 +1022,13 @@ def request_restart(by: str) -> tuple:
 
 def _tidy_switch_files() -> None:
     """A new serving process means whatever the switch files describe
-    already happened, one way or another. Skipped when something already
-    serves our port: this launch is a duplicate about to fail its bind, and
-    must not delete the live process's pending request."""
+    already happened, one way or another. Called from ``__main__`` only
+    after the port guard, so a duplicate launch (which exits there) never
+    deletes the live process's pending request."""
     data_dir = paths.data_dir()
     if data_dir is None:
         return
     try:
-        if supervisor.port_has_listener(GC_PORT):
-            LOGGER.warning("Port %s is already served; leaving switch files alone", GC_PORT)
-            return
         removed = restart_update.clear_switch_files(data_dir)
         if removed:
             LOGGER.warning("Removed %d leftover switch file(s) — a new process means "
@@ -1034,15 +1046,10 @@ def _auto_restart_loop() -> None:
         try:
             now = datetime.now()
             today_str = now.strftime("%Y-%m-%d")
-            # Already restarted today?
-            if _auto_restart_done_today == today_str:
-                continue
-            # Is it the right hour?
-            if now.hour != AUTO_RESTART_HOUR:
-                continue
-            # Is the server idle?
-            if not _is_server_idle():
-                LOGGER.debug("Auto-restart: hour matched but server is not idle")
+            if not restart_policy.should_auto_restart(
+                    hour=now.hour, today=today_str, done_today=_auto_restart_done_today,
+                    uptime_seconds=time.time() - _server_start_time,
+                    idle=now.hour == AUTO_RESTART_HOUR and _is_server_idle()):
                 continue
             _auto_restart_done_today = today_str
             if not _claim_restart():
@@ -2842,6 +2849,12 @@ def api_restart():
             else:
                 mode, tag = restart_policy.decide(paths.data_dir(), version.APP_VERSION)
     else:
+        wait = restart_policy.manual_restart_wait(restart_policy.restart_mode(),
+                                                  time.time() - _server_start_time)
+        if wait is not None:
+            # Each exit under the updater spends one of its few starts per
+            # 15 minutes; a process that just came up doesn't need another.
+            return jsonify({"error": f"The server just restarted, try again in {wait} s"}), 409
         mode, tag = request_restart(request.remote_addr or "unknown")
     return jsonify({"mode": mode, "tag": tag, "pid": os.getpid()})
 
@@ -4043,11 +4056,24 @@ def _init_app() -> None:
     threading.Thread(target=_auto_restart_loop, daemon=True, name="auto-restart").start()
 
 
-_init_app()
+if __name__ != "__main__":
+    # Imported (in-process tests): start the background work as before.
+    _init_app()
 
 
 if __name__ == "__main__":
+    # Port guard first, before any background work: Werkzeug sets
+    # allow_reuse_address, so on Windows a second bind to a served port
+    # succeeds silently and the duplicate runs forever serving nothing
+    # (the 2026-07-31 incident) — while its watcher processes files alongside
+    # the live instance. The wait also covers a just-respawned replacement
+    # racing the old process's exit.
+    if not supervisor.wait_until_free(GC_PORT, timeout=15.0):
+        LOGGER.error("Port %d is still in use after 15s — cannot start. Exiting.", GC_PORT)
+        _sys.exit(1)
+    # Only now are we the serving process.
     _tidy_switch_files()
+    _init_app()
     # debug=True would expose the Werkzeug interactive debugger — remote code
     # execution — on 0.0.0.0. Only an explicit --dev turns it on.
     app.run(host="0.0.0.0", port=GC_PORT, debug=ARGS.dev, threaded=True,

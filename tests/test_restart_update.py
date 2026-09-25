@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -177,15 +178,31 @@ class AwaitSwitchTests(unittest.TestCase):
 
 # ── Boot tests: the real app.py under the updater's environment ───────────
 
-def _bootstrap_as(tag: str):
-    """Launch app.py as __main__ with version.APP_VERSION = ``tag`` (a
-    checkout has no VERSION file, so it would otherwise report "dev", which
-    is never older than anything)."""
-    code = ("import sys, runpy, version; "
-            f"version.APP_VERSION = {tag!r}; "
-            "sys.argv = ['app.py', '--no-tray']; "
+def _bootstrap(tag=None, min_uptime=0):
+    """Launch app.py as __main__ the way run.pyw's runpy bootstrap does, with
+    two test-only overrides applied to the modules first:
+
+    * ``version.APP_VERSION = tag`` — a checkout has no VERSION file, so it
+      would otherwise report "dev", which is never older than anything;
+    * ``restart_policy.MANUAL_RESTART_MIN_UPTIME_SECONDS = min_uptime`` — a
+      fresh process refuses a manual restart for 5 minutes under the updater.
+    """
+    code = ("import sys, runpy, version, restart_policy; "
+            + (f"version.APP_VERSION = {tag!r}; " if tag else "")
+            + (f"restart_policy.MANUAL_RESTART_MIN_UPTIME_SECONDS = {min_uptime!r}; "
+               if min_uptime is not None else "")
+            + "sys.argv = ['app.py', '--no-tray']; "
             "runpy.run_path('app.py', run_name='__main__')")
     return [sys.executable, "-c", code]
+
+
+def _bootstrap_as(tag: str):
+    return _bootstrap(tag)
+
+
+def _app_pids() -> set:
+    out = subprocess.run(["pgrep", "-f", "app.py"], capture_output=True, text=True).stdout
+    return {int(x) for x in out.split()}
 
 
 def _assert_exits_without_replacement(tc, proc, port):
@@ -265,7 +282,7 @@ class RestartRouteTests(unittest.TestCase):
 
     def test_plain_restart_under_the_updater_exits_without_respawning(self):
         with tempfile.TemporaryDirectory() as t:
-            with booted(Path(t)) as (port, proc, data, home):
+            with booted(Path(t), cmd=_bootstrap()) as (port, proc, data, home):
                 code, body = post(port, "/api/restart", {})
                 self.assertEqual(code, 200)
                 self.assertEqual(body["mode"], "restart")
@@ -305,6 +322,127 @@ class RestartRouteTests(unittest.TestCase):
                 self.assertIsNone(proc.poll())
                 code, _ = get(port, "/healthz")
                 self.assertEqual(code, 200)
+
+
+    def test_fresh_process_refuses_a_manual_restart_under_the_updater(self):
+        # Each exit spends one of the updater's 3-starts-per-15-min budget.
+        with tempfile.TemporaryDirectory() as t:
+            with booted(Path(t)) as (port, proc, data, home):
+                code, body = post(port, "/api/restart", {})
+                self.assertEqual(code, 409)
+                self.assertIn("just restarted", body["error"])
+                self.assertRegex(body["error"], r"try again in \d+ s")
+                code, body = post(port, "/api/restart", {"dry_run": True})
+                self.assertEqual(code, 200)
+                self.assertEqual(body["mode"], "restart")
+                time.sleep(1.5)
+                self.assertIsNone(proc.poll())
+
+    def test_paused_updater_means_we_respawn_ourselves(self):
+        before = _app_pids()
+        with tempfile.TemporaryDirectory() as t:
+            with booted(Path(t), cmd=_bootstrap()) as (port, proc, data, home):
+                (data / "paused").write_text("", encoding="utf-8")
+                code, body = post(port, "/api/restart", {})
+                self.assertEqual((code, body["mode"]), (200, "restart"))
+                proc.wait(timeout=20)
+                new_pid = None
+                try:
+                    def replaced():
+                        nonlocal new_pid
+                        try:
+                            c, b = get(port, "/healthz", timeout=1.0)
+                        except Exception:
+                            return False
+                        if c == 200 and b["pid"] != proc.pid:
+                            new_pid = b["pid"]
+                            return True
+                        return False
+                    self.assertTrue(wait_for(replaced, timeout=60),
+                                    "no replacement came up while the updater is paused")
+                finally:
+                    for pid in (_app_pids() - before):
+                        try:
+                            os.kill(pid, signal.SIGTERM)
+                        except OSError:
+                            pass
+                    wait_for(lambda: not (_app_pids() - before), timeout=15)
+        self.assertIsNotNone(new_pid)
+        self.assertEqual(_app_pids() - before, set(), "leaked app.py processes")
+
+    def test_second_instance_on_a_served_port_exits(self):
+        from bootapp import child_env
+        with tempfile.TemporaryDirectory() as t, tempfile.TemporaryDirectory() as t2:
+            with booted(Path(t)) as (port, proc, data, home):
+                env = child_env(Path(t2), port)
+                with open(Path(t2, "dup.log"), "w", encoding="utf-8") as log:
+                    dup = subprocess.Popen([sys.executable, "app.py", "--no-tray"], cwd=ROOT,
+                                           env=env, stdout=log, stderr=subprocess.STDOUT)
+                    try:
+                        rc = dup.wait(timeout=40)
+                    except subprocess.TimeoutExpired:
+                        dup.kill()
+                        dup.wait(10)
+                        self.fail("a duplicate launch kept running on an occupied port")
+                self.assertNotEqual(rc, 0)
+                # Our guard refused it — not merely a failed bind, which on
+                # Windows (SO_REUSEADDR) succeeds silently: the 2026-07-31
+                # incident.
+                dup_log = Path(t2, "dup.log").read_text(encoding="utf-8")
+                self.assertIn("still in use", dup_log)
+                # ...and before starting any background work (the watcher
+                # would process files alongside the live instance).
+                self.assertNotIn("Migrating CSV header", dup_log)
+                code, body = get(port, "/healthz")
+                self.assertEqual((code, body["pid"]), (200, proc.pid))
+
+
+class PolicyDecisionTests(unittest.TestCase):
+    def test_respawn_decision_legacy(self):
+        import restart_policy
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            self.assertTrue(restart_policy.should_respawn(d, env={}))
+            (d / "switching").write_text("")
+            self.assertFalse(restart_policy.should_respawn(d, env={}))
+            (d / "switching").unlink()
+            (d / "switch-accepted").write_text("{}")
+            self.assertFalse(restart_policy.should_respawn(d, env={}))
+
+    def test_respawn_decision_under_the_updater(self):
+        import restart_policy
+        env = {"GC_DATA_DIR": "x"}
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            self.assertFalse(restart_policy.should_respawn(d, env=env))
+            (d / "paused").write_text("")
+            self.assertTrue(restart_policy.should_respawn(d, env=env))
+            (d / "switching").write_text("")
+            self.assertFalse(restart_policy.should_respawn(d, env=env))
+            (d / "switching").unlink()
+            (d / "switch-requested").write_text(json.dumps({"at": time.time()}))
+            self.assertFalse(restart_policy.should_respawn(d, env=env))
+
+    def test_auto_restart_decision(self):
+        import restart_policy as rp
+        ok = dict(hour=rp.AUTO_RESTART_HOUR, today="2026-09-26", done_today="2026-09-25",
+                  uptime_seconds=7200, idle=True)
+        self.assertTrue(rp.should_auto_restart(**ok))
+        self.assertFalse(rp.should_auto_restart(**{**ok, "hour": rp.AUTO_RESTART_HOUR + 1}))
+        self.assertFalse(rp.should_auto_restart(**{**ok, "done_today": "2026-09-26"}))
+        self.assertFalse(rp.should_auto_restart(**{**ok, "idle": False}))
+        # The storm guard: a process that has just come back (its once-a-day
+        # flag reset with it) must not restart again within the hour.
+        self.assertEqual(rp.AUTO_RESTART_MIN_UPTIME_SECONDS, 3600)
+        self.assertFalse(rp.should_auto_restart(**{**ok, "uptime_seconds": 700}))
+
+    def test_manual_restart_uptime_guard(self):
+        import restart_policy as rp
+        self.assertEqual(rp.MANUAL_RESTART_MIN_UPTIME_SECONDS, 300)
+        self.assertEqual(rp.manual_restart_wait("exit", 100), 200)
+        self.assertEqual(rp.manual_restart_wait("exit", 299.5), 1)
+        self.assertIsNone(rp.manual_restart_wait("exit", 300))
+        self.assertIsNone(rp.manual_restart_wait("respawn", 5))
 
 
 if __name__ == "__main__":
