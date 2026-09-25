@@ -17,6 +17,8 @@ import json
 import logging
 import os
 import re
+import stat
+import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -941,6 +943,48 @@ def distillation_curve_from_cdf(path: Path, *, blank_path: Path | None = None) -
     return pct_curve, bp_curve
 
 
+def _atomic_write_csv(path, fieldnames, rows) -> None:
+    """Rewrite the whole CSV at *path* (header + *rows*, as dicts) atomically.
+
+    Written to a temp file in the same folder, flushed and fsynced, then
+    ``os.replace``d over the original, so an exit mid-write (a restart under
+    the updater ends in os._exit or taskkill /F) can never leave the results
+    CSV truncated: readers see the old file or the new one. The bytes are
+    exactly what ``open("w", newline="", encoding="utf-8")`` + DictWriter
+    wrote before.
+
+    On failure the original is untouched and the temp file removed. A
+    PermissionError from the replace (Windows: someone, e.g. Excel, has the
+    CSV open) is re-raised naming *path*, as the old ``open("w")`` did.
+    Callers hold ``_CSV_LOCK``.
+    """
+    path = Path(path)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp",
+                                    dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(rows)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
+        except OSError:
+            pass  # new file, or a filesystem without POSIX modes
+        try:
+            os.replace(tmp, path)
+        except PermissionError as exc:
+            raise PermissionError(exc.errno, exc.strerror, str(path)) from exc
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def _append_csv_row(dest_csv, row_data: list) -> None:
     """Always append *row_data* as a new line (writing CSV_HEADER first if the
     file is new). Unlike :func:`_upsert_csv_row`, this does NOT replace an
@@ -984,10 +1028,7 @@ def _upsert_csv_row(dest_csv, row_data: list) -> None:
                 csv.writer(fh).writerow(row_data)
         else:
             rows[match_idx] = dict(zip(CSV_HEADER, row_data))
-            with dest_csv.open("w", newline="", encoding="utf-8") as fh:
-                w2 = csv.DictWriter(fh, fieldnames=CSV_HEADER)
-                w2.writeheader()
-                w2.writerows(rows)
+            _atomic_write_csv(dest_csv, CSV_HEADER, rows)
 
 
 def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool = False) -> Path:

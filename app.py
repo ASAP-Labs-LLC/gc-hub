@@ -647,10 +647,7 @@ def _migrate_csv_header() -> None:
             new_rows.append(new_row)
 
         try:
-            with csv_path.open("w", newline="", encoding="utf-8") as fh:
-                writer = csv.DictWriter(fh, fieldnames=distill.CSV_HEADER)
-                writer.writeheader()
-                writer.writerows(new_rows)
+            distill._atomic_write_csv(csv_path, distill.CSV_HEADER, new_rows)
             LOGGER.info("CSV migration complete — %d rows written with new header",
                         len(new_rows))
         except Exception as exc:
@@ -2776,10 +2773,7 @@ def _do_reindex_injection_times() -> None:
                     LOGGER.debug("Reindex: could not read %s: %s", src, exc)
                     unreadable += 1
 
-            with csv_path.open("w", encoding="utf-8", newline="") as fh:
-                writer = csv.DictWriter(fh, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(rows)
+            distill._atomic_write_csv(csv_path, fieldnames, rows)
     except Exception as exc:
         LOGGER.exception("Library reorder failed")
         notifications_mod.get_store().add("error", f"Library reorder failed: {exc}")
