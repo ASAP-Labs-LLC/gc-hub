@@ -465,25 +465,38 @@ def calibration_ladder(conf: Dict[str, str],
             last_carbon = c
         pairs = kept
     if len(pairs) >= 2:
-        return [p[0] for p in pairs], [p[1] for p in pairs]
-    if not cal_path.is_file():
-        return [], []
-    try:
-        sens = float(sensitivity if sensitivity is not None
-                     else conf.get("calibration_sensitivity", 50) or 50)
-        peaks = calibration_peak_times(cal_path, sens)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Calibration ladder: could not read %s: %s", cal_path, exc)
-        return [], []
-    if len(peaks) != len(N_ALKANE_CARBON):
+        times, carbons = [p[0] for p in pairs], [p[1] for p in pairs]
+    else:
+        if not cal_path.is_file():
+            return [], []
+        try:
+            sens = float(sensitivity if sensitivity is not None
+                         else conf.get("calibration_sensitivity", 50) or 50)
+            peaks = calibration_peak_times(cal_path, sens)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Calibration ladder: could not read %s: %s", cal_path, exc)
+            return [], []
+        if len(peaks) != len(N_ALKANE_CARBON):
+            LOGGER.warning(
+                "Calibration ladder: auto-detected %d peak(s) but the reference "
+                "ladder has %d n-alkanes; labels may be mislabeled - save peak "
+                "assignments on the Calibration page.",
+                len(peaks), len(N_ALKANE_CARBON),
+            )
+        n = min(len(peaks), len(N_ALKANE_CARBON))
+        times, carbons = [float(t) for t in peaks[:n]], list(N_ALKANE_CARBON[:n])
+
+    # Never hand out a 0<n<2-point ladder from either branch above — a
+    # 1-point ladder still crashes every consumer that interpolates against
+    # it (analysis_core._ladder requires >= 2 points).
+    if len(times) < 2:
         LOGGER.warning(
-            "Calibration ladder: auto-detected %d peak(s) but the reference "
-            "ladder has %d n-alkanes; labels may be mislabeled - save peak "
-            "assignments on the Calibration page.",
-            len(peaks), len(N_ALKANE_CARBON),
+            "Calibration ladder: only %d usable point(s) for %s; need at "
+            "least 2 - returning no ladder.",
+            len(times), cal_path,
         )
-    n = min(len(peaks), len(N_ALKANE_CARBON))
-    return [float(t) for t in peaks[:n]], list(N_ALKANE_CARBON[:n])
+        return [], []
+    return times, carbons
 
 
 def upsert_assignments(raw: str, cdf_path, assignments: list) -> str:

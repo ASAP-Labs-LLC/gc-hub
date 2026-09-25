@@ -240,7 +240,7 @@ def analyze_pair(
         trend_diff = trend_sample - trend_std
 
     segments: list[dict] = []
-    if cal_times:
+    if len(cal_times) >= 2:
         trend_segments = detect_deviation_segments(
             trend_diff, t,
             thresh_marginal, thresh_moderate, thresh_significant,
@@ -416,7 +416,7 @@ def generate_conclusion(
     # No usable calibration ladder (e.g. nothing configured, or an
     # unreadable/short auto-detect fallback) -> skip carbon-range mapping
     # entirely rather than reach np.interp with too few points. Matches
-    # analyze_pair's `if cal_times:` guard: segments (and therefore any
+    # analyze_pair's `len(cal_times) >= 2` guard: segments (and therefore any
     # deviation) never get computed without a usable ladder either.
     range_defs: list[tuple[str, int, int, float, float]] = []
     if len(cal_times) >= 2:

@@ -21,6 +21,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+
 WEBAPP_DIR = Path(__file__).resolve().parent.parent
 if str(WEBAPP_DIR) not in sys.path:
     sys.path.insert(0, str(WEBAPP_DIR))
@@ -181,6 +183,35 @@ class CalibrationLadderFallbackWarningTests(unittest.TestCase):
         self.assertEqual(len(carbons), n)
 
 
+class CalibrationLadderNeverShortTests(unittest.TestCase):
+    """calibration_ladder must never hand out a 0<n<2-point ladder from
+    EITHER branch — a 1-point 'ladder' still crashes every consumer that
+    needs to interpolate against it (analyze_pair/generate_conclusion), just
+    with a smaller reproduction case than the 24-vs-20 mismatch."""
+
+    def test_single_auto_detected_peak_returns_empty_not_one_point(self):
+        cal = _real_cdf()
+        try:
+            conf = {"calibration_cdf": str(cal), "calibration_assignments": ""}
+            with mock.patch.object(distill, "calibration_peak_times", return_value=[0.5]):
+                with self.assertLogs(distill.LOGGER, level="WARNING") as cm:
+                    result = distill.calibration_ladder(conf)
+        finally:
+            os.unlink(cal)
+        self.assertEqual(result, ([], []))
+        self.assertTrue(any("at least 2" in m for m in cm.output), cm.output)
+
+    def test_zero_auto_detected_peaks_still_returns_empty(self):
+        cal = _real_cdf()
+        try:
+            conf = {"calibration_cdf": str(cal), "calibration_assignments": ""}
+            with mock.patch.object(distill, "calibration_peak_times", return_value=[]):
+                result = distill.calibration_ladder(conf)
+        finally:
+            os.unlink(cal)
+        self.assertEqual(result, ([], []))
+
+
 class CalibrationLadderEnvOverrideTests(unittest.TestCase):
     """GC_CAL_CDF must win over the saved setting for calibration_ladder too,
     the same way it already does for the distillation math."""
@@ -228,6 +259,27 @@ class AnalysisCoreBoundaryTests(unittest.TestCase):
             analysis_core.carbon_to_time(6.0, [0.5, 1.0, 1.5], [5, 8, 6])
         with self.assertRaisesRegex(ValueError, "not increasing"):
             analysis_core.segment_carbon_range(0.5, 1.5, [0.5, 1.0, 1.5], [5, 5, 6])
+
+
+class AnalyzePairShortLadderGuardTests(unittest.TestCase):
+    """analyze_pair's calibration guard must require >=2 points, not just
+    truthiness — a 1-point ladder is still too short for segment_carbon_range
+    (analysis_core._ladder now raises for < 2 points), and calibration_ladder
+    can no longer produce one, but analyze_pair is a public function that
+    must not crash if handed one directly."""
+
+    def test_single_point_ladder_is_skipped_not_crashed(self):
+        n = 1000
+        t = np.linspace(0, 10, n)
+        y_sample = np.zeros(n)
+        y_std = np.zeros(n)
+        y_sample[400:450] = 500.0  # a real, wide, above-threshold deviation
+        result = analysis_core.analyze_pair(
+            t, y_sample, y_std,
+            thresh_marginal=50.0, thresh_moderate=200.0, thresh_significant=400.0,
+            cal_times=[0.5], cal_carbons=[5],
+        )
+        self.assertEqual(result["segments"], [])
 
 
 class GenerateConclusionEmptyLadderTests(unittest.TestCase):
