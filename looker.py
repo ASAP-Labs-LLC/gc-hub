@@ -11,6 +11,7 @@ scan without starting the background thread.
 from __future__ import annotations
 
 import csv
+import re
 import logging
 import shutil
 import time
@@ -249,8 +250,7 @@ class Looker(Thread):
         LOGGER.debug("Processed %s", processed.name)
         with self._state_lock:
             if is_blank:
-                self._latest_blank_path = processed
-                self._save_blank_cache(processed)
+                self._register_blank(processed)
             self._index.add(key)
             self._save_index_cache()
 
@@ -309,8 +309,11 @@ class Looker(Thread):
             p = Path(data.get("path", ""))
             mtime = float(data.get("mtime", 0))
             if p.is_file() and abs(p.stat().st_mtime - mtime) < 1:
-                self._latest_blank_path = p
-                LOGGER.info("Loaded blank cache %s", p)
+                if distill.is_plausible_blank(p):
+                    self._latest_blank_path = p
+                    LOGGER.info("Loaded blank cache %s", p)
+                else:
+                    LOGGER.warning("Ignoring cached blank %s: it carries sample signal", p.name)
         except Exception as exc:
             LOGGER.warning("Failed to read blank cache %s: %s", self.blank_cache, exc)
 
@@ -325,9 +328,43 @@ class Looker(Thread):
     # ------------------------------------------------------------------ #
     # Reprocess helpers
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def _is_blank_sample(sample: str) -> bool:
-        return "blank" in sample.lower()
+    _BLANK_NAME = re.compile(r"^blank[\s_\-]*\d*$", re.IGNORECASE)
+
+    @classmethod
+    def _is_blank_sample(cls, sample: str) -> bool:
+        # Exact names only ("Blank", "Blank2", "blank_3"), not any substring.
+        return bool(cls._BLANK_NAME.match((sample or "").strip()))
+
+    def _register_blank(self, path: Path) -> bool:
+        """Make *path* the reference blank if it is genuine and the newest.
+
+        Returns True when the cache was updated. A file merely *named* blank
+        (e.g. a sequence line whose sample name was never changed) is refused
+        by :func:`distill.is_plausible_blank`; an older genuine blank never
+        replaces a newer one, whatever order files are (re)processed in.
+        """
+        path = Path(path)
+        if not distill.is_plausible_blank(path):
+            LOGGER.warning("Not registering %s as blank: it carries sample signal", path.name)
+            return False
+        try:
+            _, cand_dt = distill.cdf_metadata(path)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Not registering %s as blank: %s", path.name, exc)
+            return False
+        cur = self._latest_blank_path
+        if cur is not None and cur != path and Path(cur).is_file():
+            try:
+                _, cur_dt = distill.cdf_metadata(Path(cur))
+                if cur_dt > cand_dt and distill.is_plausible_blank(Path(cur)):
+                    LOGGER.info("Keeping newer blank %s over %s", Path(cur).name, path.name)
+                    return False
+            except Exception:  # noqa: BLE001
+                pass
+        self._latest_blank_path = path
+        self._save_blank_cache(path)
+        LOGGER.info("Reference blank is now %s (%s)", path.name, cand_dt)
+        return True
 
     def _distillation_row_exists(self, sample: str, date: datetime) -> bool:
         """Return True if distillation CSV already has this sample/date row."""
@@ -490,8 +527,7 @@ class Looker(Thread):
                 self._index.add((sample, str(inj_dt)))
                 self._save_index_cache()
                 if self._is_blank_sample(sample):
-                    self._latest_blank_path = processed_path
-                    self._save_blank_cache(processed_path)
+                    self._register_blank(processed_path)
             results[sample] = {"status": "ok", "path": str(processed_path)}
 
         ok = sum(1 for r in results.values() if r.get("status") == "ok")
@@ -554,8 +590,7 @@ class Looker(Thread):
                 self._index.add((sample_name, str(inj_dt)))
                 self._save_index_cache()
                 if self._is_blank_sample(sample_name):
-                    self._latest_blank_path = processed_path
-                    self._save_blank_cache(processed_path)
+                    self._register_blank(processed_path)
             results[raw] = {"status": "ok", "path": str(processed_path)}
 
         ok = sum(1 for r in results.values() if r.get("status") == "ok")

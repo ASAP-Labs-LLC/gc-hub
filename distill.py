@@ -27,6 +27,7 @@ from netCDF4 import Dataset
 from plotly.graph_objects import Scatter
 from scipy.interpolate import interp1d
 from scipy.signal import find_peaks
+from scipy.ndimage import minimum_filter1d
 
 # ---------------------------------------------------------------------------
 # Optional project‑level settings helper (silently mocked if absent)
@@ -274,10 +275,11 @@ def build_calibration_from_anchors(
     def _cal(rt_arr: np.ndarray) -> np.ndarray:
         rt_arr = np.asarray(rt_arr, float)
         out = cubic(rt_arr)
-        # Below first calibration point — use stable linear extrapolation
+        # Below the first calibration point: clamp to the first anchor's BP.
+        # Linear extrapolation put the start of the run at -155 °C.
         mask_lo = rt_arr < rt_sorted[0]
         if mask_lo.any():
-            out[mask_lo] = linear_lo(rt_arr[mask_lo])
+            out[mask_lo] = bp_sorted[0]
         # Above 80th-percentile calibration point — use linear
         if linear_hi is not cubic:
             mask_hi = rt_arr > rt_sorted[high_idx]
@@ -553,6 +555,15 @@ def _apply_blank_and_clip(
         if tb.size != t.size or not np.allclose(tb, t):
             yb = np.interp(t, tb, yb)
         yb = yb - _offset(yb, dt)
+        # Guard: a blank must not carry sample-like signal. Subtracting one
+        # that does wipes the sample out and leaves a 10-second "curve".
+        h_sample = _peak_height_outside_solvent(t, y)
+        h_blank = _peak_height_outside_solvent(t, yb)
+        if h_sample > 0 and h_blank > BLANK_MAX_HEIGHT_FRACTION * h_sample:
+            raise BlankRejected(
+                f"blank peak height {h_blank:.0f} pA is {h_blank / h_sample:.0%} of the sample's "
+                f"{h_sample:.0f} pA (limit {BLANK_MAX_HEIGHT_FRACTION:.0%}) - not a blank"
+            )
         y = y - yb
     else:
         LOGGER.warning("No blank available – ASTM 12.2 not applied")
@@ -567,6 +578,63 @@ def _apply_blank_and_clip(
     start = mask.argmax()
     end = len(mask) - mask[::-1].argmax() - 1
     return t[start : end + 1], y[start : end + 1]
+
+
+# ---------------------------------------------------------------------------
+# Blank plausibility (added 2026-09-18 after a diesel run named "Blank" was
+# cached as the reference blank and subtracted from every sample)
+# ---------------------------------------------------------------------------
+class BlankRejected(ValueError):
+    """Raised when the reference blank carries sample-like signal."""
+
+
+# A genuine ASTM D2887 blank has no peaks outside the solvent window. Anything
+# above this height (pA, after removing the slow bleed ramp) is a sample.
+BLANK_MAX_INTENSITY_PA = 200.0
+BLANK_SOLVENT_END_MIN = 0.35
+# At subtraction time the blank may not carry more than this fraction of the
+# sample's own peak height, whatever the absolute numbers are.
+BLANK_MAX_HEIGHT_FRACTION = 0.25
+
+
+def _peak_height_outside_solvent(t: np.ndarray, y: np.ndarray,
+                                 solvent_end_min: float = BLANK_SOLVENT_END_MIN) -> float:
+    """Tallest peak after the solvent window, with the slow bleed ramp removed.
+
+    A 1-minute rolling minimum tracks column bleed (which rises with the oven
+    ramp in every run, blank or not) so only real peaks are measured.
+    """
+    if t.size < 3:
+        return 0.0
+    dt = float(np.median(np.diff(t))) if t.size > 1 else 0.01
+    win = max(3, int(round(1.0 / dt)))
+    baseline = minimum_filter1d(y, size=win, mode="nearest")
+    resid = y - baseline
+    mask = t > solvent_end_min
+    return float(resid[mask].max()) if mask.any() else 0.0
+
+
+def is_plausible_blank(path: Path, max_intensity_pa: float | None = None) -> bool:
+    """True if *path* looks like a blank run (no sample peaks after the solvent).
+
+    The threshold can be tuned in settings as ``blank_max_intensity_pa``.
+    """
+    if max_intensity_pa is None:
+        try:
+            max_intensity_pa = float(_get_settings().get("blank_max_intensity_pa", BLANK_MAX_INTENSITY_PA))
+        except Exception:  # noqa: BLE001
+            max_intensity_pa = BLANK_MAX_INTENSITY_PA
+    try:
+        t, y = _read_cdf(Path(path))
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Cannot read candidate blank %s: %s", path, exc)
+        return False
+    height = _peak_height_outside_solvent(t, y)
+    ok = height <= max_intensity_pa
+    if not ok:
+        LOGGER.warning("Rejecting %s as blank: %.0f pA of sample signal after %.2f min (limit %.0f pA)",
+                       Path(path).name, height, BLANK_SOLVENT_END_MIN, max_intensity_pa)
+    return ok
 
 # ---------------------------------------------------------------------------
 # Public helpers
