@@ -232,3 +232,5 @@ deviation bullets, comment presets, and the UI redesign.
 - The GC PCs keep running the share copy until phase 2, so they **do not get
   the calibration fix from a release**. The fixed files can be copied onto the
   share as a stopgap, with Ryan's approval.
+- Before enabling auto_switch, `/healthz` must count a live QBench upload or
+  queued reprocess as an active session (reuse `_is_server_idle`'s checks).

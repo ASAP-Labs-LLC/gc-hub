@@ -1,0 +1,29 @@
+/* ── Version stamp ────────────────────────────────────────────────────
+   Which build is running, bottom-right, on every page. Shared between
+   index.html and calibration.html — calibration.html has no external
+   stylesheet of its own (inline <style> only), so this file is linked from
+   both rather than duplicated (or hidden) in each page's markup.
+
+   Deliberately quiet, and pointer-events:none because it sits above the
+   page layout and must not eat a click meant for the app underneath.
+   z-index is kept well below any modal-overlay (1000+) so it never sits on
+   top of a modal. Falls back to a hardcoded color where a page defines
+   neither --text-muted (index.html's style.css) nor --muted
+   (calibration.html's inline :root). */
+#app-version {
+  position: fixed;
+  bottom: 6px;
+  right: 10px;
+  z-index: 60;
+  pointer-events: none;
+  user-select: none;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted, var(--muted, #7d8590));
+  opacity: 0.55;
+}
+
+@media print {
+  #app-version { display: none; }
+}

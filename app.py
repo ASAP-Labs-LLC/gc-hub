@@ -828,9 +828,26 @@ def _error(msg: str, status: int = 400) -> tuple:
 
 # Paths that are machines checking on the app, not a person using it. Counting
 # them as activity would keep the idle timer from ever advancing: the updater
-# polls /healthz continuously, static assets load on every page view, and the
-# SSE streams below send keep-alive pings for as long as a tab stays open.
-_NON_ACTIVITY_PATHS = {"/healthz"}
+# polls /healthz continuously, static assets load on every page view, and
+# these are the endpoints app.js hits on its own timers for the life of an
+# open tab (not from a click): /api/notifications every 30s
+# (setInterval(loadNotifications, 30000)); /api/server-status every 1s while
+# waiting for a restart (_waitForServerAndReload); /api/scan/status every 2s
+# while a scan runs (startScanStatusPolling); /api/reprocess/status likewise
+# (_pollReprocessStatus); /api/qbench-upload-status once on load to
+# reconnect to an in-progress upload. Excluding /static/ covers page assets;
+# excluding paths ending in /stream covers the SSE routes' *reconnects* —
+# before_request fires once per connection attempt, not per keep-alive byte
+# sent over an already-open one, so a stream that free-runs for hours without
+# reconnecting doesn't need (and can't get) re-exclusion after the first hit.
+_NON_ACTIVITY_PATHS = {
+    "/healthz",
+    "/api/notifications",
+    "/api/server-status",
+    "/api/scan/status",
+    "/api/reprocess/status",
+    "/api/qbench-upload-status",
+}
 
 
 @app.before_request
@@ -3815,7 +3832,13 @@ def healthz():
     now = time.time()
     with _last_activity_lock:
         idle = now - _last_activity
-        active = sum(1 for t in _recent_clients.values() if now - t < 300)
+        # Prune clients not seen in 5 minutes so _recent_clients doesn't grow
+        # without bound over an uptime of weeks (scanners, monitors, anyone
+        # who has since gone away).
+        stale = [addr for addr, t in _recent_clients.items() if now - t >= 300]
+        for addr in stale:
+            del _recent_clients[addr]
+        active = len(_recent_clients)
     return jsonify({"status": "ok", "version": version.APP_VERSION, "pid": os.getpid(),
                     "active_sessions": active, "idle_seconds": round(idle, 1)})
 

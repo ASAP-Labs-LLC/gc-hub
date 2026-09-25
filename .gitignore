@@ -69,4 +69,4 @@ distill_results*.csv
 
 # CI writes the release tag into a VERSION file next to the code; a
 # checkout has no VERSION and reports "dev" (see version.py).
-VERSION
+/VERSION
