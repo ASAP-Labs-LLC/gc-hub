@@ -303,6 +303,21 @@ def _cal_key(cdf_path) -> str:
         return str(cdf_path)
 
 
+def active_calibration_path(conf: Dict[str, str]) -> Path | None:
+    """Return the calibration CDF the distillation math will actually use.
+
+    ``GC_CAL_CDF`` (an env override used for testing/ops) always wins over
+    the saved ``calibration_cdf`` setting. The distillation sites
+    (``distillation_curve_from_cdf``, ``process_cdf``) and
+    ``calibration_ladder`` all resolve the file through this one function, so
+    the carbon-range labels shown on a chart always agree with the file the
+    math used to build it. Returns ``None`` when nothing is configured.
+    """
+    raw = os.environ.get("GC_CAL_CDF") or conf.get("calibration_cdf") or ""
+    raw = raw.strip()
+    return Path(raw) if raw else None
+
+
 def parse_assignment_map(raw: str) -> Dict[str, list]:
     """Parse the ``calibration_assignments`` settings JSON string.
 
@@ -318,6 +333,85 @@ def parse_assignment_map(raw: str) -> Dict[str, list]:
     return data if isinstance(data, dict) else {}
 
 
+def _assignment_pairs(amap: Dict[str, list], cdf_path) -> list[Tuple[float, int]]:
+    """Return sorted ``(rt, carbon)`` pairs from saved assignments for
+    ``cdf_path`` — the single source ``anchors_for``, ``calibration_ladder``
+    and the ``/api/calibration`` overlay all read.
+
+    Drops ``ignore``d and incomplete entries, tolerates malformed ``rt``/
+    ``carbon`` values (skips them rather than raising), drops carbons unknown
+    to the reference n-alkane ladder, and de-duplicates carbons — keeping the
+    first occurrence after sorting by retention time. Never raises.
+    """
+    entries = amap.get(_cal_key(cdf_path))
+    if entries is None:
+        entries = amap.get(str(cdf_path))
+    if not entries:
+        return []
+    cbp = carbon_bp_map()
+    raw: list[Tuple[float, int]] = []
+    for e in entries:
+        if not isinstance(e, dict) or e.get("ignore"):
+            continue
+        if e.get("carbon") is None or e.get("rt") is None:
+            continue
+        try:
+            rt = float(e["rt"])
+            carbon = int(e["carbon"])
+        except (TypeError, ValueError):
+            continue
+        if carbon not in cbp:
+            continue
+        raw.append((rt, carbon))
+    raw.sort(key=lambda p: p[0])
+    seen: set[int] = set()
+    pairs: list[Tuple[float, int]] = []
+    for rt, carbon in raw:
+        if carbon in seen:
+            continue
+        seen.add(carbon)
+        pairs.append((rt, carbon))
+    return pairs
+
+
+def validate_assignments(entries: list) -> list[str]:
+    """Return human-readable errors if assigned carbons are not strictly
+    increasing with retention time.
+
+    Mirrors the ordering constraint ``calibration_ladder`` and the
+    distillation math both depend on: a peak eluting later must be assigned
+    a higher carbon number than every earlier-eluting assigned peak, or
+    carbon-range labelling (``np.interp`` against the ladder) is silently
+    wrong. ``ignore``d and unassigned entries are skipped. Never raises —
+    malformed ``rt``/``carbon`` values are simply skipped.
+    """
+    pairs: list[Tuple[float, int]] = []
+    for e in entries:
+        if not isinstance(e, dict) or e.get("ignore"):
+            continue
+        if e.get("carbon") is None or e.get("rt") is None:
+            continue
+        try:
+            rt = float(e["rt"])
+            carbon = int(e["carbon"])
+        except (TypeError, ValueError):
+            continue
+        pairs.append((rt, carbon))
+    pairs.sort(key=lambda p: p[0])
+    errors: list[str] = []
+    last_rt: float | None = None
+    last_carbon: int | None = None
+    for rt, carbon in pairs:
+        if last_carbon is not None and carbon <= last_carbon:
+            errors.append(
+                f"C{carbon} at {rt:.3f} min is not greater than C{last_carbon} "
+                f"at {last_rt:.3f} min"
+            )
+            continue
+        last_rt, last_carbon = rt, carbon
+    return errors
+
+
 def anchors_for(
     amap: Dict[str, list], cdf_path
 ) -> Tuple[np.ndarray, np.ndarray] | None:
@@ -327,29 +421,12 @@ def anchors_for(
     unassigned peaks are dropped. Returns ``None`` when fewer than two usable
     anchors exist (too few to interpolate — caller falls back to auto-detect).
     """
-    entries = amap.get(_cal_key(cdf_path))
-    if entries is None:
-        entries = amap.get(str(cdf_path))
-    if not entries:
-        return None
-    cbp = carbon_bp_map()
-    pairs: list[Tuple[float, float]] = []
-    for e in entries:
-        if not isinstance(e, dict) or e.get("ignore"):
-            continue
-        carbon = e.get("carbon")
-        rt = e.get("rt")
-        if carbon is None or rt is None:
-            continue
-        bp = cbp.get(int(carbon))
-        if bp is None:
-            continue
-        pairs.append((float(rt), float(bp)))
+    pairs = _assignment_pairs(amap, cdf_path)
     if len(pairs) < 2:
         return None
-    pairs.sort(key=lambda p: p[0])
+    cbp = carbon_bp_map()
     rt_arr = np.array([p[0] for p in pairs], float)
-    bp_arr = np.array([p[1] for p in pairs], float)
+    bp_arr = np.array([cbp[p[1]] for p in pairs], float)
     return rt_arr, bp_arr
 
 
@@ -358,32 +435,36 @@ def calibration_ladder(conf: Dict[str, str],
     """Return ``(times, carbons)`` for labelling carbon ranges on a trace.
 
     Uses the operator's saved peak->carbon assignments for the configured
-    calibration CDF (the same source the distillation math uses), so ignored
-    peaks (CS2, impurities) never get a carbon number. Falls back to
-    sequential auto-detection only when no assignments are saved, truncated
-    to the known n-alkane ladder so the two lists are always the same length.
-    Returns ``([], [])`` when no calibration is configured or it can't be read.
+    calibration CDF (the same source the distillation math uses, resolved via
+    ``active_calibration_path`` so labels and math never disagree), so
+    ignored peaks (CS2, impurities) never get a carbon number. Any assignment
+    whose carbon does not increase with retention time is dropped (logged)
+    rather than silently mislabelling ranges. Falls back to sequential
+    auto-detection only when fewer than two usable assignments survive,
+    truncated to the known n-alkane ladder so the two lists are always the
+    same length. Returns ``([], [])`` when no calibration is configured or it
+    can't be read.
     """
-    cal_cdf = (conf.get("calibration_cdf") or "").strip()
-    if not cal_cdf:
+    cal_path = active_calibration_path(conf)
+    if cal_path is None:
         return [], []
-    cal_path = Path(cal_cdf)
     amap = parse_assignment_map(conf.get("calibration_assignments", ""))
-    entries = amap.get(_cal_key(cal_path)) or amap.get(str(cal_path)) or []
-    pairs = []
-    seen = set()
-    for e in entries:
-        if not isinstance(e, dict) or e.get("ignore"):
-            continue
-        if e.get("carbon") is None or e.get("rt") is None:
-            continue
-        c = int(e["carbon"])
-        if c in seen:
-            continue
-        seen.add(c)
-        pairs.append((float(e["rt"]), c))
+    pairs = _assignment_pairs(amap, cal_path)
     if len(pairs) >= 2:
-        pairs.sort()
+        kept: list[Tuple[float, int]] = []
+        last_carbon: int | None = None
+        for rt, c in pairs:
+            if last_carbon is not None and c <= last_carbon:
+                LOGGER.warning(
+                    "Calibration ladder: dropping out-of-order assignment "
+                    "(rt=%.3f min, C%d) - not greater than the previous kept C%d",
+                    rt, c, last_carbon,
+                )
+                continue
+            kept.append((rt, c))
+            last_carbon = c
+        pairs = kept
+    if len(pairs) >= 2:
         return [p[0] for p in pairs], [p[1] for p in pairs]
     if not cal_path.is_file():
         return [], []
@@ -394,6 +475,13 @@ def calibration_ladder(conf: Dict[str, str],
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("Calibration ladder: could not read %s: %s", cal_path, exc)
         return [], []
+    if len(peaks) != len(N_ALKANE_CARBON):
+        LOGGER.warning(
+            "Calibration ladder: auto-detected %d peak(s) but the reference "
+            "ladder has %d n-alkanes; labels may be mislabeled - save peak "
+            "assignments on the Calibration page.",
+            len(peaks), len(N_ALKANE_CARBON),
+        )
     n = min(len(peaks), len(N_ALKANE_CARBON))
     return [float(t) for t in peaks[:n]], list(N_ALKANE_CARBON[:n])
 
@@ -791,8 +879,8 @@ def distillation_curve_from_cdf(path: Path, *, blank_path: Path | None = None) -
     else:
         t, y = _apply_blank_and_clip(t, y, None)
 
-    cal_cdf = Path(os.environ.get("GC_CAL_CDF", conf.get("calibration_cdf", "")))
-    if not cal_cdf.is_file():
+    cal_cdf = active_calibration_path(conf)
+    if cal_cdf is None or not cal_cdf.is_file():
         raise FileNotFoundError("Calibration CDF not found – set settings['calibration_cdf'] or GC_CAL_CDF")
     cal_fn = _calibration_function(cal_cdf)
     bp_curve = cal_fn(t)
@@ -872,8 +960,8 @@ def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool =
         t, y = _apply_blank_and_clip(t, y, None)
 
     # 2 Calibration
-    cal_cdf = Path(os.environ.get("GC_CAL_CDF", conf.get("calibration_cdf", "")))
-    if not cal_cdf.is_file():
+    cal_cdf = active_calibration_path(conf)
+    if cal_cdf is None or not cal_cdf.is_file():
         raise FileNotFoundError("Calibration CDF not found – set settings['calibration_cdf'] or GC_CAL_CDF")
     cal_fn = _calibration_function(cal_cdf)
     bp_curve = cal_fn(t)

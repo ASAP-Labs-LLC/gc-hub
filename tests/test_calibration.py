@@ -173,6 +173,150 @@ class AnchorsForTests(unittest.TestCase):
     def test_unknown_path_returns_none(self) -> None:
         self.assertIsNone(distill.anchors_for({}, "/data/cal.CDF"))
 
+    def test_duplicate_carbons_are_deduped_keeping_first_by_time(self) -> None:
+        # Behaviour change from the pre-hardening version (which kept
+        # duplicates): anchors_for now shares distill._assignment_pairs with
+        # calibration_ladder, which de-duplicates by carbon number. This only
+        # affects hand-edited settings with a repeated carbon assignment.
+        path = "/data/cal.CDF"
+        amap = {
+            self._key(path): [
+                {"rt": 1.0, "carbon": 5},
+                {"rt": 1.5, "carbon": 5},  # duplicate C5, later time - dropped
+                {"rt": 2.0, "carbon": 6},
+            ]
+        }
+        rt, bp = distill.anchors_for(amap, path)
+        np.testing.assert_allclose(rt, [1.0, 2.0])
+        np.testing.assert_allclose(bp, [36.0, 69.0])
+
+
+class AssignmentPairsTests(unittest.TestCase):
+    """distill._assignment_pairs: the single (rt, carbon) source shared by
+    anchors_for, calibration_ladder, and the /api/calibration overlay."""
+
+    def _key(self, p: str) -> str:
+        return str(Path(p).resolve())
+
+    def test_returns_sorted_pairs(self) -> None:
+        path = "/data/cal.CDF"
+        amap = {self._key(path): [
+            {"rt": 3.0, "carbon": 7}, {"rt": 1.0, "carbon": 5}, {"rt": 2.0, "carbon": 6},
+        ]}
+        self.assertEqual(distill._assignment_pairs(amap, path), [(1.0, 5), (2.0, 6), (3.0, 7)])
+
+    def test_skips_ignored_and_unassigned(self) -> None:
+        path = "/data/cal.CDF"
+        amap = {self._key(path): [
+            {"rt": 1.0, "carbon": 5}, {"rt": 1.5, "ignore": True}, {"rt": 1.8},
+        ]}
+        self.assertEqual(distill._assignment_pairs(amap, path), [(1.0, 5)])
+
+    def test_drops_carbon_unknown_to_reference_ladder(self) -> None:
+        path = "/data/cal.CDF"
+        amap = {self._key(path): [{"rt": 1.0, "carbon": 999}, {"rt": 2.0, "carbon": 6}]}
+        self.assertEqual(distill._assignment_pairs(amap, path), [(2.0, 6)])
+
+    def test_dedupes_carbons_keeping_first_by_time(self) -> None:
+        path = "/data/cal.CDF"
+        amap = {self._key(path): [
+            {"rt": 1.0, "carbon": 5}, {"rt": 1.5, "carbon": 5}, {"rt": 2.0, "carbon": 6},
+        ]}
+        self.assertEqual(distill._assignment_pairs(amap, path), [(1.0, 5), (2.0, 6)])
+
+    def test_malformed_rt_or_carbon_is_skipped_not_raised(self) -> None:
+        path = "/data/cal.CDF"
+        amap = {self._key(path): [
+            {"rt": "not-a-number", "carbon": 5},
+            {"rt": 1.0, "carbon": "also-not-a-number"},
+            {"rt": 2.0, "carbon": 6},
+        ]}
+        self.assertEqual(distill._assignment_pairs(amap, path), [(2.0, 6)])
+
+    def test_falls_back_to_str_key_lookup_when_canonical_key_is_absent(self) -> None:
+        path = "/data/cal.CDF"
+        amap = {str(path): [{"rt": 1.0, "carbon": 5}]}  # no resolved-path key at all
+        self.assertEqual(distill._assignment_pairs(amap, path), [(1.0, 5)])
+
+    def test_present_but_empty_entries_does_not_fall_through_to_str_key(self) -> None:
+        # `is None`, not `or`: an *empty* list at the canonical (resolved)
+        # key means the operator cleared all assignments for this CDF — it
+        # must not fall through to a stray str(path) entry as if nothing
+        # were saved. A relative path is used so the resolved key and the
+        # raw str(path) key are genuinely distinct dict entries.
+        path = "data/cal.CDF"
+        amap = {
+            self._key(path): [],
+            str(path): [{"rt": 1.0, "carbon": 5}],
+        }
+        self.assertNotEqual(self._key(path), str(path))  # sanity: two real keys
+        self.assertEqual(distill._assignment_pairs(amap, path), [])
+
+    def test_unknown_path_returns_empty_list(self) -> None:
+        self.assertEqual(distill._assignment_pairs({}, "/data/cal.CDF"), [])
+
+
+class ValidateAssignmentsTests(unittest.TestCase):
+    """distill.validate_assignments: pure function backing the 400 the
+    /api/calibration POST route returns for a non-increasing ladder."""
+
+    def test_strictly_increasing_carbons_has_no_errors(self) -> None:
+        entries = [{"rt": 1.0, "carbon": 5}, {"rt": 2.0, "carbon": 6}, {"rt": 3.0, "carbon": 7}]
+        self.assertEqual(distill.validate_assignments(entries), [])
+
+    def test_out_of_order_pair_is_named_in_the_error(self) -> None:
+        entries = [{"rt": 1.0, "carbon": 5}, {"rt": 2.0, "carbon": 10}, {"rt": 3.0, "carbon": 7}]
+        errors = distill.validate_assignments(entries)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("C7", errors[0])
+        self.assertIn("C10", errors[0])
+
+    def test_ignored_and_unassigned_entries_do_not_affect_ordering(self) -> None:
+        entries = [
+            {"rt": 1.0, "carbon": 5},
+            {"rt": 1.2, "ignore": True},
+            {"rt": 1.4},
+            {"rt": 2.0, "carbon": 6},
+        ]
+        self.assertEqual(distill.validate_assignments(entries), [])
+
+    def test_repeated_carbon_is_an_error(self) -> None:
+        entries = [{"rt": 1.0, "carbon": 5}, {"rt": 2.0, "carbon": 5}]
+        errors = distill.validate_assignments(entries)
+        self.assertEqual(len(errors), 1)
+
+    def test_empty_list_has_no_errors(self) -> None:
+        self.assertEqual(distill.validate_assignments([]), [])
+
+
+class ActiveCalibrationPathTests(unittest.TestCase):
+    """distill.active_calibration_path: the one place GC_CAL_CDF is resolved,
+    shared by the distillation math and calibration_ladder() so labels and
+    numbers always agree on which file is 'the' calibration."""
+
+    def test_uses_settings_when_no_env_override(self) -> None:
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GC_CAL_CDF", None)
+            path = distill.active_calibration_path({"calibration_cdf": "/data/cal.CDF"})
+        self.assertEqual(path, Path("/data/cal.CDF"))
+
+    def test_env_override_wins_over_settings(self) -> None:
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"GC_CAL_CDF": "/env/cal.CDF"}):
+            path = distill.active_calibration_path({"calibration_cdf": "/data/cal.CDF"})
+        self.assertEqual(path, Path("/env/cal.CDF"))
+
+    def test_returns_none_when_nothing_configured(self) -> None:
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GC_CAL_CDF", None)
+            self.assertIsNone(distill.active_calibration_path({"calibration_cdf": ""}))
+            self.assertIsNone(distill.active_calibration_path({}))
+
 
 class CalibrationCacheInvalidationTests(unittest.TestCase):
     """The cached calibration must refresh when assignments change.

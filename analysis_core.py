@@ -345,7 +345,18 @@ def _ladder(cal_times, cal_carbons):
         raise ValueError(
             f"calibration ladder mismatch: {len(cal_times)} peak times vs "
             f"{len(cal_carbons)} carbon numbers - use distill.calibration_ladder()")
-    return np.array(cal_times, dtype=float), np.array(cal_carbons, dtype=float)
+    n = len(cal_times)
+    if n < 2:
+        raise ValueError(
+            f"calibration ladder has {n} point(s); need at least 2 - "
+            "use distill.calibration_ladder()")
+    ct = np.array(cal_times, dtype=float)
+    cn = np.array(cal_carbons, dtype=float)
+    if np.any(np.diff(cn) <= 0):
+        raise ValueError(
+            "calibration ladder carbons are not increasing with retention "
+            f"time (carbons={cal_carbons}) - use distill.calibration_ladder()")
+    return ct, cn
 
 
 def carbon_to_time(
@@ -402,12 +413,18 @@ def generate_conclusion(
         bullets = "\n".join(lines)
 
     # ── Conclusion (overlap-based, matching desktop exactly) ──────────
+    # No usable calibration ladder (e.g. nothing configured, or an
+    # unreadable/short auto-detect fallback) -> skip carbon-range mapping
+    # entirely rather than reach np.interp with too few points. Matches
+    # analyze_pair's `if cal_times:` guard: segments (and therefore any
+    # deviation) never get computed without a usable ladder either.
     range_defs: list[tuple[str, int, int, float, float]] = []
-    for rng in ranges:
-        c_s, c_e = int(rng["c_start"]), int(rng["c_end"])
-        t0 = carbon_to_time(c_s, cal_times, cal_carbons)
-        t1 = carbon_to_time(c_e, cal_times, cal_carbons)
-        range_defs.append((rng.get("label", "Range"), c_s, c_e, t0, t1))
+    if len(cal_times) >= 2:
+        for rng in ranges:
+            c_s, c_e = int(rng["c_start"]), int(rng["c_end"])
+            t0 = carbon_to_time(c_s, cal_times, cal_carbons)
+            t1 = carbon_to_time(c_e, cal_times, cal_carbons)
+            range_defs.append((rng.get("label", "Range"), c_s, c_e, t0, t1))
 
     range_pos: dict[str, bool] = {}
     for label, c_s, c_e, t0, t1 in range_defs:

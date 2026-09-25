@@ -939,7 +939,7 @@ def _generate_analysis_report_pdf(
     def _c_to_time(c: int) -> "float | None":
         if not cal_times:
             return None
-        cn = np.array(cal_carbons[:len(cal_times)], dtype=float)
+        cn = np.array(cal_carbons, dtype=float)
         ct = np.array(cal_times, dtype=float)
         if len(cn) < 2:
             return float(ct[0]) if len(ct) else None
@@ -1597,17 +1597,12 @@ def api_calibration():
 
         # Overlay arrays (peak_times/carbon_numbers/boiling_points) drive the
         # dashboard chromatogram markers. Prefer the saved manual assignments so
-        # the overlay matches the calibration the distillation actually uses;
-        # fall back to sequential auto-detection when nothing is assigned.
+        # the overlay matches the calibration the distillation actually uses
+        # (same source as calibration_ladder/anchors_for: distill._assignment_pairs
+        # drops ignored/unknown carbons and de-dupes); fall back to sequential
+        # auto-detection when nothing is assigned.
         cbp = distill.carbon_bp_map()
-        assigned = sorted(
-            (
-                (float(e["rt"]), int(e["carbon"]))
-                for e in saved
-                if isinstance(e, dict) and e.get("carbon") is not None
-            ),
-            key=lambda p: p[0],
-        )
+        assigned = distill._assignment_pairs(amap, cal_path)
         if assigned:
             overlay_times = [rt for rt, _ in assigned]
             overlay_carbons = [c for _, c in assigned]
@@ -1666,6 +1661,14 @@ def api_calibration_save():
                     return _error(f"Unknown carbon number: {carbon}")
                 clean.append({"rt": rt, "carbon": carbon})
             # peaks left unassigned (no carbon, not ignored) are simply omitted
+
+        errors = distill.validate_assignments(clean)
+        if errors:
+            return _error(
+                "Assigned carbons must increase with retention time: "
+                + "; ".join(errors),
+                400,
+            )
 
         conf["calibration_assignments"] = distill.upsert_assignments(
             conf.get("calibration_assignments", ""), cal_path, clean
@@ -2741,7 +2744,7 @@ def api_analysis():
             "conclusion": conclusion,
             "report": bullets,
             "cal_times": cal_times,
-            "cal_carbons": cal_carbons[: len(cal_times)],
+            "cal_carbons": cal_carbons,
         }
         return jsonify(result)
     except Exception as exc:
