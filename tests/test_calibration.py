@@ -55,16 +55,15 @@ class BuildCalibrationFromAnchorsTests(unittest.TestCase):
         cal = distill.build_calibration_from_anchors(rt, bp)
         np.testing.assert_allclose(cal(rt), bp, atol=1e-6)
 
-    def test_below_first_anchor_uses_stable_linear_extrapolation(self) -> None:
-        # The cubic alone can dive to absurd/negative temps before the first
-        # anchor; the builder must fall back to linear there.
+    def test_below_first_anchor_clamps_to_first_anchor_bp(self) -> None:
+        # Before the first anchor the curve is clamped to that anchor's BP.
+        # Linear extrapolation (the pre-2026-09-18 behaviour) put the start of
+        # a real run at -155 °C; a cubic can dive further still.
         rt = np.array([2.0, 3.0, 4.0, 5.0])
         bp = np.array([69.0, 98.0, 126.0, 151.0])
         cal = distill.build_calibration_from_anchors(rt, bp)
-        # Linear slope between first two anchors is 29 °C/min; one min earlier
-        # than the first anchor should be ~ 69 - 29 = 40, not a wild cubic value.
-        val = float(cal(np.array([1.0]))[0])
-        self.assertAlmostEqual(val, 40.0, delta=1.0)
+        vals = cal(np.array([0.0, 1.0, 1.99]))
+        np.testing.assert_allclose(vals, [69.0, 69.0, 69.0], atol=1e-6)
 
 
 class PeakDetectionSensitivityTests(unittest.TestCase):
