@@ -1,0 +1,9 @@
+# Pin the on-disk line endings of the few files that are intentionally
+# CRLF (edited/run on the Windows production host — see CLAUDE.md's
+# "Windows-isms are intentional" note). `-text` disables any newline
+# normalization for these paths (no autocrlf mangling on checkout/checkin,
+# no accidental LF flip from a tool that opens them in text mode), without
+# renormalizing what's already committed. Every other tracked file in this
+# repo is currently LF and is left alone.
+distill.py -text
+looker.py -text
