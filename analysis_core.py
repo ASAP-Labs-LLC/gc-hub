@@ -340,13 +340,20 @@ def range_color_rgba(color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{a})"
 
 
+def _ladder(cal_times, cal_carbons):
+    if len(cal_times) != len(cal_carbons):
+        raise ValueError(
+            f"calibration ladder mismatch: {len(cal_times)} peak times vs "
+            f"{len(cal_carbons)} carbon numbers - use distill.calibration_ladder()")
+    return np.array(cal_times, dtype=float), np.array(cal_carbons, dtype=float)
+
+
 def carbon_to_time(
     carbon_number: float,
     cal_times: list[float],
     cal_carbons: list[int],
 ) -> float:
-    cn = np.array(cal_carbons[: len(cal_times)], dtype=float)
-    ct = np.array(cal_times, dtype=float)
+    ct, cn = _ladder(cal_times, cal_carbons)
     return float(np.interp(carbon_number, cn, ct))
 
 
@@ -356,8 +363,7 @@ def segment_carbon_range(
     cal_times: list[float],
     cal_carbons: list[int],
 ) -> str:
-    ct = np.array(cal_times, dtype=float)
-    cn = np.array(cal_carbons[: len(cal_times)], dtype=float)
+    ct, cn = _ladder(cal_times, cal_carbons)
     c_start = np.interp(t_start, ct, cn)
     c_end = np.interp(t_end, ct, cn)
     return f"C{int(round(c_start))}-C{int(round(c_end))}"

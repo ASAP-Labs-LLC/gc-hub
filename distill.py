@@ -353,6 +353,51 @@ def anchors_for(
     return rt_arr, bp_arr
 
 
+def calibration_ladder(conf: Dict[str, str],
+                       sensitivity: float | None = None) -> Tuple[list, list]:
+    """Return ``(times, carbons)`` for labelling carbon ranges on a trace.
+
+    Uses the operator's saved peak->carbon assignments for the configured
+    calibration CDF (the same source the distillation math uses), so ignored
+    peaks (CS2, impurities) never get a carbon number. Falls back to
+    sequential auto-detection only when no assignments are saved, truncated
+    to the known n-alkane ladder so the two lists are always the same length.
+    Returns ``([], [])`` when no calibration is configured or it can't be read.
+    """
+    cal_cdf = (conf.get("calibration_cdf") or "").strip()
+    if not cal_cdf:
+        return [], []
+    cal_path = Path(cal_cdf)
+    amap = parse_assignment_map(conf.get("calibration_assignments", ""))
+    entries = amap.get(_cal_key(cal_path)) or amap.get(str(cal_path)) or []
+    pairs = []
+    seen = set()
+    for e in entries:
+        if not isinstance(e, dict) or e.get("ignore"):
+            continue
+        if e.get("carbon") is None or e.get("rt") is None:
+            continue
+        c = int(e["carbon"])
+        if c in seen:
+            continue
+        seen.add(c)
+        pairs.append((float(e["rt"]), c))
+    if len(pairs) >= 2:
+        pairs.sort()
+        return [p[0] for p in pairs], [p[1] for p in pairs]
+    if not cal_path.is_file():
+        return [], []
+    try:
+        sens = float(sensitivity if sensitivity is not None
+                     else conf.get("calibration_sensitivity", 50) or 50)
+        peaks = calibration_peak_times(cal_path, sens)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Calibration ladder: could not read %s: %s", cal_path, exc)
+        return [], []
+    n = min(len(peaks), len(N_ALKANE_CARBON))
+    return [float(t) for t in peaks[:n]], list(N_ALKANE_CARBON[:n])
+
+
 def upsert_assignments(raw: str, cdf_path, assignments: list) -> str:
     """Return an updated ``calibration_assignments`` JSON string.
 

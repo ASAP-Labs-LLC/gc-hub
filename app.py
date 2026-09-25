@@ -894,14 +894,7 @@ def _generate_analysis_report_pdf(
     conf = settings_mod.load_settings()
     x_max_min = float(conf.get("analysis_x_max_min", 7.0))
 
-    cal_cdf = conf.get("calibration_cdf", "").strip()
-    cal_times: list[float] = []
-    cal_carbons: list[int] = list(distill.N_ALKANE_CARBON)
-    if cal_cdf and Path(cal_cdf).is_file():
-        try:
-            cal_times = distill.calibration_peak_times(Path(cal_cdf))
-        except Exception as exc:
-            LOGGER.warning("Calibration load failed for PDF: %s", exc)
+    cal_times, cal_carbons = distill.calibration_ladder(conf)
 
     # ── Data arrays ───────────────────────────────────────────────────
     t_common = np.array(analysis_result["sample_raw"]["x"])
@@ -2705,11 +2698,7 @@ def api_analysis():
             t_common = t_sample
 
         # Calibration data for carbon mapping
-        cal_cdf = conf.get("calibration_cdf", "").strip()
-        cal_times: list[float] = []
-        cal_carbons: list[int] = list(distill.N_ALKANE_CARBON)
-        if cal_cdf and Path(cal_cdf).is_file():
-            cal_times = distill.calibration_peak_times(Path(cal_cdf))
+        cal_times, cal_carbons = distill.calibration_ladder(conf)
 
         # Trend difference + both detection channels (trend + raw-diff spikes)
         spike_min_width = float(conf.get(
@@ -2939,11 +2928,7 @@ def _run_export_analysis(params: dict, conf: dict) -> tuple[dict, list[dict]]:
         y_std_interp = y_std
         t_common = t_sample
 
-    cal_cdf = conf.get("calibration_cdf", "").strip()
-    cal_times: list[float] = []
-    cal_carbons: list[int] = list(distill.N_ALKANE_CARBON)
-    if cal_cdf and Path(cal_cdf).is_file():
-        cal_times = distill.calibration_peak_times(Path(cal_cdf))
+    cal_times, cal_carbons = distill.calibration_ladder(conf)
 
     spike_min_width = float(conf.get(
         "analysis_spike_min_width_min",
@@ -3311,11 +3296,7 @@ def api_qbench_upload():
                         trend_s = compute_trend_line(t_s, y_s, q, w, sig)
                         trend_st = compute_trend_line(t_s, y_st, q, w, sig)
                         diff = trend_s - trend_st
-                        cal_cdf = conf.get("calibration_cdf", "").strip()
-                        cal_times: list[float] = []
-                        cal_carbons: list[int] = list(distill.N_ALKANE_CARBON)
-                        if cal_cdf and Path(cal_cdf).is_file():
-                            cal_times = distill.calibration_peak_times(Path(cal_cdf))
+                        cal_times, cal_carbons = distill.calibration_ladder(conf)
                         segs = detect_deviation_segments(diff, t_s, tm, tmod, ts, cal_times, cal_carbons) if cal_times else []
 
                         ar = {
