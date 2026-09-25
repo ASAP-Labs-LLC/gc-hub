@@ -34,7 +34,7 @@ def _row(lab, dt, v, note="plain"):
 
 
 def _old_rewrite(path: Path, rows: list[dict]) -> bytes:
-    """What _upsert_csv_row wrote before: open("w") + DictWriter."""
+    """What the rewrites wrote before: open("w") + DictWriter."""
     with path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=distill.CSV_HEADER)
         w.writeheader()
@@ -55,21 +55,29 @@ class AtomicCsvTests(unittest.TestCase):
         return sorted(p.name for p in self.dir.iterdir() if p.name != self.csv.name)
 
     def _seed(self):
-        distill._upsert_csv_row(self.csv, _row("L1", "2024-01-01 10:00", 1, 'µ, "quoted"\nline'))
-        distill._upsert_csv_row(self.csv, _row("L2", "2024-01-02 10:00", 2))
+        distill._append_csv_row(self.csv, _row("L1", "2024-01-01 10:00", 1, 'µ, "quoted"\nline'))
+        distill._append_csv_row(self.csv, _row("L2", "2024-01-02 10:00", 2))
         return self.csv.read_bytes()
 
-    def test_upsert_replace_bytes_identical_to_old_rewrite(self):
+    def _rows(self):
+        with self.csv.open("r", encoding="utf-8", newline="") as fh:
+            return list(csv.DictReader(fh))
+
+    def _rewrite(self, v=99):
+        rows = self._rows()
+        rows[0] = dict(zip(distill.CSV_HEADER, _row("L1", "2024-01-01 10:00", v)))
+        distill._atomic_write_csv(self.csv, distill.CSV_HEADER, rows)
+
+    def test_rewrite_bytes_identical_to_old_rewrite(self):
         self._seed()
         new = _row("L1", "2024-01-01 10:00", 99, "ümlaut")
-        with self.csv.open("r", encoding="utf-8", newline="") as fh:
-            rows = list(csv.DictReader(fh))
+        rows = self._rows()
         rows[0] = dict(zip(distill.CSV_HEADER, new))
         ref = self.dir / "ref.csv"
         expected = _old_rewrite(ref, rows)
         ref.unlink()
 
-        distill._upsert_csv_row(self.csv, new)
+        distill._atomic_write_csv(self.csv, distill.CSV_HEADER, rows)
         self.assertEqual(self.csv.read_bytes(), expected)
         self.assertIn(b"\r\n", expected)          # csv's line terminator, unchanged
         self.assertEqual(self._leftovers(), [])
@@ -84,7 +92,7 @@ class AtomicCsvTests(unittest.TestCase):
 
         with mock.patch.object(distill.csv, "DictWriter", Boom):
             with self.assertRaises(OSError):
-                distill._upsert_csv_row(self.csv, _row("L1", "2024-01-01 10:00", 99))
+                self._rewrite()
         self.assertEqual(self.csv.read_bytes(), before)
         self.assertEqual(self._leftovers(), [])
 
@@ -101,18 +109,50 @@ class AtomicCsvTests(unittest.TestCase):
         # Surface it as open("w") would have (filename = the CSV), clean up.
         before = self._seed()
         err = PermissionError(13, "Access is denied")
-        with mock.patch.object(distill.os, "replace", side_effect=err):
+        with mock.patch.object(distill.os, "replace", side_effect=err) as rep, \
+                mock.patch.object(distill.time, "sleep") as slept:
             with self.assertRaises(PermissionError) as cm:
-                distill._upsert_csv_row(self.csv, _row("L1", "2024-01-01 10:00", 99))
+                self._rewrite()
+        self.assertEqual(rep.call_count, distill.CSV_REPLACE_ATTEMPTS)
+        self.assertEqual(distill.CSV_REPLACE_ATTEMPTS, 10)
+        self.assertEqual(slept.call_count, distill.CSV_REPLACE_ATTEMPTS - 1)
+        for c in slept.call_args_list:
+            self.assertTrue(0.1 <= c.args[0] <= 0.2, c)
         self.assertEqual(cm.exception.filename, str(self.csv))
         self.assertEqual(self.csv.read_bytes(), before)
         self.assertEqual(self._leftovers(), [])
+
+    def test_transient_sharing_lock_is_retried(self):
+        # Antivirus / indexer / backup / an SMB client briefly holding the
+        # CSV without delete-sharing: the replace succeeds on a later try.
+        self._seed()
+        real = os.replace
+        calls = []
+
+        def flaky(src, dst):
+            calls.append(1)
+            if len(calls) <= 3:
+                raise PermissionError(13, "The process cannot access the file")
+            return real(src, dst)
+        with mock.patch.object(distill.os, "replace", side_effect=flaky), \
+                mock.patch.object(distill.time, "sleep"):
+            self._rewrite(v=42)
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(float(self._rows()[0]["2887 IBP"]), 42.0)
+        self.assertEqual(self._leftovers(), [])
+
+    def test_sweep_stale_temps(self):
+        self._seed()
+        (self.dir / ".distill_results.csv.abc123.tmp").write_text("x")
+        (self.dir / "other.tmp").write_text("x")
+        self.assertEqual(distill.sweep_stale_csv_temps(self.csv), 1)
+        self.assertEqual(self._leftovers(), ["other.tmp"])
 
     @unittest.skipIf(os.name == "nt", "POSIX permission bits")
     def test_file_mode_is_kept(self):
         self._seed()
         os.chmod(self.csv, 0o664)
-        distill._upsert_csv_row(self.csv, _row("L1", "2024-01-01 10:00", 99))
+        self._rewrite()
         self.assertEqual(stat.S_IMODE(self.csv.stat().st_mode), 0o664)
 
 
@@ -139,6 +179,39 @@ def _truncating_csv_rewrites(path: Path) -> list[str]:
             if opens_w and writes_csv:
                 found.append(f"{path.name}:{node.lineno} in {fn.name}")
     return found
+
+
+def _unlocked_csv_reads(path: Path, funcs) -> list[str]:
+    """``<x>.open("r"…)`` of the results CSV in ``funcs`` not inside a
+    ``with distill._CSV_LOCK`` block."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    bad = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef) or fn.name not in funcs:
+            continue
+        locked = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.With) and any(
+                    ast.unparse(i.context_expr) == "distill._CSV_LOCK" for i in node.items):
+                locked |= {id(n) for n in ast.walk(node)}
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "open" and ast.unparse(node.func.value) == "csv_path"
+                    and id(node) not in locked):
+                bad.append(f"{fn.name}:{node.lineno}")
+    return bad
+
+
+class ReadersTakeTheLockTests(unittest.TestCase):
+    def test_table_and_curve_read_under_the_csv_lock(self):
+        # On Windows os.replace fails while a reader holds the CSV open; the
+        # app's own readers must not be one of those.
+        self.assertEqual(_unlocked_csv_reads(ROOT / "app.py",
+                                             {"api_table", "api_distillation_curve"}), [])
+
+    def test_upsert_is_gone(self):
+        # Dead code: process_cdf dedupes inline and appends.
+        self.assertFalse(hasattr(distill, "_upsert_csv_row"))
 
 
 class NoTruncatingRewritesTests(unittest.TestCase):

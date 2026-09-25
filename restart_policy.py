@@ -115,6 +115,30 @@ def should_respawn(data_dir: Path, env: Optional[Mapping[str, str]] = None) -> b
     return may_respawn(d)
 
 
+# Windows process-creation flags (numeric so this imports anywhere).
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_NO_WINDOW = 0x08000000
+
+
+def respawn_command(executable: str, argv, *, deployed: bool, app_dir: Path, cwd: str,
+                    windows: bool) -> Tuple[list, str, int]:
+    """``(args, cwd, creationflags)`` for a self-spawned replacement.
+
+    Deployed (only ever while the updater is paused): run ``app.py``
+    relative to the current directory — the updater's ``current`` junction —
+    so the replacement runs whatever the junction points at, with no console
+    window, as coa-reviewer does. Legacy: the app's own folder, absolute.
+    ``argv[0]`` is dropped (run.pyw's runpy bootstrap leaves it as ``-c``)."""
+    flags_tail = list(argv[1:])
+    if deployed:
+        args, where = [executable, "app.py", *flags_tail], cwd
+        flags = (CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP) if windows else 0
+    else:
+        args, where = [executable, str(Path(app_dir) / "app.py"), *flags_tail], str(app_dir)
+        flags = CREATE_NEW_PROCESS_GROUP if windows else 0
+    return args, where, flags
+
+
 def should_auto_restart(*, hour: int, today: str, done_today: Optional[str],
                         uptime_seconds: float, idle: bool) -> bool:
     """Whether the daily auto-restart fires now."""
@@ -238,9 +262,14 @@ def await_switch(data_dir: Path, tag: str, at: float, *,
                  pickup: float = restart_update.PICKUP_SECONDS,
                  accepted_wait: float = ACCEPTED_WAIT_SECONDS,
                  poll: float = POLL_SECONDS,
-                 sleep: Callable[[float], None] = time.sleep) -> str:
+                 sleep: Callable[[float], None] = time.sleep,
+                 on_taken: Optional[Callable[[], None]] = None) -> str:
     """Watch for the updater's answer to the switch request written at
-    ``at``. Returns ``"restart"`` or ``"exit"`` (see above). Never raises."""
+    ``at``. Returns ``"restart"`` or ``"exit"`` (see above). Never raises.
+
+    ``on_taken`` runs once the updater has (or may have) taken the request,
+    before waiting to be killed — the app takes the results-CSV lock there,
+    so the updater's taskkill /F cannot cut an append in half."""
     data_dir = Path(data_dir)
     try:
         verdict, outcome = _poll_switch(data_dir, at, _polls(pickup, poll), poll, sleep)
@@ -260,6 +289,11 @@ def await_switch(data_dir: Path, tag: str, at: float, *,
         else:
             logger.warning("The switch request for %s was taken but left no outcome; "
                            "waiting to be stopped", tag)
+        if on_taken is not None:
+            try:
+                on_taken()
+            except Exception:
+                logger.exception("on_taken failed; waiting to be stopped anyway")
         for _ in range(_polls(accepted_wait, poll)):
             sleep(poll)
         logger.warning("Still running %.0fs after the updater took the switch to %s",

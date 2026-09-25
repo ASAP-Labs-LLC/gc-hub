@@ -33,8 +33,13 @@
     /** After a restart that asked the updater to install ``expectedTag``:
         a notice when the process that came back runs something else. */
     function switchOutcomeNotice(expectedTag, runningVersion) {
-        if (!expectedTag || runningVersion === expectedTag) return null;
-        return `Update was not installed (refused) — still on ${runningVersion}`;
+        if (!expectedTag || _sameRelease(runningVersion, expectedTag)) return null;
+        return `Update was not installed — still on ${String(runningVersion || '').trim()}`;
+    }
+
+    // The updater's differs_from: trimmed, case-insensitive equality.
+    function _sameRelease(a, b) {
+        return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
     }
 
     root.restartLabel = restartLabel;

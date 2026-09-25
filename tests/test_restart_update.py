@@ -129,12 +129,15 @@ class AwaitSwitchTests(unittest.TestCase):
         self._t.cleanup()
 
     def _run(self, on_sleep=None, pickup=5.0, accepted_wait=4.0):
+        self.taken = []
+
         def sleep(_s):
             self.sleeps += 1
             if on_sleep:
                 on_sleep(self.sleeps)
         return self.rp.await_switch(self.data, "v2.0.0", self.at, pickup=pickup,
-                                    accepted_wait=accepted_wait, poll=1.0, sleep=sleep)
+                                    accepted_wait=accepted_wait, poll=1.0, sleep=sleep,
+                                    on_taken=lambda: self.taken.append(self.sleeps))
 
     def _no_switch_files(self):
         for n in ("switch-requested", "switch-accepted", "switch-refused"):
@@ -146,6 +149,7 @@ class AwaitSwitchTests(unittest.TestCase):
                 _claim(self.data, "switch-refused", {"why": "app is paused"})
         self.assertEqual(self._run(updater), "restart")
         self.assertEqual(self.sleeps, 2)
+        self.assertEqual(self.taken, [])
         self._no_switch_files()
 
     def test_accepted_waits_to_be_killed_then_exits_without_respawn(self):
@@ -154,10 +158,13 @@ class AwaitSwitchTests(unittest.TestCase):
                 _claim(self.data, "switch-accepted", {"accepted_at": time.time()})
         self.assertEqual(self._run(updater), "exit")
         self.assertEqual(self.sleeps, 1 + 4)   # pickup poll + accepted_wait polls
+        # The results-CSV lock is taken before waiting to be killed.
+        self.assertEqual(self.taken, [1])
         self._no_switch_files()
 
     def test_unclaimed_is_withdrawn_then_plain_restart(self):
         self.assertEqual(self._run(), "restart")
+        self.assertEqual(self.taken, [])
         self.assertEqual(self.sleeps, 5)       # pickup / poll
         self._no_switch_files()
 
@@ -173,6 +180,7 @@ class AwaitSwitchTests(unittest.TestCase):
             if n == 1:
                 (self.data / "switch-requested").unlink()
         self.assertEqual(self._run(updater), "exit")
+        self.assertEqual(self.taken, [3])
         self._no_switch_files()
 
 
@@ -280,6 +288,18 @@ class RestartRouteTests(unittest.TestCase):
                     for n in ("switch-requested", "switch-accepted", "switch-refused")),
                     timeout=10))
 
+    def test_leftover_csv_temp_files_are_swept_at_boot(self):
+        with tempfile.TemporaryDirectory() as t:
+            data = Path(t, "data")
+            data.mkdir()
+            stale = data / ".distill_results.csv.k2j3h4.tmp"
+            stale.write_text("half a row", encoding="utf-8")
+            keep = data / "notes.tmp"
+            keep.write_text("not ours", encoding="utf-8")
+            with booted(Path(t)) as (port, proc, data, home):
+                self.assertTrue(wait_for(lambda: not stale.exists(), timeout=10))
+                self.assertTrue(keep.exists())
+
     def test_plain_restart_under_the_updater_exits_without_respawning(self):
         with tempfile.TemporaryDirectory() as t:
             with booted(Path(t), cmd=_bootstrap()) as (port, proc, data, home):
@@ -339,7 +359,7 @@ class RestartRouteTests(unittest.TestCase):
                 self.assertIsNone(proc.poll())
 
     def test_paused_updater_means_we_respawn_ourselves(self):
-        before = _app_pids()
+        import supervisor
         with tempfile.TemporaryDirectory() as t:
             with booted(Path(t), cmd=_bootstrap()) as (port, proc, data, home):
                 (data / "paused").write_text("", encoding="utf-8")
@@ -347,28 +367,25 @@ class RestartRouteTests(unittest.TestCase):
                 self.assertEqual((code, body["mode"]), (200, "restart"))
                 proc.wait(timeout=20)
                 new_pid = None
-                try:
-                    def replaced():
-                        nonlocal new_pid
-                        try:
-                            c, b = get(port, "/healthz", timeout=1.0)
-                        except Exception:
-                            return False
-                        if c == 200 and b["pid"] != proc.pid:
-                            new_pid = b["pid"]
-                            return True
+
+                def replaced():
+                    nonlocal new_pid
+                    try:
+                        c, b = get(port, "/healthz", timeout=1.0)
+                    except Exception:
                         return False
+                    if c == 200 and b["pid"] != proc.pid:
+                        new_pid = b["pid"]
+                        return True
+                    return False
+                try:
                     self.assertTrue(wait_for(replaced, timeout=60),
                                     "no replacement came up while the updater is paused")
                 finally:
-                    for pid in (_app_pids() - before):
-                        try:
-                            os.kill(pid, signal.SIGTERM)
-                        except OSError:
-                            pass
-                    wait_for(lambda: not (_app_pids() - before), timeout=15)
-        self.assertIsNotNone(new_pid)
-        self.assertEqual(_app_pids() - before, set(), "leaked app.py processes")
+                    if new_pid is not None:
+                        os.kill(new_pid, signal.SIGTERM)
+                        self.assertTrue(supervisor.wait_until_free(port, timeout=15),
+                                        "the replacement did not release the port")
 
     def test_second_instance_on_a_served_port_exits(self):
         from bootapp import child_env
@@ -398,6 +415,27 @@ class RestartRouteTests(unittest.TestCase):
 
 
 class PolicyDecisionTests(unittest.TestCase):
+    def test_respawn_command_deployed_runs_via_the_junction(self):
+        import restart_policy as rp
+        args, cwd, flags = rp.respawn_command(
+            "py.exe", ["app.py", "--no-tray"], deployed=True, app_dir=Path("C:/r/releases/v1"),
+            cwd="C:/r/current", windows=True)
+        self.assertEqual(args, ["py.exe", "app.py", "--no-tray"])
+        self.assertEqual(cwd, "C:/r/current")
+        self.assertEqual(flags, rp.CREATE_NO_WINDOW | rp.CREATE_NEW_PROCESS_GROUP)
+        _, _, flags = rp.respawn_command("py", ["-c"], deployed=True, app_dir=Path("/a"),
+                                         cwd="/c", windows=False)
+        self.assertEqual(flags, 0)
+
+    def test_respawn_command_legacy_uses_the_app_dir(self):
+        import restart_policy as rp
+        args, cwd, flags = rp.respawn_command(
+            "py.exe", ["-c"], deployed=False, app_dir=Path("/share/gc"), cwd="/elsewhere",
+            windows=True)
+        self.assertEqual(args, ["py.exe", str(Path("/share/gc") / "app.py")])
+        self.assertEqual(cwd, str(Path("/share/gc")))
+        self.assertEqual(flags, rp.CREATE_NEW_PROCESS_GROUP)
+
     def test_respawn_decision_legacy(self):
         import restart_policy
         with tempfile.TemporaryDirectory() as t:

@@ -153,7 +153,10 @@ class ProcessedCdfFilenameTests(unittest.TestCase):
             self.assertNotIn(bad, name)
 
 
-class UpsertCsvRowTests(unittest.TestCase):
+class AtomicWriteCsvTests(unittest.TestCase):
+    """``_atomic_write_csv`` — every whole-file rewrite of the results CSV
+    (header migration, injection-time reindex) goes through it."""
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.csv_path = Path(self._tmp.name) / "distill_results.csv"
@@ -161,32 +164,30 @@ class UpsertCsvRowTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _row(self, lab_id: str, inj_dt: str, marker: float) -> list:
-        # CSV_HEADER is 29 wide: Lab ID, InjectionDateTime, then 27 numbers.
+    def _row(self, lab_id: str, inj_dt: str, marker: float) -> dict:
         row = [lab_id, inj_dt] + [marker] * (len(distill.CSV_HEADER) - 2)
-        return row
+        return dict(zip(distill.CSV_HEADER, row))
 
     def _read_rows(self) -> list[dict]:
         with self.csv_path.open("r", encoding="utf-8", newline="") as fh:
             return list(csv.DictReader(fh))
 
-    def test_creates_file_with_header_and_row(self) -> None:
-        distill._upsert_csv_row(self.csv_path, self._row("L1", "2024-01-01 10:00", 1))
+    def test_creates_file_with_header_and_rows(self) -> None:
+        distill._atomic_write_csv(self.csv_path, distill.CSV_HEADER,
+                                  [self._row("L1", "2024-01-01 10:00", 1)])
         rows = self._read_rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["Lab ID"], "L1")
 
-    def test_same_key_replaces_instead_of_duplicating(self) -> None:
-        distill._upsert_csv_row(self.csv_path, self._row("L1", "2024-01-01 10:00", 1))
-        distill._upsert_csv_row(self.csv_path, self._row("L1", "2024-01-01 10:00", 99))
+    def test_replaces_the_whole_file(self) -> None:
+        distill._atomic_write_csv(self.csv_path, distill.CSV_HEADER,
+                                  [self._row("L1", "2024-01-01 10:00", 1),
+                                   self._row("L2", "2024-01-02 10:00", 2)])
+        distill._atomic_write_csv(self.csv_path, distill.CSV_HEADER,
+                                  [self._row("L1", "2024-01-01 10:00", 99)])
         rows = self._read_rows()
-        self.assertEqual(len(rows), 1, "Same (Lab ID, InjectionDateTime) must not duplicate")
-        self.assertEqual(float(rows[0]["2887 IBP"]), 99.0, "Row should be updated in place")
-
-    def test_different_key_appends(self) -> None:
-        distill._upsert_csv_row(self.csv_path, self._row("L1", "2024-01-01 10:00", 1))
-        distill._upsert_csv_row(self.csv_path, self._row("L2", "2024-01-02 10:00", 2))
-        self.assertEqual(len(self._read_rows()), 2)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(float(rows[0]["2887 IBP"]), 99.0)
 
 
 class AppendCsvRowTests(unittest.TestCase):

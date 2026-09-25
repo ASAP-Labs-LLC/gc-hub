@@ -20,6 +20,7 @@ import re
 import stat
 import tempfile
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, Sequence, Tuple
@@ -943,6 +944,49 @@ def distillation_curve_from_cdf(path: Path, *, blank_path: Path | None = None) -
     return pct_curve, bp_curve
 
 
+# On Windows os.replace fails with PermissionError while any other handle
+# without delete-sharing has the target open — antivirus, the indexer, a
+# backup, an SMB client — usually for a moment only.
+CSV_REPLACE_ATTEMPTS = 10
+CSV_REPLACE_BACKOFF_SECONDS = (0.1, 0.2)   # grows from the first to the second
+
+
+def _replace_retrying(tmp: Path, path: Path) -> None:
+    lo, hi = CSV_REPLACE_BACKOFF_SECONDS
+    for attempt in range(CSV_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as exc:
+            if attempt == CSV_REPLACE_ATTEMPTS - 1:
+                raise PermissionError(exc.errno, exc.strerror, str(path)) from exc
+            LOGGER.debug("%s is busy (%s); retrying the replace", path, exc)
+            time.sleep(lo + (hi - lo) * attempt / max(1, CSV_REPLACE_ATTEMPTS - 2))
+
+
+def _csv_temp_prefix(path: Path) -> str:
+    return f".{path.name}."
+
+
+def sweep_stale_csv_temps(csv_path) -> int:
+    """Remove temp files a killed ``_atomic_write_csv`` left next to
+    *csv_path*. Call only while no rewrite can be running (startup).
+    Returns how many were removed."""
+    csv_path = Path(csv_path)
+    removed = 0
+    try:
+        leftovers = list(csv_path.parent.glob(_csv_temp_prefix(csv_path) + "*.tmp"))
+    except OSError:
+        return 0
+    for stale in leftovers:
+        try:
+            stale.unlink()
+            removed += 1
+        except OSError as exc:
+            LOGGER.warning("Could not remove leftover %s: %s", stale, exc)
+    return removed
+
+
 def _atomic_write_csv(path, fieldnames, rows) -> None:
     """Rewrite the whole CSV at *path* (header + *rows*, as dicts) atomically.
 
@@ -955,11 +999,11 @@ def _atomic_write_csv(path, fieldnames, rows) -> None:
 
     On failure the original is untouched and the temp file removed. A
     PermissionError from the replace (Windows: someone, e.g. Excel, has the
-    CSV open) is re-raised naming *path*, as the old ``open("w")`` did.
-    Callers hold ``_CSV_LOCK``.
+    CSV open) is retried briefly, then re-raised naming *path*, as the old
+    ``open("w")`` did. Callers hold ``_CSV_LOCK``.
     """
     path = Path(path)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp",
+    fd, tmp_name = tempfile.mkstemp(prefix=_csv_temp_prefix(path), suffix=".tmp",
                                     dir=str(path.parent))
     tmp = Path(tmp_name)
     try:
@@ -973,10 +1017,7 @@ def _atomic_write_csv(path, fieldnames, rows) -> None:
             os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
         except OSError:
             pass  # new file, or a filesystem without POSIX modes
-        try:
-            os.replace(tmp, path)
-        except PermissionError as exc:
-            raise PermissionError(exc.errno, exc.strerror, str(path)) from exc
+        _replace_retrying(tmp, path)
     except BaseException:
         try:
             tmp.unlink()
@@ -987,7 +1028,7 @@ def _atomic_write_csv(path, fieldnames, rows) -> None:
 
 def _append_csv_row(dest_csv, row_data: list) -> None:
     """Always append *row_data* as a new line (writing CSV_HEADER first if the
-    file is new). Unlike :func:`_upsert_csv_row`, this does NOT replace an
+    file is new). It does NOT replace an
     existing row — every call adds a distinct line, so a reprocess / Export-to-
     LIMS of the same sample produces a new row. Thread-safe via ``_CSV_LOCK``."""
     with _CSV_LOCK:
@@ -997,38 +1038,6 @@ def _append_csv_row(dest_csv, row_data: list) -> None:
             if write_header:
                 w.writerow(CSV_HEADER)
             w.writerow(row_data)
-
-
-def _upsert_csv_row(dest_csv, row_data: list) -> None:
-    """Replace the CSV row matching (Lab ID + InjectionDateTime), or append.
-
-    Thread-safe: serialised through ``_CSV_LOCK``.
-    """
-    with _CSV_LOCK:
-        lab_id = str(row_data[0]).strip()
-        inj_dt = str(row_data[1]).strip()
-        if not dest_csv.exists():
-            with dest_csv.open("a", newline="", encoding="utf-8") as fh:
-                w = csv.writer(fh)
-                w.writerow(CSV_HEADER)
-                w.writerow(row_data)
-            return
-        rows: list[dict] = []
-        with dest_csv.open("r", encoding="utf-8", newline="") as fh:
-            for row in csv.DictReader(fh):
-                rows.append(row)
-        match_idx = next(
-            (i for i, r in enumerate(rows)
-             if r.get("Lab ID", "").strip() == lab_id
-             and r.get("InjectionDateTime", "").strip() == inj_dt),
-            None,
-        )
-        if match_idx is None:
-            with dest_csv.open("a", newline="", encoding="utf-8") as fh:
-                csv.writer(fh).writerow(row_data)
-        else:
-            rows[match_idx] = dict(zip(CSV_HEADER, row_data))
-            _atomic_write_csv(dest_csv, CSV_HEADER, rows)
 
 
 def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool = False) -> Path:

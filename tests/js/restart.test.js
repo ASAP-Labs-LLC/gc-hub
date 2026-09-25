@@ -27,5 +27,7 @@ module.exports = (t) => {
     t.eq(switchOutcomeNotice('v1.1.0', 'v1.1.0'), null);
     t.eq(switchOutcomeNotice(null, 'v1.0.0'), null);
     t.eq(switchOutcomeNotice('v1.1.0', 'v1.0.0'),
-        'Update was not installed (refused) — still on v1.0.0');
+        'Update was not installed — still on v1.0.0');
+    // Same comparison as the updater's differs_from: trimmed, case-insensitive.
+    t.eq(switchOutcomeNotice('v1.1.0', ' V1.1.0 '), null);
 };

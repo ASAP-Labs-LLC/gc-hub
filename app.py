@@ -913,6 +913,30 @@ def _claim_restart() -> bool:
 
 
 CSV_LOCK_EXIT_TIMEOUT_SECONDS = 30.0
+_csv_lock_held_for_exit = False
+
+
+def _hold_csv_lock_for_exit() -> bool:
+    """Take distill._CSV_LOCK for the rest of this process's life, so an exit
+    (ours, or the updater's taskkill /F) cannot land mid-write. Idempotent:
+    the lock is not reentrant, and both the switch watcher and _do_restart
+    call this. False if it stayed busy past the timeout."""
+    global _csv_lock_held_for_exit
+    if _csv_lock_held_for_exit:
+        return True
+    if distill._CSV_LOCK.acquire(timeout=CSV_LOCK_EXIT_TIMEOUT_SECONDS):
+        _csv_lock_held_for_exit = True
+        return True
+    LOGGER.error("Results CSV still busy after %.0fs — exiting anyway",
+                 CSV_LOCK_EXIT_TIMEOUT_SECONDS)
+    return False
+
+
+def _release_csv_lock_for_exit() -> None:
+    global _csv_lock_held_for_exit
+    if _csv_lock_held_for_exit:
+        _csv_lock_held_for_exit = False
+        distill._CSV_LOCK.release()
 
 
 def _do_restart(reason: str = "restart") -> None:
@@ -941,28 +965,20 @@ def _do_restart(reason: str = "restart") -> None:
         LOGGER.exception("could not decide whether to respawn — not respawning")
         spawn = False
 
-    csv_locked = distill._CSV_LOCK.acquire(timeout=CSV_LOCK_EXIT_TIMEOUT_SECONDS)
-    if not csv_locked:
-        LOGGER.error("Results CSV still busy after %.0fs — restarting anyway",
-                     CSV_LOCK_EXIT_TIMEOUT_SECONDS)
+    _hold_csv_lock_for_exit()
     if not spawn:
         LOGGER.info("Exiting without a respawn; the updater restarts the app")
         _exit()
     try:
         # Spawn a new process *then* exit.  On Windows os.execv can be
-        # unreliable, so use subprocess + os._exit instead. Absolute script
-        # path and cwd: run.pyw's runpy bootstrap leaves sys.argv[0] == "-c".
-        subprocess.Popen(
-            [_sys.executable, str(APP_DIR / "app.py"), *_sys.argv[1:]],
-            cwd=str(APP_DIR),
-            close_fds=True,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-            if platform.system() == "Windows" else 0,
-        )
+        # unreliable, so use subprocess + os._exit instead.
+        args, cwd, flags = restart_policy.respawn_command(
+            _sys.executable, _sys.argv, deployed=paths.data_dir() is not None,
+            app_dir=APP_DIR, cwd=os.getcwd(), windows=platform.system() == "Windows")
+        subprocess.Popen(args, cwd=cwd, close_fds=True, creationflags=flags)
     except Exception:
         LOGGER.exception("Failed to spawn new server process")
-        if csv_locked:
-            distill._CSV_LOCK.release()
+        _release_csv_lock_for_exit()
         with _restart_lock:   # stay up; a later request may try again
             _restart_claimed = False
         return  # don't exit if we couldn't start the replacement
@@ -974,7 +990,8 @@ def _await_switch_then_restart(data_dir: Path, tag: str, at: float) -> None:
     """Watch for the updater's answer, then restart. When it has the request
     this only exits (should_respawn: the switch files are gone by now, so
     only a paused updater makes us start our own replacement)."""
-    action = restart_policy.await_switch(data_dir, tag, at)
+    action = restart_policy.await_switch(data_dir, tag, at,
+                                         on_taken=_hold_csv_lock_for_exit)
     _do_restart(f"switch to {tag}: {action}")
 
 
@@ -1739,23 +1756,26 @@ def api_distillation_curve():
             csv_path = Path(conf.get("distill_output", str(paths.default_results_csv())))
             if csv_path.is_file():
                 import csv as csv_mod
-                with csv_path.open("r", encoding="utf-8", newline="") as fh:
-                    reader = csv_mod.DictReader(fh)
-                    best_row = None
-                    for row in reader:
-                        if (row.get("Lab ID", "").strip() == sample_name.strip()):
-                            best_row = row  # keep last match (most recent)
-                    if best_row:
-                        for k in distill.CSV_HEADER[2:15]:
-                            v = best_row.get(k, "")
-                            if v:
-                                try: d2887_csv[k] = float(v)
-                                except ValueError: pass
-                        for k in distill.CSV_HEADER[15:28]:  # D86 columns only (Source File at [28] excluded)
-                            v = best_row.get(k, "")
-                            if v:
-                                try: d86_csv[k] = float(v)
-                                except ValueError: pass
+                # Read under the lock (a reader's open handle makes a
+                # rewrite's os.replace fail on Windows); process after.
+                with distill._CSV_LOCK:
+                    with csv_path.open("r", encoding="utf-8", newline="") as fh:
+                        csv_rows = list(csv_mod.DictReader(fh))
+                best_row = None
+                for row in csv_rows:
+                    if (row.get("Lab ID", "").strip() == sample_name.strip()):
+                        best_row = row  # keep last match (most recent)
+                if best_row:
+                    for k in distill.CSV_HEADER[2:15]:
+                        v = best_row.get(k, "")
+                        if v:
+                            try: d2887_csv[k] = float(v)
+                            except ValueError: pass
+                    for k in distill.CSV_HEADER[15:28]:  # D86 columns only (Source File at [28] excluded)
+                        v = best_row.get(k, "")
+                        if v:
+                            try: d86_csv[k] = float(v)
+                            except ValueError: pass
 
             # Pre-calculate uncorrected D86 from D2887 so the frontend toggle
             # can switch between before/after without recomputing in the browser.
@@ -1808,14 +1828,14 @@ def api_table():
         if not csv_path.is_file():
             return jsonify({"columns": distill.CSV_HEADER, "rows": []})
 
-        rows: list[list[str]] = []
-        with csv_path.open("r", encoding="utf-8", newline="") as fh:
-            reader = csv.reader(fh)
-            header = next(reader, None)
-            if header is None:
-                return jsonify({"columns": distill.CSV_HEADER, "rows": []})
-            for row in reader:
-                rows.append(row)
+        # Under the lock: a reader's open handle makes a rewrite's
+        # os.replace fail on Windows. Read into memory, then release.
+        with distill._CSV_LOCK:
+            with csv_path.open("r", encoding="utf-8", newline="") as fh:
+                all_rows = list(csv.reader(fh))
+        if not all_rows:
+            return jsonify({"columns": distill.CSV_HEADER, "rows": []})
+        header, rows = all_rows[0], all_rows[1:]
 
         # NOTE: D86 corrections are already applied in distill.process_cdf()
         # step 5b before writing to CSV.  Do NOT re-apply them here or the
@@ -4056,6 +4076,19 @@ def _init_app() -> None:
     threading.Thread(target=_auto_restart_loop, daemon=True, name="auto-restart").start()
 
 
+def _sweep_csv_temps() -> None:
+    """Remove temp files a killed atomic CSV rewrite left beside the results
+    CSV. Only after the port guard: a live instance may be mid-rewrite."""
+    try:
+        conf = settings_mod.load_settings()
+        csv_path = Path(conf.get("distill_output", str(paths.default_results_csv())))
+        removed = distill.sweep_stale_csv_temps(csv_path)
+        if removed:
+            LOGGER.warning("Removed %d leftover results-CSV temp file(s)", removed)
+    except Exception:
+        LOGGER.exception("Could not sweep results-CSV temp files (non-fatal)")
+
+
 if __name__ != "__main__":
     # Imported (in-process tests): start the background work as before.
     _init_app()
@@ -4073,6 +4106,7 @@ if __name__ == "__main__":
         _sys.exit(1)
     # Only now are we the serving process.
     _tidy_switch_files()
+    _sweep_csv_temps()
     _init_app()
     # debug=True would expose the Werkzeug interactive debugger — remote code
     # execution — on 0.0.0.0. Only an explicit --dev turns it on.
