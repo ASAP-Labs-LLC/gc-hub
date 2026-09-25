@@ -4,7 +4,7 @@ const assert = require('assert');
 const t = {
     eq(a, b) { assert.deepStrictEqual(a, b); },
 };
-const tests = ['./selection.test.js', './report_payload.test.js', './flagrules.test.js'];
+const tests = ['./selection.test.js', './report_payload.test.js', './flagrules.test.js', './restart.test.js'];
 let failed = 0;
 for (const f of tests) {
     try { require(f)(t); console.log('PASS', f); }

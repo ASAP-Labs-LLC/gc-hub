@@ -885,6 +885,7 @@
       </div>
     </div>
     <div class="modal-footer">
+      <button class="btn btn-secondary" id="btn-restart" title="Restart the server process" style="margin-right:auto;">Restart</button>
       <button class="btn btn-secondary" data-dismiss="modal">Cancel</button>
       <button class="btn btn-primary" id="btn-settings-save">Save</button>
     </div>
@@ -1086,7 +1087,8 @@
 <script src="{{ url_for('static', filename='js/selection.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/report_payload.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=41"></script>
+<script src="{{ url_for('static', filename='js/restart.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=42"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

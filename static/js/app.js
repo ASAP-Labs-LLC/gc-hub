@@ -2990,6 +2990,9 @@ function openSettingsModal() {
     const modal = document.getElementById('modal-settings');
     if (!modal) return;
 
+    // "Restart & install vX.Y.Z" when the updater has a newer release staged
+    refreshRestartLabel();
+
     // Populate fields
     const fieldsMap = {
         'set-watch-dir': 'watch_dir',
@@ -3761,23 +3764,52 @@ async function rebuildDatabase() {
    19b. SERVER RESTART
    =================================================================== */
 
+// What a restart would do right now ({mode, tag, pid} from a dry run), so
+// both Restart buttons can say "Restart & install vX.Y.Z" when the updater
+// has a newer release staged.
+let _restartDecision = null;
+
+async function refreshRestartLabel() {
+    try {
+        _restartDecision = await apiPost('/api/restart', { dry_run: true });
+    } catch (_) {
+        _restartDecision = null;
+    }
+    const label = restartLabel(_restartDecision);
+    const btn = document.getElementById('btn-restart');
+    if (btn) btn.textContent = label;
+    const tb = document.getElementById('btn-restart-server');
+    if (tb) tb.textContent = label === 'Restart' ? 'Restart Server' : label;
+}
+
 async function restartServer() {
-    if (!confirm('Restart the server? The page will reload automatically once the server is back up.')) {
+    await refreshRestartLabel();
+    if (!confirm(restartConfirmText(_restartDecision))) {
         return;
     }
     try {
-        await apiPost('/api/restart');
-        showNotification('Server is restarting...', 'info');
-        // Poll until the server comes back, then reload the page
-        _waitForServerAndReload();
+        const res = await apiPost('/api/restart', {});
+        const installing = res && res.mode === 'switch' && res.tag;
+        showNotification(installing
+            ? `Restarting and installing ${res.tag}… this page will reconnect`
+            : 'Restarting… this page will reconnect', 'info');
+        for (const id of ['btn-restart', 'btn-restart-server']) {
+            const b = document.getElementById(id);
+            if (b) { b.disabled = true; b.textContent = 'Restarting…'; }
+        }
+        _waitForServerAndReload(res ? res.pid : null);
     } catch (e) {
         showNotification('Restart failed: ' + e.message, 'error');
     }
 }
 
-function _waitForServerAndReload() {
+// Poll /healthz every 2 s and reload once a *different* process answers:
+// while a switch is pending the old process keeps serving until the updater
+// stops it, and the updater then health-checks the new release before
+// starting it — allow a few minutes before giving up.
+function _waitForServerAndReload(oldPid) {
     let attempts = 0;
-    const maxAttempts = 60; // give up after ~60 seconds
+    const maxAttempts = 150; // ~5 minutes at 2 s
     const interval = setInterval(async () => {
         attempts++;
         if (attempts > maxAttempts) {
@@ -3786,8 +3818,8 @@ function _waitForServerAndReload() {
             return;
         }
         try {
-            const resp = await fetch('/api/server-status', { method: 'GET' });
-            if (resp.ok) {
+            const resp = await fetch('/healthz', { method: 'GET', cache: 'no-store' });
+            if (resp.ok && serverReplaced(oldPid, await resp.json())) {
                 clearInterval(interval);
                 // Small extra delay so the server finishes initialising
                 setTimeout(() => location.reload(), 1500);
@@ -3795,7 +3827,7 @@ function _waitForServerAndReload() {
         } catch (_) {
             // Server still down — keep polling
         }
-    }, 1000);
+    }, 2000);
 }
 
 /* ===================================================================
@@ -3980,6 +4012,7 @@ function setupEventListeners() {
         'btn-rebuild-db': rebuildDatabase,
         'btn-help': openHelpModal,
         'btn-restart-server': restartServer,
+        'btn-restart': restartServer,
         'btn-advanced-views': toggleAdvancedViews,
         'upload-indicator': () => {
             const m = document.getElementById('modal-qbench');

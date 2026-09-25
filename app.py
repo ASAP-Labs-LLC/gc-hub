@@ -56,6 +56,9 @@ from flask import (
 # subprocess we spawn, including the daily auto-restart — agrees on the port.
 import instance
 import paths
+import restart_policy
+import restart_update
+import supervisor
 import version
 
 # ── Command line ──────────────────────────────────────────────────────────
@@ -831,8 +834,10 @@ def _error(msg: str, status: int = 400) -> tuple:
 # polls /healthz continuously, static assets load on every page view, and
 # these are the endpoints app.js hits on its own timers for the life of an
 # open tab (not from a click): /api/notifications every 30s
-# (setInterval(loadNotifications, 30000)); /api/server-status every 1s while
-# waiting for a restart (_waitForServerAndReload); /api/scan/status every 2s
+# (setInterval(loadNotifications, 30000)); /healthz every 2s while waiting
+# for a restart (_waitForServerAndReload; /api/server-status, which it used
+# to poll, stays excluded for tabs still running an older app.js);
+# /api/scan/status every 2s
 # while a scan runs (startScanStatusPolling); /api/reprocess/status likewise
 # (_pollReprocessStatus); /api/qbench-upload-status once on load to
 # reconnect to an in-progress upload. Excluding /static/ covers page assets;
@@ -887,25 +892,140 @@ def _is_server_idle() -> bool:
     return True
 
 
-def _do_restart() -> None:
-    """Restart the server process by spawning a new copy then exiting."""
-    LOGGER.info("=== SERVER RESTART INITIATED ===")
+APP_DIR = Path(__file__).resolve().parent
+
+# ── Restart: plain, or by installing a staged release ─────────────────────
+# One restart per process (button, second click or 3 AM): _restart_claimed is
+# the single-flight flag. Under the updater a restart only ever EXITS — the
+# updater's supervise() relaunches within ~20 s, and a replacement we spawned
+# would race it for the port. Legacy mode spawns its replacement, except
+# while a switch is under way (restart_policy.may_respawn).
+_restart_lock = threading.RLock()
+_restart_claimed = False
+_restart_decision: tuple = ("restart", None)   # what the pending restart is doing
+
+
+def _claim_restart() -> bool:
+    """Take the single restart this process gets. False if one is under way."""
+    global _restart_claimed
+    with _restart_lock:
+        if _restart_claimed:
+            return False
+        _restart_claimed = True
+        return True
+
+
+def _do_restart(reason: str = "restart", *, allow_respawn: bool = True) -> None:
+    """Exit so a fresh process takes over — the updater's relaunch when
+    deployed, a self-spawned copy in legacy mode. ``allow_respawn=False``
+    means the updater has (or may have) a switch request: exit, never spawn."""
+    global _restart_claimed
+    LOGGER.info("=== SERVER RESTART INITIATED (%s) ===", reason)
     # Give a moment for any in-flight response to finish
     time.sleep(1.0)
+
+    def _exit() -> None:
+        for h in logging.root.handlers:   # os._exit skips logging's atexit flush
+            try:
+                h.flush()
+            except Exception:
+                pass
+        os._exit(0)
+
+    if not allow_respawn or restart_policy.restart_mode() == "exit":
+        LOGGER.info("Exiting without a respawn; the updater restarts the app")
+        _exit()
     try:
-        # Spawn a new process *then* exit.  On Windows os.execv can be
-        # unreliable, so use subprocess + os._exit instead.
-        subprocess.Popen(
-            [_sys.executable] + _sys.argv,
-            close_fds=True,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-            if platform.system() == "Windows" else 0,
-        )
+        spawn = restart_policy.may_respawn(paths.data_dir() or APP_DIR)
     except Exception:
-        LOGGER.exception("Failed to spawn new server process")
-        return  # don't exit if we couldn't start the replacement
-    LOGGER.info("New process spawned — shutting down old process")
-    os._exit(0)
+        LOGGER.exception("could not decide whether to respawn — not respawning")
+        spawn = False
+    if spawn:
+        try:
+            # Spawn a new process *then* exit.  On Windows os.execv can be
+            # unreliable, so use subprocess + os._exit instead.
+            subprocess.Popen(
+                [_sys.executable] + _sys.argv,
+                close_fds=True,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                if platform.system() == "Windows" else 0,
+            )
+        except Exception:
+            LOGGER.exception("Failed to spawn new server process")
+            with _restart_lock:   # stay up; a later request may try again
+                _restart_claimed = False
+            return  # don't exit if we couldn't start the replacement
+        LOGGER.info("New process spawned — shutting down old process")
+    _exit()
+
+
+def _await_switch_then_restart(data_dir: Path, tag: str, at: float) -> None:
+    """Watch for the updater's answer; restart normally unless it has the
+    request (then exit without a respawn and let it start the new release)."""
+    action = restart_policy.await_switch(data_dir, tag, at)
+    _do_restart(f"switch to {tag}: {action}", allow_respawn=(action == "restart"))
+
+
+def request_restart(by: str) -> tuple:
+    """Restart because someone clicked. Returns ``(mode, tag)``: ``("switch",
+    tag)`` when a newer healthy release is staged and the updater was asked to
+    install it, else ``("restart", None)``. The work happens on a thread so
+    the caller answers first. Single-flight: a second click while one is
+    pending changes nothing and reports the same answer."""
+    global _restart_decision
+    with _restart_lock:
+        if not _claim_restart():
+            LOGGER.info("Restart by %s ignored: one is already under way %s", by,
+                        _restart_decision)
+            return _restart_decision
+        data_dir = paths.data_dir()
+        try:
+            mode, tag = restart_policy.decide(data_dir, version.APP_VERSION)
+            if mode == "switch":
+                at = time.time()
+                if restart_update.write_switch_request(data_dir, tag, by=by, now=at):
+                    LOGGER.info("Asked the updater to install %s; waiting for its answer", tag)
+                    threading.Thread(target=_await_switch_then_restart,
+                                     args=(data_dir, tag, at), daemon=True,
+                                     name="await-switch").start()
+                    _restart_decision = (mode, tag)
+                    return _restart_decision
+                LOGGER.warning("Could not ask the updater to install %s — restarting "
+                               "normally", tag)
+                restart_update.clear_switch_files(data_dir)
+            else:
+                LOGGER.info("Manual restart by %s: no newer release staged — plain restart", by)
+        except Exception:
+            LOGGER.exception("Could not prepare the restart — restarting normally")
+            try:
+                if data_dir is not None:
+                    restart_update.clear_switch_files(data_dir)
+            except Exception:
+                LOGGER.exception("could not clear switch files")
+        _restart_decision = ("restart", None)
+        threading.Thread(target=_do_restart, args=("manual restart",), daemon=True,
+                         name="restart").start()
+        return _restart_decision
+
+
+def _tidy_switch_files() -> None:
+    """A new serving process means whatever the switch files describe
+    already happened, one way or another. Skipped when something already
+    serves our port: this launch is a duplicate about to fail its bind, and
+    must not delete the live process's pending request."""
+    data_dir = paths.data_dir()
+    if data_dir is None:
+        return
+    try:
+        if supervisor.port_has_listener(GC_PORT):
+            LOGGER.warning("Port %s is already served; leaving switch files alone", GC_PORT)
+            return
+        removed = restart_update.clear_switch_files(data_dir)
+        if removed:
+            LOGGER.warning("Removed %d leftover switch file(s) — a new process means "
+                           "the restart already happened", removed)
+    except Exception:
+        LOGGER.exception("Could not tidy switch files (non-fatal)")
 
 
 def _auto_restart_loop() -> None:
@@ -927,9 +1047,12 @@ def _auto_restart_loop() -> None:
             if not _is_server_idle():
                 LOGGER.debug("Auto-restart: hour matched but server is not idle")
                 continue
-            LOGGER.info("Auto-restart: server idle at %02d:00 — restarting", AUTO_RESTART_HOUR)
             _auto_restart_done_today = today_str
-            _do_restart()
+            if not _claim_restart():
+                LOGGER.info("Auto-restart: a restart is already under way")
+                continue
+            LOGGER.info("Auto-restart: server idle at %02d:00 — restarting", AUTO_RESTART_HOUR)
+            _do_restart("auto-restart")
         except Exception:
             LOGGER.exception("Auto-restart check failed (non-fatal)")
 
@@ -2711,11 +2834,22 @@ def api_rebuild_db():
 
 @app.route("/api/restart", methods=["POST"])
 def api_restart():
-    """Restart the server process.  The browser reconnects automatically."""
-    LOGGER.info("Manual restart requested via API")
-    # Restart in a background thread so this response can be sent first
-    threading.Thread(target=_do_restart, daemon=True).start()
-    return jsonify({"status": "restarting"})
+    """Restart the server — installing the staged release when the updater
+    has a newer healthy one. ``{"dry_run": true}`` only reports what a
+    restart would do (the UI labels its button with it).
+
+    Returns ``{"mode": "switch"|"restart", "tag": <tag or null>, "pid"}``;
+    the browser polls /healthz until ``pid`` changes."""
+    body = request.get_json(silent=True) or {}
+    if body.get("dry_run"):
+        with _restart_lock:
+            if _restart_claimed:
+                mode, tag = _restart_decision
+            else:
+                mode, tag = restart_policy.decide(paths.data_dir(), version.APP_VERSION)
+    else:
+        mode, tag = request_restart(request.remote_addr or "unknown")
+    return jsonify({"mode": mode, "tag": tag, "pid": os.getpid()})
 
 
 @app.route("/api/server-status", methods=["GET"])
@@ -3919,6 +4053,7 @@ _init_app()
 
 
 if __name__ == "__main__":
+    _tidy_switch_files()
     # debug=True would expose the Werkzeug interactive debugger — remote code
     # execution — on 0.0.0.0. Only an explicit --dev turns it on.
     app.run(host="0.0.0.0", port=GC_PORT, debug=ARGS.dev, threaded=True,
