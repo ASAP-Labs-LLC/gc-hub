@@ -57,6 +57,28 @@ from flask import (
 import instance
 import paths
 
+# ── Command line ──────────────────────────────────────────────────────────
+# The ASAPSV1 updater launches ``app.py --no-tray`` (its health_args); --dev
+# turns on the Flask debugger for local work only. --port is still resolved
+# by instance.resolve_port() below; it is declared here so it isn't "unknown".
+# Only a direct launch (``__main__``, which includes run.pyw's runpy
+# bootstrap whose sys.argv is ['-c']) parses the real argv: when app is
+# imported (tests), sys.argv belongs to someone else.
+import argparse
+
+_ap = argparse.ArgumentParser(prog="app.py", description="GC Hub web app")
+_ap.add_argument("--port", type=int, help="port (PORT env wins when deployed)")
+_ap.add_argument("--dev", action="store_true",
+                 help="Flask debug mode with the interactive debugger (never in production)")
+_ap.add_argument("--no-tray", action="store_true",
+                 help="accepted for updater compatibility; there is no tray")
+ARGS, _unknown_args = _ap.parse_known_args(_sys.argv[1:] if __name__ == "__main__" else [])
+_bad_flags = [a for a in _unknown_args if a.startswith("-")]
+if _bad_flags:
+    # A typo in the updater config must fail the health check loudly,
+    # not boot with the flag silently ignored.
+    _ap.error(f"unrecognized arguments: {' '.join(_bad_flags)}")
+
 GC_PORT = instance.resolve_port()
 os.environ["GC_PORT"] = str(GC_PORT)
 
@@ -106,6 +128,27 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 LOGGER = logging.getLogger("webapp")
+
+# Deployed (GC_DATA_DIR set): also log to DATA_DIR/app.log, rotating, so the
+# updater-supervised process — which has no console anyone watches — leaves
+# a trail. Legacy mode stays console-only, as before.
+_LOG_FILE = paths.log_file()
+if _LOG_FILE is not None:
+    import logging.handlers
+
+    _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _fh = logging.handlers.RotatingFileHandler(
+        _LOG_FILE, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    logging.getLogger().addHandler(_fh)
+
+    # The health check runs against an empty data dir: create the default
+    # folders up front so nothing downstream trips over their absence.
+    for _d in (paths.default_processed_dir(), paths.default_export_dir()):
+        try:
+            _d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            LOGGER.exception("Could not create %s", _d)
 
 # ---------------------------------------------------------------------------
 # Flask app
@@ -668,13 +711,61 @@ def _upload_log(msg: str) -> None:
     _publish(_upload_subscribers, _upload_sub_lock, msg)
 
 
+WATCH_DIR_NOT_CONFIGURED = "Watch folder is not configured — set it in Settings"
+
+
+class WatchDirNotConfigured(RuntimeError):
+    """``watch_dir`` is empty or not an existing folder.
+
+    Raised by ``_get_looker()`` — the one door every Looker user goes
+    through — so nothing can scan a bogus folder. Routes turn it into a 409
+    with ``WATCH_DIR_NOT_CONFIGURED``; background loops skip the cycle.
+    """
+
+    def __init__(self, raw: Any = None) -> None:
+        super().__init__(f"{WATCH_DIR_NOT_CONFIGURED} (watch_dir={raw!r})")
+        self.raw = raw
+
+
+def _watch_dir_configured(conf: Dict[str, Any]) -> Optional[Path]:
+    """The configured watch folder, or ``None`` if it is unusable.
+
+    Tests the *raw* string before building a Path: ``Path("")`` is ``.``
+    (cwd — the release folder when deployed) and ``Path("").is_dir()`` is
+    True, so an empty setting would otherwise mean "watch the app itself".
+    """
+    raw = conf.get("watch_dir", paths.default_watch_dir())
+    if raw is None or not str(raw).strip():
+        return None
+    watch = Path(str(raw).strip())
+    try:
+        return watch if watch.is_dir() else None
+    except OSError:  # unreachable share, permission denied, ...
+        return None
+
+
+def _looker_or_409():
+    """``(looker, None)`` or ``(None, 409 response)`` when unconfigured."""
+    try:
+        return _get_looker(), None
+    except WatchDirNotConfigured:
+        return None, _error(WATCH_DIR_NOT_CONFIGURED, 409)
+
+
 def _get_looker() -> looker_mod.Looker:
-    """Return (and lazily create) the singleton Looker instance."""
+    """Return (and lazily create) the singleton Looker instance.
+
+    Raises ``WatchDirNotConfigured`` while ``watch_dir`` is empty or not an
+    existing folder — checked on every call, so clearing the setting (or the
+    share disappearing) stops scanning too, not just a fresh start.
+    """
     global _looker
+    conf = settings_mod.load_settings()
+    watch = _watch_dir_configured(conf)
+    if watch is None:
+        raise WatchDirNotConfigured(conf.get("watch_dir", paths.default_watch_dir()))
     with _looker_lock:
         if _looker is None:
-            conf = settings_mod.load_settings()
-            watch = Path(conf.get("watch_dir", paths.default_watch_dir()))
             proc = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
             blank = Path(conf.get("blank_cache_file", proc / ".blank_cache.json"))
             _looker = looker_mod.Looker(
@@ -686,13 +777,29 @@ def _get_looker() -> looker_mod.Looker:
 
 
 def _refresh_looker_paths() -> None:
-    """Re-read settings and update the Looker watch/processed directories."""
-    lk = _get_looker()
+    """Re-apply settings to the Looker after a save.
+
+    With a usable ``watch_dir`` this updates the existing Looker's folders —
+    or, if there was none yet (first configuration of a fresh deploy),
+    creates it — and makes sure the watcher is running, so no restart is
+    needed. With an unusable one it leaves everything alone: ``_get_looker()``
+    refuses until the folder is fixed.
+    """
     conf = settings_mod.load_settings()
-    lk.update_paths(
-        watch_dir=Path(conf.get("watch_dir", paths.default_watch_dir())),
-        processed_dir=Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir()))),
-    )
+    watch = _watch_dir_configured(conf)
+    if watch is None:
+        LOGGER.warning("Watch folder %r is not set or missing - the watcher stays idle "
+                       "until it is configured in Settings",
+                       conf.get("watch_dir", paths.default_watch_dir()))
+        return
+    fresh = _looker is None
+    lk = _get_looker()
+    if not fresh:
+        lk.update_paths(
+            watch_dir=watch,
+            processed_dir=Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir()))),
+        )
+    _start_watcher()
 
 
 def _safe_path(p: str) -> Path:
@@ -2008,9 +2115,25 @@ def _watcher_loop() -> None:
 
     print("[WATCHER] Background watcher started", flush=True)
 
+    unconfigured_logged = False
     while not _watcher_stop.is_set():
         try:
-            lk = _get_looker()
+            try:
+                lk = _get_looker()
+            except WatchDirNotConfigured as exc:
+                # Idle until Settings names a real folder (or a missing share
+                # comes back); log once per outage, not every poll.
+                if not unconfigured_logged:
+                    LOGGER.warning("Watcher idle: watch folder %r is not set or missing - "
+                                   "configure it in Settings", exc.raw)
+                    unconfigured_logged = True
+                _scan_status["phase"] = "idle"
+                _scan_stop.wait(WATCHER_POLL_SECONDS)
+                _scan_stop.clear()
+                continue
+            if unconfigured_logged:
+                LOGGER.info("Watch folder available again: %s", lk.watch_dir)
+                unconfigured_logged = False
             # _scan_halt is the *within-cycle* abort; clearing it here lets the
             # next cycle process genuinely-new files. Stickiness of a user Stop
             # comes from _suppressed_paths (set below on halt, excluded by
@@ -2182,6 +2305,9 @@ def api_scan():
     Clears ``_scan_halt`` and ``_suppressed_paths`` so an explicit Scan re-attacks
     any backlog a previous Stop abandoned.
     """
+    _, err = _looker_or_409()
+    if err:
+        return err
     _scan_halt.clear()
     with _suppressed_lock:
         _suppressed_paths.clear()
@@ -2217,6 +2343,8 @@ def api_stop_scan():
     try:
         lk = _get_looker()
         lk._stop_event.set()
+    except WatchDirNotConfigured:
+        pass  # no Looker, nothing in flight to stop
     except Exception as exc:
         print(f"[WATCHER] Could not signal Looker stop: {exc}", flush=True)
     # Invalidate the directory cache so the next scan re-snapshots and finds
@@ -2360,6 +2488,9 @@ def api_reprocess():
         if missing:
             return jsonify({"status": "no-match", "missing": missing})
         return _error("No samples provided")
+    _, err = _looker_or_409()
+    if err:
+        return err
 
     count, pending = _enqueue_reprocess(paths, samples, label="Reprocess")
     return jsonify({"status": "queued", "count": count, "pending": pending})
@@ -2498,6 +2629,9 @@ def _do_reindex_injection_times() -> None:
 
 @app.route("/api/rebuild-db", methods=["POST"])
 def api_rebuild_db():
+    _, err = _looker_or_409()
+    if err:
+        return err
     pending = _task_queue.qsize()
 
     def _do_rebuild():
@@ -2796,6 +2930,9 @@ def api_export_lims():
     paths = body.get("paths", [])
     if not samples and not paths:
         return _error("No samples provided")
+    _, err = _looker_or_409()
+    if err:
+        return err
 
     count, pending = _enqueue_reprocess(paths, samples, label="Export to LIMS")
     return jsonify({"status": "queued", "count": count, "pending": pending})
@@ -3641,6 +3778,12 @@ def api_open_folder():
 #  Serve the SPA index
 # ===================================================================== #
 
+@app.route("/healthz")
+def healthz():
+    """Liveness probe for the ASAPSV1 updater. No auth, no outbound calls."""
+    return jsonify({"status": "ok"})
+
+
 @app.route("/")
 def index():
     from flask import render_template
@@ -3696,9 +3839,18 @@ def _init_app() -> None:
             LOGGER.info("Initialising Looker (this may take a moment with many files)...")
             _get_looker()
             LOGGER.info("Looker initialised — starting watcher")
-            _start_watcher()
+        except WatchDirNotConfigured as exc:
+            # Fresh deploy / health check (empty data dir) or a share that is
+            # down. Don't build a Looker; the watcher below idles and picks the
+            # folder up as soon as Settings (or the network) provides it.
+            LOGGER.warning("Looker not started: watch folder %r is not set or missing - "
+                           "configure it in Settings", exc.raw)
         except Exception:
             LOGGER.exception("Looker init failed (will retry on first request)")
+        try:
+            _start_watcher()
+        except Exception:
+            LOGGER.exception("Watcher start failed")
 
     threading.Thread(target=_bg_init, daemon=True, name="init").start()
     threading.Thread(target=_auto_restart_loop, daemon=True, name="auto-restart").start()
@@ -3708,5 +3860,7 @@ _init_app()
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=GC_PORT, debug=True, threaded=True,
+    # debug=True would expose the Werkzeug interactive debugger — remote code
+    # execution — on 0.0.0.0. Only an explicit --dev turns it on.
+    app.run(host="0.0.0.0", port=GC_PORT, debug=ARGS.dev, threaded=True,
             use_reloader=False)  # reloader kills background threads on file changes
