@@ -56,6 +56,7 @@ from flask import (
 # subprocess we spawn, including the daily auto-restart — agrees on the port.
 import instance
 import paths
+import version
 
 # ── Command line ──────────────────────────────────────────────────────────
 # The ASAPSV1 updater launches ``app.py --no-tray`` (its health_args); --dev
@@ -237,6 +238,7 @@ _files_cache_ready = threading.Event()  # signalled once first scan completes
 # ── Activity tracking & auto-restart ─────────────────────────────────
 _last_activity: float = time.time()
 _last_activity_lock = threading.Lock()
+_recent_clients: dict[str, float] = {}   # remote_addr -> last-seen time, for /healthz active_sessions
 _server_start_time: float = time.time()
 _auto_restart_done_today: str = ""          # date string e.g. "2026-05-07"
 AUTO_RESTART_HOUR = 3            # 3 AM local time
@@ -824,12 +826,23 @@ def _error(msg: str, status: int = 400) -> tuple:
 #  Activity tracking & server restart
 # ===================================================================== #
 
+# Paths that are machines checking on the app, not a person using it. Counting
+# them as activity would keep the idle timer from ever advancing: the updater
+# polls /healthz continuously, static assets load on every page view, and the
+# SSE streams below send keep-alive pings for as long as a tab stays open.
+_NON_ACTIVITY_PATHS = {"/healthz"}
+
+
 @app.before_request
 def _track_activity():
     """Record the timestamp of every incoming request for idle detection."""
     global _last_activity
+    path = request.path
+    if path in _NON_ACTIVITY_PATHS or path.startswith("/static/") or path.endswith("/stream"):
+        return
     with _last_activity_lock:
         _last_activity = time.time()
+        _recent_clients[request.remote_addr] = _last_activity
 
 
 def _is_server_idle() -> bool:
@@ -3797,15 +3810,21 @@ def api_open_folder():
 
 @app.route("/healthz")
 def healthz():
-    """Liveness probe for the ASAPSV1 updater. No auth, no outbound calls."""
-    return jsonify({"status": "ok"})
+    """Updater health contract (see coa-reviewer/RELEASING.md): 200 + status
+    ok + version == tag. No auth, no outbound calls, not activity."""
+    now = time.time()
+    with _last_activity_lock:
+        idle = now - _last_activity
+        active = sum(1 for t in _recent_clients.values() if now - t < 300)
+    return jsonify({"status": "ok", "version": version.APP_VERSION, "pid": os.getpid(),
+                    "active_sessions": active, "idle_seconds": round(idle, 1)})
 
 
 @app.route("/")
 def index():
     from flask import render_template
     try:
-        return render_template("index.html")
+        return render_template("index.html", app_version=version.APP_VERSION)
     except Exception:
         return (
             "<h1>GC Viewer &amp; Distillation Parser</h1>"
@@ -3817,7 +3836,7 @@ def index():
 def calibration_page():
     from flask import render_template
     try:
-        return render_template("calibration.html")
+        return render_template("calibration.html", app_version=version.APP_VERSION)
     except Exception:
         return (
             "<h1>Calibration</h1>"

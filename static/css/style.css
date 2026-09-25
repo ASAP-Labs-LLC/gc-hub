@@ -1679,3 +1679,25 @@ tbody tr.selected td.col-d2887 {
     background: #f9f9f9;
   }
 }
+
+/* ── Version stamp ────────────────────────────────────────────────────
+   Which build is running, bottom-right. Deliberately quiet, and
+   pointer-events:none because it sits above the page layout and must
+   not eat a click meant for the app underneath. */
+#app-version {
+  position: fixed;
+  bottom: 6px;
+  right: 10px;
+  z-index: 9999;
+  pointer-events: none;
+  user-select: none;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  opacity: 0.55;
+}
+
+@media print {
+  #app-version { display: none; }
+}

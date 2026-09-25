@@ -1087,5 +1087,8 @@
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/app.js') }}?v=41"></script>
 
+<!-- Which build is running, bottom-right. Same string /healthz reports. -->
+<div id="app-version" aria-hidden="true">{{ app_version }}</div>
+
 </body>
 </html>
