@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import ast
 import importlib
+import os
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 WEBAPP_DIR = Path(__file__).resolve().parent.parent
@@ -45,6 +47,13 @@ def _module_ast(name: str) -> ast.Module:
     return ast.parse(_read(name))
 
 
+# qbench_client resolves credentials at *import* time. conftest points HOME
+# and QBENCH_STORE_PATH at a throwaway dir, so the developer's real store is
+# (rightly) invisible here: supply dummy credentials for the import tests.
+_DUMMY_CREDS = {"QBENCH_CLIENT_ID": "test-id", "QBENCH_CLIENT_SECRET": "test-secret"}
+
+
+@mock.patch.dict(os.environ, _DUMMY_CREDS)
 class QBenchClientVendoringTests(unittest.TestCase):
     """The fix vendors qbench_client.py into the webapp folder."""
 
@@ -84,6 +93,7 @@ class QBenchClientVendoringTests(unittest.TestCase):
             sys.modules.pop("qbench_client", None)
 
 
+@mock.patch.dict(os.environ, _DUMMY_CREDS)
 class QBenchClientRuntimeTests(unittest.TestCase):
     """End-to-end proof of the fix: the exact line that used to blow up
     (`from qbench_client import QBenchAPIClient`) now resolves AND the class

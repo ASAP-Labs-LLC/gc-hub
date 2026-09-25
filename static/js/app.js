@@ -3206,10 +3206,12 @@ async function saveSettings() {
     if (oil) { newSettings.analysis_oil_c_start = String(oil.c_start); newSettings.analysis_oil_c_end = String(oil.c_end); }
 
     try {
-        await apiPost('/api/settings', newSettings);
+        const saved = await apiPost('/api/settings', newSettings);
         state.settings = newSettings;
         closeAllModals();
         showNotification('Settings saved — refreshing data...', 'success');
+        // e.g. "Watch folder is not set or not found — watcher idle"
+        if (saved && saved.warning) showNotification(saved.warning, 'warning');
         await refreshAll();
         showNotification('Data refreshed with new settings', 'success');
     } catch (e) {

@@ -74,41 +74,73 @@ def child_env(tmp: Path, port: int, extra_env=None) -> dict:
     return env
 
 
-@contextlib.contextmanager
-def booted(tmp: Path, *, args=("--no-tray",), cmd=None, extra_env=None, wait=60.0):
-    """Launch app.py and yield ``(port, proc, data_dir, home_dir)`` once
-    ``/healthz`` answers 200.
+def _start(tmp: Path, cmd, args, extra_env, wait):
+    """Launch once; return ``(port, proc, log)`` after /healthz is 200.
 
-    ``cmd`` overrides the whole command line (e.g. a runpy bootstrap like
-    ``run.pyw`` uses); by default it is ``python app.py *args``.
+    Raises ``_PortTaken`` if the child lost the race for its port (the free
+    port was probed, closed, then grabbed by someone else before the bind).
     """
     port = free_port()
     env = child_env(tmp, port, extra_env)
-    data, home = tmp / "data", tmp / "home"
-    log = open(tmp / "boot.log", "w")
+    log_path = tmp / "boot.log"
     argv = list(cmd) if cmd is not None else [sys.executable, "app.py", *args]
-    proc = subprocess.Popen(argv, cwd=ROOT, env=env,
-                            stdout=log, stderr=subprocess.STDOUT)
+    log = open(log_path, "w", encoding="utf-8")
+    proc = None
     try:
+        proc = subprocess.Popen(argv, cwd=ROOT, env=env,
+                                stdout=log, stderr=subprocess.STDOUT)
         deadline = time.time() + wait
         while time.time() < deadline:
             if proc.poll() is not None:
-                raise RuntimeError(f"app exited {proc.returncode}: {(tmp / 'boot.log').read_text()[-3000:]}")
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+                if "Address already in use" in text or "address is already in use" in text.lower():
+                    raise _PortTaken(text[-3000:])
+                raise RuntimeError(f"app exited {proc.returncode}: {text[-3000:]}")
             try:
                 code, _ = get(port, "/healthz", timeout=1.0)
                 if code == 200:
-                    break
+                    return port, proc, log
             except Exception:
                 pass
             time.sleep(0.5)
-        else:
-            raise RuntimeError(f"no /healthz within {wait}s: {(tmp / 'boot.log').read_text()[-3000:]}")
-        yield port, proc, data, home
+        raise RuntimeError(f"no /healthz within {wait}s: "
+                           f"{log_path.read_text(encoding='utf-8', errors='replace')[-3000:]}")
+    except BaseException:
+        _stop(proc, log)
+        raise
+
+
+class _PortTaken(RuntimeError):
+    pass
+
+
+def _stop(proc, log) -> None:
+    try:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(10)
     finally:
-        proc.terminate()
-        try:
-            proc.wait(10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(10)
         log.close()
+
+
+@contextlib.contextmanager
+def booted(tmp: Path, *, args=("--no-tray",), cmd=None, extra_env=None, wait=60.0):
+    """Launch app.py and yield ``(port, proc, data_dir, home_dir)`` once
+    ``/healthz`` answers 200. The process is stopped on exit.
+
+    ``cmd`` overrides the whole command line (e.g. a runpy bootstrap like
+    ``run.pyw`` uses); by default it is ``python app.py *args``. A lost race
+    for the probed port is retried once on a fresh port.
+    """
+    try:
+        port, proc, log = _start(tmp, cmd, args, extra_env, wait)
+    except _PortTaken:
+        port, proc, log = _start(tmp, cmd, args, extra_env, wait)
+    try:
+        yield port, proc, tmp / "data", tmp / "home"
+    finally:
+        _stop(proc, log)

@@ -25,7 +25,12 @@ Two sources of cross-test pollution this guards against:
 """
 from __future__ import annotations
 
+import atexit
+import json
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -33,6 +38,38 @@ import pytest
 WEBAPP_DIR = Path(__file__).resolve().parent.parent
 if str(WEBAPP_DIR) not in sys.path:
     sys.path.insert(0, str(WEBAPP_DIR))
+
+# ── A throwaway home for the whole session ────────────────────────────────
+# Done at MODULE TOP LEVEL, before any test module is collected: settings,
+# notifications and instance compute their paths from Path.home() at *import*
+# time. Without this, the in-process tests that ``import app`` run in legacy
+# mode against the developer's real ~/.gc_viewer_settings.json — whose
+# watch_dir / processed_cdf_dir point at the live lab share — so the watcher
+# scans production data and rewrites its caches. Path.home() honours HOME on
+# POSIX and USERPROFILE on Windows; APPDATA and QBENCH_STORE_PATH steer
+# qbench_secrets. Subprocess boots (tests/bootapp.py) inherit this and then
+# set their own per-test home on top.
+TEST_HOME = Path(tempfile.mkdtemp(prefix="gc-hub-test-home-")).resolve()
+os.environ["HOME"] = str(TEST_HOME)
+os.environ["USERPROFILE"] = str(TEST_HOME)
+os.environ["APPDATA"] = str(TEST_HOME / "AppData")
+os.environ["QBENCH_STORE_PATH"] = str(TEST_HOME / "qbench.json")
+atexit.register(shutil.rmtree, TEST_HOME, ignore_errors=True)
+# Likewise strip the deployment variables *before* collection: settings and
+# notifications resolve GC_DATA_DIR / GC_PORT at import time, so a shell with
+# e.g. GC_DATA_DIR pointing at a real data folder would otherwise aim every
+# in-process `import app` at it (the per-test fixture below runs too late).
+for _name in ("PORT", "GC_PORT", "GC_DATA_DIR", "GC_CAL_CDF"):
+    os.environ.pop(_name, None)
+# Legacy defaults are cwd-relative (watch_dir = cwd, processed_cdf = cwd/
+# processed_cdf), i.e. the repo. Seed the temp home's settings so in-process
+# `import app` watches and writes inside the temp home instead.
+(TEST_HOME / "watch").mkdir()
+(TEST_HOME / ".gc_viewer_settings.json").write_text(json.dumps({
+    "watch_dir": str(TEST_HOME / "watch"),
+    "processed_cdf_dir": str(TEST_HOME / "processed_cdf"),
+    "distill_output": str(TEST_HOME / "distill_results.csv"),
+}), encoding="utf-8")
 
 _DEPLOY_ENV_VARS = ("PORT", "GC_PORT", "GC_DATA_DIR", "GC_CAL_CDF")
 

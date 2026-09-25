@@ -66,7 +66,8 @@ import paths
 # imported (tests), sys.argv belongs to someone else.
 import argparse
 
-_ap = argparse.ArgumentParser(prog="app.py", description="GC Hub web app")
+_ap = argparse.ArgumentParser(prog="app.py", description="GC Hub web app",
+                              allow_abbrev=False)  # --d must not mean --dev
 _ap.add_argument("--port", type=int, help="port (PORT env wins when deployed)")
 _ap.add_argument("--dev", action="store_true",
                  help="Flask debug mode with the interactive debugger (never in production)")
@@ -194,6 +195,7 @@ _creds_new: dict = {}               # {"username": ..., "password": ...}
 
 # Background file watcher — queues new CDFs and processes in batches
 _watcher_thread: Optional[threading.Thread] = None
+_watcher_start_lock = threading.Lock()
 _watcher_stop = threading.Event()
 _scan_halt = threading.Event()   # stop processing (checked per-file, not per-batch)
 SCAN_BATCH_SIZE = 50
@@ -776,30 +778,37 @@ def _get_looker() -> looker_mod.Looker:
         return _looker
 
 
-def _refresh_looker_paths() -> None:
-    """Re-apply settings to the Looker after a save.
+WATCH_DIR_IDLE_WARNING = "Watch folder is not set or not found — watcher idle"
+
+
+def _refresh_looker_paths() -> Optional[str]:
+    """Re-apply settings to the Looker after a save; return a warning or None.
 
     With a usable ``watch_dir`` this updates the existing Looker's folders —
     or, if there was none yet (first configuration of a fresh deploy),
     creates it — and makes sure the watcher is running, so no restart is
-    needed. With an unusable one it leaves everything alone: ``_get_looker()``
-    refuses until the folder is fixed.
+    needed. With an unusable one the watcher stays idle (``_get_looker()``
+    refuses), but an existing Looker still takes the new processed folder,
+    and the caller gets ``WATCH_DIR_IDLE_WARNING`` to show the operator.
     """
     conf = settings_mod.load_settings()
     watch = _watch_dir_configured(conf)
+    processed = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
+    with _looker_lock:
+        existing = _looker
     if watch is None:
+        if existing is not None:
+            existing.update_paths(watch_dir=existing.watch_dir, processed_dir=processed)
         LOGGER.warning("Watch folder %r is not set or missing - the watcher stays idle "
                        "until it is configured in Settings",
                        conf.get("watch_dir", paths.default_watch_dir()))
-        return
-    fresh = _looker is None
-    lk = _get_looker()
-    if not fresh:
-        lk.update_paths(
-            watch_dir=watch,
-            processed_dir=Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir()))),
-        )
+        return WATCH_DIR_IDLE_WARNING
+    if existing is not None:
+        existing.update_paths(watch_dir=watch, processed_dir=processed)
+    else:
+        _get_looker()
     _start_watcher()
+    return None
 
 
 def _safe_path(p: str) -> Path:
@@ -1416,7 +1425,7 @@ def api_save_settings():
         )
 
         settings_mod.save_settings(body)
-        _refresh_looker_paths()
+        warning = _refresh_looker_paths()
 
         if es_changed:
             with _early_signal_cache_lock:
@@ -1424,6 +1433,8 @@ def api_save_settings():
             _save_early_signal_cache()
 
         conf = settings_mod.load_settings()
+        if warning:
+            conf = dict(conf, warning=warning)
         return jsonify(conf)
     except Exception as exc:
         return _error(str(exc), 500)
@@ -1547,8 +1558,11 @@ def api_distillation_curve():
         # Use cached blank for consistency with process_cdf
         blank_path = None
         try:
-            lk = _get_looker()
-            if lk._latest_blank_path and lk._latest_blank_path.is_file():
+            # The existing Looker's blank, not _get_looker(): that is gated on
+            # the watch folder, and a down share must not silently drop blank
+            # subtraction (or stat the share on every request).
+            lk = _looker
+            if lk is not None and lk._latest_blank_path and lk._latest_blank_path.is_file():
                 sample_name, _ = distill.cdf_metadata(p)
                 if "blank" not in sample_name.lower():
                     blank_path = lk._latest_blank_path
@@ -2074,7 +2088,7 @@ def _fast_scan_cdfs(watch: Path, force: bool = False) -> list[Path]:
                         except OSError:
                             pass
         except OSError as exc:
-            print(f"[SCAN] Error scanning {d}: {exc}", flush=True)
+            LOGGER.warning(f"[SCAN] Error scanning {d}: {exc}")
 
     _scan_dir(str(watch))
 
@@ -2091,18 +2105,23 @@ def _fast_scan_cdfs(watch: Path, force: bool = False) -> list[Path]:
         "cached_cdf_paths": [str(p) for p in all_cdfs],
         "folders": {},
     })
-    print(f"[SCAN] os.scandir found {len(all_cdfs)} CDF files in {time.time()-now:.1f}s", flush=True)
+    LOGGER.info(f"[SCAN] os.scandir found {len(all_cdfs)} CDF files in {time.time()-now:.1f}s")
     return all_cdfs
 
 
 def _start_watcher() -> None:
-    """Start the background watcher thread."""
+    """Start the background watcher thread (idempotent, thread-safe).
+
+    Init, settings save and /api/scan can call this concurrently; the lock
+    makes check-then-start atomic so two watchers can never run.
+    """
     global _watcher_thread
-    if _watcher_thread and _watcher_thread.is_alive():
-        return
-    _watcher_stop.clear()
-    _watcher_thread = threading.Thread(target=_watcher_loop, daemon=True, name="watcher")
-    _watcher_thread.start()
+    with _watcher_start_lock:
+        if _watcher_thread and _watcher_thread.is_alive():
+            return
+        _watcher_stop.clear()
+        _watcher_thread = threading.Thread(target=_watcher_loop, daemon=True, name="watcher")
+        _watcher_thread.start()
     LOGGER.info("Background watcher started (poll=%ds, batch=%d)",
                 WATCHER_POLL_SECONDS, SCAN_BATCH_SIZE)
 
@@ -2113,7 +2132,7 @@ def _watcher_loop() -> None:
     """
     from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
-    print("[WATCHER] Background watcher started", flush=True)
+    LOGGER.info("[WATCHER] Background watcher started")
 
     unconfigured_logged = False
     while not _watcher_stop.is_set():
@@ -2127,7 +2146,8 @@ def _watcher_loop() -> None:
                     LOGGER.warning("Watcher idle: watch folder %r is not set or missing - "
                                    "configure it in Settings", exc.raw)
                     unconfigured_logged = True
-                _scan_status["phase"] = "idle"
+                if _scan_status.get("phase") != "stopped":  # keep the user's Stop visible
+                    _scan_status["phase"] = "idle"
                 _scan_stop.wait(WATCHER_POLL_SECONDS)
                 _scan_stop.clear()
                 continue
@@ -2145,7 +2165,7 @@ def _watcher_loop() -> None:
             _scan_status["phase"] = "scanning"
 
             t0 = time.time()
-            print(f"[WATCHER] Scanning {lk.watch_dir} (rglob) ...", flush=True)
+            LOGGER.info(f"[WATCHER] Scanning {lk.watch_dir} (rglob) ...")
 
             # ── Phase 1: discover files using Looker's rglob (reliable) ──
             try:
@@ -2154,7 +2174,7 @@ def _watcher_loop() -> None:
                     key=lambda p: p.stat().st_mtime,
                 )
             except Exception as exc:
-                print(f"[WATCHER] rglob failed: {exc}", flush=True)
+                LOGGER.warning(f"[WATCHER] rglob failed: {exc}")
                 _scan_status["phase"] = "idle"
                 _scan_stop.wait(WATCHER_POLL_SECONDS)
                 _scan_stop.clear()
@@ -2168,8 +2188,8 @@ def _watcher_loop() -> None:
 
             _scan_status.update(total=total, new=new_count, already=already,
                                 processed=0, errors=0)
-            print(f"[WATCHER] Listed in {elapsed:.1f}s: {total} total, "
-                  f"{new_count} new, {already} seen", flush=True)
+            LOGGER.info(f"[WATCHER] Listed in {elapsed:.1f}s: {total} total, "
+                        f"{new_count} new, {already} seen")
 
             if new_count == 0:
                 _scan_status["phase"] = "idle"
@@ -2189,8 +2209,8 @@ def _watcher_loop() -> None:
             stopped = False
             max_workers = min(4, lk.max_workers)
 
-            print(f"[WATCHER] Processing {new_count} files in {total_batches} "
-                  f"batch(es) ({max_workers} workers)", flush=True)
+            LOGGER.info(f"[WATCHER] Processing {new_count} files in {total_batches} "
+                        f"batch(es) ({max_workers} workers)")
 
             for batch_start in range(0, new_count, SCAN_BATCH_SIZE):
                 if _scan_halt.is_set():
@@ -2218,7 +2238,7 @@ def _watcher_loop() -> None:
                             lk._seen.add(fp)
                         except Exception as exc:
                             errors += 1
-                            print(f"[WATCHER]   FAIL {fp.name}: {exc}", flush=True)
+                            LOGGER.warning(f"[WATCHER]   FAIL {fp.name}: {exc}")
 
                 if _scan_halt.is_set():
                     for f in remaining:
@@ -2258,15 +2278,15 @@ def _watcher_loop() -> None:
             # ── Summary ──────────────────────────────────────────────────
             total_el = time.time() - t0
             if stopped:
-                print(f"[WATCHER] STOPPED ({total_el:.1f}s): {processed} ok, "
-                      f"{errors} err", flush=True)
+                LOGGER.info(f"[WATCHER] STOPPED ({total_el:.1f}s): {processed} ok, "
+                            f"{errors} err")
                 _scan_status["phase"] = "stopped"
                 _publish_json(_scan_subscribers, _scan_sub_lock,
                               {"type": "stopped", "processed": processed,
                                "skipped": already, "errors": errors})
             else:
-                print(f"[WATCHER] Complete ({total_el:.1f}s): {processed} ok, "
-                      f"{errors} err", flush=True)
+                LOGGER.info(f"[WATCHER] Complete ({total_el:.1f}s): {processed} ok, "
+                            f"{errors} err")
                 _scan_status["phase"] = "done"
                 _publish_json(_scan_subscribers, _scan_sub_lock,
                               {"type": "done", "processed": processed,
@@ -2277,16 +2297,12 @@ def _watcher_loop() -> None:
                 try:
                     _maybe_rebuild_files_cache(force=True)
                 except Exception as fc_exc:
-                    print(f"[WATCHER] File cache refresh failed: {fc_exc}",
-                          flush=True)
+                    LOGGER.warning(f"[WATCHER] File cache refresh failed: {fc_exc}")
 
             _scan_status["phase"] = "idle"
 
         except Exception as exc:
-            print(f"[WATCHER] ERROR: {exc}", flush=True)
-            import traceback
-            traceback.print_exc()
-            LOGGER.exception("Watcher error: %s", exc)
+            LOGGER.exception(f"[WATCHER] ERROR: {exc}")
             _scan_status["phase"] = "idle"
 
         _scan_stop.wait(WATCHER_POLL_SECONDS)
@@ -2340,18 +2356,19 @@ def api_stop_scan():
     _scan_halt.set()
     # Propagate to the Looker so in-progress _handle_new() calls abort at their
     # next checkpoint. Without this, worker threads run to completion regardless.
+    # Use the existing Looker directly, not _get_looker(): Stop must reach
+    # in-flight work even if the watch folder has just become unusable.
     try:
-        lk = _get_looker()
-        lk._stop_event.set()
-    except WatchDirNotConfigured:
-        pass  # no Looker, nothing in flight to stop
+        lk = _looker
+        if lk is not None:
+            lk._stop_event.set()
     except Exception as exc:
-        print(f"[WATCHER] Could not signal Looker stop: {exc}", flush=True)
+        LOGGER.warning(f"[WATCHER] Could not signal Looker stop: {exc}")
     # Invalidate the directory cache so the next scan re-snapshots and finds
     # the unprocessed files that were skipped due to the stop.
     _invalidate_dir_cache()
     _scan_status["phase"] = "stopped"
-    print("[WATCHER] HALT requested by user", flush=True)
+    LOGGER.info("[WATCHER] HALT requested by user")
     _scan_log("Stop requested")
     return jsonify({"status": "stopped"})
 
