@@ -108,9 +108,42 @@ class ResolvePortTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             instance.resolve_port(argv=[], env={"GC_PORT": "banana"})
 
-    def test_port_env_from_updater_wins(self) -> None:
-        self.assertEqual(instance.resolve_port(argv=["--port", "5561"],
-                                               env={"PORT": "5580", "GC_PORT": "5562"}), 5580)
+    def test_port_env_wins_when_deployed(self) -> None:
+        # GC_DATA_DIR set means the updater launched this process — PORT is
+        # its handshake and must win outright.
+        self.assertEqual(
+            instance.resolve_port(
+                argv=["--port", "5561"],
+                env={"PORT": "5580", "GC_PORT": "5562", "GC_DATA_DIR": "/srv/gcdata"},
+            ),
+            5580,
+        )
+
+    def test_port_env_ignored_when_not_deployed(self) -> None:
+        # No GC_DATA_DIR means legacy mode (a share copy, or a developer's
+        # shell that happens to have PORT set for something unrelated).
+        # Precedence must stay exactly --port -> GC_PORT -> default.
+        self.assertEqual(
+            instance.resolve_port(
+                argv=["--port", "5561"], env={"PORT": "5580", "GC_PORT": "5562"}
+            ),
+            5561,
+        )
+        self.assertEqual(
+            instance.resolve_port(argv=[], env={"PORT": "5580", "GC_PORT": "5562"}),
+            5562,
+        )
+        self.assertEqual(
+            instance.resolve_port(argv=[], env={"PORT": "5580"}),
+            instance.DEFAULT_PORT,
+        )
+
+    def test_blank_gc_data_dir_is_not_deployed(self) -> None:
+        # Mirrors paths.data_dir()'s "blank string is legacy" rule.
+        self.assertEqual(
+            instance.resolve_port(argv=[], env={"PORT": "5580", "GC_DATA_DIR": "   "}),
+            instance.DEFAULT_PORT,
+        )
 
 
 class ActivePortTests(unittest.TestCase):

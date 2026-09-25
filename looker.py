@@ -29,6 +29,7 @@ from threading import Event, Thread, Lock
 from typing import Sequence
 
 import distill  # needs process_cdf() and cdf_metadata()
+import paths  # stdlib-only; where every on-disk state location lives
 
 LOGGER = logging.getLogger("looker")
 
@@ -372,7 +373,7 @@ class Looker(Thread):
             conf = distill.settings.load_settings()  # type: ignore[attr-defined]
         except Exception:
             return True  # fall back to skip check if settings not available
-        csv_path = Path(conf.get("distill_output", "distill_results.csv"))
+        csv_path = Path(conf.get("distill_output", str(paths.default_results_csv())))
         if not csv_path.exists():
             return False
         target_date = date.isoformat(sep=" ")
@@ -441,7 +442,7 @@ class Looker(Thread):
             conf = distill.settings.load_settings()  # type: ignore[attr-defined]
         except Exception:
             conf = {}
-        csv_path = Path(conf.get("distill_output", "distill_results.csv"))
+        csv_path = Path(conf.get("distill_output", str(paths.default_results_csv())))
 
         if csv_path.exists():
             if backup:

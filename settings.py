@@ -2,9 +2,18 @@ r"""settings.py (Web version)
 ~~~~~~~~~~~~~
 Persistent path/config helper — web-compatible (no PyQt dependencies).
 
-Stores JSON in:
-    • Windows  →  %USERPROFILE%\.gc_viewer_settings.json
-    • macOS/*nix →  ~/.gc_viewer_settings.json
+Where the JSON lives, and what the path/dir *values* inside it default to,
+both come from ``paths.py`` and split into two modes:
+
+* **legacy** (``GC_DATA_DIR`` unset — a copy still running from the share):
+  unchanged from before this module existed —
+      • Windows  →  %USERPROFILE%\.gc_viewer_settings[-port].json
+      • macOS/*nix →  ~/.gc_viewer_settings[-port].json
+  with ``processed_cdf_dir``/``distill_output``/``export_folder`` defaulting
+  cwd-relative and ``watch_dir`` defaulting to cwd itself.
+* **deployed** (``GC_DATA_DIR`` set by the ASAPSV1 updater): one file at
+  ``GC_DATA_DIR/settings.json``, and every path default lives under
+  ``GC_DATA_DIR`` too — see ``paths.py`` for the full table.
 """
 from __future__ import annotations
 
@@ -27,10 +36,7 @@ CONFIG_PATH: Path = paths.settings_file()
 # Default values — update here when adding new settings keys
 # ---------------------------------------------------------------------------
 DEFAULTS: Dict[str, str] = {
-    # In deployed mode cwd is the immutable release folder — watching it
-    # would treat the app's own files as instrument data, so the watcher
-    # stays off (empty watch_dir) until the operator sets one explicitly.
-    "watch_dir": str(Path.cwd()) if paths.data_dir() is None else "",
+    "watch_dir": paths.default_watch_dir(),
     "processed_cdf_dir": str(paths.default_processed_dir()),
     "distill_output": str(paths.default_results_csv()),
     "calibration_cdf": "",
@@ -41,6 +47,12 @@ DEFAULTS: Dict[str, str] = {
     "calibration_labels": "",
     "blank_cache_file": str(paths.default_processed_dir() / ".blank_cache.json"),
     "export_folder": str(paths.default_export_dir()),
+    # Read-only, unused: no route or template reads this key back (grepped —
+    # nothing else in the repo references "splash_image_file"). Left
+    # cwd-relative by design rather than routed through paths.py: cwd is
+    # wherever app.py's own files are, which is exactly where a shipped
+    # splash asset would live, deployed or not. Revisit if this setting is
+    # ever wired up to something that actually reads it.
     "splash_image_file": str(Path.cwd() / "splash.png"),
     "export_graph_qss": "",
     "comparison_defaults_dir": str(paths.standards_dir()),
@@ -140,7 +152,7 @@ def load_settings() -> Dict[str, str]:
     proc = Path(conf.get("processed_cdf_dir", paths.default_processed_dir()))
     conf["blank_cache_file"] = str(proc / ".blank_cache.json")
     conf.setdefault("export_folder", str(paths.default_export_dir()))
-    conf.setdefault("splash_image_file", str(Path.cwd() / "splash.png"))
+    conf.setdefault("splash_image_file", str(Path.cwd() / "splash.png"))  # unused; see DEFAULTS comment above
 
     # Manage comparison standards directory
     comp_dir_str = (conf.get("comparison_defaults_dir") or "").strip()

@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import tempfile
 import time
 import threading
 import traceback
@@ -235,7 +236,7 @@ def _login(driver, username: str, password: str,
         _emit("LOGIN TIMEOUT: login button still visible after 50 s", cb)
         _emit(f"  Current URL: {driver.current_url}", cb)
         try:
-            _diag = Path(os.environ.get("TEMP", ".")) / "qbench_login_fail.png"
+            _diag = Path(tempfile.gettempdir()) / "qbench_login_fail.png"
             driver.save_screenshot(str(_diag))
             _emit(f"  Screenshot saved: {_diag}", cb)
         except Exception:

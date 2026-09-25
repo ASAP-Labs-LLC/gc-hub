@@ -169,9 +169,18 @@ class ServerManager:
             f"runpy.run_path({script!r}, run_name='__main__')\n"
         )
 
+        # Defence in depth: instance.resolve_port() only honours PORT when
+        # GC_DATA_DIR is set (the updater's deployed mode), so a stray PORT
+        # in this launcher's own environment shouldn't matter today — but
+        # this is the legacy share launcher, never the updater, so PORT has
+        # no business reaching the Flask subprocess at all.
+        child_env = os.environ.copy()
+        child_env.pop("PORT", None)
+
         self._proc = subprocess.Popen(
             [_console_python(), "-c", bootstrap],
             cwd=str(BASE),
+            env=child_env,
             creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
 

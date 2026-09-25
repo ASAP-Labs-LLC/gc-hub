@@ -128,6 +128,40 @@ class NoDeadSharedDrivePathTests(unittest.TestCase):
             )
 
 
+class DiagnosticScreenshotPathTests(unittest.TestCase):
+    """The login-failure diagnostic screenshot must use a real temp dir.
+
+    ``os.environ.get("TEMP", ".")`` falls back to ``"."`` (cwd) when TEMP is
+    unset — on the ASAPSV1 updater, cwd is the immutable release folder, so a
+    login-failure screenshot would try to write inside it (and TEMP isn't
+    guaranteed to be set for a service-launched process either way).
+    ``tempfile.gettempdir()`` is the correct cross-platform source of truth.
+    """
+
+    def test_uses_tempfile_gettempdir(self) -> None:
+        src = _read("qbench_pdf_uploader.py")
+        self.assertIn(
+            "tempfile.gettempdir()", src,
+            "the login-failure screenshot path must use tempfile.gettempdir() "
+            "instead of os.environ.get(\"TEMP\", \".\")",
+        )
+        self.assertNotIn(
+            'os.environ.get("TEMP"', src,
+            "found the old TEMP-env-with-cwd-fallback pattern — replace it "
+            "with tempfile.gettempdir()",
+        )
+
+    def test_imports_tempfile(self) -> None:
+        tree = _module_ast("qbench_pdf_uploader.py")
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        self.assertIn("tempfile", imported)
+
+
 class UploaderContractTests(unittest.TestCase):
     """Guards the uploader API that app.py depends on. These pass on the live
     (feature-rich) uploader and MUST stay green through consolidation — they

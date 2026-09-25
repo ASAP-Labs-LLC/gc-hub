@@ -59,24 +59,71 @@ class DeployedModeTests(unittest.TestCase):
     def test_blank_env_value_is_legacy(self):
         self.assertIsNone(paths.data_dir(env={"GC_DATA_DIR": "  "}))
 
+    def test_relative_env_value_is_resolved_absolute(self):
+        # The updater's launcher config or a developer's shell could set a
+        # relative GC_DATA_DIR; every consumer downstream (settings.py,
+        # notifications.py, app.py) compares/joins these paths, so a relative
+        # one must be normalized once, here, rather than leaking cwd-relative
+        # behaviour back in through the side door.
+        rel = "relative/gcdata"
+        self.assertTrue(paths.data_dir(env={"GC_DATA_DIR": rel}).is_absolute())
+        self.assertEqual(paths.data_dir(env={"GC_DATA_DIR": rel}), Path(rel).resolve())
+
+
+class DefaultWatchDirTests(unittest.TestCase):
+    def test_legacy_is_cwd(self):
+        self.assertEqual(paths.default_watch_dir(env={}), str(Path.cwd()))
+
+    def test_deployed_is_empty(self):
+        self.assertEqual(
+            paths.default_watch_dir(env={"GC_DATA_DIR": "/srv/gcdata"}), ""
+        )
+
 
 class SettingsUsesPathsTests(unittest.TestCase):
+    """Reloading settings.py under GC_DATA_DIR must not leak into other tests.
+
+    The env patch and the module reload it drives are scoped tightly to the
+    ``with`` block; the restoring reload happens in ``tearDown`` — strictly
+    after ``mock.patch.dict`` has already put ``os.environ`` back — so it
+    always recomputes ``settings`` from the *real* environment, never from a
+    still-patched one. ``distill``'s settings cache is cleared on both sides
+    since it's keyed on ``settings.CONFIG_PATH``'s mtime, which just moved.
+    """
+
+    def setUp(self) -> None:
+        import distill
+        self._distill = distill
+        distill._SETTINGS_CACHE = None
+        distill._SETTINGS_MTIME = None
+
+    def tearDown(self) -> None:
+        import settings
+        os.environ.pop("GC_DATA_DIR", None)
+        importlib.reload(settings)
+        self._distill._SETTINGS_CACHE = None
+        self._distill._SETTINGS_MTIME = None
+
     def test_settings_module_follows_gc_data_dir(self):
         import tempfile
-        with tempfile.TemporaryDirectory() as tmp, \
-             mock.patch.dict(os.environ, {"GC_DATA_DIR": tmp}):
-            import settings
-            s = importlib.reload(settings)
-            try:
-                self.assertEqual(s.CONFIG_PATH, Path(tmp) / "settings.json")
-                self.assertEqual(s.DEFAULTS["distill_output"], str(Path(tmp) / "distill_results.csv"))
-                self.assertEqual(s.DEFAULTS["processed_cdf_dir"], str(Path(tmp) / "processed_cdf"))
-                self.assertEqual(s.DEFAULTS["export_folder"], str(Path(tmp) / "exports"))
+        with tempfile.TemporaryDirectory() as tmp:
+            # paths.data_dir() resolves GC_DATA_DIR (paths.py item 5), which
+            # on macOS normalizes /var -> /private/var — resolve tmp the same
+            # way so the comparison isn't a symlink-vs-not false negative.
+            resolved = Path(tmp).resolve()
+            with mock.patch.dict(os.environ, {"GC_DATA_DIR": tmp}):
+                import settings
+                s = importlib.reload(settings)
+                self.assertEqual(s.CONFIG_PATH, resolved / "settings.json")
+                self.assertEqual(s.DEFAULTS["distill_output"], str(resolved / "distill_results.csv"))
+                self.assertEqual(s.DEFAULTS["processed_cdf_dir"], str(resolved / "processed_cdf"))
+                self.assertEqual(s.DEFAULTS["export_folder"], str(resolved / "exports"))
                 self.assertEqual(s.DEFAULTS["comparison_defaults_dir"],
-                                 str(Path(tmp) / "gc_comparison_standards"))
-            finally:
-                os.environ.pop("GC_DATA_DIR", None)
-                importlib.reload(settings)
+                                 str(resolved / "gc_comparison_standards"))
+                self.assertEqual(s.DEFAULTS["watch_dir"], "")
+            # mock.patch.dict has restored os.environ here, but the `settings`
+            # module object itself still reflects deployed mode — tearDown
+            # reloads it back, outside this context, not this test method.
 
 
 if __name__ == "__main__":

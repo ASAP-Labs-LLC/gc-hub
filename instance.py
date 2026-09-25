@@ -48,22 +48,33 @@ def validate_port(value) -> int:
 
 
 def resolve_port(argv: Optional[Sequence[str]] = None, env=None) -> int:
-    """Decide this process's port: ``PORT`` → ``--port`` → ``GC_PORT`` → the default.
+    """Decide this process's port.
 
-    ``PORT`` is set by the ASAPSV1 updater, which launches the app with no
-    ``--port`` flag; it must win over anything else so the health-check and
-    the switched-in instance always bind where the updater expects.
+    Deployed (``GC_DATA_DIR`` set by the ASAPSV1 updater): ``PORT`` wins
+    outright. The updater launches the app with no ``--port`` flag and
+    expects it bound to exactly the port it chose for the health check /
+    switch handshake.
+
+    Legacy (``GC_DATA_DIR`` unset — a copy still running from the share):
+    unchanged from before ``PORT`` existed — ``--port`` → ``GC_PORT`` → the
+    default. ``PORT`` is deliberately ignored here so a developer's shell
+    (or anything else) that happens to have a stray ``PORT`` set can't
+    silently move a share copy off the port its operator chose.
 
     Raises ``ValueError`` on a malformed value rather than falling back — a
     typo that silently became 5560 would put a second server on the first
-    instance's port.
+    instance's port. (Can't import ``paths.data_dir()`` here — ``paths.py``
+    itself imports this module — so the ``GC_DATA_DIR`` check is inlined,
+    mirroring its blank-string-is-legacy rule.)
     """
     argv = list(sys.argv[1:]) if argv is None else list(argv)
     env = os.environ if env is None else env
 
-    raw_port_env = (env.get("PORT") or "").strip()
-    if raw_port_env:
-        return validate_port(raw_port_env)
+    deployed = bool((env.get("GC_DATA_DIR") or "").strip())
+    if deployed:
+        raw_port_env = (env.get("PORT") or "").strip()
+        if raw_port_env:
+            return validate_port(raw_port_env)
 
     for i, arg in enumerate(argv):
         if arg == "--port":

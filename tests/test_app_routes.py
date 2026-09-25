@@ -197,12 +197,19 @@ class DeployedModeFallbackTests(unittest.TestCase):
     In deployed mode ``cwd`` is the updater's immutable release folder, so a
     bare relative literal like ``conf.get("distill_output", "distill_results.csv")``
     would resolve inside it. These ``conf.get(key, ...)`` fallbacks are
-    defensive (``conf`` always comes from ``settings_mod.load_settings()``,
-    which always sets every ``DEFAULTS`` key), but they must still route
-    through ``paths.py`` rather than a hardcoded literal.
+    mostly defensive (``conf`` usually comes from
+    ``settings_mod.load_settings()``, which always sets every ``DEFAULTS``
+    key) but at least one — ``looker.rebuild_database`` when
+    ``load_settings()`` raises — is genuinely reachable. All of them must
+    route through ``paths.py`` rather than a hardcoded literal.
 
-    AST-only: importing app.py starts the Looker and auto-restart threads.
+    AST-only: importing app.py starts the Looker and auto-restart threads;
+    distill.py/looker.py are cheap enough to parse the same way for
+    consistency and so a stray CRLF re-save never breaks this guard.
     """
+
+    # Every module with a ``conf.get(<state key>, ...)`` fallback.
+    STATE_PATH_MODULES = ("app.py", "distill.py", "looker.py")
 
     # Settings keys whose value is a filesystem location that must live
     # under GC_DATA_DIR when deployed (see paths.py).
@@ -214,19 +221,20 @@ class DeployedModeFallbackTests(unittest.TestCase):
         "watch_dir",
     }
 
-    def test_app_py_imports_paths(self) -> None:
-        tree = ast.parse((WEBAPP_DIR / "app.py").read_text(encoding="utf-8"))
-        imported = {
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
-        }
-        self.assertIn("paths", imported)
+    @staticmethod
+    def _tree(filename: str) -> ast.Module:
+        return ast.parse((WEBAPP_DIR / filename).read_text(encoding="utf-8"))
 
-    def test_state_path_fallbacks_are_not_bare_literals(self) -> None:
-        tree = ast.parse((WEBAPP_DIR / "app.py").read_text(encoding="utf-8"))
-        checked = 0
+    def _conf_get_calls(self, tree: ast.Module):
+        """Yield (key_node, default_node) for every ``conf.get(<literal key>, <default>)``
+        or ``conf[<literal key>]``-with-fallback call, regardless of the
+        surrounding variable's exact spelling, as long as it plausibly holds
+        a settings dict (i.e. the attribute access is ``.get`` with exactly
+        one key + one default argument, or a two-arg ``.get`` on a subscript
+        target). This deliberately excludes calls on obviously-unrelated
+        dicts (e.g. the directory-snapshot ``cache.get("watch_dir", ...)``
+        in app.py) by requiring the receiver be named ``conf``.
+        """
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
@@ -239,19 +247,55 @@ class DeployedModeFallbackTests(unittest.TestCase):
             if not (isinstance(key_node, ast.Constant)
                     and key_node.value in self.STATE_PATH_KEYS):
                 continue
-            checked += 1
-            default_node = node.args[1]
-            self.assertNotIsInstance(
-                default_node, ast.Constant,
-                f'conf.get({key_node.value!r}, ...) at app.py:{node.lineno} uses '
-                "a bare literal fallback — relative paths resolve inside the "
-                "release folder when GC_DATA_DIR is set; route it through paths.py",
-            )
+            yield node, key_node, node.args[1]
+
+    def test_state_path_modules_import_paths(self) -> None:
+        for filename in self.STATE_PATH_MODULES:
+            tree = self._tree(filename)
+            imported = {
+                alias.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Import)
+                for alias in node.names
+            }
+            self.assertIn("paths", imported, f"{filename} does not import paths")
+
+    def test_state_path_fallbacks_are_not_bare_literals(self) -> None:
+        checked = 0
+        for filename in self.STATE_PATH_MODULES:
+            tree = self._tree(filename)
+            for node, key_node, default_node in self._conf_get_calls(tree):
+                checked += 1
+                self.assertNotIsInstance(
+                    default_node, ast.Constant,
+                    f'conf.get({key_node.value!r}, ...) at {filename}:{node.lineno} uses '
+                    "a bare literal fallback — relative paths resolve inside the "
+                    "release folder when GC_DATA_DIR is set; route it through paths.py",
+                )
         self.assertGreater(checked, 0, "no conf.get(...) calls found for tracked state keys")
 
     def test_dir_cache_path_uses_paths_module(self) -> None:
-        source = (WEBAPP_DIR / "app.py").read_text(encoding="utf-8")
-        self.assertIn("_DIR_CACHE_PATH = paths.dir_cache_file()", source)
+        """``_DIR_CACHE_PATH`` must be assigned from ``paths.dir_cache_file()``.
+
+        Checked via the assignment's call target (module + attribute name)
+        rather than an exact source-text match, so reformatting the line
+        doesn't make this test a no-op.
+        """
+        tree = self._tree("app.py")
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "_DIR_CACHE_PATH"):
+                continue
+            value = node.value
+            self.assertIsInstance(value, ast.Call, "_DIR_CACHE_PATH must be assigned a call result")
+            self.assertIsInstance(value.func, ast.Attribute)
+            self.assertEqual(value.func.attr, "dir_cache_file")
+            self.assertIsInstance(value.func.value, ast.Name)
+            self.assertEqual(value.func.value.id, "paths")
+            return
+        self.fail("_DIR_CACHE_PATH assignment not found in app.py")
 
 
 if __name__ == "__main__":

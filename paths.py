@@ -29,7 +29,13 @@ def _env(env: Optional[Mapping[str, str]]) -> Mapping[str, str]:
 
 def data_dir(env=None) -> Optional[Path]:
     raw = (_env(env).get(DATA_ENV) or "").strip()
-    return Path(raw) if raw else None
+    if not raw:
+        return None
+    # Resolve relative to absolute once, here: every consumer below joins or
+    # compares this path, and a relative GC_DATA_DIR would otherwise make
+    # those results depend on cwd — exactly what deployed mode exists to
+    # avoid (cwd is the updater's release folder, not the data folder).
+    return Path(raw).resolve()
 
 
 def settings_file(env=None) -> Path:
@@ -50,6 +56,20 @@ def default_processed_dir(env=None) -> Path:
 def default_export_dir(env=None) -> Path:
     d = data_dir(env)
     return (d if d else Path.cwd()) / "exports"
+
+
+def default_watch_dir(env=None) -> str:
+    """Default ``watch_dir``: cwd in legacy mode, empty when deployed.
+
+    In deployed mode cwd is the updater's immutable release folder —
+    watching it would treat the app's own files as instrument data.
+    ``app._get_looker()``'s guard (Task 3) keeps the watcher off while this
+    is empty, until the operator sets a real folder.
+
+    Returns ``str`` (not ``Path``) because this only ever lands in a
+    settings dict, never joined onto another path.
+    """
+    return "" if data_dir(env) is not None else str(Path.cwd())
 
 
 def standards_dir(env=None) -> Path:

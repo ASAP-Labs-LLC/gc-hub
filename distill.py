@@ -40,6 +40,8 @@ except ModuleNotFoundError:  # stand‑alone usage
         def load_settings() -> dict: return {}
     settings = _FakeSettings()             # type: ignore
 
+import paths  # stdlib-only; where every on-disk state location lives
+
 LOGGER = logging.getLogger("distill")
 LOGGER.addHandler(logging.NullHandler())
 
@@ -994,7 +996,7 @@ def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool =
     Returns the final path of the processed CDF (may be moved/renamed).
     """
     conf = _get_settings()
-    dest_csv = Path(conf.get("distill_output", "distill_results.csv"))
+    dest_csv = Path(conf.get("distill_output", str(paths.default_results_csv())))
 
     # 1 Chromatogram
     t, y = _read_cdf(path)
@@ -1061,7 +1063,7 @@ def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool =
         if str(conf.get("bestfit_enabled", "true")).lower() == "true":
             import fuel_fit  # deferred: keeps distill importable without scipy.optimize
             standards = fuel_fit.load_standards(
-                Path(conf.get("comparison_defaults_dir", "")), gc_xy_from_cdf
+                Path(conf.get("comparison_defaults_dir", str(paths.standards_dir()))), gc_xy_from_cdf
             )
             if standards:
                 fit = fuel_fit.classify(
@@ -1082,7 +1084,7 @@ def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool =
     lab_id = sample  # plain sample name for CSV
 
     # 7 Write CSV  (move section 8 first so we know the final path)
-    proc_dir = Path(conf.get("processed_cdf_dir", "")).expanduser()
+    proc_dir = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir()))).expanduser()
     if proc_dir:
         proc_dir.mkdir(parents=True, exist_ok=True)
         final_dst = proc_dir / processed_cdf_filename(lab_id, inj_dt, path.suffix)

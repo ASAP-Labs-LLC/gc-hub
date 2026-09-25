@@ -674,7 +674,7 @@ def _get_looker() -> looker_mod.Looker:
     with _looker_lock:
         if _looker is None:
             conf = settings_mod.load_settings()
-            watch = Path(conf.get("watch_dir", "" if paths.data_dir() is not None else str(Path.cwd())))
+            watch = Path(conf.get("watch_dir", paths.default_watch_dir()))
             proc = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
             blank = Path(conf.get("blank_cache_file", proc / ".blank_cache.json"))
             _looker = looker_mod.Looker(
@@ -690,7 +690,7 @@ def _refresh_looker_paths() -> None:
     lk = _get_looker()
     conf = settings_mod.load_settings()
     lk.update_paths(
-        watch_dir=Path(conf.get("watch_dir", "" if paths.data_dir() is not None else str(Path.cwd()))),
+        watch_dir=Path(conf.get("watch_dir", paths.default_watch_dir())),
         processed_dir=Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir()))),
     )
 
