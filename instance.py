@@ -48,7 +48,11 @@ def validate_port(value) -> int:
 
 
 def resolve_port(argv: Optional[Sequence[str]] = None, env=None) -> int:
-    """Decide this process's port: ``--port`` → ``GC_PORT`` → the default.
+    """Decide this process's port: ``PORT`` → ``--port`` → ``GC_PORT`` → the default.
+
+    ``PORT`` is set by the ASAPSV1 updater, which launches the app with no
+    ``--port`` flag; it must win over anything else so the health-check and
+    the switched-in instance always bind where the updater expects.
 
     Raises ``ValueError`` on a malformed value rather than falling back — a
     typo that silently became 5560 would put a second server on the first
@@ -56,6 +60,10 @@ def resolve_port(argv: Optional[Sequence[str]] = None, env=None) -> int:
     """
     argv = list(sys.argv[1:]) if argv is None else list(argv)
     env = os.environ if env is None else env
+
+    raw_port_env = (env.get("PORT") or "").strip()
+    if raw_port_env:
+        return validate_port(raw_port_env)
 
     for i, arg in enumerate(argv):
         if arg == "--port":

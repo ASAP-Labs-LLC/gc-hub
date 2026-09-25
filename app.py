@@ -55,6 +55,7 @@ from flask import (
 # Publishing it back to the environment means every module — and every
 # subprocess we spawn, including the daily auto-restart — agrees on the port.
 import instance
+import paths
 
 GC_PORT = instance.resolve_port()
 os.environ["GC_PORT"] = str(GC_PORT)
@@ -212,9 +213,9 @@ def _rebuild_files_cache() -> list[dict]:
     """
     from datetime import datetime as _dt
     conf = settings_mod.load_settings()
-    csv_path_str = conf.get("distill_output", "distill_results.csv")
+    csv_path_str = conf.get("distill_output", str(paths.default_results_csv()))
     csv_path = Path(csv_path_str)
-    proc_dir = Path(conf.get("processed_cdf_dir", ""))
+    proc_dir = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
     files: list[dict] = []
     t0 = time.time()
     seen: set[tuple] = set()
@@ -374,7 +375,7 @@ def _load_early_signal_cache() -> None:
     """Load the on-disk sample-flags cache into memory."""
     global _early_signal_cache_file
     conf = settings_mod.load_settings()
-    proc_dir = Path(conf.get("processed_cdf_dir", ""))
+    proc_dir = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
     _early_signal_cache_file = proc_dir / ".sample_flags_cache.json"
     if _early_signal_cache_file.is_file():
         try:
@@ -440,7 +441,7 @@ def _load_bestfit_cache() -> None:
     """Load the on-disk best-fit cache into memory."""
     global _bestfit_cache_file
     conf = settings_mod.load_settings()
-    proc_dir = Path(conf.get("processed_cdf_dir", ""))
+    proc_dir = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
     _bestfit_cache_file = proc_dir / ".bestfit_cache.json"
     if _bestfit_cache_file.is_file():
         try:
@@ -483,7 +484,7 @@ def _classify_cdf(cdf_path: str, conf: dict) -> dict | None:
     """Full best-fit classification of one CDF (None when unavailable)."""
     if fuel_fit is None:
         return None
-    comp_dir = Path(conf.get("comparison_defaults_dir", ""))
+    comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
     standards = fuel_fit.load_standards(comp_dir, distill.gc_xy_from_cdf)
     if not standards:
         return None
@@ -525,7 +526,7 @@ def _enrich_files_with_early_signal(files: list[dict]) -> None:
         f["early_signal"] = bool(flags)
 
     if fuel_fit is not None and str(conf.get("bestfit_enabled", "true")).lower() == "true":
-        comp_dir = Path(conf.get("comparison_defaults_dir", ""))
+        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
         standards = fuel_fit.load_standards(comp_dir, distill.gc_xy_from_cdf)
         if standards:
             bf_fp = sample_flags.rules_fingerprint([
@@ -545,10 +546,10 @@ def _migrate_csv_header() -> None:
     back-filled by scanning the processed-CDF directory for matching files.
     """
     conf = settings_mod.load_settings()
-    csv_path = Path(conf.get("distill_output", "distill_results.csv"))
+    csv_path = Path(conf.get("distill_output", str(paths.default_results_csv())))
     if not csv_path.is_file():
         return
-    proc_dir = Path(conf.get("processed_cdf_dir", ""))
+    proc_dir = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
 
     with distill._CSV_LOCK:
         try:
@@ -673,8 +674,8 @@ def _get_looker() -> looker_mod.Looker:
     with _looker_lock:
         if _looker is None:
             conf = settings_mod.load_settings()
-            watch = Path(conf.get("watch_dir", "."))
-            proc = Path(conf.get("processed_cdf_dir", "processed_cdf"))
+            watch = Path(conf.get("watch_dir", "" if paths.data_dir() is not None else str(Path.cwd())))
+            proc = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
             blank = Path(conf.get("blank_cache_file", proc / ".blank_cache.json"))
             _looker = looker_mod.Looker(
                 watch_dir=watch,
@@ -689,8 +690,8 @@ def _refresh_looker_paths() -> None:
     lk = _get_looker()
     conf = settings_mod.load_settings()
     lk.update_paths(
-        watch_dir=Path(conf.get("watch_dir", ".")),
-        processed_dir=Path(conf.get("processed_cdf_dir", "processed_cdf")),
+        watch_dir=Path(conf.get("watch_dir", "" if paths.data_dir() is not None else str(Path.cwd()))),
+        processed_dir=Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir()))),
     )
 
 
@@ -1013,7 +1014,7 @@ def _generate_analysis_report_pdf(
 
     # Overlay additional comparison standards
     _ov_colors = ["#3498db", "#27ae60", "#8e44ad", "#e67e22", "#16a085"]
-    comp_dir = Path(conf.get("comparison_defaults_dir", ""))
+    comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
     for oi, ov_name in enumerate(overlay_standards):
         try:
             ov_path = comp_dir / f"{ov_name}.CDF"
@@ -1457,7 +1458,7 @@ def api_distillation_curve():
         try:
             sample_name, _ = distill.cdf_metadata(p)
             conf = settings_mod.load_settings()
-            csv_path = Path(conf.get("distill_output", "distill_results.csv"))
+            csv_path = Path(conf.get("distill_output", str(paths.default_results_csv())))
             if csv_path.is_file():
                 import csv as csv_mod
                 with csv_path.open("r", encoding="utf-8", newline="") as fh:
@@ -1525,7 +1526,7 @@ def api_distillation_curve():
 def api_table():
     try:
         conf = settings_mod.load_settings()
-        csv_path = Path(conf.get("distill_output", "distill_results.csv"))
+        csv_path = Path(conf.get("distill_output", str(paths.default_results_csv())))
         if not csv_path.is_file():
             return jsonify({"columns": distill.CSV_HEADER, "rows": []})
 
@@ -1764,7 +1765,7 @@ _reprocess_status: Dict[str, Any] = {
 # Stores {folder_path: {"size": total_bytes, "count": num_files}} for
 # subfolders 1-2 levels deep under the watch directory.  On each poll
 # only folders whose size/count changed are re-scanned for new CDFs.
-_DIR_CACHE_PATH = Path.home() / ".gc_viewer_dircache.json"
+_DIR_CACHE_PATH = paths.dir_cache_file()
 
 
 def _load_dir_cache() -> Dict[str, Any]:
@@ -2435,7 +2436,7 @@ def api_library_reindex_times():
 def _do_reindex_injection_times() -> None:
     """Worker body for /api/library/reindex-times."""
     conf = settings_mod.load_settings()
-    csv_path = Path(conf.get("distill_output", "distill_results.csv"))
+    csv_path = Path(conf.get("distill_output", str(paths.default_results_csv())))
     if not csv_path.is_file():
         notifications_mod.get_store().add("warning", "Library reorder: no results CSV found.")
         return
@@ -2558,7 +2559,7 @@ def api_server_status():
 def api_comparison_standards():
     try:
         conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", ""))
+        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
         if not comp_dir.is_dir():
             return jsonify([])
         files = []
@@ -2587,7 +2588,7 @@ def api_add_comparison_standard():
             return _error(f"Source file not found: {source_path}", 404)
 
         conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", ""))
+        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
         comp_dir.mkdir(parents=True, exist_ok=True)
 
         dest = comp_dir / f"{name}.CDF"
@@ -2601,7 +2602,7 @@ def api_add_comparison_standard():
 def api_delete_comparison_standard(name: str):
     try:
         conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", ""))
+        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
         target = comp_dir / f"{name}.CDF"
         if not target.is_file():
             # Try lowercase
@@ -2624,7 +2625,7 @@ def api_rename_comparison_standard():
             return _error("old_name and new_name are required")
 
         conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", ""))
+        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
         old_path = comp_dir / f"{old_name}.CDF"
         if not old_path.is_file():
             old_path = comp_dir / f"{old_name}.cdf"
@@ -2656,7 +2657,7 @@ def api_analysis():
         conf = settings_mod.load_settings()
 
         # Resolve standard CDF path
-        comp_dir = Path(conf.get("comparison_defaults_dir", ""))
+        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
         std_path = comp_dir / f"{standard_name}.CDF"
         if not std_path.is_file():
             std_path = comp_dir / f"{standard_name}.cdf"
@@ -2840,14 +2841,14 @@ def api_export_comparison():
             return _error("Plotly/kaleido not installed", 500)
 
         conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", ""))
+        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
         standard_paths = []
         if comp_dir.is_dir():
             for fp in comp_dir.iterdir():
                 if fp.suffix.lower() == ".cdf" and fp.is_file():
                     standard_paths.append(fp)
 
-        export_dir = Path(conf.get("export_folder", "exports"))
+        export_dir = Path(conf.get("export_folder", str(paths.default_export_dir())))
         export_dir.mkdir(parents=True, exist_ok=True)
 
         generated_files: list[str] = []
@@ -2901,7 +2902,7 @@ def _run_export_analysis(params: dict, conf: dict) -> tuple[dict, list[dict]]:
     if not sample_path or not standard_name:
         raise ValueError("sample_path and standard_name are required")
 
-    comp_dir = Path(conf.get("comparison_defaults_dir", ""))
+    comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
     std_path = comp_dir / f"{standard_name}.CDF"
     if not std_path.is_file():
         std_path = comp_dir / f"{standard_name}.cdf"
@@ -3010,7 +3011,7 @@ def api_export_analysis_reports_zip():
             return _error("Plotly/kaleido not installed", 500)
 
         conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", ""))
+        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
 
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -3208,7 +3209,7 @@ def api_qbench_upload():
         _emit_overall("started", f"Uploading {total} item(s)")
 
         conf = settings_mod.load_settings()
-        export_dir = Path(conf.get("export_folder", "exports"))
+        export_dir = Path(conf.get("export_folder", str(paths.default_export_dir())))
         export_dir.mkdir(parents=True, exist_ok=True)
 
         # Prime ChromeDriver once
@@ -3275,7 +3276,7 @@ def api_qbench_upload():
                             "overlay_standards": item.get("overlay_standards", []),
                         }
                         sample_p = _safe_path(sample_path)
-                        comp_dir = Path(conf.get("comparison_defaults_dir", ""))
+                        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
                         std_path = comp_dir / f"{standard_name}.CDF"
                         if not std_path.is_file():
                             std_path = comp_dir / f"{standard_name}.cdf"

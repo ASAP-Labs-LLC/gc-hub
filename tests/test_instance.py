@@ -108,6 +108,10 @@ class ResolvePortTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             instance.resolve_port(argv=[], env={"GC_PORT": "banana"})
 
+    def test_port_env_from_updater_wins(self) -> None:
+        self.assertEqual(instance.resolve_port(argv=["--port", "5561"],
+                                               env={"PORT": "5580", "GC_PORT": "5562"}), 5580)
+
 
 class ActivePortTests(unittest.TestCase):
     def test_reads_env(self) -> None:

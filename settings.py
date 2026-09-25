@@ -14,31 +14,36 @@ from pathlib import Path
 from typing import Dict
 
 import instance
+import paths
 
 LOGGER = logging.getLogger("settings")
 
-# Derived from GC_PORT at import time so several instances can run side by
-# side. Stays a module-level Path (not a call) so tests can redirect it.
-CONFIG_PATH: Path = instance.settings_path()
+# Derived from GC_PORT (legacy) or GC_DATA_DIR (deployed) at import time so
+# several instances can run side by side. Stays a module-level Path (not a
+# call) so tests can redirect it.
+CONFIG_PATH: Path = paths.settings_file()
 
 # ---------------------------------------------------------------------------
 # Default values — update here when adding new settings keys
 # ---------------------------------------------------------------------------
 DEFAULTS: Dict[str, str] = {
-    "watch_dir": str(Path.cwd()),
-    "processed_cdf_dir": str(Path.cwd() / "processed_cdf"),
-    "distill_output": str(Path.cwd() / "distill_results.csv"),
+    # In deployed mode cwd is the immutable release folder — watching it
+    # would treat the app's own files as instrument data, so the watcher
+    # stays off (empty watch_dir) until the operator sets one explicitly.
+    "watch_dir": str(Path.cwd()) if paths.data_dir() is None else "",
+    "processed_cdf_dir": str(paths.default_processed_dir()),
+    "distill_output": str(paths.default_results_csv()),
     "calibration_cdf": "",
     "calibration_assignments": "",
     "calibration_sensitivity": "50",
     "theme_css": "",
     "series_colors": "",
     "calibration_labels": "",
-    "blank_cache_file": str(Path.cwd() / "processed_cdf" / ".blank_cache.json"),
-    "export_folder": str(Path.cwd() / "exports"),
+    "blank_cache_file": str(paths.default_processed_dir() / ".blank_cache.json"),
+    "export_folder": str(paths.default_export_dir()),
     "splash_image_file": str(Path.cwd() / "splash.png"),
     "export_graph_qss": "",
-    "comparison_defaults_dir": str(CONFIG_PATH.parent / "gc_comparison_standards"),
+    "comparison_defaults_dir": str(paths.standards_dir()),
     "comparison_export_template": "",
     "correction_factors_json": "//asapserver/Labsharedrive/ASAP Lab Results/EQM_Correction Factor/correction_factors.json",
     "analysis_quantile": "0.20",
@@ -90,6 +95,10 @@ def _seed_new_instance() -> None:
     """First run on a non-default port: copy the primary instance's config,
     minus the per-instance paths. No-op in every other case.
     """
+    if paths.data_dir() is not None:
+        # Deployed mode has one settings file per data dir, not per port —
+        # there is nothing to seed from.
+        return
     if instance.active_port() == instance.DEFAULT_PORT:
         return
     if CONFIG_PATH.exists():
@@ -128,9 +137,9 @@ def load_settings() -> Dict[str, str]:
         except Exception as exc:
             LOGGER.warning("Settings read failed, using defaults: %s", exc)
 
-    proc = Path(conf.get("processed_cdf_dir", Path.cwd()))
+    proc = Path(conf.get("processed_cdf_dir", paths.default_processed_dir()))
     conf["blank_cache_file"] = str(proc / ".blank_cache.json")
-    conf.setdefault("export_folder", str(Path.cwd() / "exports"))
+    conf.setdefault("export_folder", str(paths.default_export_dir()))
     conf.setdefault("splash_image_file", str(Path.cwd() / "splash.png"))
 
     # Manage comparison standards directory

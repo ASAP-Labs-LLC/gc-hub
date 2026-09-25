@@ -191,5 +191,68 @@ class PortBindingTests(unittest.TestCase):
         self.assertLess(instance_line, settings_line)
 
 
+class DeployedModeFallbackTests(unittest.TestCase):
+    """Relative-path fallbacks must resolve under GC_DATA_DIR, not cwd.
+
+    In deployed mode ``cwd`` is the updater's immutable release folder, so a
+    bare relative literal like ``conf.get("distill_output", "distill_results.csv")``
+    would resolve inside it. These ``conf.get(key, ...)`` fallbacks are
+    defensive (``conf`` always comes from ``settings_mod.load_settings()``,
+    which always sets every ``DEFAULTS`` key), but they must still route
+    through ``paths.py`` rather than a hardcoded literal.
+
+    AST-only: importing app.py starts the Looker and auto-restart threads.
+    """
+
+    # Settings keys whose value is a filesystem location that must live
+    # under GC_DATA_DIR when deployed (see paths.py).
+    STATE_PATH_KEYS = {
+        "distill_output",
+        "processed_cdf_dir",
+        "export_folder",
+        "comparison_defaults_dir",
+        "watch_dir",
+    }
+
+    def test_app_py_imports_paths(self) -> None:
+        tree = ast.parse((WEBAPP_DIR / "app.py").read_text(encoding="utf-8"))
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        self.assertIn("paths", imported)
+
+    def test_state_path_fallbacks_are_not_bare_literals(self) -> None:
+        tree = ast.parse((WEBAPP_DIR / "app.py").read_text(encoding="utf-8"))
+        checked = 0
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "conf"
+                    and len(node.args) == 2):
+                continue
+            key_node = node.args[0]
+            if not (isinstance(key_node, ast.Constant)
+                    and key_node.value in self.STATE_PATH_KEYS):
+                continue
+            checked += 1
+            default_node = node.args[1]
+            self.assertNotIsInstance(
+                default_node, ast.Constant,
+                f'conf.get({key_node.value!r}, ...) at app.py:{node.lineno} uses '
+                "a bare literal fallback — relative paths resolve inside the "
+                "release folder when GC_DATA_DIR is set; route it through paths.py",
+            )
+        self.assertGreater(checked, 0, "no conf.get(...) calls found for tracked state keys")
+
+    def test_dir_cache_path_uses_paths_module(self) -> None:
+        source = (WEBAPP_DIR / "app.py").read_text(encoding="utf-8")
+        self.assertIn("_DIR_CACHE_PATH = paths.dir_cache_file()", source)
+
+
 if __name__ == "__main__":
     unittest.main()

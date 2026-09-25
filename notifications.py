@@ -16,11 +16,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import paths
+
 LOGGER = logging.getLogger(__name__)
 
-# Default store lives next to the user settings file (home dir), not in the
-# data folder, so it is per-machine and independent of watch/processed paths.
-DEFAULT_PATH = Path.home() / ".gc_viewer_notifications.json"
+# Legacy: lives next to the user settings file (home dir), independent of
+# watch/processed paths. Deployed (GC_DATA_DIR set): under the data dir, so
+# it moves with the rest of the app's state. See paths.notifications_file().
+DEFAULT_PATH = paths.notifications_file()
 
 _VALID_LEVELS = {"info", "success", "warning", "error"}
 
