@@ -333,6 +333,49 @@ def parse_assignment_map(raw: str) -> Dict[str, list]:
     return data if isinstance(data, dict) else {}
 
 
+def _longest_increasing_by_carbon(
+    pairs: list[Tuple[float, int]]
+) -> list[Tuple[float, int]]:
+    """Return the longest strictly-increasing-by-carbon run of ``pairs``
+    (already sorted by retention time; carbons already de-duplicated, so no
+    ties are possible). A single mis-assigned peak (e.g. the solvent wrongly
+    given a high carbon number) should only cost that one entry, not every
+    correct assignment after it — a greedy first-kept/drop-the-rest filter
+    would throw away the whole correct run instead. Each dropped entry is
+    logged individually so the operator can see which assignment was
+    excluded and why. O(n^2), fine for the handful of calibration peaks this
+    ever sees.
+    """
+    n = len(pairs)
+    if n < 2:
+        return pairs
+    carbons = [c for _, c in pairs]
+    lengths = [1] * n
+    prev = [-1] * n
+    for i in range(n):
+        for j in range(i):
+            if carbons[j] < carbons[i] and lengths[j] + 1 > lengths[i]:
+                lengths[i] = lengths[j] + 1
+                prev[i] = j
+    end = max(range(n), key=lambda i: lengths[i])
+    keep: set[int] = set()
+    i = end
+    while i != -1:
+        keep.add(i)
+        i = prev[i]
+    if len(keep) < n:
+        for i in range(n):
+            if i not in keep:
+                rt, c = pairs[i]
+                LOGGER.warning(
+                    "Calibration ladder: dropping out-of-order assignment "
+                    "(rt=%.3f min, C%d) - not part of the longest increasing "
+                    "carbon run",
+                    rt, c,
+                )
+    return [pairs[i] for i in sorted(keep)]
+
+
 def _assignment_pairs(amap: Dict[str, list], cdf_path) -> list[Tuple[float, int]]:
     """Return sorted ``(rt, carbon)`` pairs from saved assignments for
     ``cdf_path`` — the single source ``anchors_for``, ``calibration_ladder``
@@ -340,8 +383,10 @@ def _assignment_pairs(amap: Dict[str, list], cdf_path) -> list[Tuple[float, int]
 
     Drops ``ignore``d and incomplete entries, tolerates malformed ``rt``/
     ``carbon`` values (skips them rather than raising), drops carbons unknown
-    to the reference n-alkane ladder, and de-duplicates carbons — keeping the
-    first occurrence after sorting by retention time. Never raises.
+    to the reference n-alkane ladder, de-duplicates carbons (keeping the
+    first occurrence after sorting by retention time), and keeps only the
+    longest run of carbons that increases with retention time (see
+    ``_longest_increasing_by_carbon``). Never raises.
     """
     entries = amap.get(_cal_key(cdf_path))
     if entries is None:
@@ -361,6 +406,11 @@ def _assignment_pairs(amap: Dict[str, list], cdf_path) -> list[Tuple[float, int]
         except (TypeError, ValueError):
             continue
         if carbon not in cbp:
+            LOGGER.info(
+                "Calibration ladder: dropping assignment at rt=%.3f min - "
+                "C%d is not a reference n-alkane carbon",
+                rt, carbon,
+            )
             continue
         raw.append((rt, carbon))
     raw.sort(key=lambda p: p[0])
@@ -371,7 +421,7 @@ def _assignment_pairs(amap: Dict[str, list], cdf_path) -> list[Tuple[float, int]
             continue
         seen.add(carbon)
         pairs.append((rt, carbon))
-    return pairs
+    return _longest_increasing_by_carbon(pairs)
 
 
 def validate_assignments(entries: list) -> list[str]:
@@ -437,33 +487,20 @@ def calibration_ladder(conf: Dict[str, str],
     Uses the operator's saved peak->carbon assignments for the configured
     calibration CDF (the same source the distillation math uses, resolved via
     ``active_calibration_path`` so labels and math never disagree), so
-    ignored peaks (CS2, impurities) never get a carbon number. Any assignment
-    whose carbon does not increase with retention time is dropped (logged)
-    rather than silently mislabelling ranges. Falls back to sequential
-    auto-detection only when fewer than two usable assignments survive,
-    truncated to the known n-alkane ladder so the two lists are always the
-    same length. Returns ``([], [])`` when no calibration is configured or it
-    can't be read.
+    ignored peaks (CS2, impurities) never get a carbon number.
+    ``_assignment_pairs`` keeps only the longest run of carbons that
+    increases with retention time (logging each dropped entry), so a single
+    mis-assigned peak doesn't silently mislabel every range after it. Falls
+    back to sequential auto-detection only when fewer than two usable
+    assignments survive, truncated to the known n-alkane ladder so the two
+    lists are always the same length. Returns ``([], [])`` when no
+    calibration is configured or it can't be read.
     """
     cal_path = active_calibration_path(conf)
     if cal_path is None:
         return [], []
     amap = parse_assignment_map(conf.get("calibration_assignments", ""))
     pairs = _assignment_pairs(amap, cal_path)
-    if len(pairs) >= 2:
-        kept: list[Tuple[float, int]] = []
-        last_carbon: int | None = None
-        for rt, c in pairs:
-            if last_carbon is not None and c <= last_carbon:
-                LOGGER.warning(
-                    "Calibration ladder: dropping out-of-order assignment "
-                    "(rt=%.3f min, C%d) - not greater than the previous kept C%d",
-                    rt, c, last_carbon,
-                )
-                continue
-            kept.append((rt, c))
-            last_carbon = c
-        pairs = kept
     if len(pairs) >= 2:
         times, carbons = [p[0] for p in pairs], [p[1] for p in pairs]
     else:

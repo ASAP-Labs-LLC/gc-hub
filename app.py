@@ -1560,12 +1560,11 @@ def api_calibration():
     """
     try:
         conf = settings_mod.load_settings()
-        cal_cdf = conf.get("calibration_cdf", "").strip()
-        if not cal_cdf:
+        cal_path = distill.active_calibration_path(conf)
+        if cal_path is None:
             return _error("No calibration CDF configured", 404)
-        cal_path = _safe_path(cal_cdf)
         if not cal_path.is_file():
-            return _error(f"Calibration file not found: {cal_cdf}", 404)
+            return _error(f"Calibration file not found: {cal_path}", 404)
 
         # Sensitivity: query param overrides the saved setting (default 50).
         try:
@@ -1637,10 +1636,9 @@ def api_calibration_save():
     """Persist manual peak→carbon assignments for the configured cal CDF."""
     try:
         conf = settings_mod.load_settings()
-        cal_cdf = conf.get("calibration_cdf", "").strip()
-        if not cal_cdf:
+        cal_path = distill.active_calibration_path(conf)
+        if cal_path is None:
             return _error("No calibration CDF configured", 404)
-        cal_path = _safe_path(cal_cdf)
 
         body = request.get_json(silent=True) or {}
         assignments = body.get("assignments")
@@ -1708,8 +1706,9 @@ def api_calibration_active():
     """
     try:
         conf = settings_mod.load_settings()
-        cal_cdf = conf.get("calibration_cdf", "").strip()
-        cal_path = _safe_path(cal_cdf)
+        resolved = distill.active_calibration_path(conf)
+        cal_path = resolved if resolved is not None else Path("")
+        cal_cdf = str(resolved) if resolved is not None else ""
         raw = conf.get("calibration_assignments", "")
         amap = distill.parse_assignment_map(raw)
         key = distill._cal_key(cal_path)

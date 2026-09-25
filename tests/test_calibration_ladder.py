@@ -13,6 +13,7 @@ calibration file everywhere (labels and math alike).
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import sys
@@ -108,19 +109,37 @@ class CalibrationLadderMonotonicityTests(unittest.TestCase):
         self.cal = Path("/tmp/fake_cal_monotonic.CDF")
 
     def test_out_of_order_assignment_is_dropped_with_warning(self):
+        # Longest-increasing-subsequence, not greedy-first-kept: C10 (at
+        # 0.75 min) breaks the C5->C7->C8 run, but it's the shorter run
+        # (length 2 vs length 3), so C10 is the one dropped, not C7/C8.
         entries = [
             {"rt": 0.50, "carbon": 5},
-            {"rt": 0.75, "carbon": 10},
-            {"rt": 1.00, "carbon": 7},   # <= last kept (10) -> dropped
-            {"rt": 1.25, "carbon": 8},   # <= last kept (10) -> dropped
+            {"rt": 0.75, "carbon": 10},  # breaks the longer run -> dropped
+            {"rt": 1.00, "carbon": 7},
+            {"rt": 1.25, "carbon": 8},
         ]
         conf = {"calibration_cdf": str(self.cal),
                 "calibration_assignments": _assignments(self.cal, entries)}
         with self.assertLogs(distill.LOGGER, level="WARNING") as cm:
             times, carbons = distill.calibration_ladder(conf)
-        self.assertEqual(times, [0.50, 0.75])
-        self.assertEqual(carbons, [5, 10])
-        self.assertTrue(any("C7" in m for m in cm.output), cm.output)
+        self.assertEqual(times, [0.50, 1.00, 1.25])
+        self.assertEqual(carbons, [5, 7, 8])
+        self.assertTrue(any("C10" in m for m in cm.output), cm.output)
+
+    def test_wrong_early_assignment_keeps_longest_correct_run(self):
+        # CS2 solvent wrongly assigned C24 (a real mis-click scenario): the
+        # correct C5..C20 run that follows it must survive; only the single
+        # bad CS2 entry is dropped.
+        carbons = list(distill.N_ALKANE_CARBON[:14])  # C5..C20
+        entries = [{"rt": 0.30, "carbon": 24}]  # CS2, wrongly assigned
+        entries += [{"rt": 0.50 + 0.25 * i, "carbon": c} for i, c in enumerate(carbons)]
+        conf = {"calibration_cdf": str(self.cal),
+                "calibration_assignments": _assignments(self.cal, entries)}
+        with self.assertLogs(distill.LOGGER, level="WARNING") as cm:
+            times, result_carbons = distill.calibration_ladder(conf)
+        self.assertEqual(result_carbons, carbons)
+        self.assertEqual(times, [0.50 + 0.25 * i for i in range(len(carbons))])
+        self.assertTrue(any("C24" in m for m in cm.output), cm.output)
 
     def test_too_few_survive_monotonicity_falls_back(self):
         # Only one pair survives the filter -> not a usable ladder -> falls
@@ -325,6 +344,63 @@ class AppUsesLadderTests(unittest.TestCase):
     def test_calibration_save_route_validates_assignment_ordering(self):
         src = self._app_src()
         self.assertIn("distill.validate_assignments(", src)
+
+    def test_calibration_overlay_uses_assignment_pairs(self):
+        # The dashboard's /api/calibration overlay must build its
+        # peak_times/carbon_numbers from the same distill._assignment_pairs
+        # (LIS-filtered) source the report and calibration_ladder use, or
+        # the dashboard's range shading can disagree with the report.
+        src = self._app_src()
+        self.assertIn("distill._assignment_pairs(amap, cal_path)", src)
+
+
+class ApiCalibrationRoutesTests(unittest.TestCase):
+    """AST-based guards on app.py's calibration routes — never `import app`
+    (it starts threads), so these parse app.py's source instead."""
+
+    @staticmethod
+    def _app_source_text() -> str:
+        return Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+
+    @classmethod
+    def _function_node(cls, name: str) -> ast.FunctionDef:
+        tree = ast.parse(cls._app_source_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        raise AssertionError(f"function {name!r} not found in app.py")
+
+    @classmethod
+    def _function_source(cls, name: str) -> str:
+        return ast.get_source_segment(cls._app_source_text(), cls._function_node(name))
+
+    def test_calibration_routes_resolve_cdf_via_active_calibration_path(self):
+        # GC_CAL_CDF must be honoured consistently: these three routes must
+        # resolve "the" calibration CDF through active_calibration_path,
+        # not by reading conf['calibration_cdf'] directly.
+        for name in ("api_calibration", "api_calibration_save", "api_calibration_active"):
+            with self.subTest(route=name):
+                src = self._function_source(name)
+                self.assertIn("distill.active_calibration_path(conf)", src)
+                self.assertNotIn('conf.get("calibration_cdf"', src)
+
+    def test_save_route_validates_before_persisting(self):
+        # api_calibration_save must call validate_assignments() before
+        # upsert_assignments() persists the (possibly bad) assignment list.
+        func = self._function_node("api_calibration_save")
+        calls: list[tuple[int, str]] = []
+        for node in ast.walk(func):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr in ("validate_assignments", "upsert_assignments"):
+                    calls.append((node.lineno, node.func.attr))
+        calls.sort()
+        names_in_order = [name for _, name in calls]
+        self.assertIn("validate_assignments", names_in_order)
+        self.assertIn("upsert_assignments", names_in_order)
+        self.assertLess(
+            names_in_order.index("validate_assignments"),
+            names_in_order.index("upsert_assignments"),
+        )
 
 
 if __name__ == "__main__":

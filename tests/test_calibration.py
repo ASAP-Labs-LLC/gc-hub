@@ -190,6 +190,21 @@ class AnchorsForTests(unittest.TestCase):
         np.testing.assert_allclose(rt, [1.0, 2.0])
         np.testing.assert_allclose(bp, [36.0, 69.0])
 
+    def test_wrong_early_assignment_keeps_the_longest_correct_run(self) -> None:
+        # CS2 solvent wrongly assigned C24 (a real mis-click): the correct
+        # C5..C20 run that follows it must survive intact; only the single
+        # bad CS2 entry is dropped. anchors_for shares this filtering with
+        # calibration_ladder via _assignment_pairs, so the rt set it hands to
+        # the distillation math matches what the report labels use.
+        path = "/data/cal.CDF"
+        carbons = list(distill.N_ALKANE_CARBON[:14])  # C5..C20
+        entries = [{"rt": 0.30, "carbon": 24}]  # CS2, wrongly assigned
+        entries += [{"rt": 0.50 + 0.25 * i, "carbon": c} for i, c in enumerate(carbons)]
+        amap = {self._key(path): entries}
+        rt, bp = distill.anchors_for(amap, path)
+        expected_rt = [0.50 + 0.25 * i for i in range(len(carbons))]
+        np.testing.assert_allclose(rt, expected_rt)
+
 
 class AssignmentPairsTests(unittest.TestCase):
     """distill._assignment_pairs: the single (rt, carbon) source shared by
@@ -217,12 +232,52 @@ class AssignmentPairsTests(unittest.TestCase):
         amap = {self._key(path): [{"rt": 1.0, "carbon": 999}, {"rt": 2.0, "carbon": 6}]}
         self.assertEqual(distill._assignment_pairs(amap, path), [(2.0, 6)])
 
+    def test_unknown_carbon_drop_is_logged_at_info(self) -> None:
+        path = "/data/cal.CDF"
+        amap = {self._key(path): [{"rt": 1.0, "carbon": 999}, {"rt": 2.0, "carbon": 6}]}
+        with self.assertLogs(distill.LOGGER, level="INFO") as cm:
+            pairs = distill._assignment_pairs(amap, path)
+        self.assertEqual(pairs, [(2.0, 6)])
+        self.assertTrue(any("999" in m for m in cm.output), cm.output)
+
     def test_dedupes_carbons_keeping_first_by_time(self) -> None:
         path = "/data/cal.CDF"
         amap = {self._key(path): [
             {"rt": 1.0, "carbon": 5}, {"rt": 1.5, "carbon": 5}, {"rt": 2.0, "carbon": 6},
         ]}
         self.assertEqual(distill._assignment_pairs(amap, path), [(1.0, 5), (2.0, 6)])
+
+    def test_drops_the_non_increasing_pair_keeping_the_longer_run(self) -> None:
+        # Longest-increasing-subsequence, not greedy-first-kept: C10 breaks
+        # the run from C5 to C7/C8, but dropping just C10 (not C7 and C8)
+        # keeps the longer, more useful run.
+        path = "/data/cal.CDF"
+        amap = {self._key(path): [
+            {"rt": 0.50, "carbon": 5},
+            {"rt": 0.75, "carbon": 10},
+            {"rt": 1.00, "carbon": 7},
+            {"rt": 1.25, "carbon": 8},
+        ]}
+        with self.assertLogs(distill.LOGGER, level="WARNING") as cm:
+            pairs = distill._assignment_pairs(amap, path)
+        self.assertEqual(pairs, [(0.50, 5), (1.00, 7), (1.25, 8)])
+        self.assertTrue(any("C10" in m for m in cm.output), cm.output)
+
+    def test_longest_increasing_run_survives_a_wrong_early_assignment(self) -> None:
+        # CS2 wrongly assigned C24 at the very start (a real mis-click,
+        # reproducing the 002F0301.CDF-shaped scenario): the entire correct
+        # C5..C20 run afterward must survive; only the bad CS2 entry drops.
+        path = "/data/cal.CDF"
+        carbons = list(distill.N_ALKANE_CARBON[:14])  # C5..C20
+        entries = [{"rt": 0.30, "carbon": 24}]
+        entries += [{"rt": 0.50 + 0.25 * i, "carbon": c} for i, c in enumerate(carbons)]
+        amap = {self._key(path): entries}
+        with self.assertLogs(distill.LOGGER, level="WARNING") as cm:
+            pairs = distill._assignment_pairs(amap, path)
+        self.assertEqual([c for _, c in pairs], carbons)
+        self.assertEqual([rt for rt, _ in pairs],
+                          [0.50 + 0.25 * i for i in range(len(carbons))])
+        self.assertTrue(any("C24" in m for m in cm.output), cm.output)
 
     def test_malformed_rt_or_carbon_is_skipped_not_raised(self) -> None:
         path = "/data/cal.CDF"
