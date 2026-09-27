@@ -100,6 +100,66 @@ class RoundTripTests(unittest.TestCase):
         self.assertEqual(reloaded["analysis_window"], "555")
 
 
+    def test_save_keeps_indent_2_formatting(self) -> None:
+        settings_mod.save_settings({"a": "1", "b": "2"})
+        self.assertEqual(
+            settings_mod.CONFIG_PATH.read_text(encoding="utf-8"),
+            json.dumps({"a": "1", "b": "2"}, indent=2),
+        )
+
+    def test_failed_save_leaves_old_file_and_no_temp(self) -> None:
+        """A crash half-way through writing must not truncate settings.json
+        (the operator's calibration assignments live there) and must not
+        leave a temp file behind. The failure is logged, not raised."""
+        settings_mod.save_settings({"watch_dir": "old", "analysis_window": "301"})
+        before = settings_mod.CONFIG_PATH.read_text(encoding="utf-8")
+
+        def half_then_fail(obj, fh, **kw):
+            fh.write('{"watch_dir": "ne')
+            fh.flush()
+            raise OSError("disk full")
+
+        from unittest import mock
+        with mock.patch.object(settings_mod.json, "dump", side_effect=half_then_fail):
+            with self.assertLogs("settings", level="ERROR") as logs:
+                settings_mod.save_settings({"watch_dir": "new"})
+        self.assertTrue(any("Settings save failed" in m for m in logs.output))
+
+        self.assertEqual(settings_mod.CONFIG_PATH.read_text(encoding="utf-8"), before)
+        self.assertEqual(
+            sorted(p.name for p in settings_mod.CONFIG_PATH.parent.iterdir()
+                   if p.is_file()),
+            ["settings.json"],
+        )
+
+
+    def test_save_retries_a_briefly_locked_target(self) -> None:
+        from unittest import mock
+        real_replace = os.replace
+        calls = []
+
+        def locked_once(src, dst):
+            calls.append(dst)
+            if len(calls) == 1:
+                raise PermissionError(13, "sharing violation")
+            return real_replace(src, dst)
+
+        with mock.patch.object(settings_mod, "SAVE_REPLACE_BACKOFF_SECONDS", 0), \
+                mock.patch.object(settings_mod.os, "replace", side_effect=locked_once):
+            settings_mod.save_settings({"watch_dir": "retried"})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            json.loads(settings_mod.CONFIG_PATH.read_text(encoding="utf-8")),
+            {"watch_dir": "retried"},
+        )
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions")
+    def test_save_keeps_the_existing_file_mode(self) -> None:
+        settings_mod.save_settings({"a": "1"})
+        os.chmod(settings_mod.CONFIG_PATH, 0o644)
+        settings_mod.save_settings({"a": "2"})
+        self.assertEqual(settings_mod.CONFIG_PATH.stat().st_mode & 0o777, 0o644)
+
 class ConfigPathPerPortTests(unittest.TestCase):
     """CONFIG_PATH is computed at import time from GC_PORT."""
 

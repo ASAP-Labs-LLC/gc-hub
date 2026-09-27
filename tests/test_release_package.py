@@ -574,11 +574,110 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("--verify-tag", pub)
         self.assertLess(pub.index("gh release view"), pub.index("gh release create"))
 
+    def test_prerelease_tags_and_release_notes_file(self):
+        pub = self.jobs["publish"]
+        self.assertIn('"$TAG" == *-*', pub)
+        self.assertIn("--prerelease", pub)
+        self.assertIn('docs/release-notes/$TAG.md', pub)
+        self.assertLess(pub.index("Write release notes"), pub.index("gh release create"))
+
     def test_one_release_at_a_time(self):
         top = _top(self.wf)
         self.assertRegex(top, r"concurrency:\s*\n\s+group: release")
         self.assertIn("cancel-in-progress: false", top)
 
+
+
+def _step_script(job_text, step_name):
+    """The ``run: |`` body of the step called ``step_name``, dedented."""
+    lines = job_text.splitlines()
+    start = next(i for i, l in enumerate(lines)
+                 if l.strip() == f"- name: {step_name}")
+    run_i = next(i for i in range(start + 1, len(lines))
+                 if lines[i].strip() == "run: |")
+    indent = len(lines[run_i]) - len(lines[run_i].lstrip()) + 2
+    body = []
+    for l in lines[run_i + 1:]:
+        if l.strip() and len(l) - len(l.lstrip()) < indent:
+            break
+        body.append(l[indent:])
+    return "\n".join(body) + "\n"
+
+
+_FAKE_GH = """#!/bin/sh
+# Records every call; `release view` finds nothing, so publish creates.
+printf '%s\\n' "$*" >> "$GH_LOG"
+case "$1 $2" in
+  "release view") exit 1 ;;
+esac
+exit 0
+"""
+
+
+class ReleaseWorkflowScriptTests(unittest.TestCase):
+    """Run the publish job's own shell steps with a fake ``gh``."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pub = _jobs((WF / "release.yml").read_text())["publish"]
+
+    def setUp(self):
+        self._t = tempfile.TemporaryDirectory()
+        self.dir = Path(self._t.name)
+        (self.dir / "bin").mkdir()
+        gh = self.dir / "bin" / "gh"
+        gh.write_text(_FAKE_GH)
+        gh.chmod(0o755)
+        (self.dir / "dist").mkdir()
+        self.log = self.dir / "gh.log"
+
+    def tearDown(self):
+        self._t.cleanup()
+
+    def _run(self, step, tag):
+        env = dict(os.environ, TAG=tag, GH_LOG=str(self.log),
+                   PATH=f"{self.dir / 'bin'}:{os.environ['PATH']}")
+        script = _step_script(self.pub, step)
+        r = subprocess.run(["bash", "-c", script], cwd=self.dir, env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def _create_call(self):
+        calls = self.log.read_text().splitlines()
+        return next(c for c in calls if c.startswith("release create"))
+
+    def test_hyphenated_tag_is_published_as_prerelease(self):
+        self._run("Publish release", "v1.2.3-rc.1")
+        self.assertIn("--prerelease", self._create_call().split())
+
+    def test_plain_tag_is_a_normal_release(self):
+        self._run("Publish release", "v1.2.3")
+        self.assertNotIn("--prerelease", self._create_call().split())
+
+    def test_build_suffix_without_hyphen_is_a_normal_release(self):
+        self._run("Publish release", "v1.2.3+build.7")
+        self.assertNotIn("--prerelease", self._create_call().split())
+
+    def test_notes_include_the_release_notes_file_for_the_tag(self):
+        notes_dir = self.dir / "docs" / "release-notes"
+        notes_dir.mkdir(parents=True)
+        (notes_dir / "v1.2.3.md").write_text("Fixed `x` in C:\\ASAPApps.\n")
+        self._run("Write release notes", "v1.2.3")
+        notes = (self.dir / "dist" / "notes.md").read_text()
+        self.assertTrue(notes.startswith("Fixed `x` in C:\\ASAPApps.\n"), notes)
+        self.assertIn("C:\\ASAPApps\\gc\\releases\\v1.2.3\\", notes)
+        self.assertIn("sha256sum -c gc-hub-v1.2.3.zip.sha256", notes)
+
+    def test_notes_without_a_file_are_the_boilerplate(self):
+        self._run("Write release notes", "v1.2.4")
+        notes = (self.dir / "dist" / "notes.md").read_text()
+        self.assertTrue(notes.startswith("Automated release of GC Hub."), notes)
+
+    def test_v1_0_0_notes_exist(self):
+        notes = (ROOT / "docs" / "release-notes" / "v1.0.0.md").read_text()
+        self.assertIn("D2887", notes)
+        self.assertIn("DEPLOY.md", notes)
 
 if __name__ == "__main__":
     unittest.main()

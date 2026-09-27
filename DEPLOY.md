@@ -64,22 +64,83 @@ What each field does for gc:
 | `health_args: ["--no-tray"]` | Accepted and ignored by `app.py`. Any other unknown flag makes the app exit with an error, so a typo here fails the health check loudly |
 | `auto_switch: false` | A healthy staged release waits until someone presses Settings > Restart ("Restart & install vX.Y.Z"). Leave it false until `/healthz` counts a running QBench upload or reprocess as activity (spec, Open items) |
 
-Then restart the updater's scheduled task so it reads the new config. The
-first poll (within ~5 minutes) stages and health-checks the latest release.
-Check with:
+Then restart the updater's scheduled task so it reads the new config
+(`schtasks /end /tn "<updater task name>"`, then
+`schtasks /run /tn "<updater task name>"`). The first poll (within ~5 minutes)
+stages and health-checks the latest release.
 
-```
-python C:\ASAPApps\updater\updater.py status --config C:\ASAPApps\updater\config.json
-```
+## Step 3: first install (switch to v1.0.0 by hand)
 
-## Step 3: move existing settings into `C:\ASAPApps\gc\data\settings.json`
+On a fresh box there is no `current` junction and nothing is running, so there
+is no Settings > Restart button to press, and the updater's supervision loop
+cannot start the app on its own. **Until the first switch, `updater.log`
+fills with failed starts; this is expected.** Every ~20 s it logs
+`[gc] not serving on port 5560 — starting it` and then `[gc] failed to start`,
+and after 3 starts in 15 minutes it logs CRITICAL
+`[gc] has failed to stay up after 3 starts in 15 minutes — not restarting
+again` on every pass until those starts are 15 minutes old.
+
+1. Wait until the release is staged and healthy:
+
+   ```
+   python C:\ASAPApps\updater\updater.py status --config C:\ASAPApps\updater\config.json
+   ```
+
+   It is ready when it prints
+
+   ```
+   gc: DOWN (port 5560)  current=dev junction->None staged=v1.0.0 healthy=True
+   ```
+
+   (plus a `notes:` line from the health check). `healthy=False` means the
+   staging failed: the `notes:` line and `C:\ASAPApps\updater\updater.log` say
+   why. `staged=None` means it has not been polled yet, or the PAT cannot
+   see gc-hub (Step 1).
+
+2. Do the first install:
+
+   ```
+   python C:\ASAPApps\updater\updater.py switch --app gc --tag v1.0.0 --config C:\ASAPApps\updater\config.json
+   ```
+
+   This creates the `current` junction, starts the app and waits up to 60 s
+   for `/healthz` to report `v1.0.0`. It exits 0 on success. There is no
+   previous release to roll back to, so a failure here leaves the app down;
+   `updater.log` gives the reason.
+
+3. Hand the app to the updater service. `switch` started the app itself, as
+   **the account that ran the command** (so with that account's `%APPDATA%`,
+   where the QBench store lives, and it stops when that account logs off).
+   - Restart the updater's scheduled task (`schtasks /end` and `/run` as
+     above). This also clears the failed-start history, which the service
+     keeps only in memory, so it is no longer "giving up".
+   - Stop the copy `switch` started: `netstat -ano | findstr :5560`, then
+     `taskkill /F /T /PID <pid>` for the LISTENING line. Within ~20 s the
+     service starts it again as the task's account.
+   - `updater.py status` should now show
+     `gc: SERVING on 5560  current=v1.0.0 junction->v1.0.0 staged=v1.0.0 healthy=True`.
+
+From here on, a new release is installed with Settings > Restart (see
+`RELEASING.md` §4).
+
+## Step 4: move existing settings into `C:\ASAPApps\gc\data\settings.json`
 
 A fresh deploy starts **unconfigured**: no watch folder (so the Looker does not
 start, and the log says why), no calibration, default analysis settings. You
 can configure it from Settings in the browser, or carry over an existing
 install's settings:
 
-1. Stop the app, or do this before its first start.
+1. Stop the app. Pausing it first keeps the updater from starting it again
+   while you edit:
+
+   ```
+   python C:\ASAPApps\updater\updater.py pause --app gc --config C:\ASAPApps\updater\config.json
+   ```
+
+   Pause does not stop a running app ("Stop it yourself if it is still
+   running"), so then `netstat -ano | findstr :5560` and
+   `taskkill /F /T /PID <pid>` for the LISTENING line. (Settings > Restart
+   is not a stop: while paused, the app starts its own replacement.)
 2. Copy the settings file of the copy you are replacing. On the machine and
    account that ran it, that is `%USERPROFILE%\.gc_viewer_settings.json` for
    port 5560, or `%USERPROFILE%\.gc_viewer_settings-<port>.json` for another
@@ -102,8 +163,15 @@ install's settings:
    `bestfit_*` and `sample_flag_rules` values as they are. They are the
    operator's work, and the calibration assignments are what the carbon
    labels come from (`distill.calibration_ladder`).
-4. Start the app (press Restart, or let the updater start it) and check
-   Settings shows the paths you set.
+4. Resume, and the updater starts the app within ~20 s:
+
+   ```
+   python C:\ASAPApps\updater\updater.py resume --app gc --config C:\ASAPApps\updater\config.json
+   ```
+
+   Check Settings shows the paths you set. Use the same pause / stop / edit /
+   resume sequence for any later hand edit of `settings.json`; the app
+   rewrites the file whenever settings are saved from the browser.
 
 Things to know about paths when the updater runs as **SYSTEM**:
 
@@ -117,7 +185,7 @@ Things to know about paths when the updater runs as **SYSTEM**:
   results CSV are not coordinated across processes. Until phase 2 retires the
   share copies, retire a share copy before its folder moves to ASAPSV1.
 
-## Step 4: enter the QBench API credentials (after rotating them)
+## Step 5: enter the QBench API credentials (after rotating them)
 
 **Rotate the QBench API client secret first.** The old values are in the
 `gc-data` repository's history on GitHub and hardcoded in the `qbench_client.py`
@@ -147,6 +215,37 @@ counts.
 
 The app starts without credentials (the health check runs with none). Only
 QBench lookups and uploads fail until they are entered.
+
+## Updating the share copies (legacy, until phase 2)
+
+The GC PCs keep running their copies from `\\ASAPServer\Labsharedrive` with
+`run.pyw` and do not receive releases. If Ryan approves copying a fix onto a
+share copy (for example the calibration crash fix):
+
+1. **Copy the whole tree, never individual files.** `app.py` now imports
+   `paths`, `restart_policy`, `restart_update`, `supervisor`, `version` and
+   `qbench_secrets`, so an `app.py` copied on its own does not start. Use the
+   contents of the release zip (`gc-hub-vX.Y.Z.zip`, which also carries
+   `VERSION`) and copy them over the share folder. The zip holds no state, so
+   the folder's results CSV, `processed_cdf` and caches are not touched.
+   Quit `run.pyw` (tray > Quit) first: it restarts the server whenever a
+   `.py` file changes, which mid-copy means starting a half-copied tree.
+2. **Stop any orphaned server still holding the port.** A restart from inside
+   the app (Settings > Restart, or the 3 AM auto-restart) starts a new server
+   process that `run.pyw` does not track, so quitting `run.pyw` can leave it
+   running with the old code. Check with `netstat -ano | findstr :5560` (or
+   that copy's port) and `taskkill /F /T /PID <pid>` for the LISTENING line.
+   Then relaunch `run.pyw`.
+3. **Enter the QBench API pair once per Windows account.** The old share
+   `qbench_client.py` had the pair hardcoded. This tree reads
+   `QBENCH_CLIENT_ID`/`QBENCH_CLIENT_SECRET` from the environment or
+   `%APPDATA%\ASAPLabs\qbench.json`, so on each GC PC, as the Windows account
+   that runs `run.pyw`, open **Settings > QBench API** and press **Test &
+   Save** (Step 5). Until then QBench lookups and uploads fail.
+4. **Scan, Reprocess, Export to LIMS and Rebuild DB return 409** ("Watch
+   folder is not configured") while the instrument folder (`watch_dir`) is
+   unreachable, for example when the share or the GC PC's folder is offline.
+   They work again once the folder is reachable; nothing needs restarting.
 
 ## After setup
 

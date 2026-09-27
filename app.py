@@ -1080,6 +1080,12 @@ def _await_switch_then_restart(data_dir: Path, tag: str, at: float) -> None:
     """Watch for the updater's answer, then restart. When it has the request
     this only exits (should_respawn: the switch files are gone by now, so
     only a paused updater makes us start our own replacement)."""
+    # By design: once the updater has taken the request, on_taken holds
+    # distill._CSV_LOCK until this process dies, so the updater's taskkill /F
+    # cannot cut a results-CSV write in half. Until then every request that
+    # reads the CSV (/api/table, /api/distillation-curve, the Looker's appends,
+    # ...) blocks, for up to restart_policy.ACCEPTED_WAIT_SECONDS (~45 s) if
+    # the updater is slow to stop us. Normally the stop comes within seconds.
     action = restart_policy.await_switch(data_dir, tag, at,
                                          on_taken=_hold_csv_lock_for_exit)
     _do_restart(f"switch to {tag}: {action}")
@@ -2861,36 +2867,31 @@ def _do_reindex_injection_times() -> None:
     _scan_log("Re-deriving injection times from CDFs…")
     updated = 0
     unreadable = 0
+
+    def _read_rows():
+        with csv_path.open("r", encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh)
+            return reader.fieldnames or [], list(reader)
+
     try:
+        # Snapshot under the lock, then read every CDF with it released: that
+        # can take minutes on a share, and the table, the distillation curve
+        # and the Looker's appends all wait on this lock.
         with distill._CSV_LOCK:
-            with csv_path.open("r", encoding="utf-8", newline="") as fh:
-                reader = csv.DictReader(fh)
-                fieldnames = reader.fieldnames or []
-                rows = list(reader)
+            _fieldnames, snapshot = _read_rows()
+        derived, unreadable = distill.derive_injection_times(snapshot)
+
+        # Re-read and apply only to rows still present, so rows appended,
+        # deleted or edited meanwhile are kept as they now are.
+        with distill._CSV_LOCK:
+            fieldnames, rows = _read_rows()
+            updated = distill.apply_injection_times(rows, derived)
 
             # Back up before mutating historical data.
             try:
                 shutil.copy2(csv_path, csv_path.with_suffix(csv_path.suffix + ".bak"))
             except Exception as exc:
                 LOGGER.warning("Could not back up CSV before reorder: %s", exc)
-
-            for row in rows:
-                src = (row.get("Source File") or "").strip()
-                if not src:
-                    continue
-                src_path = Path(src)
-                if not src_path.is_file():
-                    unreadable += 1
-                    continue
-                try:
-                    _sample, inj_dt = distill.cdf_metadata(src_path)
-                    new_val = inj_dt.isoformat(sep=" ")
-                    if (row.get("InjectionDateTime") or "").strip() != new_val:
-                        row["InjectionDateTime"] = new_val
-                        updated += 1
-                except Exception as exc:
-                    LOGGER.debug("Reindex: could not read %s: %s", src, exc)
-                    unreadable += 1
 
             distill._atomic_write_csv(csv_path, fieldnames, rows)
     except Exception as exc:

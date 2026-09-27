@@ -80,8 +80,9 @@ A stdlib-only module with no side effects on import, in the same style as
 
 ### 2. Port
 
-The precedence becomes `PORT` env (from the updater) → `--port` → `GC_PORT` →
-5560, still resolved in `instance.py`. The legacy multi-port launcher keeps
+Still resolved in `instance.py`. `PORT` (from the updater) wins only when
+`GC_DATA_DIR` is set (deployed mode). Legacy mode keeps `--port` → `GC_PORT` →
+5560 and ignores a stray `PORT`. The legacy multi-port launcher keeps
 working but is not used in production. `app.py` accepts and ignores
 `--no-tray` (the updater's `health_args`) and accepts `--dev`; any other
 unknown flag is an error, so a typo in the updater config fails the health
@@ -182,12 +183,13 @@ export all fail. With the old file it only "worked" because the solvent was
 labelled C5, so every carbon range was shifted by one.
 
 Fix:
-- `distill.calibration_ladder(conf) -> list[tuple[float, int]]` returns
-  (retention time, carbon number) pairs from the **saved assignments**. It is
-  the same source `_build_calibration` uses for the distillation math, so
-  ignored peaks are dropped. It falls back to sequential auto-detection only
-  when no assignments exist. The result is sorted by time and contains no
-  duplicate carbons.
+- `distill.calibration_ladder(conf) -> (times, carbons)` returns two
+  equal-length lists (retention times, carbon numbers) from the **saved
+  assignments**. It is the same source `_build_calibration` uses for the
+  distillation math, so ignored peaks are dropped. It keeps the longest run of
+  carbons increasing with retention time (duplicate, unknown and out-of-order
+  entries are dropped) and falls back to sequential auto-detection only when
+  fewer than two usable assignments remain.
 - All four copy-pasted blocks (`api_analysis`, `_run_export_analysis`, the
   analysis-PDF generator, the QBench upload worker) call it. There is one code
   path.
@@ -243,7 +245,17 @@ deviation bullets, comment presets, and the UI redesign.
   hashed password in the data dir). That is small, but it changes who can do
   what, so it waits for Ryan's call.
 - The GC PCs keep running the share copy until phase 2, so they **do not get
-  the calibration fix from a release**. The fixed files can be copied onto the
-  share as a stopgap, with Ryan's approval.
+  the calibration fix from a release**. The fixed code can be copied onto the
+  share as a stopgap, with Ryan's approval, as described in `DEPLOY.md`
+  ("Updating the share copies"): copy the **whole tree** (the release zip's
+  contents), never individual files, because `app.py` now needs `paths`,
+  `restart_policy`, `restart_update`, `supervisor`, `version` and
+  `qbench_secrets`; each GC PC's Windows account then enters the QBench API
+  pair once in Settings > QBench API (the old share `qbench_client.py` had it
+  hardcoded; this tree reads the environment or
+  `%APPDATA%\ASAPLabs\qbench.json`); kill any orphaned server still holding
+  the port (an in-app or 3 AM restart leaves a process `run.pyw` does not
+  track) and relaunch `run.pyw`. Scan, Reprocess, Export to LIMS and Rebuild
+  DB return 409 while the instrument folder is unreachable.
 - Before enabling auto_switch, `/healthz` must count a live QBench upload or
   queued reprocess as an active session (reuse `_is_server_idle`'s checks).

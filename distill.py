@@ -1026,6 +1026,61 @@ def _atomic_write_csv(path, fieldnames, rows) -> None:
         raise
 
 
+def _injection_row_key(row) -> Tuple[str, str, str]:
+    """Identity of a results row for the library reorder: the dedupe key
+    (Lab ID + InjectionDateTime) plus Source File, so two rows that share a
+    Lab ID and time but came from different CDFs are never confused."""
+    return ((row.get("Lab ID") or "").strip(),
+            (row.get("InjectionDateTime") or "").strip(),
+            (row.get("Source File") or "").strip())
+
+
+def derive_injection_times(rows, read_metadata=None):
+    """Re-derive InjectionDateTime for each row from its Source File.
+
+    Called with ``_CSV_LOCK`` **released**: it opens one CDF per row, which
+    can take minutes on a share. Returns ``({row key: new value}, unreadable)``
+    where the key is ``_injection_row_key`` of the row as it was read, and
+    ``unreadable`` counts rows whose CDF is missing or could not be read.
+    Rows without a Source File are skipped and not counted.
+    """
+    if read_metadata is None:
+        read_metadata = cdf_metadata
+    derived: Dict[Tuple[str, str, str], str] = {}
+    unreadable = 0
+    for row in rows:
+        src = (row.get("Source File") or "").strip()
+        if not src:
+            continue
+        src_path = Path(src)
+        if not src_path.is_file():
+            unreadable += 1
+            continue
+        try:
+            _sample, inj_dt = read_metadata(src_path)
+            derived[_injection_row_key(row)] = inj_dt.isoformat(sep=" ")
+        except Exception as exc:
+            LOGGER.debug("Reindex: could not read %s: %s", src, exc)
+            unreadable += 1
+    return derived, unreadable
+
+
+def apply_injection_times(rows, derived) -> int:
+    """Apply ``derive_injection_times`` output to ``rows`` (a fresh read of the
+    CSV, under ``_CSV_LOCK``), in place. Only rows whose key is still present
+    are touched: rows appended, deleted or edited since the snapshot are left
+    exactly as they are. Returns how many rows changed."""
+    updated = 0
+    for row in rows:
+        new_val = derived.get(_injection_row_key(row))
+        if new_val is None:
+            continue
+        if (row.get("InjectionDateTime") or "").strip() != new_val:
+            row["InjectionDateTime"] = new_val
+            updated += 1
+    return updated
+
+
 def _append_csv_row(dest_csv, row_data: list) -> None:
     """Always append *row_data* as a new line (writing CSV_HEADER first if the
     file is new). It does NOT replace an

@@ -190,7 +190,7 @@ python C:\ASAPApps\updater\updater.py status --config C:\ASAPApps\updater\config
 ```
 
 ```
-gc: SERVING on 5560  current=v1.2.3  junction->v1.2.3  staged=v1.2.3 healthy=True
+gc: SERVING on 5560  current=v1.2.3 junction->v1.2.3 staged=v1.2.3 healthy=True
 ```
 
 `current` is what is running. `staged` ahead of `current` means it is built and
@@ -225,8 +225,11 @@ first, or publish it without deploying (below).
 python C:\ASAPApps\updater\updater.py rollback --app gc
 ```
 
-**Publishing without deploying**: mark the GitHub release as a prerelease.
-`/releases/latest` skips prereleases, so the updater never sees it:
+**Publishing without deploying**: a tag with a pre-release suffix
+(`v1.2.3-rc.1`, anything containing `-`) is published as a **prerelease** by
+`release.yml` automatically. `/releases/latest` skips prereleases, so the
+updater never stages an rc. To do the same for an existing release, mark it as
+a prerelease by hand:
 
 ```bash
 gh release edit v1.2.3 --prerelease          # updater ignores it
@@ -253,8 +256,19 @@ exiting (`restart_policy.should_respawn`).
 
 - **The updater tracks whatever GitHub calls *latest*, not the highest
   version.** GitHub's latest is the most recently created non-prerelease, so
-  publishing `v1.0.9` after `v1.2.0` deploys `v1.0.9`. That is how you
+  publishing `v1.0.9` after `v1.2.0` stages `v1.0.9`. That is how you
   re-release a known-good build, and it is also how a mistyped tag ships.
+- **A re-released older build (or any tag with a suffix) can only be
+  installed with the CLI `switch`, not the Restart button.** Restart asks for
+  a switch only when `restart_update.is_upgrade` says the staged tag is a
+  strictly newer plain `vX.Y.Z` than the running one; an older version, or a
+  tag like `v1.2.3+build.1`, is never offered: the button stays "Restart" and
+  restarts the same version. On ASAPSV1:
+  `python C:\ASAPApps\updater\updater.py switch --app gc --tag v1.0.9`.
+  (For an immediate undo, `rollback` is still the tool; see §5.)
+- **Tags containing `-` are prereleases** (`v1.2.3-rc.1`): published, never
+  staged. Hand one over with `gh release edit <tag> --prerelease=false`; it
+  then has a suffix, so it too needs the CLI `switch` (above).
 - **The tag becomes a folder name** (`releases\v1.2.3\`). `package_release.sh`
   accepts only `vMAJOR.MINOR.PATCH` with an optional `-prerelease`/`+build`
   suffix of letters, digits, dots and hyphens that does not end in `.` or `-`

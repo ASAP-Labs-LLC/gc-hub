@@ -19,6 +19,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import stat
+import tempfile
+import time
 from pathlib import Path
 from typing import Dict
 
@@ -168,9 +172,52 @@ def load_settings() -> Dict[str, str]:
     return conf
 
 
+# On Windows os.replace fails with PermissionError while another handle without
+# delete-sharing has settings.json open (a concurrent load_settings, antivirus),
+# usually for a moment only. Same idea as distill._replace_retrying.
+SAVE_REPLACE_ATTEMPTS = 5
+SAVE_REPLACE_BACKOFF_SECONDS = 0.1
+
+
+def _replace_retrying(tmp: str, path: Path) -> None:
+    for attempt in range(SAVE_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == SAVE_REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(SAVE_REPLACE_BACKOFF_SECONDS)
+
+
 def save_settings(conf: Dict[str, str]) -> None:
+    """Write ``conf`` to ``CONFIG_PATH`` atomically (same pattern as
+    ``qbench_secrets.save_default``): a temp file in the same folder, fsync,
+    then ``os.replace``. A failure part-way through leaves the previous
+    settings file untouched (it holds the operator's calibration assignments)
+    and removes the temp file. Errors are logged, never raised."""
+    tmp = None
     try:
-        with CONFIG_PATH.open("w", encoding="utf-8") as fh:
+        directory = str(CONFIG_PATH.parent)
+        # Named after the file, so a leftover from a hard kill is recognisable
+        # next to it (legacy mode keeps settings in the home folder).
+        fd, tmp = tempfile.mkstemp(prefix=f".{CONFIG_PATH.name}.", suffix=".tmp",
+                                   dir=directory)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(conf, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:  # keep the existing file's permissions (mkstemp makes it 0600)
+            os.chmod(tmp, stat.S_IMODE(CONFIG_PATH.stat().st_mode))
+        except OSError:
+            pass
+        _replace_retrying(tmp, CONFIG_PATH)
+        tmp = None
     except Exception as exc:
         LOGGER.error("Settings save failed: %s", exc)
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass

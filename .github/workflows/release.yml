@@ -58,8 +58,8 @@ jobs:
         run: |
           set -euo pipefail
           # A quoted heredoc, so backticks and backslashes in the notes are
-          # literal.
-          cat > dist/notes.md <<'NOTES_END'
+          # literal. <tag> is filled in below, in this text only.
+          standard=$(cat <<'NOTES_END'
           Automated release of GC Hub.
 
           The updater on ASAPSV1 unpacks this into `C:\ASAPApps\gc\releases\<tag>\`
@@ -72,7 +72,15 @@ jobs:
           sha256sum -c gc-hub-<tag>.zip.sha256
           ```
           NOTES_END
-          sed -i "s/<tag>/$TAG/g" dist/notes.md
+          )
+          # Hand-written notes for this tag (docs/release-notes/<tag>.md) go
+          # first, verbatim, when the file exists.
+          : > dist/notes.md
+          if [ -f "docs/release-notes/$TAG.md" ]; then
+            cat "docs/release-notes/$TAG.md" >> dist/notes.md
+            printf '\n---\n\n' >> dist/notes.md
+          fi
+          printf '%s\n' "${standard//<tag>/$TAG}" >> dist/notes.md
           cat dist/notes.md
 
       # Safe to re-run. A release that already has its checksum asset is
@@ -95,9 +103,18 @@ jobs:
             echo "Deleting partial release $TAG (the tag stays)."
             gh release delete "$TAG" --yes
           fi
+          # A tag with a pre-release suffix (v1.2.3-rc.1) is published as a
+          # prerelease. The updater follows /releases/latest, which skips
+          # prereleases, so an rc is never staged on ASAPSV1.
+          if [[ "$TAG" == *-* ]]; then
+            set -- --prerelease
+          else
+            set --
+          fi
           gh release create "$TAG" \
             "dist/gc-hub-$TAG.zip" \
             "dist/gc-hub-$TAG.zip.sha256" \
             --title "$TAG" \
             --notes-file dist/notes.md \
-            --verify-tag
+            --verify-tag \
+            "$@"
