@@ -1,18 +1,21 @@
-flask
-numpy
-scipy
-pandas
-netCDF4
-plotly
-kaleido
-xhtml2pdf
-pystray
-Pillow
-watchdog
+# Pinned to the versions the test suite passes on (Python 3.12, macOS).
+# The ASAPSV1 updater builds each release's venv from this file with its own
+# Python on Windows; see RELEASING.md "Dependency pins" before bumping.
+flask==3.1.3
+numpy==2.5.3
+scipy==1.18.1
+pandas==3.0.6
+netCDF4==1.7.4
+plotly==7.1.0
+kaleido==1.4.0
+xhtml2pdf==0.2.20
+pystray==0.19.5
+Pillow==12.3.0
+watchdog==6.0.0
 
 # QBench PDF uploader
-selenium
-webdriver-manager
-chromedriver-autoinstaller
-PyJWT
-requests
+selenium==4.49.0
+webdriver-manager==4.1.2
+chromedriver-autoinstaller==0.6.4
+PyJWT==2.15.0
+requests==2.34.2
