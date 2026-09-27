@@ -17,13 +17,14 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.parse
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bootapp import ROOT, booted, get, post  # noqa: E402
+from bootapp import ROOT, booted, get, post, send  # noqa: E402
 
 sys.path.insert(0, str(ROOT))
 import qbench_secrets  # noqa: E402
@@ -383,6 +384,253 @@ class CredentialRouteTests(unittest.TestCase):
                 self.assertFalse((home / "qbench.json").exists())
             logs = _logs(tmp)
             self.assertNotIn(GOOD_SECRET, logs)
+
+
+# ───────────────────── review fixes: store hardening ───────────────────── #
+
+class SaveDefaultHardeningTests(unittest.TestCase):
+    def test_failed_write_over_corrupt_store_leaves_it_in_place(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t, "qbench.json")
+            p.write_text("{not json")
+            with mock.patch.dict(os.environ, {"QBENCH_STORE_PATH": str(p)}), \
+                 mock.patch.object(qbench_secrets.json, "dump", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    qbench_secrets.save_default("id-x", "sec-x")
+            self.assertEqual(p.read_text(), "{not json", "old store must stay put")
+            self.assertEqual(os.listdir(t), ["qbench.json"], "no backup, no temp file")
+
+    def test_corrupt_backup_is_private_and_only_newest_kept(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t, "qbench.json")
+            old = Path(t, "qbench.json.corrupt-20200101-000000")
+            old.write_text("older junk")
+            p.write_text("{not json")
+            with mock.patch.dict(os.environ, {"QBENCH_STORE_PATH": str(p)}):
+                qbench_secrets.save_default("id-x", "sec-x")
+                self.assertEqual(qbench_secrets.get_client_id(), "id-x")
+            backups = sorted(n for n in os.listdir(t) if n.startswith("qbench.json.corrupt-"))
+            self.assertEqual(len(backups), 1, backups)
+            self.assertNotEqual(backups[0], old.name)
+            b = Path(t, backups[0])
+            self.assertEqual(b.read_text(), "{not json")
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(b.stat().st_mode), 0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions")
+    def test_new_store_directory_is_private(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t, "fresh", "qbench.json")
+            with mock.patch.dict(os.environ, {"QBENCH_STORE_PATH": str(p)}):
+                qbench_secrets.save_default("id-x", "sec-x")
+            self.assertEqual(stat.S_IMODE(p.parent.stat().st_mode), 0o700)
+
+
+class SecretMissingMessageTests(unittest.TestCase):
+    def test_points_to_settings_screen(self):
+        with tempfile.TemporaryDirectory() as t, mock.patch.dict(
+                os.environ, {"QBENCH_STORE_PATH": str(Path(t, "q.json"))}):
+            os.environ.pop("QBENCH_CLIENT_ID", None)
+            with self.assertRaises(qbench_secrets.QBenchSecretMissing) as cm:
+                qbench_secrets.get_client_id()
+            msg = str(cm.exception)
+            self.assertIn("Settings > QBench API", msg)
+            self.assertIn("QBENCH_CLIENT_ID", msg)
+            self.assertIn(str(Path(t, "q.json")), msg)
+            Path(t, "q.json").write_text(json.dumps({"profiles": {}}))
+            with self.assertRaises(qbench_secrets.QBenchSecretMissing) as cm:
+                qbench_secrets.get_client_id(profile="tools")
+            self.assertIn("Settings > QBench API", str(cm.exception))
+
+
+class DescribeNonStringTests(unittest.TestCase):
+    def test_non_string_values_read_as_unconfigured(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t, "q.json")
+            for cid, sec in ((12345678, "s"), ("id-1234", ["x"]), ({"a": 1}, 99)):
+                p.write_text(json.dumps({"client_id": cid, "client_secret": sec}))
+                with mock.patch.dict(os.environ, {"QBENCH_STORE_PATH": str(p)}):
+                    d = qbench_secrets.describe()
+                self.assertIs(d["configured"], False, (cid, sec))
+                self.assertIsInstance(d["client_id_hint"], str)
+
+
+# ───────────────────── review fixes: bounded probe ─────────────────────── #
+
+class _CountingHandler(http.server.BaseHTTPRequestHandler):
+    """Always 400 (with a Date header, which is what triggers the clock-skew
+    retry), or hangs when the server's ``hang`` event is set."""
+
+    def do_POST(self):  # noqa: N802
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.server.hits.append(time.time())
+        if self.server.hang:
+            self.server.release.wait(30)
+            return
+        body = json.dumps({"error": "invalid_grant"}).encode()
+        self.send_response(400)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextlib.contextmanager
+def counting_token_server(hang=False):
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _CountingHandler)
+    srv.hits, srv.hang, srv.release = [], hang, threading.Event()
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}/token", srv
+    finally:
+        srv.release.set()
+        srv.shutdown()
+        srv.server_close()
+
+
+@unittest.skipUnless(HAVE_DEPS, "jwt/requests not installed")
+class ProbeClientTests(unittest.TestCase):
+    def setUp(self):
+        sys.modules.pop("qbench_client", None)
+        self.addCleanup(sys.modules.pop, "qbench_client", None)
+        self.mod = importlib.import_module("qbench_client")
+
+    def test_retry_skew_false_makes_one_request(self):
+        with counting_token_server() as (url, srv):
+            c = self.mod.QBenchAPIClient(client_id="i", client_secret="s", token_url=url)
+            with self.assertRaises(requests.exceptions.HTTPError):
+                c.get_access_token(force=True, retry_skew=False)
+            self.assertEqual(len(srv.hits), 1)
+
+    def test_retry_skew_default_still_retries(self):
+        with counting_token_server() as (url, srv):
+            c = self.mod.QBenchAPIClient(client_id="i", client_secret="s", token_url=url)
+            with self.assertRaises(requests.exceptions.HTTPError):
+                c.get_access_token(force=True)
+            self.assertEqual(len(srv.hits), 2)
+
+    def test_private_rate_limiter(self):
+        c = self.mod.QBenchAPIClient(client_id="i", client_secret="s",
+                                     private_rate_limiter=True)
+        self.assertIsNot(c.rate_limiter, self.mod.GLOBAL_RATE_LIMITER)
+        d = self.mod.QBenchAPIClient(client_id="i", client_secret="s")
+        self.assertIs(d.rate_limiter, self.mod.GLOBAL_RATE_LIMITER)
+
+
+class ProbeShapeTests(unittest.TestCase):
+    """The route's probe is bounded: short tuple timeout, private limiter,
+    no skew retry."""
+
+    def test_probe_arguments(self):
+        tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "api_qbench_api_credentials_post")
+        src = ast.unparse(fn)
+        self.assertIn("private_rate_limiter=True", src)
+        self.assertIn("retry_skew=False", src)
+        self.assertRegex(src, r"timeout=\(\s*\d+,\s*\d+\s*\)")
+
+
+@unittest.skipUnless(HAVE_DEPS, "flask/netCDF4/jwt/requests not installed")
+class BoundedProbeRouteTests(unittest.TestCase):
+    BODY = {"client_id": GOOD_ID, "client_secret": BAD_SECRET, "password": "admin"}
+
+    def test_rejection_is_one_token_request(self):
+        with tempfile.TemporaryDirectory() as t, counting_token_server() as (url, srv):
+            with booted(Path(t), extra_env={"QBENCH_TOKEN_URL": url}) as (port, *_):
+                code, body = post(port, ROUTE, self.BODY)
+            self.assertEqual(code, 400, body)
+            self.assertIn("400", body["error"])
+            self.assertEqual(len(srv.hits), 1)
+
+    def test_hanging_token_server_times_out_quickly(self):
+        with tempfile.TemporaryDirectory() as t, counting_token_server(hang=True) as (url, srv):
+            with booted(Path(t), extra_env={"QBENCH_TOKEN_URL": url}) as (port, _p, _d, home):
+                start = time.time()
+                code, body = post(port, ROUTE, self.BODY, timeout=25)
+                elapsed = time.time() - start
+                self.assertFalse((home / "qbench.json").exists())
+            self.assertEqual(code, 400, body)
+            self.assertIn("timed out", body["error"])
+            self.assertNotIn(BAD_SECRET, json.dumps(body))
+            self.assertLess(elapsed, 12.5)
+            self.assertEqual(len(srv.hits), 1)
+
+
+# ───────────────────── review fixes: cross-site writes ─────────────────── #
+
+@unittest.skipUnless(HAVE_DEPS, "flask/netCDF4/jwt/requests not installed")
+class CrossSiteTests(unittest.TestCase):
+    JSON = {"Content-Type": "application/json"}
+
+    def test_guard(self):
+        with tempfile.TemporaryDirectory() as t, fake_token_server() as url:
+            with booted(Path(t), extra_env={"QBENCH_TOKEN_URL": url}) as (port, _p, _d, home):
+                store = home / "qbench.json"
+                good = json.dumps({"client_id": GOOD_ID, "client_secret": GOOD_SECRET,
+                                   "password": "admin"}).encode()
+                me = f"http://127.0.0.1:{port}"
+
+                # text/plain is a CORS "simple" request: refused on gated routes.
+                code, body = send(port, ROUTE, good, {"Content-Type": "text/plain"})
+                self.assertEqual(code, 415, body)
+                code, body = send(port, "/api/save-analysis-defaults",
+                                  json.dumps({"password": "admin", "params": {}}).encode(),
+                                  {"Content-Type": "text/plain"})
+                self.assertEqual(code, 415, body)
+                self.assertFalse(store.exists())
+
+                # Foreign Origin / cross-site fetch metadata: 403.
+                for hdrs in ({"Origin": "http://evil.example"},
+                             {"Origin": f"http://127.0.0.1:{port + 1}"},
+                             {"Origin": "null"},
+                             {"Sec-Fetch-Site": "cross-site"},
+                             {"Sec-Fetch-Site": "same-site"}):
+                    code, body = send(port, ROUTE, good, {**self.JSON, **hdrs})
+                    self.assertEqual(code, 403, hdrs)
+                    self.assertEqual(body, {"error": "Cross-site request refused"}, hdrs)
+                self.assertFalse(store.exists())
+
+                # Non-admin state-changing route: guarded too.
+                dry = json.dumps({"dry_run": True}).encode()
+                code, body = send(port, "/api/restart", dry,
+                                  {**self.JSON, "Origin": "http://evil.example"})
+                self.assertEqual(code, 403)
+                code, body = send(port, "/api/restart", dry, self.JSON)
+                self.assertEqual(code, 200, body)
+                code, body = send(port, "/api/restart", dry,
+                                  {**self.JSON, "Origin": me, "Sec-Fetch-Site": "same-origin"})
+                self.assertEqual(code, 200, body)
+
+                # Reads are not guarded.
+                code, _ = send(port, ROUTE, None, {"Origin": "http://evil.example"}, method="GET")
+                self.assertEqual(code, 200)
+
+                # The app's own UI: matching Origin + same-origin + JSON works.
+                code, body = send(port, ROUTE, good, {**self.JSON, "Origin": me,
+                                                      "Sec-Fetch-Site": "same-origin"})
+                self.assertEqual(code, 200, body)
+                self.assertTrue(store.exists())
+
+
+class UiShapeTests(unittest.TestCase):
+    def test_admin_input_is_not_autofilled(self):
+        html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+        import re
+        tag = re.search(r'<input[^>]*id="qb-api-admin"[^>]*>', html).group(0)
+        self.assertIn('autocomplete="new-password"', tag)
+
+    def test_save_request_has_timeout_and_no_noop(self):
+        js = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
+        start = js.index("async function saveQbApiCredentials")
+        fn = js[start:js.index("\n}\n", start)]
+        self.assertIn("AbortController", fn)
+        self.assertIn("signal", fn)
+        self.assertNotIn("body.client_secret = ''", fn)
 
 
 if __name__ == "__main__":

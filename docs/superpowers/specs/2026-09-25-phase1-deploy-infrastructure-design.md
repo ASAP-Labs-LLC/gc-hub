@@ -150,15 +150,20 @@ Copy COA's file byte-for-byte. A test pins its sha256 against the copy in
   (temp file + `os.replace`) to the existing store path. It merges into the
   existing JSON so other `profiles` are preserved. On POSIX the file is
   created `0600`; on Windows it inherits the `%APPDATA%` ACL.
-- `GET /api/qbench-credentials` returns `{configured: bool, client_id_hint:
+- `GET /api/qbench-api-credentials` returns `{configured: bool, client_id_hint:
   "…abcd", store_path}`. **The secret is never returned.**
-- `POST /api/qbench-credentials` takes `{client_id, client_secret, password}`:
+- `POST /api/qbench-api-credentials` takes `{client_id, client_secret, password}`
+  (JSON only: any other content type is refused with 415). The older
+  `/api/qbench-credentials` is the Selenium web-login route and is unchanged:
   - It is gated by the same admin password as "Set as Default". That password
     is currently a hardcoded `"admin"`; the design follows the existing gate
     and flags it (see Open items).
   - It **test-authenticates first** by requesting a token with the submitted
-    pair, and saves only on success. Failure returns 400 with QBench's error
-    message and nothing is written.
+    pair, and saves only on success. Failure returns 400 with a generic
+    reason (the HTTP status or "timed out", never QBench's response text,
+    which could echo the assertion) and nothing is written. The probe is
+    bounded: a (5 s connect, 10 s read) timeout, its own rate limiter, and
+    exactly one token request (no clock-skew retry).
 - UI: a "QBench API" section in Settings with Client ID, Client Secret
   (password input, never pre-filled), admin password, and a "Test & Save"
   button. When configured, the status line reads "Configured (…abcd)".
@@ -222,10 +227,18 @@ deviation bullets, comment presets, and the UI redesign.
    then restart the updater task. Port 5560 must be free on ASAPSV1.
 3. Enter the QBench API credentials in the new Settings screen, **after
    rotating them**: the old values are in `gc-data`'s history on GitHub and
-   hardcoded in the live `qbench_client.py` on the share.
+   hardcoded in the live `qbench_client.py` on the share. The store lands in
+   the `%APPDATA%` of the account the updater's scheduled task runs as; for
+   SYSTEM that is
+   `C:\Windows\System32\config\systemprofile\AppData\Roaming\ASAPLabs\qbench.json`.
+   Settings > QBench API shows the exact path.
 
 ## Open items
 
+- State-changing `/api/` requests that a browser marks as cross-site (a
+  foreign `Origin`, or `Sec-Fetch-Site` other than `same-origin`/`none`) are
+  refused with 403, but DNS rebinding is not mitigated; a `Host` allowlist
+  would be the fix.
 - The admin gate is a hardcoded `"admin"`. It should become a setting (a
   hashed password in the data dir). That is small, but it changes who can do
   what, so it waits for Ryan's call.

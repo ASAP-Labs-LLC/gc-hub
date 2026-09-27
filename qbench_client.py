@@ -9,7 +9,7 @@ import time
 from collections import deque
 from datetime import date
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import jwt  # type: ignore
 import requests
@@ -69,9 +69,13 @@ class QBenchAPIClient:
         client_secret: Optional[str] = None,
         token_url: Optional[str] = None,
         api_base_url: str = API_BASE_URL,
-        timeout: int = DEFAULT_TIMEOUT,
+        timeout: Union[float, Tuple[float, float]] = DEFAULT_TIMEOUT,
         max_calls_per_minute: int = MAX_CALLS_PER_MINUTE,
+        private_rate_limiter: bool = False,
     ) -> None:
+        """``timeout`` goes straight to requests, so ``(connect, read)`` works.
+        ``private_rate_limiter=True`` keeps this client off the shared
+        limiter (a one-off credential probe must not queue behind uploads)."""
         self.client_id = client_id or qbench_secrets.get_client_id()
         self.client_secret = client_secret or qbench_secrets.get_client_secret()
         self.token_url = token_url or os.getenv("QBENCH_TOKEN_URL") or DEFAULT_TOKEN_URL
@@ -89,7 +93,7 @@ class QBenchAPIClient:
         self.session.mount("http://", adapter)
 
         # Allow short bursts while respecting the documented caps (shared across instances).
-        if max_calls_per_minute == MAX_CALLS_PER_MINUTE:
+        if max_calls_per_minute == MAX_CALLS_PER_MINUTE and not private_rate_limiter:
             self.rate_limiter = GLOBAL_RATE_LIMITER
         else:
             self.rate_limiter = RateLimiter(max_calls_per_minute, 60.0)
@@ -103,7 +107,9 @@ class QBenchAPIClient:
             token = token.decode("utf-8")
         return token
 
-    def get_access_token(self, *, force: bool = False) -> str:
+    def get_access_token(self, *, force: bool = False, retry_skew: bool = True) -> str:
+        """``retry_skew=False`` skips the one clock-skew retry after a 400,
+        so a credential probe makes exactly one token request."""
         now = int(time.time() + self.time_offset)
         with self._token_lock:
             if not force and self._access_token and now < (self._token_expires_at - 15):
@@ -121,7 +127,7 @@ class QBenchAPIClient:
                 response.raise_for_status()
             except requests.exceptions.HTTPError as e:
                 # Check for clock skew (400 Bad Request often means "Future IAT")
-                if e.response is not None and e.response.status_code == 400:
+                if retry_skew and e.response is not None and e.response.status_code == 400:
                     server_date = e.response.headers.get("Date")
                     if server_date:
                         try:

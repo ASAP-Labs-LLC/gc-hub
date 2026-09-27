@@ -33,6 +33,7 @@ import zipfile
 import threading
 import time
 import traceback
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
@@ -845,6 +846,73 @@ def _check_admin(body) -> bool:
 
 
 # ===================================================================== #
+#  Cross-site write guard
+# ===================================================================== #
+# There is no login or session, and the app listens on the lab LAN, so any
+# page open in a lab browser could otherwise POST here: get_json(force=True)
+# parses a text/plain body, which is a CORS "simple" request (no preflight).
+# Browsers mark every fetch with Origin (on non-GET) and Sec-Fetch-Site; the
+# app's own pages send a matching Origin and "same-origin". Requests with
+# neither header (curl, the updater, tests) are not from a browser page and
+# pass. DNS rebinding is not covered (see the spec's Open items).
+
+_STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_ALLOWED_FETCH_SITES = frozenset({"same-origin", "none"})
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _host_port(netloc: str, scheme: str):
+    """``(hostname, port)`` from a ``host[:port]`` string, or None."""
+    try:
+        parts = urllib.parse.urlsplit(f"{scheme}://{netloc}")
+        host = (parts.hostname or "").lower()
+        port = parts.port or _DEFAULT_PORTS.get(scheme)
+    except ValueError:
+        return None
+    return (host, port) if host else None
+
+
+def _is_cross_site_request() -> bool:
+    site = request.headers.get("Sec-Fetch-Site")
+    if site is not None and site.strip().lower() not in _ALLOWED_FETCH_SITES:
+        return True
+    origin = request.headers.get("Origin")
+    if origin is not None:
+        try:
+            parts = urllib.parse.urlsplit(origin.strip())
+        except ValueError:
+            return True
+        if parts.scheme not in _DEFAULT_PORTS or not parts.netloc:
+            return True  # includes the opaque origin "null"
+        mine = _host_port(request.host, request.scheme)
+        return mine is None or _host_port(parts.netloc, parts.scheme) != mine
+    return False
+
+
+@app.before_request
+def _refuse_cross_site_writes():
+    """Refuse state-changing /api/ requests that a browser marks as coming
+    from another site. Registered before activity tracking, so a refused
+    request does not count as use."""
+    if request.method in _STATE_CHANGING_METHODS and request.path.startswith("/api/") \
+            and _is_cross_site_request():
+        LOGGER.warning("Refused cross-site %s %s from %s (Origin %r, Sec-Fetch-Site %r)",
+                       request.method, request.path, request.remote_addr,
+                       request.headers.get("Origin"), request.headers.get("Sec-Fetch-Site"))
+        return jsonify({"error": "Cross-site request refused"}), 403
+    return None
+
+
+def _admin_json_body():
+    """The JSON body of an admin-gated route, or an error response. These
+    routes require ``Content-Type: application/json`` on top of the
+    cross-site guard, so no form or text/plain post can reach them."""
+    if not request.is_json:
+        return None, _error("Expected Content-Type: application/json", 415)
+    return request.get_json(silent=True) or {}, None
+
+
+# ===================================================================== #
 #  Activity tracking & server restart
 # ===================================================================== #
 
@@ -1640,7 +1708,9 @@ def api_save_settings():
 def api_save_analysis_defaults():
     """Save current analysis parameters as persistent defaults (password-protected)."""
     try:
-        body = request.get_json(force=True)
+        body, err = _admin_json_body()
+        if err:
+            return err
         if not _check_admin(body):
             return _error("Incorrect password", 403)
         params = body.get("params", {})
@@ -3971,7 +4041,9 @@ def api_qbench_api_credentials_get():
 def api_qbench_api_credentials_post():
     """Test the submitted pair by requesting a token; save it only if QBench
     accepts it. Admin-gated."""
-    body = request.get_json(force=True, silent=True) or {}
+    body, err = _admin_json_body()
+    if err:
+        return err
     if not _check_admin(body):
         return _error("Incorrect password", 403)
     cid = body.get("client_id")
@@ -3983,8 +4055,13 @@ def api_qbench_api_credentials_post():
     if qbench_client is None:
         return _error("QBench client unavailable (jwt/requests not installed)", 500)
     try:
-        probe = qbench_client.QBenchAPIClient(client_id=cid, client_secret=sec, timeout=15)
-        probe.get_access_token(force=True)
+        # Bounded so a request thread is not held for a minute: short
+        # (connect, read) timeout, its own rate limiter (never queued behind
+        # an upload), and one token request (no clock-skew retry).
+        probe = qbench_client.QBenchAPIClient(client_id=cid, client_secret=sec,
+                                              timeout=(5, 10),  # (connect, read) s
+                                              private_rate_limiter=True)
+        probe.get_access_token(force=True, retry_skew=False)
     except Exception as exc:
         msg = _token_failure_message(exc)
         LOGGER.warning("QBench credential test failed: %s", msg)

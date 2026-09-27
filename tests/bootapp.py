@@ -47,6 +47,25 @@ def post(port, path, body, timeout=10.0):
         return e.code, json.loads(e.read() or b"null")
 
 
+def send(port, path, data=b"", headers=None, method="POST", timeout=10.0):
+    """A raw request with exactly the given body bytes and headers (for
+    content-type and cross-site checks). Returns ``(status, parsed JSON or
+    None)``."""
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data,
+                                 method=method, headers=dict(headers or {}))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+            code = r.status
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        code = e.code
+    try:
+        return code, json.loads(raw or b"null")
+    except ValueError:
+        return code, None
+
+
 def wait_for(predicate, timeout=20.0, interval=0.25) -> bool:
     """Poll ``predicate`` until it is truthy or ``timeout`` elapses."""
     deadline = time.time() + timeout

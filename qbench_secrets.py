@@ -23,8 +23,10 @@ The store is deliberately outside every repository. The only writer is
 :func:`save_default`, used by the app's Settings screen after QBench has
 accepted the pair.
 """
+import glob
 import json
 import os
+import shutil
 import tempfile
 import time
 
@@ -63,6 +65,9 @@ def _load_store():
         return json.load(fh)
 
 
+_WHERE_TO_FIX = "Enter it in the app under Settings > QBench API"
+
+
 def _resolve(key, env_var, profile=None):
     store = _load_store()
     if profile is None:
@@ -72,16 +77,22 @@ def _resolve(key, env_var, profile=None):
         if profile not in profiles:
             raise QBenchSecretMissing(
                 f"QBench profile {profile!r} is not defined in the local store "
-                f"at {_store_path()}. Add it under \"profiles\" rather than "
-                f"falling back to the default client."
+                f"at {_store_path()}. Settings > QBench API sets only the "
+                f"default pair; add this profile under \"profiles\" in that "
+                f"file rather than falling back to the default client."
             )
         value = profiles[profile].get(key)
     if not value:
-        where = f"profile {profile!r}" if profile else "the default pair"
+        if profile:
+            raise QBenchSecretMissing(
+                f"QBench {key} is not configured for profile {profile!r}. "
+                f"Settings > QBench API sets only the default pair; add "
+                f"{key!r} under \"profiles\" in the local store at {_store_path()}."
+            )
         raise QBenchSecretMissing(
-            f"QBench {key} is not configured for {where}. Set the {env_var} "
-            f"environment variable, or add {key!r} to the local store at "
-            f"{_store_path()}."
+            f"QBench {key} is not configured. {_WHERE_TO_FIX}, or set the "
+            f"{env_var} environment variable, or add {key!r} to the local "
+            f"store at {_store_path()}."
         )
     return value
 
@@ -99,8 +110,11 @@ def get_client_id(profile=None):
 def save_default(client_id, client_secret):
     """Write the default pair into the local store, keeping every other key
     and profile. Atomic (temp file + ``os.replace``), ``0600`` on POSIX, parent
-    directory created. A store that is not valid JSON is kept aside as
-    ``<store>.corrupt-<time>`` and replaced. Never logs or returns the secret.
+    directory created ``0700``. The new store is written in full before
+    anything else is touched, so a failed write leaves the old store in place.
+    A store that is not valid JSON is then copied aside as
+    ``<store>.corrupt-<time>`` (``0600``; only the newest such copy is kept)
+    and replaced. Never logs or returns the secret.
     """
     client_id = (client_id or "").strip()
     client_secret = (client_secret or "").strip()
@@ -108,13 +122,14 @@ def save_default(client_id, client_secret):
         raise ValueError("Client ID and Client Secret are both required")
     path = _store_path()
     directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    corrupt = False
     try:
         data = _load_store()
         if not isinstance(data, dict):
             raise ValueError("store is not a JSON object")
     except ValueError:  # includes json.JSONDecodeError
-        os.replace(path, f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}")
+        corrupt = True
         data = {}
     data["client_id"] = client_id
     data["client_secret"] = client_secret
@@ -127,6 +142,8 @@ def save_default(client_id, client_secret):
             json.dump(data, fh, indent=2)
             fh.flush()
             os.fsync(fh.fileno())
+        if corrupt:
+            _keep_corrupt_copy(path)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -136,6 +153,21 @@ def save_default(client_id, client_secret):
         raise
     if os.name != "nt":
         os.chmod(path, 0o600)
+
+
+def _keep_corrupt_copy(path):
+    """Copy an unreadable store to ``<store>.corrupt-<time>`` (``0600`` on
+    POSIX) and drop any older such copies. It may hold a secret."""
+    backup = f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+    shutil.copyfile(path, backup)
+    if os.name != "nt":
+        os.chmod(backup, 0o600)
+    for old in glob.glob(glob.escape(path) + ".corrupt-*"):
+        if old != backup:
+            try:
+                os.unlink(old)
+            except OSError:
+                pass
 
 
 def describe():
@@ -151,8 +183,10 @@ def describe():
         data = {}
     env_id = os.environ.get("QBENCH_CLIENT_ID") or ""
     env_secret = os.environ.get("QBENCH_CLIENT_SECRET") or ""
-    cid = env_id or data.get("client_id") or ""
-    secret = env_secret or data.get("client_secret") or ""
+    stored_id = data.get("client_id")
+    stored_secret = data.get("client_secret")
+    cid = env_id or (stored_id if isinstance(stored_id, str) else "")
+    secret = env_secret or (stored_secret if isinstance(stored_secret, str) else "")
     configured = bool(cid and secret)
     if not configured:
         source = ""

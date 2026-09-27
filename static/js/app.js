@@ -262,8 +262,9 @@ function initParamTooltips() {
    4. API HELPERS
    =================================================================== */
 
-async function api(method, url, body) {
-    const opts = { method, headers: {} };
+async function api(method, url, body, extra) {
+    // extra: optional fetch options merged in (e.g. { signal } for a timeout).
+    const opts = { ...(extra || {}), method, headers: {} };
     if (body !== undefined) {
         opts.headers['Content-Type'] = 'application/json';
         opts.body = JSON.stringify(body);
@@ -3078,8 +3079,12 @@ async function saveQbApiCredentials() {
     _clearQbApiSecrets();
     if (msg) { msg.style.color = '#7d8590'; msg.textContent = 'Checking with QBench\u2026'; }
     if (btn) btn.disabled = true;
+    // The server gives QBench ~15 s at most; don't leave the button disabled
+    // forever if the request itself stalls.
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 20000);
     try {
-        const status = await apiPost('/api/qbench-api-credentials', body);
+        const status = await api('POST', '/api/qbench-api-credentials', body, { signal: ctl.signal });
         _renderQbApiStatus(status);
         if (idEl) idEl.value = '';
         if (msg) {
@@ -3089,10 +3094,12 @@ async function saveQbApiCredentials() {
                 : 'QBench accepted the credentials. Saved.';
         }
     } catch (e) {
-        if (msg) { msg.style.color = '#f85149'; msg.textContent = e.message; }
+        const text = e.name === 'AbortError'
+            ? 'No answer from the server in 20 s. Reopen Settings to check the status before trying again.'
+            : e.message;
+        if (msg) { msg.style.color = '#f85149'; msg.textContent = text; }
     } finally {
-        body.client_secret = '';
-        body.password = '';
+        clearTimeout(timer);
         if (btn) btn.disabled = false;
     }
 }
