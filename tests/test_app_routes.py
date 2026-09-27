@@ -44,6 +44,7 @@ EXPECTED_ROUTES = {
     "/api/notifications/<notif_id>/dismiss",
     "/api/notifications/dismiss-all",
     "/api/open-folder",
+    "/api/qbench-api-credentials",
     "/api/qbench-cancel",
     "/api/qbench-credentials",
     "/api/qbench-skip-item",

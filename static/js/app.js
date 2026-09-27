@@ -3029,7 +3029,72 @@ function openSettingsModal() {
     // Populate comparison standards list in settings
     renderSettingsStandards();
 
+    // QBench API credentials: status only; the secret is never sent back.
+    _clearQbApiSecrets();
+    const qbMsg = document.getElementById('qb-api-message');
+    if (qbMsg) qbMsg.textContent = '';
+    refreshQbApiStatus();
+
     openModal(modal);
+}
+
+/* ── QBench API credentials (Settings modal) ───────────────────────── */
+
+function _renderQbApiStatus(status) {
+    const el = document.getElementById('qb-api-status');
+    if (el) el.textContent = qbApiStatusText(status);
+    const pathEl = document.getElementById('qb-api-store-path');
+    if (pathEl) pathEl.textContent = (status && status.store_path) || '';
+}
+
+async function refreshQbApiStatus() {
+    try {
+        _renderQbApiStatus(await apiGet('/api/qbench-api-credentials'));
+    } catch (e) {
+        const el = document.getElementById('qb-api-status');
+        if (el) el.textContent = `Unknown (${e.message})`;
+    }
+}
+
+function _clearQbApiSecrets() {
+    for (const id of ['qb-api-client-secret', 'qb-api-admin']) {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+    }
+}
+
+async function saveQbApiCredentials() {
+    const idEl = document.getElementById('qb-api-client-id');
+    const secretEl = document.getElementById('qb-api-client-secret');
+    const adminEl = document.getElementById('qb-api-admin');
+    const msg = document.getElementById('qb-api-message');
+    const btn = document.getElementById('btn-qb-api-save');
+    const body = {
+        client_id: idEl ? idEl.value.trim() : '',
+        client_secret: secretEl ? secretEl.value : '',
+        password: adminEl ? adminEl.value : '',
+    };
+    // Clear the secret and admin password now, whatever the outcome.
+    _clearQbApiSecrets();
+    if (msg) { msg.style.color = '#7d8590'; msg.textContent = 'Checking with QBench\u2026'; }
+    if (btn) btn.disabled = true;
+    try {
+        const status = await apiPost('/api/qbench-api-credentials', body);
+        _renderQbApiStatus(status);
+        if (idEl) idEl.value = '';
+        if (msg) {
+            msg.style.color = '#3fb950';
+            msg.textContent = status.source === 'environment'
+                ? 'Saved, but environment variables on the server override it.'
+                : 'QBench accepted the credentials. Saved.';
+        }
+    } catch (e) {
+        if (msg) { msg.style.color = '#f85149'; msg.textContent = e.message; }
+    } finally {
+        body.client_secret = '';
+        body.password = '';
+        if (btn) btn.disabled = false;
+    }
 }
 
 /* ── Flag-rules editor (Settings modal) ────────────────────────────── */
@@ -4083,6 +4148,7 @@ function setupEventListeners() {
         'btn-export-qbench': exportQueueToQBench,
         // Settings modal
         'btn-settings-save': saveSettings,
+        'btn-qb-api-save': saveQbApiCredentials,
         // Reprocess modal
         'btn-reprocess-run': submitReprocess,
         // Notification tray

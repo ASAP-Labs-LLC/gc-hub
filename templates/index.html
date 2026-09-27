@@ -883,6 +883,27 @@
           <!-- populated by app.js -->
         </ul>
       </div>
+
+      <!-- QBench API (OAuth client) credentials: tested against QBench, then saved -->
+      <div style="margin-top:12px; border-top:1px solid #21262d; padding-top:10px;">
+        <span style="font-size:12px; font-weight:600; color:#c9d1d9; display:block; margin-bottom:6px;">QBench API</span>
+        <p style="font-size:11px; color:#7d8590; margin:0 0 6px;">Status: <span id="qb-api-status">Checking&hellip;</span></p>
+        <div class="form-row">
+          <label for="qb-api-client-id">Client ID</label>
+          <input type="text" id="qb-api-client-id" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="form-row">
+          <label for="qb-api-client-secret">Client Secret</label>
+          <input type="password" id="qb-api-client-secret" autocomplete="new-password" spellcheck="false">
+        </div>
+        <div class="form-row">
+          <label for="qb-api-admin">Admin password</label>
+          <input type="password" id="qb-api-admin" autocomplete="off">
+          <button class="btn btn-secondary" id="btn-qb-api-save">Test &amp; Save</button>
+        </div>
+        <p id="qb-api-message" style="font-size:11px; margin:4px 0 0; min-height:14px;"></p>
+        <p style="font-size:11px; color:#7d8590; margin:4px 0 0;">The pair is checked with QBench first and saved only if QBench accepts it. The secret is never shown again. Saved to <span id="qb-api-store-path" style="font-family:monospace;"></span> (the account running this app).</p>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" id="btn-restart" title="Restart the server process" style="margin-right:auto;">Restart</button>
@@ -1088,7 +1109,8 @@
 <script src="{{ url_for('static', filename='js/report_payload.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=3"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=43"></script>
+<script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=44"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

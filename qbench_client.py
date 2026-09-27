@@ -18,9 +18,10 @@ from requests.adapters import HTTPAdapter
 
 import qbench_secrets
 
-CLIENT_ID = qbench_secrets.get_client_id()
-CLIENT_SECRET = qbench_secrets.get_client_secret()
-TOKEN_URL = "https://asaplabs.qbench.net/qbench/oauth2/v1/token"
+# Credentials are resolved when a client is constructed, never at import: the
+# app must boot (and pass the updater's health check) with no credential store,
+# and a pair saved from Settings must take effect without a restart.
+DEFAULT_TOKEN_URL = "https://asaplabs.qbench.net/qbench/oauth2/v1/token"
 API_BASE_URL = "https://asaplabs.qbench.net/qbench/api/v2"
 DEFAULT_TIMEOUT = int(os.getenv("QBENCH_TIMEOUT_SECONDS", "30"))
 MAX_CALLS_PER_MINUTE = int(os.getenv("QBENCH_MAX_CALLS_PER_MIN", "340"))
@@ -64,16 +65,16 @@ class QBenchAPIClient:
 
     def __init__(
         self,
-        client_id: str = CLIENT_ID,
-        client_secret: str = CLIENT_SECRET,
-        token_url: str = TOKEN_URL,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        token_url: Optional[str] = None,
         api_base_url: str = API_BASE_URL,
         timeout: int = DEFAULT_TIMEOUT,
         max_calls_per_minute: int = MAX_CALLS_PER_MINUTE,
     ) -> None:
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.token_url = token_url
+        self.client_id = client_id or qbench_secrets.get_client_id()
+        self.client_secret = client_secret or qbench_secrets.get_client_secret()
+        self.token_url = token_url or os.getenv("QBENCH_TOKEN_URL") or DEFAULT_TOKEN_URL
         self.api_base_url = api_base_url.rstrip("/")
         self.timeout = timeout
         self._access_token: Optional[str] = None

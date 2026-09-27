@@ -18,6 +18,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
 
 import base64
 import csv
+import hmac
 import io
 import json
 import logging
@@ -104,6 +105,13 @@ try:
     import qbench_pdf_uploader
 except ImportError:
     qbench_pdf_uploader = None  # type: ignore[assignment]
+import qbench_secrets
+try:  # needs jwt + requests; importing it no longer needs credentials
+    import qbench_client
+    import requests.exceptions as requests_exc
+except ImportError:
+    qbench_client = None  # type: ignore[assignment]
+    requests_exc = None  # type: ignore[assignment]
 
 # Optional -- used for analysis trend-line smoothing
 try:
@@ -820,6 +828,20 @@ def _safe_path(p: str) -> Path:
 
 def _error(msg: str, status: int = 400) -> tuple:
     return jsonify({"error": msg}), status
+
+
+# OPEN ITEM (spec: "Open items"): the admin password is a hardcoded "admin".
+# It should become a hashed setting in the data dir; that changes who can do
+# what, so it waits for Ryan's call. Every gated route goes through here.
+_ADMIN_PASSWORD = b"admin"
+
+
+def _check_admin(body) -> bool:
+    """True when the request body carries the admin password (constant-time)."""
+    supplied = (body or {}).get("password") if isinstance(body, dict) else None
+    if not isinstance(supplied, str):
+        return False
+    return hmac.compare_digest(supplied.encode("utf-8"), _ADMIN_PASSWORD)
 
 
 # ===================================================================== #
@@ -1619,7 +1641,7 @@ def api_save_analysis_defaults():
     """Save current analysis parameters as persistent defaults (password-protected)."""
     try:
         body = request.get_json(force=True)
-        if body.get("password") != "admin":
+        if not _check_admin(body):
             return _error("Incorrect password", 403)
         params = body.get("params", {})
         overlays = body.get("range_overlays", [])
@@ -3917,6 +3939,67 @@ def api_qbench_update_credentials():
         _creds_new["password"] = p
     _creds_ready.set()   # unblock the upload thread
     return jsonify({"status": "ok"})
+
+
+# QBench *API* (OAuth client) credentials, entered from Settings. Distinct
+# from the Selenium web login above (/api/qbench-credentials, qbenchlogin.txt).
+# The secret is never returned, logged, or echoed: describe() carries only the
+# last four characters of the client id.
+
+def _token_failure_message(exc: Exception) -> str:
+    """A reason for a failed token request that cannot contain the secret or
+    the signed assertion: only the exception class and the HTTP status."""
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", None)
+    if status is not None and 400 <= status < 500:
+        return f"QBench rejected these credentials (HTTP {status})"
+    if status is not None:
+        return f"QBench could not check these credentials right now (HTTP {status})"
+    if requests_exc is not None and isinstance(exc, requests_exc.Timeout):
+        return "Could not reach QBench to check these credentials (timed out)"
+    if requests_exc is not None and isinstance(exc, requests_exc.ConnectionError):
+        return "Could not reach QBench to check these credentials (connection failed)"
+    return f"QBench did not accept these credentials ({type(exc).__name__})"
+
+
+@app.route("/api/qbench-api-credentials", methods=["GET"])
+def api_qbench_api_credentials_get():
+    return jsonify(qbench_secrets.describe())
+
+
+@app.route("/api/qbench-api-credentials", methods=["POST"])
+def api_qbench_api_credentials_post():
+    """Test the submitted pair by requesting a token; save it only if QBench
+    accepts it. Admin-gated."""
+    body = request.get_json(force=True, silent=True) or {}
+    if not _check_admin(body):
+        return _error("Incorrect password", 403)
+    cid = body.get("client_id")
+    sec = body.get("client_secret")
+    cid = cid.strip() if isinstance(cid, str) else ""
+    sec = sec.strip() if isinstance(sec, str) else ""
+    if not cid or not sec:
+        return _error("Client ID and Client Secret are both required", 400)
+    if qbench_client is None:
+        return _error("QBench client unavailable (jwt/requests not installed)", 500)
+    try:
+        probe = qbench_client.QBenchAPIClient(client_id=cid, client_secret=sec, timeout=15)
+        probe.get_access_token(force=True)
+    except Exception as exc:
+        msg = _token_failure_message(exc)
+        LOGGER.warning("QBench credential test failed: %s", msg)
+        return _error(msg, 400)
+    try:
+        qbench_secrets.save_default(cid, sec)
+    except Exception as exc:
+        LOGGER.error("Could not save QBench API credentials: %s", type(exc).__name__)
+        return _error(f"QBench accepted the credentials but saving them failed "
+                      f"({type(exc).__name__}) at {qbench_secrets.describe()['store_path']}", 500)
+    LOGGER.info("QBench API credentials updated from %s (client id ...%s)",
+                request.remote_addr, cid[-4:])
+    # QBenchAPIClient resolves the pair on construction and nothing holds a
+    # long-lived client, so the next QBench call uses the new pair.
+    return jsonify(qbench_secrets.describe())
 
 
 # ===================================================================== #
