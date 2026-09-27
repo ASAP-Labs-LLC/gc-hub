@@ -1,0 +1,131 @@
+name: CI
+
+# Every push and pull request, and the test stage of release.yml (which calls
+# this file). Tag pushes are left to release.yml so a tag is not tested twice.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
+
+# Nothing here writes to the repo. The checkouts also drop the token
+# (persist-credentials: false) so test code cannot reach it through .git/config.
+permissions:
+  contents: read
+
+# One run per ref; a newer push to a branch cancels the older run. A tag ref
+# (the release.yml call) is never cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.14 is the interpreter the ASAPSV1 updater builds release venvs with
+        # (see requirements.txt); 3.12 is the oldest the numpy/scipy pins take.
+        python-version: ['3.12', '3.14']
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The pinned set a release ships. netCDF4's manylinux wheel bundles
+      # HDF5/netCDF, so no system packages are needed. pip is left as bundled,
+      # as the updater leaves it.
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      # supervisor.py and restart_update.py must stay byte-identical to
+      # coa-reviewer's, and the .sha256 must parse with its real updater. Those
+      # tests compare against ../coa-reviewer, so put its latest release there
+      # instead of letting them skip.
+      - name: Check out coa-reviewer's latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          T=$(gh release view -R ASAP-Labs-LLC/coa-reviewer --json tagName -q .tagName)
+          echo "coa-reviewer $T"
+          git clone --depth 1 --branch "$T" https://github.com/ASAP-Labs-LLC/coa-reviewer ../coa-reviewer
+
+      # GC_REQUIRE_DEPS makes tests/conftest.py end the session if a runtime
+      # dependency cannot be imported, instead of skipping the tests that need
+      # it; -rs lists whatever still skips, with the reason.
+      - name: Python tests
+        env:
+          GC_REQUIRE_DEPS: '1'
+        run: python -m pytest tests/ -q -rs
+
+      - name: JavaScript tests
+        run: node tests/js/run.js
+
+      - name: Package (dry run)
+        run: bash scripts/package_release.sh v0.0.0-ci dist
+
+  # What the updater does on ASAPSV1: a fresh venv from requirements.txt with
+  # the bundled pip, then boot with an empty data dir on the scratch port and
+  # poll /healthz. Advisory for now (continue-on-error) until it has a record.
+  windows-install:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Build a venv the way the updater does
+        run: |
+          python -c "import sys,struct;print(sys.version, sys.executable, struct.calcsize('P')*8)"
+          python -m venv v
+          v\Scripts\python -m pip install -r requirements.txt
+
+      - name: Boot and poll /healthz
+        shell: pwsh
+        env:
+          GC_DATA_DIR: ${{ runner.temp }}\gc-healthcheck
+          PORT: '15560'
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:GC_DATA_DIR | Out-Null
+          $p = Start-Process -FilePath 'v\Scripts\python.exe' -ArgumentList 'app.py', '--no-tray' `
+                 -PassThru -NoNewWindow -RedirectStandardOutput app.out -RedirectStandardError app.err
+          $ok = $false
+          $body = $null
+          for ($i = 0; $i -lt 60; $i++) {
+            if ($p.HasExited) { break }
+            try {
+              $body = Invoke-RestMethod -Uri 'http://127.0.0.1:15560/healthz' -TimeoutSec 2
+              if ($body.status -eq 'ok') { $ok = $true; break }
+            } catch { }
+            Start-Sleep -Seconds 1
+          }
+          # The venv's python.exe is a launcher with the real interpreter as a
+          # child, so kill the tree.
+          if (-not $p.HasExited) { taskkill /PID $p.Id /T /F | Out-Null }
+          Write-Host '--- app stdout ---'; Get-Content app.out -ErrorAction SilentlyContinue
+          Write-Host '--- app stderr ---'; Get-Content app.err -ErrorAction SilentlyContinue
+          if (-not $ok) { Write-Error 'no status "ok" from /healthz within 60 s'; exit 1 }
+          $body | ConvertTo-Json

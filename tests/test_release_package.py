@@ -14,6 +14,8 @@ behind. The one run against the real checkout only reads it.
 import ast
 import hashlib
 import importlib.util
+import os
+import sys
 import re
 import shutil
 import subprocess
@@ -69,6 +71,13 @@ PLANTED = [
     "dist/old.zip",
     "node_modules/x/index.js",
     ".claude/settings.local.json",
+    ".env.local",
+    ".secret_key",
+    "credentials.json",
+    "client_secret_123.json",
+    "service_account_gc.json",
+    "server.pem",
+    "server.key",
 ]
 # A stale VERSION in the tree must be replaced by the tag, never shipped.
 STALE_VERSION = "v9.9.9-stale"
@@ -269,25 +278,306 @@ class PackageCliTests(unittest.TestCase):
             self.assertEqual(missing, [])
 
 
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+                   env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+
+@unittest.skipUnless(HAVE_TOOLS and shutil.which("git"), "needs bash, rsync, zip, git")
+class PackageGitCheckoutTests(unittest.TestCase):
+    """In a git checkout only tracked files ship; the exclude rules still apply."""
+
+    TAG = "v1.2.3-rc.1"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        base = Path(cls._tmp.name)
+        cls.src = base / "repo"
+        _copy_repo(cls.src)
+        _git(cls.src, "init", "-q")
+        _git(cls.src, "add", "-A")
+        # Tracked by mistake: the exclude rules must still keep it out.
+        (cls.src / "tracked_state.csv").write_text("state\n")
+        _git(cls.src, "add", "-f", "tracked_state.csv")
+        # Tracked but deleted from the working tree: must not break the build.
+        (cls.src / "gone.py").write_text("x = 1\n")
+        _git(cls.src, "add", "gone.py")
+        (cls.src / "gone.py").unlink()
+        # Untracked: a scratch module and a stray template must not ship.
+        (cls.src / "scratch_untracked.py").write_text("print('wip')\n")
+        (cls.src / "templates" / "untracked.html").write_text("<p>wip</p>\n")
+        cls.out = base / "out"
+        cls.result = _package(cls.src, cls.TAG, cls.out)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _rel(self):
+        with zipfile.ZipFile(self.out / f"gc-hub-{self.TAG}.zip") as z:
+            return {n.split("/", 1)[1] for n in z.namelist() if "/" in n and not n.endswith("/")}
+
+    def test_builds(self):
+        self.assertEqual(self.result.returncode, 0, self.result.stderr)
+
+    def test_untracked_files_do_not_ship(self):
+        rel = self._rel()
+        self.assertNotIn("scratch_untracked.py", rel)
+        self.assertNotIn("templates/untracked.html", rel)
+
+    def test_tracked_state_is_still_excluded(self):
+        self.assertNotIn("tracked_state.csv", self._rel())
+
+    def test_tracked_runtime_files_ship(self):
+        rel = self._rel()
+        for must in ("app.py", "requirements.txt", "VERSION", "templates/index.html"):
+            self.assertIn(must, rel)
+        missing = sorted(m for m in runtime_closure(self.src) if f"{m}.py" not in rel)
+        self.assertEqual(missing, [])
+
+
+@unittest.skipUnless(HAVE_TOOLS, "needs bash, rsync, zip")
+class PackageLeakCheckTests(unittest.TestCase):
+    def test_state_below_the_root_is_refused_not_shipped(self):
+        # The exclude for updater state is anchored at the root; a copy deeper
+        # down gets past rsync and must be caught by the leak check.
+        for rel in ("static/staged.json", "static/paused", "templates/held-tags.json"):
+            with self.subTest(rel=rel), tempfile.TemporaryDirectory() as t:
+                src = Path(t) / "repo"
+                _copy_repo(src)
+                (src / rel).write_text("state\n")
+                r = _package(src, "v0.0.0-leak", Path(t) / "out")
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertIn("leaked", r.stderr)
+                self.assertFalse((Path(t) / "out" / "gc-hub-v0.0.0-leak.zip").exists())
+
+
+class TagValidationTests(unittest.TestCase):
+    def _run(self, tag, out):
+        return subprocess.run(["bash", str(ROOT / SCRIPT), tag, out], cwd=ROOT,
+                              capture_output=True, text=True, timeout=30)
+
+    def test_non_semver_tags_are_refused(self):
+        for tag in ("v1.2.", "vfoo", "1.2.3", "v1.2", "v1.2.3-", "v1.2.3-rc.", "v1.2.3/x"):
+            with self.subTest(tag=tag), tempfile.TemporaryDirectory() as t:
+                r = self._run(tag, t)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertIn("refusing tag", r.stderr)
+                self.assertEqual(list(Path(t).iterdir()), [])
+
+    # v1.2.3 and v1.2.3-rc.1 are built for real by PackageCliTests and
+    # PackageGitCheckoutTests.
+
+
+_REQ_LINE = re.compile(
+    r"(?P<name>[A-Za-z0-9][A-Za-z0-9_.\-]*)==(?P<ver>[A-Za-z0-9_.+\-]+)"
+    r"(?:\s*;\s*(?P<marker>\S.*))?")
+
+
+def _requirements():
+    """(name, version, marker) for every requirement line, comments stripped."""
+    out = []
+    for raw in (ROOT / "requirements.txt").read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            m = _REQ_LINE.fullmatch(line)
+            out.append((m.group("name"), m.group("ver"), (m.group("marker") or "").strip())
+                       if m else (line, None, None))
+    return out
+
+
+def _norm(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 class RequirementsPinnedTests(unittest.TestCase):
     def test_every_requirement_is_pinned_exactly(self):
-        lines = [ln.split("#", 1)[0].strip()
-                 for ln in (ROOT / "requirements.txt").read_text().splitlines()]
-        reqs = [ln for ln in lines if ln]
+        reqs = _requirements()
         self.assertTrue(reqs)
-        unpinned = [r for r in reqs if not re.fullmatch(r"[A-Za-z0-9_.\-]+==[A-Za-z0-9_.\-]+", r)]
-        self.assertEqual(unpinned, [])
+        self.assertEqual([r[0] for r in reqs if r[1] is None], [])
+
+    def test_markers_are_valid(self):
+        try:
+            from packaging.markers import Marker
+        except ImportError:  # pragma: no cover - packaging ships with the pins
+            self.skipTest("packaging not installed")
+        for name, _ver, marker in _requirements():
+            if marker:
+                with self.subTest(name=name):
+                    Marker(marker)
+
+    def test_no_package_is_pinned_twice(self):
+        names = [_norm(n) for n, _v, _m in _requirements()]
+        self.assertEqual(sorted({n for n in names if names.count(n) > 1}), [])
+
+    def test_transitive_dependencies_are_pinned(self):
+        text = (ROOT / "requirements.txt").read_text()
+        self.assertIn("# --- transitive", text)
+        names = {_norm(n) for n, _v, _m in _requirements()}
+        # The ones that break a deploy without anyone touching them.
+        for dep in ("werkzeug", "jinja2", "click", "itsdangerous", "cftime", "urllib3",
+                    "certifi", "reportlab", "tzdata"):
+            self.assertIn(dep, names)
+
+    def test_platform_only_packages_carry_markers(self):
+        marks = {_norm(n): m for n, _v, m in _requirements()}
+        for name, marker in marks.items():
+            if name.startswith("pyobjc"):
+                self.assertIn("darwin", marker, name)
+        expected = {"python-xlib": "linux", "tzdata": "win32", "colorama": "win32"}
+        for name, plat in expected.items():
+            if name in marks:
+                self.assertIn(plat, marks[name], name)
 
 
-class WorkflowTests(unittest.TestCase):
-    def test_workflow_uses_the_script_and_tests_first(self):
-        wf = (ROOT / ".github" / "workflows" / "release.yml").read_text()
-        self.assertIn("scripts/package_release.sh", wf)
-        self.assertIn("pytest", wf)
-        self.assertIn("node tests/js/run.js", wf)
-        self.assertLess(wf.index("pytest tests/"), wf.index("scripts/package_release.sh"))
-        self.assertIn("contents: write", wf)
-        self.assertIn("gc-hub-", wf)
+class RequireDepsConftestTests(unittest.TestCase):
+    """GC_REQUIRE_DEPS=1 turns a missing dependency into a failed session
+    instead of a run that silently skips everything that needs it."""
+
+    def _pytest(self, env_extra, shim=None):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("GC_REQUIRE_DEPS", "PYTHONPATH")}
+        env.update(env_extra)
+        if shim:
+            env["PYTHONPATH"] = shim
+        return subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+             "tests/test_qbench_import.py"],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=180)
+
+    def _broken_scipy(self, d):
+        pkg = Path(d) / "scipy"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("raise ImportError('scipy hidden by test shim')\n")
+        return d
+
+    def test_missing_dep_fails_the_session_when_required(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = self._pytest({"GC_REQUIRE_DEPS": "1"}, shim=self._broken_scipy(d))
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("scipy", r.stdout + r.stderr)
+        self.assertIn("GC_REQUIRE_DEPS", r.stdout + r.stderr)
+
+    def test_missing_dep_is_tolerated_when_not_required(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = self._pytest({}, shim=self._broken_scipy(d))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_zero_means_off(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = self._pytest({"GC_REQUIRE_DEPS": "0"}, shim=self._broken_scipy(d))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+def _jobs(text):
+    """{job id: its YAML block} for a workflow's top-level ``jobs:`` map.
+
+    A text split, not a YAML parse (PyYAML is not a dependency); the workflows
+    keep the conventional two-space indent that this relies on.
+    """
+    body = text.split("\njobs:\n", 1)[1]
+    parts = re.split(r"^  ([A-Za-z0-9_-]+):[ \t]*$", body, flags=re.M)
+    return dict(zip(parts[1::2], parts[2::2]))
+
+
+def _top(text):
+    return text.split("\njobs:\n", 1)[0]
+
+
+WF = ROOT / ".github" / "workflows"
+
+
+class CiWorkflowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.wf = (WF / "ci.yml").read_text()
+        cls.jobs = _jobs(cls.wf)
+
+    def test_triggers(self):
+        top = _top(self.wf)
+        for trig in ("push:", "pull_request:", "workflow_call:"):
+            self.assertIn(trig, top)
+
+    def test_read_only_token_and_no_persisted_credentials(self):
+        top = _top(self.wf)
+        self.assertRegex(top, r"permissions:\s*\n\s+contents: read")
+        self.assertNotIn("contents: write", self.wf)
+        for job in self.jobs.values():
+            if "actions/checkout" in job:
+                self.assertIn("persist-credentials: false", job)
+
+    def test_concurrency_and_timeouts(self):
+        self.assertIn("concurrency:", _top(self.wf))
+        self.assertIn("github.ref", _top(self.wf))
+        self.assertEqual(set(self.jobs), {"test", "windows-install"})
+        for name, job in self.jobs.items():
+            self.assertRegex(job, r"timeout-minutes: 20\b", name)
+
+    def test_test_job(self):
+        job = self.jobs["test"]
+        self.assertIn("ubuntu-24.04", job)
+        self.assertRegex(job, r"python-version: \[\s*'3\.12',\s*'3\.14'\s*\]")
+        self.assertIn("pip install -r requirements.txt -r requirements-dev.txt", job)
+        self.assertIn("GC_REQUIRE_DEPS: '1'", job)
+        self.assertRegex(job, r"pytest tests/ -q -rs")
+        self.assertIn("node tests/js/run.js", job)
+        self.assertIn("bash scripts/package_release.sh v0.0.0-ci dist", job)
+        # The identity tests against coa-reviewer run instead of skipping.
+        self.assertIn("gh release view -R ASAP-Labs-LLC/coa-reviewer", job)
+        self.assertIn("../coa-reviewer", job)
+        self.assertLess(job.index("../coa-reviewer"), job.index("pytest tests/"))
+
+    def test_windows_install_job(self):
+        job = self.jobs["windows-install"]
+        self.assertIn("windows-latest", job)
+        self.assertIn("continue-on-error: true", job)
+        self.assertIn("python-version: '3.14'", job)
+        self.assertIn("-m pip install -r requirements.txt", job)
+        self.assertIn("--no-tray", job)
+        self.assertIn("15560", job)
+        self.assertIn("/healthz", job)
+        self.assertIn("GC_DATA_DIR", job)
+
+
+class ReleaseWorkflowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.wf = (WF / "release.yml").read_text()
+        cls.jobs = _jobs(cls.wf)
+
+    def test_tests_come_from_ci(self):
+        self.assertIn("uses: ./.github/workflows/ci.yml", self.jobs["test"])
+        self.assertRegex(self.jobs["publish"], r"needs: \[?test\]?")
+
+    def test_write_token_only_in_publish(self):
+        self.assertNotIn("contents: write", _top(self.wf))
+        self.assertRegex(_top(self.wf), r"permissions:\s*\n\s+contents: read")
+        self.assertNotIn("contents: write", self.jobs["test"])
+        self.assertIn("contents: write", self.jobs["publish"])
+        self.assertIn("persist-credentials: false", self.jobs["publish"])
+
+    def test_publish_builds_with_the_script(self):
+        pub = self.jobs["publish"]
+        self.assertIn("scripts/package_release.sh", pub)
+        self.assertIn("gc-hub-", pub)
+        self.assertIn("ubuntu-24.04", pub)
+        self.assertNotIn("ubuntu-latest", self.wf)
+        self.assertRegex(pub, r"timeout-minutes: 20\b")
+
+    def test_publish_is_idempotent(self):
+        pub = self.jobs["publish"]
+        self.assertIn('gc-hub-$TAG.zip.sha256', pub)
+        self.assertIn("gh release delete", pub)
+        self.assertNotIn("--cleanup-tag", pub)  # keep the tag
+        self.assertIn("--verify-tag", pub)
+        self.assertLess(pub.index("gh release view"), pub.index("gh release create"))
+
+    def test_one_release_at_a_time(self):
+        top = _top(self.wf)
+        self.assertRegex(top, r"concurrency:\s*\n\s+group: release")
+        self.assertIn("cancel-in-progress: false", top)
 
 
 if __name__ == "__main__":

@@ -26,9 +26,11 @@ TAG="$1"
 OUT="$2"
 
 # The tag becomes a directory name on the server (releases\<tag>\) and a
-# filename here. Letters, digits, dots, hyphens, underscores, plus only.
-if ! [[ "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
-  echo "refusing tag '$TAG': use letters, digits, '.', '-', '_' or '+' only" >&2
+# filename here, so: v + MAJOR.MINOR.PATCH, optionally a -prerelease or +build
+# suffix of letters, digits, dots and hyphens that does not end in '.' or '-'
+# (Windows silently drops a trailing dot from a folder name).
+if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]*[0-9A-Za-z])?$ ]]; then
+  echo "refusing tag '$TAG': expected vMAJOR.MINOR.PATCH, e.g. v1.2.3 or v1.2.3-rc.1" >&2
   exit 2
 fi
 
@@ -48,6 +50,25 @@ OUT_EXCLUDE=()
 case "$OUT/" in
   "$ROOT/"*) OUT_EXCLUDE=(--exclude="/${OUT#"$ROOT/"}/") ;;
 esac
+
+# In a git checkout, only tracked files are candidates: a local build must not
+# ship a scratch file that CI would never have seen. (Tracked but deleted
+# files are skipped.) Without a usable .git, e.g. a plain copy of the tree,
+# the whole working tree is the candidate set. Either way the exclude rules
+# below are applied on top.
+SRC="$ROOT"
+top="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "$top" ] && [ "$top" -ef "$ROOT" ]; then
+  SRC="$WORK/tracked"
+  mkdir -p "$SRC"
+  git -C "$ROOT" ls-files -z --cached |
+    while IFS= read -r -d '' f; do
+      if [ -e "$ROOT/$f" ] || [ -L "$ROOT/$f" ]; then printf '%s\0' "$f"; fi
+    done |
+    rsync -a --from0 --files-from=- "$ROOT/" "$SRC/"
+else
+  echo "note: $ROOT is not a git checkout; packaging the whole working tree" >&2
+fi
 
 # Leading '/' anchors a pattern to the repo root; unanchored ones match at any
 # depth. A trailing '/' matches directories only. --prune-empty-dirs drops the
@@ -69,9 +90,10 @@ rsync -a --prune-empty-dirs \
   --exclude='/paused' --exclude='/VERSION' \
   --exclude='qbench.json' --exclude='qbenchlogin.txt' --exclude='.env' --exclude='.env.*' \
   --exclude='.secret_key' --exclude='credentials.json' --exclude='*.pem' --exclude='*.key' \
+  --exclude='client_secret*.json' --exclude='service_account*.json' \
   --exclude='*.zip' --exclude='.DS_Store' --exclude='Thumbs.db' --exclude='desktop.ini' \
   ${OUT_EXCLUDE[@]+"${OUT_EXCLUDE[@]}"} \
-  "$ROOT/" "$STAGE/"
+  "$SRC/" "$STAGE/"
 
 # The stamp comes from the tag. /healthz reports it and the updater compares it
 # with the tag it staged; a stale value makes a good swap look like a failure.
@@ -88,10 +110,15 @@ done
 [ "$missing" -eq 0 ] || { echo "refusing to package" >&2; exit 1; }
 
 # Negative control: nothing that is state, secrets, or dev-only.
+# Matches at any depth, so it also catches what an anchored exclude let through.
 leaked="$(cd "$STAGE" && find . \( -iname '*.csv' -o -iname '*.pid' -o -iname '*.cdf' \
   -o -name '*.log' -o -name '*.log.*' -o -name '*.pyc' -o -name '__pycache__' \
   -o -name '.venv' -o -name 'venv' -o -name '.git' -o -name 'processed_cdf*' \
-  -o -name 'qbench.json' -o -name 'switch-*' -o -name 'switching' -o -name '.env' \) -print)"
+  -o -name 'qbench.json' -o -name 'switch-*' -o -name 'switching' \
+  -o -name 'staged.json' -o -name 'held-tags.json' -o -name 'paused' \
+  -o -name '.env' -o -name '.env.*' -o -name '.secret_key' -o -name 'credentials.json' \
+  -o -iname 'client_secret*.json' -o -iname 'service_account*.json' \
+  -o -iname '*.bak' -o -name '*.bak_*' -o -iname '*.pem' -o -iname '*.key' \) -print)"
 if [ -n "$leaked" ]; then
   echo "state leaked into package:" >&2
   echo "$leaked" >&2

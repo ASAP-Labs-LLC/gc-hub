@@ -73,6 +73,34 @@ for _name in ("PORT", "GC_PORT", "GC_DATA_DIR", "GC_CAL_CDF"):
 
 _DEPLOY_ENV_VARS = ("PORT", "GC_PORT", "GC_DATA_DIR", "GC_CAL_CDF")
 
+# ── No silent skips where the deps are supposed to be there ──────────────
+# Tests that need numpy/netCDF4/flask/... skip when those are absent, which is
+# right on a bare interpreter and wrong on CI: a broken install there would
+# turn most of the suite into skips and still go green. CI sets
+# GC_REQUIRE_DEPS=1, which makes any missing runtime dependency end the session
+# before a single test runs.
+REQUIRED_DEPS = ("flask", "netCDF4", "numpy", "scipy", "pandas", "plotly", "jwt",
+                 "requests", "xhtml2pdf")
+
+
+def _missing_required_deps() -> list:
+    import importlib
+
+    missing = []
+    for mod in REQUIRED_DEPS:
+        try:
+            importlib.import_module(mod)
+        except Exception as exc:  # ImportError, or a broken binary wheel
+            missing.append(f"{mod} ({type(exc).__name__}: {exc})")
+    return missing
+
+
+if os.environ.get("GC_REQUIRE_DEPS", "").strip() not in ("", "0"):
+    _missing = _missing_required_deps()
+    if _missing:
+        pytest.exit("GC_REQUIRE_DEPS is set but these runtime dependencies cannot be "
+                    "imported: " + "; ".join(_missing), returncode=3)
+
 
 def _clear_distill_settings_cache() -> None:
     try:

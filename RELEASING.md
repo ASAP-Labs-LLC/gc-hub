@@ -19,13 +19,20 @@ you: git tag -a v1.2.3 && git push origin v1.2.3
         │
         ▼
 .github/workflows/release.yml   (triggers on tags matching v*)
-        │  installs requirements.txt + requirements-dev.txt on Python 3.12
-        │  runs the Python suite and the JS suite: red means no release
+        │  job test = .github/workflows/ci.yml (also runs on every push/PR):
+        │     Python 3.12 and 3.14 on Linux: pinned deps, both suites with
+        │     GC_REQUIRE_DEPS=1 (a missing dep fails, never skips), identity
+        │     checks against coa-reviewer's latest release, a dry-run package;
+        │     plus an advisory Windows 3.14 install + /healthz boot
+        │  red means no release
+        │  job publish (the only job with a write token), from a fresh checkout,
         │  runs scripts/package_release.sh <tag> dist, which
-        │     copies source only (state and dev files excluded by name)
+        │     copies tracked source only (state and dev files excluded by name)
         │     writes the tag into VERSION
         │     refuses if state leaked in or a required file is missing
         │     builds gc-hub-<tag>.zip + gc-hub-<tag>.zip.sha256
+        │  and creates the release; re-running it is safe (a complete release
+        │  is left alone, a partial one is replaced, the tag is kept)
         ▼
 GitHub Release  v1.2.3   ← this is now "latest"
         │
@@ -56,6 +63,15 @@ To build the same zip locally (it is what CI runs):
 bash scripts/package_release.sh v0.0.0-local "$TMPDIR/gcpkg"
 unzip -l "$TMPDIR/gcpkg/gc-hub-v0.0.0-local.zip"
 ```
+
+In a git checkout the script packages **tracked files only** (`git ls-files`,
+then the exclude rules on top), so an untracked scratch file does not ship,
+but uncommitted edits to tracked files do: build from a clean tree if the zip
+matters. Outside a git checkout (a plain copy) it packages the whole working
+tree and says so. It needs `bash`, `rsync` and `zip`; it is tested with rsync
+3.x (Homebrew `rsync` on the Mac, the runner's on CI). The stock macOS
+`/usr/bin/rsync` (openrsync, or 2.6.9 on older systems) is untested, so use
+Homebrew rsync or let CI build it.
 
 ## 2. Choosing the number
 
@@ -107,30 +123,62 @@ gh run list --workflow=release.yml --limit 1   # expect: completed  success
 gh release view v1.2.3                         # expect: 2 assets, .zip and .zip.sha256
 ```
 
+If the run failed after the release was created (or you are unsure), re-run
+it: the publish step leaves a release that already has its `.sha256` asset
+untouched and replaces a partial one, keeping the tag.
+
 ### Dependency pins
 
-`requirements.txt` pins every direct dependency with `==`. The updater builds
-each release's venv with `python -m venv` using **the updater's own Python**
-(`sys.executable` in `build_venv`) and then `pip install --quiet -r
-requirements.txt`, on Windows. Transitive dependencies are not pinned, so
-pip resolves them at build time.
+`requirements.txt` pins everything with `==`: the direct dependencies, and
+every transitive one in a `# --- transitive` block frozen from a clean Python
+3.14 venv built from the direct pins alone, plus a small platform block with
+environment markers (`tzdata` on Windows, which a macOS freeze cannot show;
+pystray's macOS and X11 backends). `tests/test_release_package.py` requires
+`==` on every line.
 
-The pins were validated on **Python 3.12 on macOS only** (the dev `.venv`),
-and CI checks them on Python 3.12 on Linux. Neither proves they build on
-ASAPSV1. Before the first release, and whenever you bump a compiled package:
+The updater builds each release's venv with **its own interpreter**:
+`build_venv` runs `sys.executable -m venv`, then `pip install --quiet -r
+requirements.txt` with the pip bundled in that venv and no constraints file
+(`coa-reviewer/deploy/updater/updater.py`). That interpreter was recorded as
+**CPython 3.14.4 on ASAPSV1 on 2026-08-21** (the header of
+`coa-reviewer/requirements.txt`), so the pins target Python 3.14 on 64-bit
+Windows. CI tests them on Python 3.12 and 3.14 on Linux and installs them into
+a fresh Windows 3.14 venv and boots the app (`.github/workflows/ci.yml`; the
+Windows job is advisory for now). Every pinned version was also checked to
+have a `cp314` `win_amd64` (or pure-Python) wheel on 2026-09-26.
 
-- **Confirm the updater's Python version on ASAPSV1** (`C:\ASAPApps\updater\.venv\Scripts\python.exe --version`,
-  or whichever interpreter runs the updater's scheduled task). It has not been
-  checked from here. `numpy==2.5.3` and `scipy==1.18.1` declare
-  `Requires-Python >=3.12`, so an older interpreter cannot build the venv. That
-  failure is safe (the release is never deployed, and `updater.log` says why),
-  but nothing ships until it is fixed.
-- Check that a **Windows wheel** exists for that Python version for the
-  compiled packages: `numpy`, `scipy`, `pandas`, `netCDF4` (and its `cftime`
-  dependency), `Pillow`, `watchdog`. Without a wheel, pip tries to compile from
-  source and fails on a server with no compiler. `kaleido` is pure Python but
-  drives a Chrome install at runtime.
-- The QBench PDF upload (`selenium`, `chromedriver-autoinstaller`) needs Google
+Before the first release, and whenever the server's Python may have changed,
+**confirm the updater's interpreter on ASAPSV1**:
+
+```
+schtasks /query /tn "<updater task name>" /v /fo list
+```
+
+Take the executable from "Task To Run", then run it:
+
+```
+"<that python.exe>" -c "import sys,struct;print(sys.version, sys.executable, struct.calcsize('P')*8)"
+```
+
+It must be **64-bit CPython** (there are no 32-bit Windows wheels for scipy),
+and 3.12 or newer (`numpy==2.5.3` and `scipy==1.18.1` declare
+`Requires-Python >=3.12`). A different minor version than 3.14 needs its own
+wheel check. An interpreter that cannot build the venv is a safe failure (the
+release is never deployed, and `updater.log` says why), but nothing ships
+until it is fixed.
+
+When bumping a pin:
+
+- Refresh the transitive block from a clean 3.14 venv built from the direct
+  pins only (not the dev tools), and re-check the platform block by hand from
+  the packages' `Requires-Dist` markers.
+- Check that a **Windows wheel** exists for Python 3.14 for anything compiled
+  (`numpy`, `scipy`, `pandas`, `netCDF4`, `cftime`, `Pillow`, `lxml`,
+  `cryptography`, ...). Without a wheel, pip tries to compile from source and
+  fails on a server with no compiler. `pip download --no-deps --only-binary=:all:
+  --platform win_amd64 --python-version 3.14 -r <file>` does this from a Mac.
+- `kaleido` is pure Python but drives a Chrome install at runtime. The QBench
+  PDF upload (`selenium`, `chromedriver-autoinstaller`) also needs Google
   Chrome installed on ASAPSV1.
 
 ## 4. Confirming it reached the lab
@@ -207,8 +255,10 @@ exiting (`restart_policy.should_respawn`).
   version.** GitHub's latest is the most recently created non-prerelease, so
   publishing `v1.0.9` after `v1.2.0` deploys `v1.0.9`. That is how you
   re-release a known-good build, and it is also how a mistyped tag ships.
-- **The tag becomes a folder name** (`releases\v1.2.3\`). Keep tags to letters,
-  digits, dots and hyphens. `package_release.sh` refuses a tag containing `/`.
+- **The tag becomes a folder name** (`releases\v1.2.3\`). `package_release.sh`
+  accepts only `vMAJOR.MINOR.PATCH` with an optional `-prerelease`/`+build`
+  suffix of letters, digits, dots and hyphens that does not end in `.` or `-`
+  (`v1.2.3`, `v1.2.3-rc.1`); anything else fails the release job.
 - **Only the tag decides the version.** `VERSION` is written from
   `github.ref_name`. A release created by hand in the GitHub UI has no
   `VERSION` and will not deploy correctly.
@@ -216,8 +266,8 @@ exiting (`restart_policy.should_respawn`).
   `idle_seconds`.** `tests/test_healthz.py` pins that contract.
 - **`supervisor.py` and `restart_update.py` must stay byte-identical to
   coa-reviewer's.** The updater imports whichever app's copy it finds first.
-  Their tests compare against `../coa-reviewer` when that checkout exists (they
-  skip on CI).
+  Their tests compare against `../coa-reviewer` when that checkout exists; CI
+  clones coa-reviewer's latest release there, so a drift fails CI.
 - **The health check passes `--no-tray`.** `app.py` accepts it and ignores it.
   Any other unknown flag is an error on purpose, so a typo in the updater
   config fails the health check instead of being ignored.
@@ -232,7 +282,7 @@ exiting (`restart_policy.should_respawn`).
 
 | Symptom | Where to look |
 |---|---|
-| Tag pushed, no release | `gh run list --workflow=release.yml`. The job fails on a red suite, or if `package_release.sh` found leaked state or a missing file |
+| Tag pushed, no release | `gh run list --workflow=release.yml`. The test job fails on a red suite or a missing dependency (`GC_REQUIRE_DEPS`); publish fails if `package_release.sh` refused the tag, found leaked state or a missing file. Re-running is safe |
 | Release exists, never staged | `updater.log`: the PAT does not include gc-hub, a checksum mismatch, or the venv failed to build (see §3, Dependency pins) |
 | Staged but never deployed | Expected until someone presses Restart (`auto_switch` is false). Otherwise `updater.py status`, then `updater.log` |
 | Deployed and broken | `updater.py rollback --app gc`, then read `C:\ASAPApps\gc\data\app.log` |

@@ -28,11 +28,15 @@ C:\ASAPApps\gc\
 - **Port 5560 must be free on ASAPSV1** (and 15560, the scratch port for health
   checks). Check with `netstat -ano | findstr :5560`. The app refuses to start
   while its port has a listener, so a leftover share copy on 5560 blocks it.
-- **Confirm the Python that runs the updater is 3.12 or newer**
-  (`numpy==2.5.3` and `scipy==1.18.1` require it), and that Windows wheels exist
-  for it for numpy, scipy, pandas, netCDF4/cftime, Pillow and watchdog. The pins
-  were validated on Python 3.12 on macOS only; see RELEASING.md §3,
-  "Dependency pins". This has not been checked on the server.
+- **Confirm the Python that runs the updater.** It builds every release venv
+  with its own interpreter (`sys.executable`), recorded as CPython 3.14.4 on
+  ASAPSV1 on 2026-08-21 (coa-reviewer/requirements.txt); the pins target that
+  and every pin has a Python 3.14 Windows wheel. Check it is still so:
+  `schtasks /query /tn "<updater task name>" /v /fo list`, take the exe from
+  "Task To Run", and run it with
+  `-c "import sys,struct;print(sys.version, sys.executable, struct.calcsize('P')*8)"`.
+  It must be 64-bit CPython (no 32-bit scipy wheels), 3.12 or newer; see
+  RELEASING.md §3, "Dependency pins".
 - **Google Chrome must be installed** for the QBench PDF upload (Selenium) and
   for kaleido's static chart export.
 
