@@ -16,6 +16,7 @@ import pytest
 
 import corrections
 import distill
+import exports
 import make_golden
 import pipeline
 import store
@@ -83,7 +84,7 @@ def test_results_equal_the_golden_rows(hub, name):
     s, rev, export = _run_case(hub, name)
     assert _row_strings(export["line"]) == GOLDEN[name]
     results = json.loads(rev["results"])
-    assert _row_strings(pipeline.default_format_line(results, "")) == GOLDEN[name]
+    assert _row_strings(exports.format_line(results, "")) == GOLDEN[name]
     assert results["Source File"] == s["cdf_path"]
     assert (rev["blank_used"] is not None) == (make_golden.CASES[name][1] is not None)
 

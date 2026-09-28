@@ -35,7 +35,8 @@ def ladder_times(n=20, first=0.50, step=0.30):
     return [round(first + i * step, 4) for i in range(n)]
 
 
-def write_cdf(path, times, signal, sample_name, injected: datetime, method_name=None):
+def write_cdf(path, times, signal, sample_name, injected: datetime, method_name=None,
+              raw_stamp=None):
     """Write the variables/attributes distill reads (see the module docstring).
 
     ``times`` must be evenly spaced minutes; it is stored as a sampling
@@ -43,7 +44,9 @@ def write_cdf(path, times, signal, sample_name, injected: datetime, method_name=
     given, is written as the ANDI global ``detection_method_name`` (real
     Agilent files carry e.g. ``SIMDISB.M``); by default it is omitted, so the
     fixtures the golden rows were captured from stay exactly as they were.
-    distill does not read it."""
+    distill does not read it. ``raw_stamp`` overrides the injection stamp text
+    verbatim (``""`` leaves the stamp out); ``sample_name=None`` leaves the
+    name out."""
     path = Path(path)
     times = np.asarray(times, float)
     signal = np.asarray(signal, float)
@@ -52,8 +55,11 @@ def write_cdf(path, times, signal, sample_name, injected: datetime, method_name=
     interval_s = DT_MIN * 60.0 if times.size < 2 else float(times[1] - times[0]) * 60.0
     with netCDF4.Dataset(path, "w", format="NETCDF3_CLASSIC") as ds:
         ds.dataset_completeness = "C1+C2"
-        ds.sample_name = sample_name
-        ds.injection_date_time_stamp = injected.strftime("%Y%m%d%H%M%S") + "+0000"
+        if sample_name is not None:
+            ds.sample_name = sample_name
+        stamp = injected.strftime("%Y%m%d%H%M%S") + "+0000" if raw_stamp is None else raw_stamp
+        if stamp:
+            ds.injection_date_time_stamp = stamp
         if method_name is not None:
             ds.detection_method_name = method_name
         ds.createDimension("point_number", signal.size)
@@ -101,3 +107,12 @@ def blank_cdf(path, injected=datetime(2026, 9, 24, 15, 30, 27), name="Blank", me
     t = _axis()
     y = gaussian(t, 0.30, 50000, 0.01) + 40 + 5 * t
     return write_cdf(path, t, y, name, injected, method_name=method_name)
+
+
+def truncated_copy(src, dest, keep_fraction=0.95):
+    """A copy of ``src`` cut short, as an interrupted copy leaves it: the
+    NetCDF header is intact but the data runs out (netCDF4 zero-fills the
+    rest when read)."""
+    data = Path(src).read_bytes()
+    Path(dest).write_bytes(data[:int(len(data) * keep_fraction)])
+    return Path(dest)

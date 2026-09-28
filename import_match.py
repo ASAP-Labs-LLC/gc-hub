@@ -35,8 +35,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from netCDF4 import Dataset
-
 import distill
 
 _HASH_CHUNK = 1 << 20
@@ -100,8 +98,6 @@ V1_FAMILIES = ("py311_313", "py314")
 _V1_COMPACT = re.compile(r"^(\d{14})(?:\s*[+-]\d{2}:?\d{2})?$")
 _ISO_COMPACT_ZONED = re.compile(
     r"^(\d{8})(\d{6})(Z|([+-])(\d{2})(?::?(\d{2})(?::?(\d{2}))?)?)$")
-_CORRECT_COMPACT = re.compile(r"^(\d{14})(?:Z|\s*[+-]\d{2}:?\d{2})?$")
-_ISO_DATE = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}")
 _OTHER_FORMATS = ("%d-%b-%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S")
 
 
@@ -159,39 +155,10 @@ def _v1_parse(raw: str, family: str = "py311_313") -> datetime | None:
     return None
 
 
-def _correct_parse(raw: str) -> datetime | None:
-    """The fixed parse: the ANDI compact stamp (``YYYYMMDDHHMMSS`` with an
-    optional ``Z`` or ``±HH[:]MM`` zone, dropped) is matched explicitly
-    before anything else; ISO is tried only when the text has ``-`` or ``/``
-    date separators. Naive wall-clock result, or None.
-
-    Not supported (None, so the caller falls back to the file mtime): a
-    compact date without a time (``YYYYMMDD``), compact stamps with other
-    zone forms (``+HH``, ``+HHMMSS``, fractional offsets), ISO basic format
-    (``YYYYMMDDTHHMMSS``), two-digit years, and any format not listed in
-    ``_OTHER_FORMATS``."""
-    if not raw:
-        return None
-    text = raw.strip()
-    if not text:
-        return None
-    m = _CORRECT_COMPACT.match(text)
-    if m:
-        try:
-            return datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
-        except ValueError:
-            return None
-    if _ISO_DATE.match(text):
-        try:
-            return datetime.fromisoformat(text.replace("/", "-")).replace(tzinfo=None)
-        except ValueError:
-            pass
-    for fmt in _OTHER_FORMATS:
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    return None
+# The fixed parse is distill's (one definition): the ANDI compact stamp
+# (``YYYYMMDDHHMMSS`` with an optional ``Z`` or ``±HH[:]MM`` zone, dropped)
+# first, ISO only for a ``-``/``/``-separated date, then DD-Mon-YYYY and US.
+_correct_parse = distill.parse_injection_datetime
 
 
 @functools.lru_cache(maxsize=1)
@@ -227,9 +194,7 @@ def time_unverifiable(dt: str) -> bool:
     return (0, tod) in outputs or (1, tod) in outputs
 
 
-def _method_basename(raw: str) -> str:
-    text = (raw or "").strip()
-    return re.split(r"[\\/]", text)[-1].strip().upper() if text else ""
+_method_basename = distill.normalise_method_name   # one definition
 
 
 def _sha256_file(path: Path) -> str:
@@ -241,35 +206,14 @@ def _sha256_file(path: Path) -> str:
 
 
 def _read_cdf_names(path: Path) -> tuple[str, str, str, str]:
-    """(sample_name as distill reads it, how the name was found, raw stamp,
-    raw detection_method_name).
-
-    Mirrors ``distill.cdf_metadata`` exactly (variables before global
-    attributes; ``injection_date_time_stamp`` → ``injection_date`` →
-    ``injection_time``) but reads no chromatogram arrays."""
-    with distill._NETCDF_LOCK:
-        with Dataset(path) as ds:
-            vars_lc = {n.lower(): n for n in ds.variables}
-            attrs_lc = {n.lower(): n for n in ds.ncattrs()}
-
-            def _get(key: str) -> str:
-                k = key.lower()
-                if k in vars_lc:
-                    return distill._read_text(ds.variables[vars_lc[k]])
-                if k in attrs_lc:
-                    return str(getattr(ds, attrs_lc[k]))
-                return ""
-
-            name = _get("sample_name")
-            raw_date = (
-                _get("injection_date_time_stamp")
-                or _get("injection_date")
-                or _get("injection_time")
-            )
-            method = _get("detection_method_name")
-    if name:
+    """(lab name, how the name was found ('cdf'|'filename'), raw stamp, raw
+    detection_method_name), through ``distill.read_cdf_names`` and
+    ``distill.cdf_lab_name``: the hub pipeline's rule, so both store the same
+    lab ID (a blank or whitespace-only name falls back to the file stem)."""
+    name, raw_date, method = distill.read_cdf_names(path)
+    if name.strip():
         return name, "cdf", raw_date, method
-    return (path.stem or "Unknown"), "filename", raw_date, method
+    return distill.cdf_lab_name("", path.stem), "filename", raw_date, method
 
 
 def _read_cdf_meta_ex(path) -> tuple[CdfMeta, str]:

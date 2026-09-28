@@ -1023,8 +1023,14 @@ def normalise_method_name(raw) -> str:
     return re.split(r"[\\/]", text)[-1].strip().upper()
 
 
-def _cdf_names(path: Path) -> Tuple[str, str, str]:
-    """``(sample_name or '', raw injection stamp, raw detection_method_name)``."""
+def read_cdf_names(path: Path) -> Tuple[str, str, str]:
+    """``(sample_name or '', raw injection stamp, raw detection_method_name)``.
+
+    The one reader of a CDF's identity text (the hub pipeline, ``cdf_metadata``
+    and the history importer all use it): variables before global
+    attributes, the stamp from ``injection_date_time_stamp`` →
+    ``injection_date`` → ``injection_time``. Reads no chromatogram arrays.
+    Apply ``cdf_lab_name`` for the lab ID."""
     with _NETCDF_LOCK:
         with Dataset(path) as ds:
             vars_lc = {n.lower(): n for n in ds.variables}
@@ -1048,6 +1054,21 @@ def _cdf_names(path: Path) -> Tuple[str, str, str]:
     return sample, raw_date, method
 
 
+_cdf_names = read_cdf_names
+
+
+def cdf_lab_name(raw_name: str | None, fallback: str | None) -> str:
+    """The lab ID from a CDF's sample name, the one rule for hub and importer:
+    outer whitespace stripped; an empty or whitespace-only name falls back to
+    ``fallback`` (the file stem the sender had, as v1 used ``path.stem``),
+    then ``"Unknown"``. (v1 kept a whitespace-only *global attribute* name
+    verbatim; the hub treats it as missing.)"""
+    name = (raw_name or "").strip()
+    if name:
+        return name
+    return (fallback or "").strip() or "Unknown"
+
+
 def cdf_metadata(path: Path) -> Tuple[str, datetime]:
     """Return (sample_name, injection_datetime)."""
     path = Path(path)
@@ -1063,9 +1084,9 @@ def cdf_identity(path: Path, *, mtime: datetime | None = None, fallback_name: st
                  ) -> Tuple[str, datetime, str, str, str]:
     """``(sample, injection_dt, dt_source, method_name, raw_stamp)`` for a CDF.
 
-    ``sample`` is the ``sample_name``; when it is absent or blank,
-    ``fallback_name`` (the sender's file stem: what v1 used, since it read
-    the file under its original name), else this file's stem;
+    ``sample`` is ``cdf_lab_name(sample_name, fallback_name or this file's
+    stem)``: stripped, and when absent or blank the sender's file stem (what
+    v1 used, since it read the file under its original name);
     ``injection_dt`` a naive ``datetime`` from ``parse_injection_datetime``,
     with ``dt_source`` ``'cdf'``, or, when the stamp is missing or
     unparseable, ``mtime`` (the sender's file time; the file's own mtime when
@@ -1074,9 +1095,8 @@ def cdf_identity(path: Path, *, mtime: datetime | None = None, fallback_name: st
     if absent). ``raw_stamp`` is the stamp text as read.
     """
     path = Path(path)
-    sample, raw_date, method = _cdf_names(path)
-    if not sample.strip():
-        sample = (fallback_name or "").strip() or path.stem or "Unknown"
+    sample, raw_date, method = read_cdf_names(path)
+    sample = cdf_lab_name(sample, fallback_name if (fallback_name or "").strip() else path.stem)
     inj_dt = parse_injection_datetime(raw_date)
     source = "cdf"
     if inj_dt is None:

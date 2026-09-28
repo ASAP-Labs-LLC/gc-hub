@@ -150,9 +150,9 @@ def test_a_stampless_cdf_is_stored_with_the_senders_mtime(hub):
     sid = hub.submit(body, mtime="2026-09-01T08:00:05.700000", source_name="ns.CDF").sample_id
     s = hub.sample(sid)
     assert (s["injection_dt"], s["injection_dt_source"]) == ("2026-09-01 08:00:05", "mtime")
-    assert s["legacy_injection_dt"] == "2026-09-01 08:00:05"
+    assert s["legacy_injection_dt"] == "2026-09-01 08:00:05.700000"   # v1's exact string
     stored = hub.data / s["cdf_path"]
-    assert datetime.fromtimestamp(stored.stat().st_mtime) == datetime(2026, 9, 1, 8, 0, 5)
+    assert datetime.fromtimestamp(stored.stat().st_mtime) == datetime(2026, 9, 1, 8, 0, 5, 700000)
     _run(hub)
     results = json.loads(_rev(hub, sid)["results"])
     assert results["InjectionDateTime"] == "2026-09-01 08:00:05"
