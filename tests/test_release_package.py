@@ -207,6 +207,16 @@ class PackageTests(unittest.TestCase):
                      "static/js/app.js", "static/css/style.css", "static/css/badge.css"):
             self.assertIn(must, rel)
 
+    def test_the_server_docs_ship_with_the_runbooks(self):
+        rel = self._rel()
+        self.assertIn("DEPLOY.md", rel)
+        self.assertIn("RELEASING.md", rel)
+        with zipfile.ZipFile(self.zip_path) as z:
+            deploy = z.read(f"{self.name}/DEPLOY.md").decode("utf-8")
+        for must in ("## Before cutover", "### Parity check before cutover",
+                     "## Cutover runbook (per GC PC)", "--copy-instrument-from"):
+            self.assertIn(must, deploy)
+
     def test_version_is_the_tag_not_the_stale_file(self):
         with zipfile.ZipFile(self.zip_path) as z:
             self.assertEqual(z.read(f"{self.name}/VERSION").decode().strip(), self.TAG)

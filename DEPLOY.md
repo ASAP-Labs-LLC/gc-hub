@@ -269,18 +269,19 @@ entries if present.
 behaviour until cutover; the hub's admin password does not apply to them.
 
 **Agent installers need the hub URL.** Before the first "Download
-installer", set the address the GC PCs use to reach the hub
-(`POST /api/admin/hub-url {password, hub_url: "http://asapsv1:5560"}`, the
-Instruments page from 2A2). A download from `localhost` or `127.0.0.1` on the
-server itself is refused until it is set.
+installer", set the address the GC PCs use to reach the hub: Instruments
+page > *Hub URL for installers*, `http://asapsv1:5560` (or
+`POST /api/admin/hub-url {password, hub_url}`). A download from `localhost`
+or `127.0.0.1` on the server itself is refused until it is set.
 
 ## Upgrading to v2 (the hub)
 
 v2.0.0 is the hub: it no longer watches a folder. CDFs arrive from the GC-PC
-agents (phase 2B2) or from **Load CDFs from a folder** on the Hub admin page,
-and each final result is appended to the instrument's results CSV. Read
-`docs/release-notes/v2.0.0.md` before installing; several numbers can differ
-from v1's for documented reasons.
+agents (installed per PC at cutover, below), from the v1 history import, or
+from **Load CDFs from a folder** on the Hub admin page, and each final result
+is appended to the instrument's results CSV. Read the v2.0.0 release notes
+(the GitHub release page for the tag) before installing; several numbers can
+differ from v1's for documented reasons.
 
 Before pressing Settings > Restart ("Restart & install v2.0.0"):
 
@@ -310,9 +311,11 @@ notifications):
   Editing `correction_factors.json` later changes nothing in the hub.
 - Settings in the browser can change only the flag rules and series colours
   freely, and the best-fit settings with the admin password. Paths (standards
-  and export folders are fixed under `data\`), the calibration, the
-  corrections path and `blank_max_intensity_pa` are changed by editing
-  `settings.json` on the server (pause / stop / edit / resume, Step 4).
+  and export folders are fixed under `data\`), the corrections path and
+  `blank_max_intensity_pa` are changed by editing `settings.json` on the
+  server (pause / stop / edit / resume, Step 4). The calibration is each
+  instrument's own, set on the Instruments and Calibration pages (admin
+  password); `settings.json`'s calibration keys only create gc1's once.
   Saving the calibration page and adding, renaming or deleting comparison
   standards need the admin password; standards are added from a sample
   ("Set as comparison standard"), never from a server path.
@@ -322,56 +325,253 @@ notifications):
   `settings.json`) and the job-table prune run inside the hub. A failed backup
   raises an error notification and is retried hourly.
 
-Then, as needed, on **Hub admin** (`http://asapsv1:5560/admin/hub`, admin
-password):
+Then continue with "Before cutover" below. What the admin pages do:
 
-- **Load CDFs from a folder**: one-shot and read-only on the folder (copy the
-  GC's processed folder locally first, e.g. with robocopy), resumable, in
-  injection-time order; the hub processes what it loads. Check what was
-  loaded with `tools/parity_report.py` (the 2A1 plan's T6 runbook) before
-  sign-off. **Before a GC is cut over, never load CDFs of that GC injected
-  after the hub's first start** without *force backfill*: they are live
-  (after gc1's `live_since`) and would be appended to the export, while v1 on
-  the share still writes the same results to LEM's CSV, so LEM would get them
-  twice. History belongs to the import (below), which keeps it as backfill.
-- **Exports**: gc1 appends to `data\results\gc1_results.csv` by default. To
-  keep feeding the CSV LEM tails on the share: **stop the v1 writer for that
-  GC first**, then *New path* to that CSV and *Adopt* it (the hub appends
-  after its current content, so LEM's read position carries on). The
-  account the app runs as needs write access to the file and
-  create/rename/delete rights in its folder (sidecar and lock file). A file
-  that changes behind the hub's back is refused (error notification) until
-  it is adopted again or moved. *Write fresh* starts a new file with every
-  exportable result; never point LEM at one without setting its tail offset to
-  the end.
+- **Hub admin** (`http://asapsv1:5560/admin/hub`, admin password):
+  - **Import v1 history**: one instrument's v1 processed CDFs and results
+    CSV, read-only on both. *Dry run* only classifies and writes nothing;
+    *Start real import* runs it as a job (one admin job at a time),
+    resumable, stoppable between batches (*Stop*); *Load last run* shows the
+    previous run and fills the form. Every imported sample is backfill with
+    v1's numbers stored verbatim (never recomputed, never exported
+    automatically). This is how production gets its history.
+  - **Load CDFs from a folder**: one-shot and read-only on the folder,
+    resumable, in injection-time order; the hub **computes** what it loads.
+    It is not the way to bring in history (the import is), and the parity
+    check runs it on a scratch folder, never here (below). **Before a GC is
+    cut over, never load CDFs of that GC injected after its `live_since`**
+    without *force backfill*: they would be appended to the export while v1
+    on the share still writes the same results to LEM's CSV, so LEM would
+    get them twice.
+  - **Exports**: each instrument's CSV, pending rows and refusals, with
+    *Adopt*, *New path* and *Write fresh*. gc1 appends to
+    `data\results\gc1_results.csv` until it is pointed at the share CSV LEM
+    tails at cutover (below). *Write fresh* starts a new file with every
+    exportable result; never point LEM at one without setting its tail
+    offset to the end.
+- **Instruments** (`http://asapsv1:5560/instruments`): add an instrument;
+  per instrument its name, `live_since` and enabled flag, the results export
+  path and *Adopt*, the calibration (a CDF from its own samples or an
+  absolute path, then *Assign peaks…*), the 11 D86 correction factors (with
+  a required reason and their history; GC-1's seed), methods seen and their
+  mapping, the **backfill list** (*Release selected…* exports backfill
+  samples), **conflicts** (*Keep existing* / *Replace*), the comparison
+  standards per instrument, and the agent panel (status, clock skew, queue,
+  last error, commands, *Download installer*, *Revoke token*).
+
+## Before cutover (once, for both GCs)
+
+The spec's "Cutover runbook", steps 1 to 4, plus the parity check. Until a GC
+PC is cut over, its v1 copy on the share keeps processing and writing LEM's
+CSV; the hub holds that GC's history only as backfill.
+
+1. **v2 is running and the GC PCs can reach it.** `updater.py status` shows
+   `current=v2.x`. Open port 5560 inbound in the Windows firewall on
+   ASAPSV1 (elevated Command Prompt):
+
+   ```
+   netsh advfirewall firewall add rule name="GC Hub 5560" dir=in action=allow protocol=TCP localport=5560 profile=domain,private
+   ```
+
+   Check from each GC PC: `curl http://asapsv1:5560/healthz` answers
+   `{"status": "ok", ...}`.
+2. **Set the admin password** with the setup code ("Admin password"
+   above). Then on the Instruments page set *Hub URL for installers* to
+   `http://asapsv1:5560`, and **create GC-2**: *Add an instrument*, id
+   `gc2`, name `GC-2`. Leave its `live_since` empty: until it is set,
+   everything GC-2 sends is backfill.
+3. **Set each instrument's calibration and corrections.**
+   - Calibration (Instruments page, the instrument's calibration panel):
+     GC-1's came from `settings.json`; check it shows as usable. For GC-2,
+     copy the calibration CDF its v1 copy uses (`calibration_cdf` in that
+     PC's `%USERPROFILE%\.gc_viewer_settings.json`) to
+     `C:\ASAPApps\gc\data\calibration\gc2\`, enter that absolute path, *Use
+     path*, then *Assign peaks…* the way GC-2's v1 Calibration page has them.
+   - Corrections: check GC-1's seeded values against its
+     `correction_factors.json` (the info notification from the first start
+     names the file). Enter GC-2's 11 values (from GC-2's v1
+     `correction_factors_json`) with a reason, and *Save corrections*.
+     GC-2's samples wait as `pending_corrections` until then.
+   - **Confirm that LEM holds no GC correction factors.** The hub's rows are
+     already corrected; factors in LEM would be applied twice.
+4. **Copy each GC's legacy folders to ASAPSV1** (read-only on the source).
+   Take the paths from that PC's v1 settings
+   (`%USERPROFILE%\.gc_viewer_settings.json`: `processed_cdf_dir`,
+   `distill_output`, `correction_factors_json`). Copy the CDFs **first**,
+   then the CSV, so every copied CDF that v1 processed has its row. Keep
+   these folders: the cutover re-copies into them, and the history import
+   matches rows by CSV path. In a Command Prompt (cmd.exe) on ASAPSV1:
+
+   ```
+   robocopy "<GC-1 processed_cdf_dir>" C:\ASAPApps\gc\legacy\gc1\processed_cdf /E /COPY:DAT /DCOPY:T /R:2 /W:5
+   robocopy "<folder of GC-1 distill_output>" C:\ASAPApps\gc\legacy\gc1 "<its file name>" /COPY:DAT /R:2 /W:5
+   robocopy "<GC-2 processed_cdf_dir>" C:\ASAPApps\gc\legacy\gc2\processed_cdf /E /COPY:DAT /DCOPY:T /R:2 /W:5
+   robocopy "<folder of GC-2 distill_output>" C:\ASAPApps\gc\legacy\gc2 "<its file name>" /COPY:DAT /R:2 /W:5
+   ```
+
+   `/COPY:DAT /DCOPY:T` keeps file and folder times (a CDF without an
+   injection stamp is timed by its file time). Robocopy exit codes 0 to 7
+   are success; 8 or more means some files failed: read its output and
+   re-run. The account the app runs as must be able to read
+   `C:\ASAPApps\gc\legacy`.
+5. **Parity check, GC-1 then GC-2** (next section). The go-live gate:
+   PASS, with no `unexplained` difference.
+6. **First full history import, both GCs** (Hub admin > *Import v1
+   history*). For each instrument: pick it; *Processed CDF folder*
+   `C:\ASAPApps\gc\legacy\gc1\processed_cdf`; *Results CSV*
+   `C:\ASAPApps\gc\legacy\gc1\<its file name>`; *Folder aliases* the
+   processed folder(s) v1 wrote into the CSV's `Source File` column, as they
+   appear there, comma-separated. Press **Dry run** first and review it
+   (rows not imported, conflicts, rejected and truncated files, time
+   corrections); then **Start real import** and wait for the job to finish.
+   Repeat for GC-2 with its folders. Imported samples are backfill: nothing
+   is exported, and LEM sees nothing. Conflicts it reports are resolved on
+   the Instruments page (*Keep existing* / *Replace*).
+
+### Parity check before cutover
+
+`tools/parity_report.py` compares the hub's numbers with v1's, row by row
+(31 columns, exact strings), and names the reason for every difference. It
+runs on a **scratch data folder, never on production**: the loader computes
+the history there, which in production would collide with the history import.
+`--copy-instrument-from` gives the scratch store production's instrument (its
+calibration CDF and assignments, method map and hub correction factors, read
+from production's `gc.db` read-only), plus production's `settings.json` and
+comparison standards. The live hub keeps running and plays no part.
+
+Do this after "Before cutover" steps 3 and 4, in a Command Prompt (cmd.exe,
+**not** PowerShell: its `>` writes UTF-16, which the report can't read) on
+ASAPSV1:
+
+```
+cd /d C:\ASAPApps\gc\current
+set PY=C:\ASAPApps\gc\current\.venv\Scripts\python.exe
+set P=C:\ASAPApps\gc\parity
+
+rem GC-1: load and compute the copy in a new scratch folder (the loader creates it)
+%PY% tools\load_folder.py --data-dir %P%\gc1 --copy-instrument-from C:\ASAPApps\gc\data --process --json gc1 C:\ASAPApps\gc\legacy\gc1\processed_cdf > %P%-gc1-load.json
+echo %ERRORLEVEL%
+
+rem GC-1: the report, scoped to exactly what was loaded
+%PY% tools\parity_report.py --data-dir %P%\gc1 --v1-corrections "<GC-1 correction_factors_json>" --sample-ids @%P%-gc1-load.json gc1 "C:\ASAPApps\gc\legacy\gc1\<its file name>"
+echo %ERRORLEVEL%
+```
+
+GC-2 is the same with `gc2` and its folders (`--data-dir %P%\gc2`,
+`%P%-gc2-load.json`, GC-2's v1 `correction_factors_json`, its CSV). The copy
+creates GC-2 in the scratch store, so GC-2 must exist in production with its
+calibration and corrections set (step 3).
+
+**The loader** exits 0 (loaded), 1 (loaded, but some files were rejected:
+see `rejected_files` in the JSON; truncated CDFs are refused on purpose) or 2
+(nothing loaded: the message says why, e.g. the instrument doesn't exist in
+production or its calibration CDF is missing). It refuses `--process` on a
+folder a hub has served and refuses to copy an instrument into one: the
+scratch folder must be new. If a crash leaves `%P%\gc1\.gc-load-folder.lock`
+behind, delete it by hand once no loader is running.
+
+**The report** prints a verdict line, a line per tag, and the CSV and HTML it
+wrote (in `%P%\gc1\reports\`), and exits 0 for PASS, 1 for FAIL. Read:
+
+- `PASS: every difference is explained` or `FAIL: <reasons>`, then *rows
+  numerically verified* (must be more than 0) and *v1 rows outside the
+  scope* (rows whose CDFs were not in the copy; information only).
+- `[info]` tags are expected, documented differences (see the release
+  notes): `source-file` (the hub records its relative CDF path),
+  `injection-time-fix` (v1's misparsed stamp), `blank-rule`,
+  `auto-detect-off` and `corrections` (each claimed only when recomputing
+  the way v1 did reproduces v1's row exactly; the HTML shows the largest
+  absolute difference for each), `method-excluded` (an accepted non-D2887
+  method), `not-in-hub`, `v1-short-row`.
+- `[FAIL]` tags, and what to do:
+  - `method-not-accepted`: method names the hub doesn't process (listed
+    under *methods not processed*) that haven't been accepted. Only if they
+    are confirmed gasoline (D7096) runs, re-run the report with
+    `--accept-excluded-method <name>` for each (e.g.
+    `--accept-excluded-method D7096.M`; repeatable, any case). A D2887 name
+    (`SIMDISB.M`, `SIMDISTB.M`, or one mapped to D2887) can never be
+    accepted: fix the method mapping in production instead, then redo the
+    check in a new scratch folder.
+  - `not-processed`: a sample has no result. `--process` empties the queue,
+    so the sample is held (e.g. `awaiting_calibration`): fix production's
+    calibration and redo the check in a new scratch folder.
+  - `review-method`: a CDF with no method name. No flag accepts it; look at
+    the file and decide with Ryan.
+  - `no-v1-row` / `lab-id-other-time`: a loaded CDF with no v1 row. If the
+    CSV was copied before the CDFs, re-copy the CSV and re-run the report.
+    If v1 really never wrote a row for it (an orphan CDF; the history import
+    counts these as `orphans` too), there is nothing to compare: note the
+    file for sign-off and re-run the report with `--sample-ids` listing the
+    JSON's `sample_ids` without that sample's id (e.g. `--sample-ids
+    1,2,3,4`).
+  - `ambiguous-match`, `not-verified`: see those rows in the CSV/HTML.
+  - `unexplained`: a real difference. **Stop: do not cut over.** Keep the
+    report's CSV and HTML and send them to Ryan.
+- The HTML also lists the instrument's open conflicts; resolve those in
+  production before sign-off.
+
+After sign-off, keep the reports (copy `%P%\gc1\reports` and
+`%P%\gc2\reports` somewhere safe), then delete the scratch folders
+(`rmdir /s /q C:\ASAPApps\gc\parity` and the `parity-*-load.json` files).
+Keep `C:\ASAPApps\gc\legacy` until both GCs are cut over.
 
 ## Cutover runbook (per GC PC)
 
-Until a GC PC is cut over, its v1 copy on the share keeps processing and
-writing LEM's CSV; the hub holds that GC's history only as backfill. Cut over
-one PC at a time, **in this exact order**, so no row is lost or written twice
-between steps (spec, "Cutover runbook"):
+Cut over one PC at a time, **in this exact order**, so no row is lost or
+written twice between steps (spec, "Cutover runbook"). The order is: stop v1
+writing, adopt, then `live_since`.
 
-1. **Quit `run.pyw`** on that PC (tray > Quit) and remove its autostart
-   (Startup folder shortcut or scheduled task). Check nothing still listens on
-   its port (`netstat -ano | findstr :5560`, `taskkill /F /T /PID <pid>`).
-   From now on nothing processes that GC's new runs until step 4.
-2. **Re-run the history import for that instrument** (Hub admin: the history
-   import page lands with branch `t5/import-route`; until then the 2D CLI,
-   `tools/import_history.py`). It picks up only the delta since the last
-   import (files v1 processed after it); otherwise it is a no-op. Review the
-   summary (conflicts, rejected and truncated files).
-3. **Set that instrument's `live_since` to now** on the Instruments page.
-   Anything injected before it that arrives later is backfill and is listed
-   for review, never exported automatically.
-4. **Install the agent**: on the Instruments page, *Download installer* for
-   that instrument, run `install.pyw` on the PC, adopt the mirror file if
-   LEM tails a local CSV on that PC, and start the agent. Files v1 already
-   processed dedupe by sha256 against the imported copy.
+1. **Stop v1 on that PC.** Quit `run.pyw` (tray > Quit) and remove its
+   autostart (Startup folder shortcut or scheduled task). Check nothing still
+   listens on its port (`netstat -ano | findstr :5560`, `taskkill /F /T /PID
+   <pid>`). From now on nothing processes that GC's new runs until step 6,
+   and nothing writes LEM's CSV.
+2. **Re-copy and re-import the delta.** Run that GC's two robocopy commands
+   from "Before cutover" step 4 again (CDFs first, then the CSV, into the
+   same folders), then Hub admin > *Import v1 history* for that instrument
+   with the same folders and CSV path (*Load last run* fills them): *Dry
+   run*, then *Start real import*. It picks up only what v1 processed since
+   the first import; otherwise it is a no-op. Review the summary.
+3. **Point the export at the CSV LEM tails, and adopt it** (spec D9b: the
+   hub, not the agent, feeds LEM). Instruments page > that instrument >
+   *Results export*: enter the share CSV that v1 wrote and LEM tails (that
+   PC's `distill_output`, as a UNC path), *Set path*, then *Adopt the file
+   as it is*. The hub appends after its current content, so LEM's read
+   position carries on. The account the app runs as (for SYSTEM, the
+   computer account `ASAPSV1$` on the share) needs write access to the file
+   **and** create/rename/delete rights in its folder, for the sidecar
+   (`<file>.gchub.json`), its temp file and the lock file; *Adopt* refuses
+   with that reason otherwise. Rows the hub appended to its own
+   `data\results\<id>_results.csv` before the switch stay there; only
+   pending rows follow the adopt. Adopt only after step 1: a file that
+   changes behind the hub's back is refused until it is adopted again.
+4. **Check the GC PC's clock.** On the PC:
+   `w32tm /stripchart /computer:asapsv1 /samples:3 /dataonly`. `live_since`
+   is compared with the GC's own clock; fix an offset of more than a minute
+   or two before the next step.
+5. **Set that instrument's `live_since` to now** (the GC's local time) on
+   the Instruments page, and *Save settings*. Anything injected before it
+   that arrives later is backfill: it is listed in the backfill list and
+   never exported until released.
+6. **Install the agent.** Instruments page > that instrument > *Download
+   installer* (it mints a new token; downloading again revokes the
+   previous one). Copy the unzipped folder to the PC and **double-click
+   `install.pyw`**, so it runs with the Python that runs `run.pyw` (which
+   has `pystray` and `Pillow`). It takes `watch_dir` from that PC's v1
+   settings, registers autostart and starts the agent. It does **not** ask
+   for a results mirror: the mirror is optional and off. Only if LEM tails a
+   CSV local to that PC, which the hub can't write, run the installer from a
+   Command Prompt with that Python and `--mirror-path "<csv>"` (it adopts
+   the existing file). Delete `install.json` afterwards when asked (it holds
+   the token). Files v1 already processed dedupe by sha256 against the
+   imported copy.
 
-Then watch the first sync on the Instruments page and the hub's first appends
-to the adopted share CSV (Hub admin > Exports); LEM's read position carries
-on unchanged. Only after the last GC is cut over is v1 retired.
+Then watch the first sync on the Instruments page: the agent panel turns
+healthy (clock skew under 2 minutes, queued files draining, no rejected
+files), the first live sample is final, the *Results export* shows no
+pending rows or refusal, and LEM picks up the hub's first appended row. Agent
+commands (*restart*, *pause*, *resume*, *retry-rejected*) are taken at the
+agent's next heartbeat. Only after the last GC is cut over is v1 retired.
 
 ## Updating the share copies (v1.x only, from `maint/v1`)
 
