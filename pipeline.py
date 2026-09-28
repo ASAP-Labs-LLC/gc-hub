@@ -355,6 +355,25 @@ def _notify(notifier: Optional[Notifier], level: str, message: str) -> None:
         log.exception("pipeline: notifier failed")
 
 
+NOTIFY_LAB_IDS_MAX = 10
+
+
+def _lab_id_list(conn, sample_ids: list, limit: int = NOTIFY_LAB_IDS_MAX) -> str:
+    """"40301, 40302, ... and N more": the lab IDs of ``sample_ids`` (in that
+    order) for a notification, capped at ``limit``."""
+    ids = list(sample_ids)
+    shown = ids[:limit]
+    labs = {}
+    if shown:
+        marks = ",".join("?" * len(shown))
+        labs = {r[0]: r[1] for r in conn.execute(
+            f"SELECT id, lab_id FROM samples WHERE id IN ({marks})", shown)}
+    text = ", ".join(str(labs.get(i, f"#{i}")) for i in shown)
+    if len(ids) > limit:
+        text += f" and {len(ids) - limit} more"
+    return text
+
+
 _NC_TYPE_SIZE = {1: 1, 2: 1, 3: 2, 4: 4, 5: 4, 6: 8}
 _INTENSITY_VARS = ("total_intensity", "intensity_values", "intensity", "ordinate_values")
 
@@ -765,6 +784,7 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
     tmp.write_bytes(body)
     final: Optional[Path] = None
     flagged: list = []
+    flagged_labs = ""
     suspects: tuple = ()
     try:
         problem = cdf_problem(tmp)
@@ -855,6 +875,7 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
                                              review_note=UNVERIFIABLE_MATCH_NOTE_RO.format(other=sid))
                 if is_blank:
                     flagged = _flag_late_blank(conn, inst, sid, injection_dt, method_name)
+                    flagged_labs = _lab_id_list(conn, flagged)
                 os.replace(tmp, final)
                 if mtime_ts is not None:
                     os.utime(final, (mtime_ts, mtime_ts))
@@ -871,8 +892,8 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
             _notify(notifier, "warning",
                     f"{len(flagged)} final sample(s) on {inst.get('name') or instrument_id} were "
                     f"processed before an earlier-injected blank arrived (blank sample {sid}, "
-                    f"{lab_id}, injected {injection_dt}). They are marked for review and were not "
-                    f"reprocessed.")
+                    f"{lab_id}, injected {injection_dt}): {flagged_labs}. They are marked for "
+                    f"review and were not reprocessed.")
         return SubmitResult("created", sha, sid, "received", instrument_id=instrument_id)
     except BaseException:
         # The transaction rolled back (or never started): drop a file it placed.
@@ -1368,6 +1389,7 @@ class Worker:
         was resolved meanwhile."""
         sid = sample["id"]
         flagged: list = []
+        flagged_labs = ""
         with store.connection(self.db) as conn:
             with store.write_txn(conn):
                 cur = store.samples.get(sid, db=conn)
@@ -1389,6 +1411,7 @@ class Worker:
                                          method_name=src["method_name"], is_blank=src["is_blank"],
                                          db=conn)
                     flagged = _flag_blank_replaced(conn, cur, src)
+                    flagged_labs = _lab_id_list(conn, flagged)
                 rev = store.add_revision(conn, sid, results_json, reason=reason, by=by,
                                          notes=notes, **extra)
                 store.samples.set_status(sid, "final", db=conn)
@@ -1410,8 +1433,8 @@ class Worker:
             _notify(self.notifier, "warning",
                     f"The CDF of sample {sid} ({cur['lab_id']}, injected {cur['injection_dt']}) "
                     f"was replaced and changed the blank for {len(flagged)} final sample(s) "
-                    f"on {cur['instrument_id']}. They are marked for review and were not "
-                    f"reprocessed.")
+                    f"on {cur['instrument_id']}: {flagged_labs}. They are marked for review "
+                    f"and were not reprocessed.")
         return rev
 
 

@@ -219,6 +219,39 @@ def test_a_late_blank_flags_the_samples_it_would_have_served(hub):
     assert hub.sample(s2)["review_note"] is not None
 
 
+def test_the_late_blank_notification_names_the_flagged_lab_ids(hub):
+    hub.gc1()
+    hub.submit(hub.cdf("blank", injected=datetime(2026, 9, 25, 7, 0, 0)))
+    s1 = hub.submit(hub.cdf(injected=datetime(2026, 9, 25, 10, 0, 0), name="40301")).sample_id
+    s2 = hub.submit(hub.cdf(injected=datetime(2026, 9, 25, 11, 0, 0), name="40302")).sample_id
+    _run(hub)
+    notes = Notes()
+    hub.submit(hub.cdf("blank", injected=datetime(2026, 9, 25, 9, 0, 0), name="Blank2"),
+               notifier=notes)
+    assert hub.sample(s1)["review_note"] and hub.sample(s2)["review_note"]
+    (level, message), = notes.calls
+    assert level == "warning"
+    assert "40301" in message and "40302" in message
+    assert "more" not in message
+
+
+def test_the_late_blank_notification_caps_the_lab_ids_it_lists(hub):
+    hub.gc1()
+    hub.submit(hub.cdf("blank", injected=datetime(2026, 9, 25, 7, 0, 0)))
+    labs = [f"5{i:04d}" for i in range(12)]
+    for i, lab in enumerate(labs):
+        hub.submit(hub.cdf(injected=datetime(2026, 9, 25, 10, i, 0), name=lab))
+    _run(hub)
+    notes = Notes()
+    hub.submit(hub.cdf("blank", injected=datetime(2026, 9, 25, 9, 0, 0), name="Blank2"),
+               notifier=notes)
+    (_level, message), = notes.calls
+    assert "12 " in message
+    assert all(lab in message for lab in labs[:10]), message
+    assert labs[10] not in message and labs[11] not in message
+    assert "and 2 more" in message
+
+
 def test_a_late_blank_with_nothing_to_flag_is_quiet(hub):
     hub.gc1()
     notes = Notes()
