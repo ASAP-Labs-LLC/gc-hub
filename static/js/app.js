@@ -53,10 +53,12 @@ const state = {
     settings: {},
     files: [],              // /api/files samples: {sample_id, uid, lab_id, name, status, ...}
     filesTotal: 0,
-    instruments: [],
+    instruments: [],        // instrument ids (/api/files, then /api/instruments)
+    instrumentNames: {},    // {id: name} from /api/instruments, for badges and labels
     searchResult: null,     // {q, samples, total}: a server search beyond the loaded page
-    listInstrument: null,   // list filters sent with a server search (none in the UI yet)
-    listStatus: null,
+    listInstrument: null,   // the toolbar's instrument select (null = all); sent with the
+                            // page load and every server search; remembered per browser
+    listStatus: null,       // status filter sent with a server search (no UI control yet)
     selectedFile: null,
     selectedUids: new Set(),   // multi-selection (shift / ctrl-cmd)
     selectionAnchor: null,     // last plainly-clicked uid (range anchor)
@@ -378,10 +380,11 @@ async function loadFiles() {
     try {
         // The sample list is a store query (newest first); the lists filter
         // the loaded page client-side as before.
-        const res = await apiGet(`/api/files?limit=${FILES_PAGE_LIMIT}`);
+        const url = filesUrl({ instrument: state.listInstrument }, FILES_PAGE_LIMIT);
+        const res = await apiGet(url);
         state.files = res.samples || [];
         state.filesTotal = res.total || state.files.length;
-        state.instruments = res.instruments || [];
+        if (res.instruments && res.instruments.length) state.instruments = res.instruments;
         console.log('[GC Viewer] Loaded', state.files.length, 'of', state.filesTotal, 'samples');
         renderAllFileLists();
         // Flags/best-fit still being computed in the background: refetch once.
@@ -390,7 +393,8 @@ async function loadFiles() {
             setTimeout(async () => {
                 state._filesRefetchPending = false;
                 try {
-                    const retry = await apiGet(`/api/files?limit=${FILES_PAGE_LIMIT}`);
+                    const retry = await apiGet(filesUrl({ instrument: state.listInstrument },
+                                                        FILES_PAGE_LIMIT));
                     state.files = retry.samples || [];
                     state.filesTotal = retry.total || state.files.length;
                     renderAllFileLists();
@@ -401,6 +405,67 @@ async function loadFiles() {
         console.error('Failed to load files:', e);
         showNotification('Failed to load sample list: ' + e.message, 'error');
     }
+}
+
+// The toolbar's instrument filter, remembered per browser. localStorage can
+// throw (private windows, blocked storage): the filter then just isn't kept.
+const INSTRUMENT_FILTER_KEY = 'gc-hub.listInstrument';
+
+function readSavedInstrumentFilter() {
+    try { return window.localStorage.getItem(INSTRUMENT_FILTER_KEY); } catch (_) { return null; }
+}
+
+function saveInstrumentFilter(value) {
+    try {
+        if (value) window.localStorage.setItem(INSTRUMENT_FILTER_KEY, value);
+        else window.localStorage.removeItem(INSTRUMENT_FILTER_KEY);
+    } catch (_) { /* not remembered */ }
+}
+
+/** Instrument names for the badges, and the filter select's options. */
+async function loadInstruments() {
+    let list = [];
+    try {
+        const res = await apiGet('/api/instruments');
+        list = (res.instruments || []).map(i => ({ id: i.id, name: i.name }));
+    } catch (e) {
+        console.error('Failed to load instruments:', e);
+        list = (state.instruments || []).map(id => ({ id, name: id }));
+    }
+    if (list.length) state.instruments = list.map(i => i.id);
+    state.instrumentNames = Object.fromEntries(list.map(i => [i.id, i.name || i.id]));
+    const restored = restoreInstrumentFilter(state.listInstrument, state.instruments);
+    if (restored !== state.listInstrument) {
+        state.listInstrument = restored;
+        saveInstrumentFilter(restored);
+        state.searchResult = null;
+        await loadFiles();
+    }
+    renderInstrumentFilter(list);
+    renderAllFileLists();
+}
+
+function renderInstrumentFilter(list) {
+    const sel = document.getElementById('instrument-filter');
+    if (!sel) return;
+    sel.innerHTML = '';
+    for (const opt of instrumentFilterOptions(list)) {
+        const o = document.createElement('option');
+        o.value = opt.value;
+        o.textContent = opt.text;
+        sel.appendChild(o);
+    }
+    sel.value = state.listInstrument || '';
+}
+
+async function onInstrumentFilterChange() {
+    const sel = document.getElementById('instrument-filter');
+    state.listInstrument = (sel && sel.value) || null;
+    saveInstrumentFilter(state.listInstrument);
+    state.searchResult = null;
+    await loadFiles();
+    const q = (document.getElementById('universal-search')?.value || '').trim();
+    if (needsServerSearch(q, state.filesTotal, state.files.length)) _serverSearch(q);
 }
 
 async function loadCalibration() {
@@ -498,7 +563,9 @@ function renderFileList(containerId, files, mode) {
     const searchEl = document.getElementById('universal-search');
     const filter = searchEl ? searchEl.value.toLowerCase() : '';
 
-    let filtered = files.filter(f =>
+    // The instrument filter (the server already applied it; this also covers
+    // a list fetched before the filter changed).
+    let filtered = filterByInstrument(files, state.listInstrument).filter(f =>
         (f.name || '').toLowerCase().includes(filter) ||
         (f.display_name || '').toLowerCase().includes(filter));
 
@@ -535,6 +602,16 @@ function renderFileList(containerId, files, mode) {
         nameSpan.className = 'file-item-name';
         nameSpan.textContent = file.display_name || file.name;
         item.appendChild(nameSpan);
+
+        // The sample's instrument: the same lab ID can come from two GCs
+        const ib = instrumentBadge(file, state.instrumentNames);
+        if (ib) {
+            const span = document.createElement('span');
+            span.className = ib.cls;
+            span.textContent = ib.text;
+            span.title = ib.title;
+            item.appendChild(span);
+        }
 
         // Injection time corrected from v1's misparsed stamp
         const tcTitle = timeCorrectedTitle(file);
@@ -867,9 +944,35 @@ function removeContextMenu() {
    9. DASHBOARD
    =================================================================== */
 
+/** The dashboard's selected-sample line: its instrument and any review note
+    (a late blank, an unverifiable import match). textContent only. */
+function renderDashSampleMeta(file) {
+    const el = document.getElementById('dash-sample-meta');
+    if (!el) return;
+    el.textContent = '';
+    if (!file) return;
+    const ib = instrumentBadge(file, state.instrumentNames);
+    if (ib) {
+        const span = document.createElement('span');
+        span.className = ib.cls;
+        span.textContent = ib.text;
+        span.title = ib.title;
+        el.appendChild(span);
+    }
+    const note = reviewNoteTitle(file);
+    if (note) {
+        const span = document.createElement('span');
+        span.className = 'review-note';
+        span.textContent = note;
+        span.title = note;
+        el.appendChild(span);
+    }
+}
+
 async function loadDashboardData(file) {
     const chromDiv = document.getElementById('dash-chrom-plot');
     const dcDiv = document.getElementById('dash-distill-plot');
+    renderDashSampleMeta(file);
 
     // Show loading spinners on all 4 dashboard quadrants
     document.querySelectorAll('#dash-grid .panel').forEach(p => _setLoading(p, true));
@@ -896,7 +999,7 @@ async function loadDashboardData(file) {
             y: traceData.y,
             type: 'scatter',
             mode: 'lines',
-            name: traceData.name || file.name,
+            name: traceLabel(file, state.instrumentNames),
             line: { color: '#58a6ff', width: 1.5 },
         }];
         // Add calibration overlays
@@ -917,7 +1020,7 @@ async function loadDashboardData(file) {
             }
         }
         Plotly.react(chromDiv, chromTraces, basePlotlyLayout({
-            title: { text: file.name, font: { size: 14 } },
+            title: { text: traceLabel(file, state.instrumentNames), font: { size: 14 } },
             xaxis: { title: 'Time (min)', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
             yaxis: { title: 'Intensity', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
             shapes: calShapes,
@@ -994,7 +1097,7 @@ async function loadDashboardData(file) {
             },
         ];
         Plotly.react(dcDiv, dcTraces, basePlotlyLayout({
-            title: { text: 'Distillation Curve', font: { size: 14 } },
+            title: { text: 'Distillation Curve — ' + traceLabel(file, state.instrumentNames), font: { size: 14 } },
             xaxis: { title: 'Recovery (%)', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
             yaxis: { title: 'Temperature (\u00B0C)', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
         }), PLOTLY_CONFIG);
@@ -1092,7 +1195,7 @@ async function addChromatogramTrace(file) {
         const color = seriesColor(state.traces.length);
         state.traces.push({
             sample_id: file.sample_id,
-            name: data.name || file.name,
+            name: traceLabel(file, state.instrumentNames),
             visible: true,
             color,
             x: data.x,
@@ -1359,7 +1462,7 @@ async function addDCTrace(file) {
         const color = seriesColor(state.dcTraces.length);
         state.dcTraces.push({
             sample_id: file.sample_id,
-            name: file.name,
+            name: traceLabel(file, state.instrumentNames),
             visible: true,
             color,
             percent: data.percent,
@@ -3351,10 +3454,29 @@ async function saveSettings() {
 // (sample_ids: the latest injection of each matched Lab ID).
 let _reprocessPreview = { matched: [], missing: [], sample_ids: [] };
 
-/** The instrument a typed Lab-ID selection applies to: the list's only
-    instrument today (gc1); 2A2 adds a picker. */
+/** The instrument a typed Lab-ID selection applies to: the modal's picker
+    (required: two instruments can hold the same lab ID). */
 function reprocessInstrument() {
-    return (state.instruments && state.instruments[0]) || 'gc1';
+    const sel = document.getElementById('reprocess-instrument');
+    return (sel && sel.value) || '';
+}
+
+function renderReprocessInstrumentPicker() {
+    const sel = document.getElementById('reprocess-instrument');
+    if (!sel) return;
+    sel.innerHTML = '';
+    const ids = state.instruments || [];
+    const choose = document.createElement('option');
+    choose.value = '';
+    choose.textContent = 'Choose…';
+    sel.appendChild(choose);
+    for (const id of ids) {
+        const o = document.createElement('option');
+        o.value = id;
+        o.textContent = instrumentName(id, state.instrumentNames);
+        sel.appendChild(o);
+    }
+    sel.value = reprocessDefaultInstrument(ids, state.listInstrument);
 }
 
 function openReprocessModal() {
@@ -3362,6 +3484,7 @@ function openReprocessModal() {
     if (!modal) return;
     const input = document.getElementById('reprocess-ids');
     if (input) input.value = '';
+    renderReprocessInstrumentPicker();
     _reprocessPreview = { matched: [], missing: [], sample_ids: [] };
     renderReprocessPreview();
     openModal(modal);
@@ -3378,9 +3501,15 @@ async function previewReprocess() {
         renderReprocessPreview();
         return;
     }
+    const instrument = reprocessInstrument();
+    const instErr = reprocessInstrumentError(instrument);
+    if (instErr) {
+        _reprocessPreview = { matched: [], missing: [], sample_ids: [] };
+        renderReprocessPreview(instErr);
+        return;
+    }
     try {
-        const result = await apiPost('/api/reprocess/preview',
-                                     { query, instrument: reprocessInstrument() });
+        const result = await apiPost('/api/reprocess/preview', { query, instrument });
         if (result && result.error) {
             _reprocessPreview = { matched: [], missing: [], sample_ids: [] };
             renderReprocessPreview(result.error);
@@ -3972,6 +4101,12 @@ function setupEventListeners() {
     if (reprocInput) {
         reprocInput.addEventListener('input', debounce(() => previewReprocess(), 250));
     }
+    const reprocInst = document.getElementById('reprocess-instrument');
+    if (reprocInst) reprocInst.addEventListener('change', () => previewReprocess());
+
+    // Instrument filter (remembered per browser)
+    const instFilter = document.getElementById('instrument-filter');
+    if (instFilter) instFilter.addEventListener('change', () => onInstrumentFilterChange());
 
     // Close the notification panel when clicking outside it
     document.addEventListener('click', (e) => {
@@ -4066,6 +4201,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Render empty queue
     renderAnalysisQueue();
 
+    // The instrument filter this browser used last (checked against the
+    // instruments once they are loaded).
+    state.listInstrument = restoreInstrumentFilter(readSavedInstrumentFilter(), []);
+
     // Load all data in parallel
     try {
         await Promise.all([
@@ -4075,6 +4214,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             loadComparisonStandards(),
             loadTableData(),
         ]);
+        // Names for the instrument badges and the filter (after the list, so
+        // a remembered instrument that no longer exists is dropped cleanly).
+        await loadInstruments();
     } catch (e) {
         console.error('Initialization error:', e);
         showNotification('Some data failed to load on startup', 'error');
