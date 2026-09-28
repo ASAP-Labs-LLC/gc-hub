@@ -43,7 +43,8 @@ heartbeat), `bad_packages.json` (shas the launcher reverted from; the updater sk
 
 1. sha check applies to 201, 200 **and** 202 (all three return `sha256`). A mismatch marks the
    file **rejected** (`hub acknowledged sha … for …`), never sent.
-2. A file over 25 MB is rejected locally (same reason text as a 413) without uploading.
+2. A file over 25 MB is rejected locally (`too large to send (N bytes > 25 MB)`) without
+   uploading.
 3. A 2xx with a non-JSON / malformed body is treated like a 5xx (backoff).
 4. The launcher's revert is reported in the heartbeat's `last_error`
    (`reverted from <v> to <v>: 3 crashes …`) until one heartbeat succeeds.
@@ -63,6 +64,16 @@ heartbeat), `bad_packages.json` (shas the launcher reverted from; the updater sk
    only an explicit `--mirror-path` sets it (adopting an existing file). A reinstall keeps a path
    already in agent.json. `adopt-mirror` is a no-op when mirroring is off. The mirror code and
    its tests stay (done before the change).
+10. **Critic review fixes:** a scan pass hashes at most 200 files or 2 s and queues them in one
+   transaction; polls walk with `os.scandir` against an in-memory key set (no per-file SQL);
+   `poll_seconds` is floored at 1 s unless `GC_AGENT_FAST_POLL=1` (tests); ledger keys compare
+   `normcase(normpath(path))` and `watch_dir` is normalised; bytes already sent are marked sent
+   without uploading (index on sha256); packages that fail to unpack/smoke are kept in
+   `failed_packages.json` and retried at most once per 24 h; the smoke test imports
+   `agent_main, gc_agent.tray`; only the five §1 commands are obeyed; the launcher waits at
+   least 1 s between exit-3 relaunches and backs off after 5 quick ones; the builder moved to
+   `agent/build_package.py` (the hub release drops `scripts/`); the installer updates a running
+   agent's `hub_url`/`token` in place and offers to delete `install.json`.
 
 ## Tasks (strict TDD: write the test, run it red, implement, run green, commit)
 
