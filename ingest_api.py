@@ -394,6 +394,8 @@ def api_agent_heartbeat():
     inst, err = _authenticate()
     if err:
         return err
+    if (request.content_length or 0) > 64 * 1024:
+        return _err("the heartbeat is too large", 413)
     try:
         values = _heartbeat_values(json.loads(request.get_data(cache=False) or b"null"))
     except (ValueError, UnicodeDecodeError) as exc:
