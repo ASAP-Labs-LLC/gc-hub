@@ -435,7 +435,7 @@ def import_history(instrument_id: str, processed_dir, results_csv, *, instrument
     if results_csv is not None and not Path(results_csv).is_file():
         raise FileNotFoundError(f"no results CSV at {results_csv}")
 
-    if data_dir is None and not (dry_run and db is None):
+    if data_dir is None and not dry_run:
         data_dir = paths.data_dir()
         if data_dir is None:
             raise RuntimeError(f"{paths.DATA_ENV} is not set; the import needs the hub's data folder")
@@ -505,25 +505,49 @@ def _run(summary, rec, *, inst_id, root, results_csv, aliases, db, data_dir, pro
     total = len(items)
     csv_name = str(results_csv) if results_csv else ""
     done = 0
+    predicted_new: set = set()          # dry run: CDF paths it would import
     for start in range(0, total, batch_size):
         batch = items[start:start + batch_size]
         if dry_run or db is None:
-            conn_ctx = store.connection(db) if db is not None else None
-            try:
-                conn = conn_ctx.__enter__() if conn_ctx is not None else None
-                for item in batch:
-                    outcome, info = _classify(conn, inst_id, item)
-                    _record(rec, item, outcome, info)
-                    done += 1
-                    _emit(progress, {"phase": "import", "done": done, "total": total,
-                                     "outcome": outcome, "lab_id": item.lab_id})
-            finally:
-                if conn_ctx is not None:
-                    conn_ctx.__exit__(None, None, None)
+            done = _dry_batch(batch, rec, inst_id=inst_id, db=db, conf=conf, progress=progress,
+                              done=done, total=total, predicted_new=predicted_new)
             continue
         done = _write_batch(batch, rec, inst_id=inst_id, db=db, data_dir=data_dir, conf=conf,
                             by=by, csv_name=csv_name, progress=progress, done=done, total=total)
         _emit(progress, {"phase": "commit", "done": done, "total": total})
+
+
+def _dry_batch(batch, rec, *, inst_id, db, conf, progress, done, total, predicted_new) -> int:
+    """Classify without writing (``db`` None: an empty store). A collision's
+    kept CDF that this run would import makes the other a conflict."""
+    with (store.connection(db) if db is not None else _nullcontext()) as conn:
+        for item in batch:
+            outcome, info = _classify(conn, inst_id, item)
+            if item.collision_with is not None and outcome in ("conflict", "collisions_unresolved"):
+                if conn is None or outcome == "collisions_unresolved":
+                    if item.collision_with in predicted_new:
+                        outcome, info = "conflict", {"kept": item.collision_with}
+                    else:
+                        outcome, info = "collisions_unresolved", {"kept": item.collision_with}
+            if outcome == "new" and item.cdf is not None:
+                predicted_new.add(item.cdf.path)
+                try:
+                    item.is_blank = pipeline._genuine_blank(Path(item.cdf.path), item.lab_id, conf)
+                except Exception:  # noqa: BLE001 - the real run records it
+                    item.is_blank = 0
+            _record(rec, item, outcome, info)
+            done += 1
+            _emit(progress, {"phase": "import", "done": done, "total": total,
+                             "outcome": outcome, "lab_id": item.lab_id})
+    return done
+
+
+class _nullcontext:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc):
+        return False
 
 
 def _prepare(batch, inst_id, db, data_dir, conf) -> None:
@@ -661,6 +685,17 @@ def _report_matcher(summary: dict, rec: _Recorder, report) -> None:
                if not (import_match.normalise_lab_id(r.lab_id) and r.injection_dt_raw)]
     c["unmatched_without_key"] = len(keyless)
     c["name_from_filename"] = len(st.get("name_from_filename", []))
+    for p in st.get("name_from_filename", []):
+        try:
+            name = distill.read_cdf_names(Path(p))[0]
+        except Exception:  # noqa: BLE001 - it was readable a moment ago; not worth failing
+            continue
+        if name and not name.strip():
+            # the hub uses the file stem; v1 wrote the spaces to the CSV's Lab ID
+            c["whitespace_only_names"] += 1
+            rec.example("whitespace_only_names", {"cdf": p, "sample_name": name})
+    for p in st.get("name_from_filename", []):
+        rec.example("name_from_filename", {"cdf": p})
     for e in st.get("cdf_errors", []):
         rec.example("cdf_errors", {"cdf": e[0], "error": e[1]})
     for kept, dup in report.dup_sha:
@@ -674,6 +709,17 @@ def _report_matcher(summary: dict, rec: _Recorder, report) -> None:
         rec.example("mixed_rows", _row_brief(r))
     for r in keyless:
         rec.example("unmatched_without_key", _row_brief(r))
+    summary["matcher"] = {
+        "source_folders": st.get("source_folders", {}),
+        "mixed_warning": st.get("mixed_warning", False),
+        "near_misses": (st.get("near_misses") or {}).get("count", 0),
+        "rows_noncanonical_dt": (st.get("rows_noncanonical_dt") or {}).get("count", 0),
+        "unmatched_same_lab_other_time": st.get("unmatched_same_lab_other_time", 0),
+        "csv_issues": _issue_counts(st.get("csv_issues", [])),
+        "csv_encoding": st.get("csv_encoding"),
+        "dt_source": st.get("dt_source", {}),
+        "timezone": st.get("timezone", {}),
+    }
     summary["method_names"] = st.get("method_names", {})
     summary["method_names_per_folder"] = st.get("method_names_per_folder", {})
     summary["v1_misparse"] = {
@@ -685,15 +731,132 @@ def _report_matcher(summary: dict, rec: _Recorder, report) -> None:
     }
 
 
+def _issue_counts(issues: list) -> dict:
+    out: dict = {}
+    for i in issues:
+        out[i["kind"]] = out.get(i["kind"], 0) + 1
+    return dict(sorted(out.items()))
+
+
 def _one_line(summary: dict) -> str:
     c = summary["counts"]
-    return (f"{summary['instrument']}: {c['imported']} imported ({c['attached']} attached, "
+    return (f"{summary['instrument']}{' (dry run)' if summary.get('dry_run') else ''}: "
+            f"{c['imported']} imported ({c['attached']} attached, "
             f"{c['orphans']} orphan, {c['result_only']} result-only), {c['revisions']} revisions, "
             f"{c['already_imported']} already imported, {c['conflicts']} conflicts, "
             f"{c['cross_instrument']} cross-instrument, {c['truncated']} truncated, "
             f"{c['failed']} failed")
 
 
+# (key, label) per section of the text summary.
+_SECTIONS = (
+    ("Imported", (
+        ("imported", "samples"),
+        ("attached", "attached (CDF + rows)"),
+        ("orphans", "orphan CDFs (no row; raw_only unless another method)"),
+        ("result_only", "result-only (rows, no CDF; legacy_unverified)"),
+        ("revisions", "import revisions"),
+        ("delta_revisions", "of which rows appended since the last run"),
+        ("final", "status final"),
+        ("raw_only", "status raw_only"),
+        ("other_method", "status other_method (method name not mapped)"),
+        ("review_method", "status review_method (no method name)"),
+        ("time_corrected", "time corrected (v1 misparse or unrounded mtime)"),
+        ("time_unverifiable", "result-only time unverifiable (possible v1 misparse)"),
+        ("no_injection_time", "no injection stamp (mtime, whole second)"),
+        ("blanks", "genuine blanks"),
+    )),
+    ("Already in the hub (not imported again)", (
+        ("already_imported", "already imported"),
+        ("present_not_imported", "received by the hub itself (v1 rows not attached)"),
+        ("delta_refused", "new rows, but the hub has revised the sample"),
+        ("rows_changed", "stored rows differ from the CSV now"),
+        ("key_taken", "result-only key already held"),
+    )),
+    ("Not imported", (
+        ("conflicts", "conflicts stored (same lab ID and time, different file)"),
+        ("conflicts_existing", "conflicts already held"),
+        ("key_collisions", "key collisions in the folder (the other file is a conflict)"),
+        ("collisions_unresolved", "key collisions whose kept file was not imported"),
+        ("cross_instrument", "cross-instrument (file held by another instrument)"),
+        ("truncated", "truncated or empty CDFs (recopy, then re-run)"),
+        ("failed", "failed"),
+        ("cdf_errors", "unreadable CDFs"),
+        ("dup_sha", "identical bytes (duplicate files)"),
+    )),
+    ("CSV rows not imported", (
+        ("ambiguous_rows", "ambiguous (one CSV key fits several CDFs)"),
+        ("held_rows", "held (bad layout)"),
+        ("mixed_rows", "mixed (Source File outside this instrument's folder)"),
+        ("unmatched_without_key", "no lab ID or time"),
+        ("rows_not_imported", "rows of samples not imported"),
+    )),
+    ("Source", (
+        ("cdf_files", "CDF files"),
+        ("cdfs_read", "CDFs read"),
+        ("csv_rows", "CSV rows"),
+        ("whitespace_only_names", "whitespace-only sample names (hub: file stem; v1: the spaces)"),
+        ("name_from_filename", "no sample name (file stem used)"),
+    )),
+)
+
+
+def _example_text(entry: dict) -> str:
+    parts = []
+    for k, v in entry.items():
+        if v in (None, "", [], {}):
+            continue
+        parts.append(f"{k}={v!r}" if isinstance(v, str) else f"{k}={v}")
+    return ", ".join(parts)
+
+
 def format_summary(summary: dict, *, examples: int = 5) -> str:
-    """The summary as text."""
-    return _one_line(summary) + "\n"
+    """The summary as text: header, counts per section, v1 misparse, method
+    names, then up to ``examples`` examples per class."""
+    c = summary["counts"]
+    n = max(0, int(examples))
+    out: list = []
+    add = out.append
+    dry = bool(summary.get("dry_run"))
+    add(f"History import, {summary['instrument']}" + (" -- DRY RUN (nothing written)" if dry else ""))
+    add(f"  Processed folder: {summary['processed_dir']}")
+    add(f"  Results CSV: {summary['results_csv'] or '(none: CDFs only)'}")
+    add(f"  Folder aliases: {' | '.join(summary['aliases']) or '(none: mixed-row check off)'}")
+    if not summary.get("store_checked"):
+        add("  Store: not checked (an empty store and the default method map were assumed)")
+    add(f"  Started {summary['started_at']}"
+        + (f", took {summary['seconds']:.1f} s" if "seconds" in summary else ""))
+    if summary.get("stopped"):
+        add(f"  STOPPED PARTWAY: {summary['stopped']} (committed batches stay; re-run to resume)")
+    for heading, keys in _SECTIONS:
+        add("")
+        add("Would be imported" if dry and heading == "Imported" else heading)
+        for key, label in keys:
+            add(f"  {c.get(key, 0):7d}  {label}")
+    m = summary.get("v1_misparse") or {}
+    add("")
+    add("v1 misparse (Python 3.11+ fromisoformat on compact stamps)")
+    add(f"  {m.get('v1_misparsed_cdfs', 0):7d}  CDFs v1 gave a wrong time")
+    add(f"  {m.get('rows_matched_via_v1_form', 0):7d}  rows matched only through v1's form")
+    fams = m.get("v1_family_matches") or {}
+    if fams:
+        add("           rows per v1 family: " + ", ".join(f"{k} {v}" for k, v in fams.items()))
+    add("")
+    add("Method names (detection_method_name) of the CDFs kept")
+    for name, count in (summary.get("method_names") or {}).items():
+        add(f"  {count:7d}  {name or '(absent)'}")
+    if (summary.get("matcher") or {}).get("mixed_warning"):
+        add("")
+        add("WARNING: most CSV rows name a Source File outside the folder aliases; check them.")
+    if n:
+        labels = {k: lbl for _h, keys in _SECTIONS for k, lbl in keys}
+        labels["delta"] = "rows appended since the last run"
+        for cls, entries in (summary.get("examples") or {}).items():
+            if not entries:
+                continue
+            add("")
+            add(f"Examples: {labels.get(cls, cls)} (first {min(n, len(entries))} of "
+                f"{c.get(cls, len(entries))})")
+            for e in entries[:n]:
+                add("  " + _example_text(e))
+    return "\n".join(out) + "\n"
