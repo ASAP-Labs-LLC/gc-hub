@@ -206,4 +206,21 @@ Strict TDD: every task starts with a failing test (red), then the code
 - `instrument_admin.conflicts_list` uses `pipeline._replace_job`; make it
   public if another caller appears.
 - The page's GETs are open on the LAN, like `/api/agents` (correction values,
-  audit, conflict hashes and file names). Only changes are gated.
+  audit, conflict hashes and file names). Only changes are gated. The
+  calibration GET (peak detection) runs one at a time, 429 when busy.
+
+## Critic review 1 (2026-09-28): fixes, each a test first
+
+- **C1** The 24 Blueprint routes are in T4's route-fate table as `new`.
+- **I1** Clearing `live_since`, moving it later or into the future returns a
+  warning (exports stop or are held back) and the page asks for confirmation
+  (`liveSinceConfirm`). `live_since` must be `YYYY-MM-DD HH:MM[:SS]` (space
+  or `T`).
+- **I2** `standards_migrated` is set only once `sync` has seen the folder with
+  at least one CDF; an unreachable or empty folder at first use migrates later.
+- Minors: a calibration CDF is parsed before it is accepted (assignments kept
+  on refusal); stale answers after switching instrument are dropped; the
+  methods card offers every hub method; the hub-URL box is found by id; the
+  open GETs are documented in `instruments_api`.
+- Left to T5 (coordinator): C2 (ungated legacy `POST /api/calibration` and the
+  settings calibration/correction keys), I3, I4.
