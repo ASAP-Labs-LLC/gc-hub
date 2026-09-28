@@ -65,17 +65,21 @@ def plain_blank(path, injected, *, ramp=5.0, offset=40.0, name="Blank", method_n
 
 
 def v1_row(hub: Hub, cdf: Path, *, blank: Path | None = None, instrument: str = "gc1",
-           injection_dt: str | None = None, corrections_file: Path | None = None) -> dict:
+           injection_dt: str | None = None, corrections_file: Path | None = None,
+           auto: bool = False) -> dict:
     """The row v1 would have written for ``cdf`` with ``blank`` subtracted:
     the numbers from a non-strict ``distill.compute`` (v1's), the corrections
     file read leniently (v1), ``InjectionDateTime`` as v1 parsed the stamp
-    (unless given) and an absolute ``Source File``."""
+    (unless given) and an absolute ``Source File``. ``auto``: v1 had no
+    usable peak assignments and auto-detected the calibration peaks."""
     inst = store.instruments.get(instrument, db=hub.db) or store.instruments.get("gc1", db=hub.db)
     ctx = instruments.context(inst, hub.conf, data_dir=hub.data)
     if not (ctx.get("calibration_cdf") or "").strip():
         ctx = instruments.context(store.instruments.get("gc1", db=hub.db), hub.conf, data_dir=hub.data)
+    if auto:
+        ctx["calibration_assignments"] = ""
     corr = distill.load_d86_corrections(corrections_file or hub.conf["correction_factors_json"])
-    result = distill.compute(cdf, ctx, blank, corrections=corr, honour_env=False)
+    result = distill.compute(cdf, ctx, blank, corrections=corr, honour_env=False, allow_auto=True)
     row = dict(result["row"])
     if injection_dt is None:
         _name, raw_stamp, _method = distill.read_cdf_names(cdf)

@@ -119,6 +119,7 @@ class Scenario:
 
     def report(self, **kw):
         kw.setdefault("v1_corrections", self.hub.corrections)
+        kw.setdefault("conf", self.hub.conf)
         return parity_report("gc1", self.csv, db=self.hub.db, out_dir=self.out, **kw)
 
 
@@ -189,7 +190,13 @@ def test_every_difference_is_tagged(scenario):
 
     assert S["v1_rows"] == 13
     assert S["superseded_v1_rows"] == 1
-    assert S["compared_rows"] == 12
+    assert S["hub_samples"] == 11
+    assert S["compared_rows"] == 11
+    assert S["v1_rows_not_in_hub"] == 1
+    # every row with a hub result whose numbers agree or are proven: all but S7
+    # (unexplained) and the D7096 run (no result)
+    assert S["rows_numerically_verified"] == 9
+    assert S["rows_matching"] == 5          # B1, B0, S1, "Blank2", B2: only Source File differs
     assert S["tags"]["unexplained"] == {"differences": 1, "rows": 1}
     assert S["tags"]["blank-rule"]["rows"] == 2
     assert S["tags"]["not-in-hub"]["rows"] == 1
@@ -222,7 +229,7 @@ def test_a_blank_rows_own_numbers_are_never_put_down_to_the_blank_rule(hub):
 def test_without_the_v1_corrections_file_a_corrections_difference_is_unexplained(scenario):
     rep = scenario.report(v1_corrections=None)
     (d,) = [d for d in _by(rep, "40340") if d["tag"] != "source-file"]
-    assert d["tag"] == "unexplained" and "corrections" in d["detail"]
+    assert d["tag"] == "unexplained" and "--v1-corrections" in d["detail"]
 
 
 def test_the_report_files(scenario):
@@ -252,11 +259,31 @@ def test_a_sample_awaiting_calibration_is_auto_detect_off(hub, tmp_path):
     load_folder("gc2", src, backfill=False, db=hub.db, data_dir=hub.data, conf=hub.conf)
     hub.worker().run_until_idle()
     assert store.samples.search(instrument="gc2", db=hub.db)[0]["status"] == "awaiting_calibration"
-    v1 = write_v1_csv(tmp_path / "v1.csv", [v1_row(hub, cdf, instrument="gc2")])
-    rep = parity_report("gc2", v1, db=hub.db, out_dir=tmp_path / "out")
+    v1 = write_v1_csv(tmp_path / "v1.csv", [v1_row(hub, cdf, instrument="gc2", auto=True)])
+    rep = parity_report("gc2", v1, db=hub.db, out_dir=tmp_path / "out", conf=hub.conf,
+                        v1_corrections=hub.corrections)
     (d,) = rep["differences"]
-    assert d["tag"] == "auto-detect-off"
-    assert rep["exit_code"] == 0
+    assert d["tag"] == "auto-detect-off" and "auto-detected" in d["detail"]
+    # Proven, but no hub numbers were compared: the report can't pass on it alone.
+    assert rep["summary"]["rows_numerically_verified"] == 0
+    assert rep["exit_code"] == 1
+
+
+def test_awaiting_calibration_is_unexplained_unless_auto_detection_reproduces_v1(hub, tmp_path):
+    hub.gc1()
+    hub.gc2()
+    src = tmp_path / "gc2src"
+    src.mkdir()
+    cdf = fx.sample_cdf(src / "a.CDF", name="40401", method_name=SIMDIS)
+    load_folder("gc2", src, backfill=False, db=hub.db, data_dir=hub.data, conf=hub.conf)
+    hub.worker().run_until_idle()
+    row = v1_row(hub, cdf, instrument="gc2", auto=True)
+    row["2887 T50"] = str(float(row["2887 T50"]) + 2)
+    v1 = write_v1_csv(tmp_path / "v1.csv", [row])
+    rep = parity_report("gc2", v1, db=hub.db, out_dir=tmp_path / "out", conf=hub.conf,
+                        v1_corrections=hub.corrections)
+    (d,) = rep["differences"]
+    assert d["tag"] == "unexplained" and "awaiting_calibration" in d["detail"]
 
 
 def test_an_unprocessed_sample_fails_the_report(hub, tmp_path):
@@ -266,30 +293,48 @@ def test_an_unprocessed_sample_fails_the_report(hub, tmp_path):
     cdf = fx.sample_cdf(src / "a.CDF", name="40401", method_name=SIMDIS)
     load_folder("gc1", src, backfill=False, db=hub.db, data_dir=hub.data, conf=hub.conf)
     v1 = write_v1_csv(tmp_path / "v1.csv", [v1_row(hub, cdf)])
-    rep = parity_report("gc1", v1, db=hub.db, out_dir=tmp_path / "out")
+    rep = parity_report("gc1", v1, db=hub.db, out_dir=tmp_path / "out", conf=hub.conf)
     (d,) = rep["differences"]
     assert d["tag"] == "not-processed" and "received" in d["detail"]
     assert rep["exit_code"] == 1
 
 
-def test_when_v1s_blank_cannot_be_determined_a_hub_blank_explains_the_numbers(hub, tmp_path):
+def test_when_v1s_blank_is_unknown_a_candidate_blank_must_reproduce_v1(hub, tmp_path):
     """No blank row precedes the sample in the v1 CSV (v1 may have had a cached
-    blank), and the hub subtracted one: the difference is the blank rule."""
+    blank). v1 used an earlier genuine blank B0; the hub uses B1 (the latest at
+    or before). Recomputing with B0 reproduces v1's row: the blank rule, and
+    the detail names B0. A blank that isn't in the hub proves nothing."""
     hub.gc1()
     src = tmp_path / "src3"
     src.mkdir()
-    b1 = fx.blank_cdf(src / "b1.CDF", injected=at(9, 0, 27), method_name=SIMDIS)
+    b0 = plain_blank(src / "b0.CDF", at(8, 0, 27), ramp=9.0, offset=60.0)
+    fx.blank_cdf(src / "b1.CDF", injected=at(9, 0, 27), method_name=SIMDIS)
     s = fx.sample_cdf(src / "s.CDF", name="40404", injected=at(14, 23), method_name=SIMDIS)
-    other = plain_blank(tmp_path / "old_blank.CDF", at(8, 0, 27), ramp=9.0, offset=60.0)
     load_folder("gc1", src, backfill=False, db=hub.db, data_dir=hub.data, conf=hub.conf)
     hub.worker().run_until_idle()
-    v1 = write_v1_csv(tmp_path / "v1.csv", [v1_row(hub, s, blank=other)])
-    rep = parity_report("gc1", v1, db=hub.db, out_dir=tmp_path / "out",
+    b0_id = store.samples.find_by_key("gc1", "Blank", "2026-09-25 08:00:27", db=hub.db)["id"]
+    rows = [v1_row(hub, s, blank=b0),
+            v1_row(hub, hub.data / store.samples.find_by_key(
+                "gc1", "Blank", "2026-09-25 08:00:27", db=hub.db)["cdf_path"])]
+    rows[1].update({"Lab ID": "Blank", "InjectionDateTime": "2026-09-25 08:00:27"})
+    b1s = store.samples.find_by_key("gc1", "Blank", "2026-09-25 09:00:27", db=hub.db)
+    rows.append(v1_row(hub, hub.data / b1s["cdf_path"]))
+    rows[2].update({"InjectionDateTime": "2026-09-25 09:00:27"})
+    v1 = write_v1_csv(tmp_path / "v1.csv", rows)
+    rep = parity_report("gc1", v1, db=hub.db, out_dir=tmp_path / "out", conf=hub.conf,
                         v1_corrections=hub.corrections)
-    diffs = [d for d in rep["differences"] if d["tag"] != "source-file"]
+    diffs = [d for d in _by(rep, "40404") if d["tag"] != "source-file"]
     assert diffs and _tags(diffs) == {"blank-rule"}
-    assert rep["exit_code"] == 0
-    assert b1  # loaded, and chosen by the hub
+    assert all(f"blank sample {b0_id}" in d["detail"] for d in diffs)
+    assert rep["exit_code"] == 0, rep["summary"]
+
+    outside = plain_blank(tmp_path / "old_blank.CDF", at(7, 0, 27), ramp=12.0, offset=70.0)
+    v1b = write_v1_csv(tmp_path / "v1b.csv", [v1_row(hub, s, blank=outside)] + rows[1:])
+    rep = parity_report("gc1", v1b, db=hub.db, out_dir=tmp_path / "out", conf=hub.conf,
+                        v1_corrections=hub.corrections)
+    diffs = [d for d in _by(rep, "40404") if d["tag"] != "source-file"]
+    assert diffs and _tags(diffs) == {"unexplained"}
+    assert rep["exit_code"] == 1
 
 
 # ── the CLI ─────────────────────────────────────────────────────────────────
@@ -297,6 +342,7 @@ def test_when_v1s_blank_cannot_be_determined_a_hub_blank_explains_the_numbers(hu
 def test_cli(scenario):
     env = dict(os.environ)
     env.pop("GC_DATA_DIR", None)
+    (scenario.hub.data / "settings.json").write_text(json.dumps(scenario.hub.conf), encoding="utf-8")
     res = subprocess.run([sys.executable, str(CLI), "--data-dir", str(scenario.hub.data),
                           "--v1-corrections", str(scenario.hub.corrections),
                           "--out-dir", str(scenario.out), "gc1", str(scenario.csv)],
