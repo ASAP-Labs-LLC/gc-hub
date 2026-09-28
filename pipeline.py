@@ -1004,9 +1004,10 @@ class Worker:
 
     def _requeue_own(self, sample: dict) -> None:
         """A Replace job took the place of the sample's own queued job (one per
-        sample): when it ends without a result, give an unprocessed sample its
-        job back."""
-        if sample["status"] in ("received", "pending_corrections"):
+        sample, and a plain enqueue — e.g. ``on_calibration_saved`` or
+        ``on_method_mapped`` — keeps a queued Replace's payload): when it ends
+        without a result, give any sample that isn't final its job back."""
+        if sample["status"] != "final":
             store.jobs.enqueue(PROCESS, {"sample_id": sample["id"]}, sample_id=sample["id"],
                                db=self.db)
 

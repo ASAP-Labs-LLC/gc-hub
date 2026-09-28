@@ -374,3 +374,45 @@ def test_resending_the_original_to_another_instrument_is_cross_instrument(hub):
     _run(hub)
     again = hub.submit(original, instrument="gc2")
     assert (again.outcome, again.instrument_id, again.sample_id) == ("cross_instrument", "gc1", sid)
+
+
+# ── a failed Replace hands back the job it absorbed ────────────────────────
+
+@pytest.mark.parametrize("status", ["other_method", "awaiting_calibration"])
+def test_a_failed_replace_gives_a_held_sample_its_absorbed_requeue_back(hub, status):
+    """A queued Replace absorbs the plain job a hook queues (method mapped,
+    calibration saved); if the Replace fails, the sample gets that job back."""
+    row = hub.gc1()
+    if status == "other_method":
+        sid = hub.submit(hub.cdf(method_name="GASOLINE.M")).sample_id
+    else:
+        store.instruments.upsert({"id": "gc1", "calibration_assignments": "[]"}, db=hub.db)
+        sid = hub.submit(hub.cdf()).sample_id
+    _run(hub)
+    assert hub.sample(sid)["status"] == status
+    res = _conflict(hub, sid, method_name=hub.sample(sid)["method_name"])
+    job_id = _replace(hub, res.conflict_id)
+    if status == "other_method":
+        mm = {"SIMDISB.M": "D2887", "GASOLINE.M": "D2887"}
+        store.instruments.upsert({"id": "gc1", "method_map": mm}, db=hub.db)
+        pipeline.on_method_mapped("gc1", "GASOLINE.M", db=hub.db)
+    else:
+        store.instruments.upsert({"id": "gc1", "calibration_assignments":
+                                  row["calibration_assignments"]}, db=hub.db)
+        pipeline.on_calibration_saved("gc1", db=hub.db)
+    assert _job(hub, job_id)["payload"]["reason"] == "replace"   # the requeue was absorbed
+    with mock.patch.object(distill, "compute", side_effect=RuntimeError("boom")):
+        hub.worker().run_once()
+    assert store.conflicts.get(res.conflict_id, db=hub.db)["error"]
+    _run(hub)
+    assert hub.sample(sid)["status"] == "final"
+
+
+def test_a_failed_replace_of_a_final_sample_queues_nothing(hub):
+    hub.gc1()
+    sid = _final(hub)
+    res = _conflict(hub, sid)
+    _replace(hub, res.conflict_id)
+    with mock.patch.object(distill, "compute", side_effect=RuntimeError("boom")):
+        hub.worker().run_once()
+    assert store.jobs.list(state="queued", db=hub.db) == []
