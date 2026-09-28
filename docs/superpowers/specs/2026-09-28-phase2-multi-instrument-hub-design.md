@@ -11,9 +11,9 @@ delegated sign-off of the rest to an internal critic. Rev 1 got **REWORK
 
 Replace "one full app per GC PC, data split across folders" with **one hub on
 ASAPSV1 at one URL**. The hub owns every sample from every GC. Each GC PC runs
-a small **push agent**, which also hands finished results back so that LEM's
-station module reads them where it does today. Each instrument has its own
-calibration, blank and LEM correction factors. Search and analysis cover all
+a small **push agent**. The hub appends finished results to the share CSVs
+that LEM's station already tails (D9b). Each instrument has its own
+calibration, blank and correction factors, which are held in the hub (D4b). Search and analysis cover all
 instruments. The method is a pluggable field; D2887 is the only one today.
 
 ## Decisions
@@ -622,8 +622,8 @@ Raised for:
    Files v1 already processed dedupe by sha256 against the imported copy.
    Anything else before `live_since` is backfill and is listed for review
    on the Instruments page.
-6. Watch the first sync and the mirror's first appends. Reset LEM's tail
-   offset only if the mirror path differs from what the station tails.
+6. Watch the first sync and the hub's first appends to the adopted share
+   CSV (LEM's read position carries on unchanged).
 
 ## Testing
 
@@ -673,5 +673,5 @@ Raised for:
 - Whether each PC's `distill_output` is local or on UNC (D9 assumes the
   station tails a file the agent can append to).
 - Whether the port 5570 (GC-2) instance applies the `Agilent GC` factors
-  today (`correction_factors_json` isn't per-instance); the JSON file's
-  modification time; whether its values match LEM's for Agilent GC 1.
+  today (`correction_factors_json` isn't per-instance). This matters for
+  what GC-2's own correction values should be.
