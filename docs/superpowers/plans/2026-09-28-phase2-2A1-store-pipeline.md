@@ -392,4 +392,32 @@ only), `tests/pipeline/`.
   - Run `pipeline.cdf_problem` over the whole real share during the dry run
     and report truncated files.
 
+## T5 as built (2026-09-28, branch `a1/t5`)
+
+- **Startup:** `hub.start(app_conf, *, data_dir, notifier, conf_fn, on_final,
+  export_interval, maintenance, ...) -> HubRuntime` (`.worker`, `.exporter`,
+  `.maintenance`, `.wake_exports()`, `.stop()`; `hub.running()`), called by
+  `app._init_app` on a background thread. Order: migrate → `bootstrap_gc1` →
+  `seed_gc1_corrections` (decision: automatic at first start, reason
+  "seeded from correction_factors.json", by "startup"; a missing/invalid file
+  is an error notification and gc1 stays `pending_corrections`) →
+  `instruments.startup` (Worker with `instruments.corrections_provider(db)`
+  when 2A2 provides it, else `hub.corrections_provider` = `StoreProvider`) →
+  `HubExporter(notifier).start()` → `Maintenance` (backup from 1 AM once a
+  day, prune done jobs > 30 days). `pipeline.Worker` gained `on_final`
+  (wakes the exporter, refreshes `sample_cache`) and defaults to the hub's
+  `StoreProvider`; `HubExporter` gained `wake()`/`is_alive()`.
+- **Exporter hand-off:** `hub._share_exporter` calls
+  `instruments_api.set_exporter` and `hub_admin.set_exporter` when present.
+- **Admin wiring:** `hub_admin.py` (load-folder job, jobs status, exports
+  status/adopt/new-path/write-fresh, `/admin/hub`). **2D integration:** the
+  history-import route is not wired here; register it on `hub_admin.JOBS`
+  (`JOBS.start("import-history", lambda progress: import_history(...,
+  progress=progress), params)`) and add its row to the route-fate table.
+- **Security (2A2 critic):** `POST /api/calibration` admin-gated;
+  `POST /api/settings` JSON-only with the per-instrument keys read-only.
+- **Deleted:** `looker.py`, `run.pyw`, `library_view.py`, v1 watcher/cache
+  code in `app.py`, `paths.py` legacy branches, `instance.py` per-port
+  identity, `settings.PER_INSTANCE_KEYS`, and their tests.
+
 **Release rule (T4 review):** T4 (routes/UI on the store) and T5 (startup ownership, legacy removal) merge and ship **together**. Never tag between them: without T5, the app still starts the v1 Looker and no Worker.

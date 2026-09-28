@@ -23,10 +23,13 @@ modules and are skipped automatically if the dep is absent.
 | File | What it locks in |
 |------|------------------|
 | `test_qbench_import.py` | The fix: `qbench_client.py` is vendored in `webapp/` and imports locally; **no** code depends on the dead `…\COA Reviewer\V2\Past Data Manager\API` share path; the uploader keeps `LoginFailedError` + post-upload verification that `app.py` relies on. |
-| `test_app_routes.py` | All 36 `@app.route` endpoints the frontend calls are still registered (AST scan — never imports app.py, so no watcher threads spawn). |
+| `test_app_routes.py` | The `@app.route` endpoints the frontend calls are still registered (AST scan — never imports app.py, which starts the hub's threads). `test_route_fates.py` pins every registered route against the T4 plan's route-fate table. |
+| `test_hub_start.py` | `hub.start`: migrate, gc1 bootstrap, gc1 corrections seeded once (never zeros), the Worker (hub-owned corrections by default), the exporter woken on each final, the nightly backup and job prune; a booted hub turns a submitted CDF into an appended export row with no worker in the test; no `GC_DATA_DIR`, no start. |
+| `test_hub_admin.py` | The admin folder-loader job and the export actions (adopt, new path, write fresh), booted, admin-gated. |
 | `test_distill.py` | Core science: cumulative-area→percent, boiling-point interpolation, the ASTM D86 X4 polynomial, and the CSV upsert/dedup. |
-| `test_settings.py` | `DEFAULTS` surface (incl. the `early_signal_*` keys) and a save/load round-trip, isolated from the real `~/.gc_viewer_settings.json`. Also the port-aware `CONFIG_PATH` and the new-instance seeding rules (`PER_INSTANCE_KEYS` reset to defaults). |
-| `test_instance.py` | `instance.py` — port resolution precedence (`--port` > `GC_PORT` > 5560), validation, per-port settings/pidfile paths, the remembered-ports list, and the port-in-use probe. Stdlib-only. |
+| `test_settings.py` | `DEFAULTS` surface (incl. the `early_signal_*` keys) and a save/load round-trip in a temp folder; v1's per-port settings and instance seeding are gone. |
+| `test_instance.py` | `instance.py` — port resolution precedence (`PORT` > `--port` > `GC_PORT` > 5560), validation and the port-in-use probe. Stdlib-only. |
+| `test_paths.py` | Every state location under `GC_DATA_DIR`; without it every location refuses (`DataDirMissing`). |
 
 ## Not covered here
 
