@@ -46,6 +46,7 @@ from typing import Any, Optional
 import distill
 import instruments
 import methods
+import paths
 import store
 
 log = logging.getLogger("instrument_admin")
@@ -372,6 +373,22 @@ def _int_id(value: Any, what: str) -> int:
         raise AdminError(f"{what} must be an integer.") from None
 
 
+def _check_cdf(path: Path) -> None:
+    """Refuse (400) a file that doesn't read as a chromatogram CDF, before
+    anything changes: truncated, not NetCDF, or no intensity data."""
+    import pipeline
+    try:
+        problem = pipeline.cdf_problem(path)
+        if problem is None:
+            t, y = distill.gc_xy_from_cdf(path)
+            if len(t) < 2 or len(t) != len(y):
+                problem = "it holds no chromatogram"
+    except Exception as exc:  # noqa: BLE001 - any read failure means "not usable"
+        problem = f"it can't be read ({type(exc).__name__})"
+    if problem:
+        raise AdminError(f"{path.name} is not a usable calibration CDF: {problem}.")
+
+
 def set_calibration_cdf(instrument_id: str, conf: dict, *, sample_id: Any = None,
                         path: Any = None, db: store.Db = None, data_dir=None) -> dict:
     """Set the calibration CDF from one of the instrument's own samples (stored
@@ -401,6 +418,7 @@ def set_calibration_cdf(instrument_id: str, conf: dict, *, sample_id: Any = None
             if not Path(path.strip()).is_file():
                 raise AdminError(f"No file at {path.strip()}.")
             new = path.strip()
+        _check_cdf(Path(new) if Path(new).is_absolute() else Path(data_dir or paths.data_dir()) / new)
         with store.write_txn(conn):
             fields = {"id": instrument_id, "calibration_cdf": new}
             if new != (row.get("calibration_cdf") or ""):

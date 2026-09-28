@@ -84,6 +84,29 @@ def test_pick_refusals(hub, kw):
     assert e.value.status == 400
 
 
+@pytest.mark.parametrize("content", [b"not a cdf at all", b""])
+def test_pick_refuses_a_file_that_is_not_a_cdf_and_keeps_assignments(hub, content):
+    """Review minor: the file is parsed as a CDF before it is accepted."""
+    hub.gc1()
+    bad = hub.root / "bogus.CDF"
+    bad.write_bytes(content)
+    before = store.instruments.get("gc1", db=hub.db)
+    with pytest.raises(ia.AdminError) as e:
+        ia.set_calibration_cdf("gc1", hub.conf, path=str(bad), db=hub.db, data_dir=hub.data)
+    assert e.value.status == 400 and "CDF" in e.value.message
+    after = store.instruments.get("gc1", db=hub.db)
+    assert after["calibration_cdf"] == before["calibration_cdf"]
+    assert after["calibration_assignments"] == before["calibration_assignments"]
+
+
+def test_pick_refuses_a_truncated_cdf(hub):
+    import cdf_fixtures as fx
+    hub.gc1()
+    cut = fx.truncated_copy(hub.cal, hub.root / "cut.CDF")
+    with pytest.raises(ia.AdminError):
+        ia.set_calibration_cdf("gc1", hub.conf, path=str(cut), db=hub.db, data_dir=hub.data)
+
+
 def test_pick_another_instruments_sample_is_refused(hub):
     _s2, s3, _cal2 = _uncalibrated(hub)
     with pytest.raises(ia.AdminError) as e:
