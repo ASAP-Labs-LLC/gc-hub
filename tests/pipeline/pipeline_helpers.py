@@ -1,4 +1,7 @@
-"""Shared fixtures for the pipeline tests (2A1 T2).
+"""Shared fixture (``hub``) for the pipeline tests (2A1 T2). Test modules
+import it (``from pipeline_helpers import hub``): a ``conftest.py`` here would
+take the module name ``conftest`` from ``tests/conftest.py``, which other
+tests import.
 
 A hub data folder in ``tmp_path`` with a migrated store, a global conf whose
 calibration is the synthetic ladder with saved assignments (as the
@@ -62,6 +65,29 @@ class Hub:
         injected = injected or datetime(2026, 9, 25, 14, 23, 0)
         return fx.sample_cdf(self.src / f"s{self._n}.CDF", name=name or "40304",
                              injected=injected, method_name=method_name, **kw)
+
+    def gc1(self, live_since=datetime(2020, 1, 1)) -> dict:
+        """The gc1 row bootstrapped from ``conf`` (live since 2020: nothing is backfill)."""
+        import instruments
+        return instruments.bootstrap_gc1(self.conf, db=self.db, now=live_since)
+
+    def gc2(self, **fields) -> dict:
+        import instruments
+        return store.instruments.upsert(dict({
+            "id": "gc2", "name": "GC-2", "method_map": json.dumps(instruments.DEFAULT_METHOD_MAP),
+            "live_since": datetime(2020, 1, 1)}, **fields), db=self.db)
+
+    def submit(self, cdf, instrument="gc1", **kw):
+        import pipeline
+        return pipeline.submit(instrument, cdf, conf=self.conf, data_dir=self.data, db=self.db, **kw)
+
+    def worker(self, **kw):
+        import pipeline
+        kw.setdefault("conf_fn", lambda: self.conf)
+        return pipeline.Worker(db=self.db, data_dir=self.data, **kw)
+
+    def sample(self, sample_id) -> dict:
+        return store.samples.get(sample_id, db=self.db)
 
 
 @pytest.fixture()

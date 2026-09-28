@@ -14,6 +14,7 @@ import instruments
 import methods
 import store
 from methods import d2887
+from pipeline_helpers import hub  # noqa: F401  (the fixture)
 
 
 # ── methods ─────────────────────────────────────────────────────────────────
