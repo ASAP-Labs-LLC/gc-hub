@@ -35,11 +35,15 @@ def ladder_times(n=20, first=0.50, step=0.30):
     return [round(first + i * step, 4) for i in range(n)]
 
 
-def write_cdf(path, times, signal, sample_name, injected: datetime):
+def write_cdf(path, times, signal, sample_name, injected: datetime, method_name=None):
     """Write the variables/attributes distill reads (see the module docstring).
 
     ``times`` must be evenly spaced minutes; it is stored as a sampling
-    interval plus a delay, the way ANDI files store it."""
+    interval plus a delay, the way ANDI files store it. ``method_name``, when
+    given, is written as the ANDI global ``detection_method_name`` (real
+    Agilent files carry e.g. ``SIMDISB.M``); by default it is omitted, so the
+    fixtures the golden rows were captured from stay exactly as they were.
+    distill does not read it."""
     path = Path(path)
     times = np.asarray(times, float)
     signal = np.asarray(signal, float)
@@ -50,6 +54,8 @@ def write_cdf(path, times, signal, sample_name, injected: datetime):
         ds.dataset_completeness = "C1+C2"
         ds.sample_name = sample_name
         ds.injection_date_time_stamp = injected.strftime("%Y%m%d%H%M%S") + "+0000"
+        if method_name is not None:
+            ds.detection_method_name = method_name
         ds.createDimension("point_number", signal.size)
         v = ds.createVariable("actual_sampling_interval", "f8")
         v.assignValue(interval_s)

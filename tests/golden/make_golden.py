@@ -104,7 +104,6 @@ def build_inputs(root: Path) -> dict:
         "samples": {
             "40304": fx.sample_cdf(src / "40304.CDF"),
             "40305": fx.sample_cdf(src / "40305.CDF", name="40305", shift=0.4),
-            "Blank2": fx.blank_cdf(src / "Blank2.CDF", name="Blank2"),
         },
     }
 

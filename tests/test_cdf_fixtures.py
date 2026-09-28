@@ -40,6 +40,17 @@ class WriteCdfTests(unittest.TestCase):
         path = fx.write_cdf(self.dir / "b.CDF", t, np.ones_like(t), "40304", injected)
         self.assertEqual(distill.cdf_metadata(path), ("40304", injected))
 
+    def test_method_name_is_written_only_when_given(self) -> None:
+        import netCDF4
+        t = np.arange(0, 1.0, fx.DT_MIN)
+        named = fx.write_cdf(self.dir / "m.CDF", t, np.ones_like(t), "S", datetime(2026, 9, 1, 15, 0),
+                             method_name="SIMDISTB.M")
+        plain = fx.write_cdf(self.dir / "p.CDF", t, np.ones_like(t), "S", datetime(2026, 9, 1, 15, 0))
+        with netCDF4.Dataset(named) as ds:
+            self.assertEqual(ds.detection_method_name, "SIMDISTB.M")
+        with netCDF4.Dataset(plain) as ds:
+            self.assertNotIn("detection_method_name", ds.ncattrs())
+
     def test_builders_are_deterministic(self) -> None:
         a = fx.sample_cdf(self.dir / "s1.CDF")
         b = fx.sample_cdf(self.dir / "s2.CDF")
