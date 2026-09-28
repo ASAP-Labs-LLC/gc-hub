@@ -263,7 +263,7 @@ def test_adopt_mirror_is_a_noop_when_mirroring_is_off(tmp_path, hub, clock):
     assert a.mirror is None and a.mirror_error is None
     assert hub.by_path("/api/agent/results") == []     # nothing pulled
     assert a.ledger.results_seq() == 0
-    assert list(root.glob("*.gchub.json")) == []
+    assert list(root.glob("*.gcagent.json")) == [] and list(root.glob("*.gchub.json")) == []
 
 
 def test_big_first_scan_does_not_block_heartbeat_or_quit(tmp_path, hub, clock):

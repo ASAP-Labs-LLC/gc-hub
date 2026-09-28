@@ -28,7 +28,7 @@ def _rows(*seqs):
 
 
 def _sidecar(p):
-    return json.loads((p.parent / (p.name + ".gchub.json")).read_text(encoding="utf-8"))
+    return json.loads((p.parent / (p.name + ".gcagent.json")).read_text(encoding="utf-8"))
 
 
 @pytest.fixture
@@ -131,7 +131,7 @@ def test_pending_rolls_forward_after_crash(m):
     sc = _sidecar(mr.path_obj)
     sc["pending"] = {"size": len(data + extra), "sha256": hashlib.sha256(data + extra).hexdigest(),
                      "seq": 2}
-    (mr.path_obj.parent / "results.csv.gchub.json").write_text(json.dumps(sc))
+    (mr.path_obj.parent / "results.csv.gcagent.json").write_text(json.dumps(sc))
     mr.path_obj.write_bytes(data + extra)
     assert mr.append(CSV_HEADER, _rows(2, 3)) == 1      # 2 is already there
     assert mr.path_obj.read_bytes() == data + extra + _rows(3)[0]["line"].encode()
@@ -157,7 +157,7 @@ def test_adopt_refuses_wrong_header(tmp_path):
     p.write_bytes(_line("Lab ID", "Other").encode())
     with pytest.raises(MirrorError, match="header"):
         mirror.adopt(str(p), 0)
-    assert not (tmp_path / "old.csv.gchub.json").exists()
+    assert not (tmp_path / "old.csv.gcagent.json").exists()
 
 
 def test_inspect_reports_without_writing(tmp_path):
@@ -165,8 +165,9 @@ def test_inspect_reports_without_writing(tmp_path):
     p.write_bytes((HEADER_LINE + _line("A1", "x")).encode())
     info = mirror.inspect(str(p))
     assert info == {"exists": True, "size": p.stat().st_size, "header_ok": True,
-                    "last_row": _line("A1", "x").rstrip("\r\n"), "adopted": False}
-    assert not (tmp_path / "old.csv.gchub.json").exists()
+                    "last_row": _line("A1", "x").rstrip("\r\n"), "adopted": False,
+                    "hub_owned": None}
+    assert not (tmp_path / "old.csv.gcagent.json").exists()
     assert mirror.inspect(str(tmp_path / "none.csv"))["exists"] is False
 
 

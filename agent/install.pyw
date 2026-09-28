@@ -397,6 +397,14 @@ def install(args, ui):
             raise InstallError(str(exc))
 
         if mpath and args.mirror_path is not None:
+            if mpath.startswith(("\\\\", "//")):
+                raise InstallError("The results mirror path %s is a UNC (network share) path. The "
+                                   "mirror must be a local file on this PC: the hub itself appends "
+                                   "to the share CSVs LEM reads, and two writers must never share "
+                                   "a file." % mpath)
+            owner = mirror.hub_owner_reason(mpath)
+            if owner:
+                raise InstallError(owner)
             if not Path(mpath).parent.is_dir():
                 raise InstallError("the folder for the results CSV does not exist: %s"
                                    % Path(mpath).parent)

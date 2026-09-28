@@ -1,8 +1,17 @@
 """Results mirror: append the hub's finished rows for this instrument to a
 local CSV (the file LEM's station module tails), never rewriting a byte.
 
-Sidecar ``<mirror>.gchub.json`` = ``{"size", "sha256", "seq", "adopted_at"}``
-describes the file as the agent last left it. An append is refused when:
+Sidecar ``<mirror>.gcagent.json`` = ``{"size", "sha256", "seq", "adopted_at"}``
+describes the file as the agent last left it. It is deliberately not the
+hub's ``<file>.gchub.json`` (another schema, plus a ``.gchub.lock`` the agent
+does not take): the agent **never** mirrors into a file the hub owns, i.e.
+one with a ``.gchub.json`` beside it (hub schema or unreadable) or whose
+sidecar carries the hub's ``instrument``/``db_id`` keys. A ``.gchub.json`` in
+the agent's own schema was written by an older agent and is renamed to
+``.gcagent.json``. Sidecar temp files are ``.gcagent-<sidecar>.<random>.part``,
+which v1's start-up sweep of ``.<csv>.*.tmp`` can never match.
+
+An append is refused when:
 
 * the file exists but has no sidecar (not adopted);
 * the file is missing but has a sidecar (deleted by someone else);
@@ -51,9 +60,62 @@ class MirrorFetchError(Exception):
     """The hub did not return results (transient)."""
 
 
+SIDECAR_SUFFIX = ".gcagent.json"
+HUB_SIDECAR_SUFFIX = ".gchub.json"
+_AGENT_KEYS = {"size", "sha256", "seq", "adopted_at", "pending"}
+_HUB_KEYS = ("instrument", "db_id")
+_HUB_OWNS = ("%s has the gc-hub export sidecar %s beside it: the hub owns this file, so the "
+             "agent will not mirror into it (choose another results_mirror_path, or leave the "
+             "mirror off; the hub already appends to the share CSVs LEM reads)")
+
+
 def sidecar_path(path):
     p = Path(path)
-    return p.with_name(p.name + ".gchub.json")
+    return p.with_name(p.name + SIDECAR_SUFFIX)
+
+
+def hub_sidecar_path(path):
+    p = Path(path)
+    return p.with_name(p.name + HUB_SIDECAR_SUFFIX)
+
+
+def _read_json(p):
+    try:
+        return json.loads(Path(p).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _agent_schema(d):
+    return (isinstance(d, dict) and set(d) <= _AGENT_KEYS
+            and {"size", "sha256", "seq"} <= set(d))
+
+
+def hub_owner_reason(path):
+    """Why the hub owns *path* (a message), or None. Writes nothing."""
+    p = Path(path)
+    hp = hub_sidecar_path(p)
+    if hp.exists() and not _agent_schema(_read_json(hp)):
+        return _HUB_OWNS % (p, hp.name)
+    d = _read_json(sidecar_path(p)) if sidecar_path(p).exists() else None
+    if isinstance(d, dict) and any(k in d for k in _HUB_KEYS):
+        return _HUB_OWNS % (p, sidecar_path(p).name)
+    return None
+
+
+def claim(path):
+    """Raise MirrorError when the hub owns *path*; rename a sidecar an older
+    agent wrote as ``.gchub.json`` to ``.gcagent.json``."""
+    reason = hub_owner_reason(path)
+    if reason:
+        raise MirrorError(reason)
+    hp, ap = hub_sidecar_path(path), sidecar_path(path)
+    if hp.exists():
+        if ap.exists():
+            raise MirrorError("%s has both %s and an older agent sidecar %s; remove the older "
+                              "one, then adopt-mirror" % (path, ap.name, hp.name))
+        os.replace(str(hp), str(ap))
+        log.info("renamed the older agent sidecar %s to %s", hp.name, ap.name)
 
 
 def header_line():
@@ -73,7 +135,9 @@ def _load_sidecar(path):
 
 
 def _save_sidecar(path, sc):
-    util.atomic_write_text(sidecar_path(path), json.dumps(sc, sort_keys=True) + "\n")
+    sp = sidecar_path(path)
+    util.atomic_write_bytes(sp, (json.dumps(sc, sort_keys=True) + "\n").encode("utf-8"),
+                            tmp_prefix=".gcagent-" + sp.name + ".", tmp_suffix=".part")
 
 
 def _first_and_last_rows(data):
@@ -87,19 +151,23 @@ def _first_and_last_rows(data):
 def inspect(path):
     """What the installer shows before adoption. Writes nothing."""
     p = Path(path)
+    owner = hub_owner_reason(p)
     if not p.is_file():
-        return {"exists": False}
+        return {"exists": False, "hub_owned": owner}
     data = p.read_bytes()
     first, last = _first_and_last_rows(data)
+    adopted = sidecar_path(p).exists() or (hub_sidecar_path(p).exists() and owner is None)
     return {"exists": True, "size": len(data), "header_ok": first == CSV_HEADER,
-            "last_row": last, "adopted": sidecar_path(p).exists()}
+            "last_row": last, "adopted": adopted, "hub_owned": owner}
 
 
 def adopt(path, seq):
     """Accept the mirror file as it is now: check the header, then write the
     sidecar at the agent's current results seq. A missing file clears any
-    stale sidecar, so the agent starts a new file."""
+    stale sidecar, so the agent starts a new file. A file the hub owns is
+    refused."""
     p = Path(path)
+    claim(p)
     if not p.is_file():
         try:
             os.unlink(str(sidecar_path(p)))
@@ -127,6 +195,7 @@ class Mirror:
         """Return (existing bytes, sidecar) after the safety checks, rolling a
         pending append forward when the file matches it."""
         p = self.path_obj
+        claim(p)
         sc = _load_sidecar(p)
         exists = p.is_file()
         if not exists:

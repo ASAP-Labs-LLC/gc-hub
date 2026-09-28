@@ -31,12 +31,15 @@ def sha256_file(path, chunk=1 << 20):
     return h.hexdigest()
 
 
-def atomic_write_bytes(path, data, retries=10):
+def atomic_write_bytes(path, data, retries=10, tmp_prefix=None, tmp_suffix=".tmp"):
     """Write *data* to *path* via a temp file in the same folder, fsync and
-    ``os.replace``. Retries briefly on Windows sharing violations."""
+    ``os.replace``. Retries briefly on Windows sharing violations. The temp
+    file is ``<tmp_prefix><random><tmp_suffix>`` (default ``.<name>.*.tmp``)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent))
+    if tmp_prefix is None:
+        tmp_prefix = "." + path.name + "."
+    fd, tmp = tempfile.mkstemp(prefix=tmp_prefix, suffix=tmp_suffix, dir=str(path.parent))
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)

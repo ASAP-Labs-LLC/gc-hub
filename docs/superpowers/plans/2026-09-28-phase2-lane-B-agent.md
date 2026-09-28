@@ -83,6 +83,14 @@ heartbeat), `bad_packages.json` (shas the launcher reverted from; the updater sk
    while unpacking an update is recorded in `failed_packages.json`. The installer's in-place
    update re-reads, merges and verifies (retrying) so it never clobbers the agent's own
    `paused` write; the launcher's atomic write retries sharing violations.
+12. **Integration seam I5/M3:** the agent's mirror sidecar is `<mirror>.gcagent.json` (was
+   `.gchub.json`, the hub export's sidecar name with another schema). The agent refuses any
+   file the hub owns (`.gchub.json` beside it in the hub schema or unreadable, or a sidecar
+   with `instrument`/`db_id`) with "…the hub owns this file…" in `last_error`; an older agent's
+   `.gchub.json` in the agent schema is renamed. Sidecar temp files are
+   `.gcagent-<sidecar>.<random>.part` (v1's sweep of `.<csv>.*.tmp` cannot match). The
+   installer refuses a UNC or hub-owned `--mirror-path`. Contract §1's "Mirror sidecar" line
+   needs the new name.
    *Possible optimisation (not done):* each poll still walks the whole watch folder; with a very
    large history it could skip folders whose mtime has not changed since the last pass (NTFS
    updates a folder's mtime when entries are added or removed).
