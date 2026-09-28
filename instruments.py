@@ -193,9 +193,12 @@ def startup(app_conf: Dict[str, str], notifier=None, *, db: store.Db = None,
     ``notifications.get_store().add``). ``db`` defaults to
     ``<data_dir>/gc.db`` and ``data_dir`` to ``paths.data_dir()``;
     ``conf_fn`` (default ``settings.load_settings``) supplies the global
-    settings per job. Other keywords go to ``pipeline.Worker``.
+    settings per job. ``format_line`` defaults to ``exports.format_line``
+    (the frozen v1 export line). Other keywords go to ``pipeline.Worker``.
     """
+    import exports
     import pipeline  # deferred: pipeline imports this module
+    worker_kw.setdefault("format_line", exports.format_line)
     data = Path(data_dir) if data_dir is not None else paths.data_dir()
     if data is None:
         raise RuntimeError(f"{paths.DATA_ENV} is not set; the hub needs a data folder")

@@ -469,6 +469,8 @@ def test_instruments_startup_bootstraps_requeues_and_starts(hub):
         assert store.instruments.get("gc1", db=hub.db)["live_since"] is not None
         assert list(incoming.iterdir()) == []
         assert w.notifier is notes
+        import exports
+        assert w.format_line is exports.format_line     # the frozen export line, not the fallback
         sid = hub.submit(hub.cdf(injected=datetime.now().replace(microsecond=0))).sample_id
         w.wake()
         deadline = time.monotonic() + 30

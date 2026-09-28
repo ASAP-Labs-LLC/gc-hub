@@ -76,7 +76,7 @@ Public API
         .run_until_idle() -> int  # every due job; returns how many ran
 
 ``instruments.startup(app_conf, notifier, ...)`` does migrate → gc1
-bootstrap → ``Worker.start()`` in one call.
+bootstrap → ``Worker.start()`` in one call, with ``format_line=exports.format_line``.
 
 Injection points:
 
