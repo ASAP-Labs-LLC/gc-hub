@@ -493,13 +493,27 @@ def _cache_fingerprints(conf: dict) -> dict:
 _cache_refresh_lock = threading.Lock()
 _cache_refresh_pending: set[int] = set()
 _cache_refresh_running = False
+# sample id -> monotonic time its CDF last failed to read: not retried for
+# CACHE_FAILURE_TTL seconds, so an unreadable file isn't re-read on every
+# list request.
+_cache_failures: dict[int, float] = {}
+CACHE_FAILURE_TTL = 300.0
+CACHE_REFRESH_PAUSE = 0.2      # seconds between batches: leave the store and disk to requests
 
 
 def _schedule_cache_refresh(sample_ids) -> None:
-    """Queue samples for the background sample_cache refresher (single flight)."""
+    """Queue samples for the background sample_cache refresher (single flight).
+    Samples whose CDF failed to read in the last ``CACHE_FAILURE_TTL`` seconds
+    are skipped."""
     global _cache_refresh_running
+    now = _monotonic()
     with _cache_refresh_lock:
-        _cache_refresh_pending.update(int(s) for s in sample_ids)
+        for sid in sample_ids:
+            failed = _cache_failures.get(int(sid))
+            if failed is not None and now - failed < CACHE_FAILURE_TTL:
+                continue
+            _cache_failures.pop(int(sid), None)
+            _cache_refresh_pending.add(int(sid))
         if _cache_refresh_running or not _cache_refresh_pending:
             return
         _cache_refresh_running = True
@@ -528,6 +542,7 @@ def _refresh_sample_cache() -> None:
                     _refresh_one(sid, data, db, conf, fps, standards)
             except Exception:
                 LOGGER.exception("sample_cache refresh failed")
+            time.sleep(CACHE_REFRESH_PAUSE)
     except BaseException:
         with _cache_refresh_lock:
             _cache_refresh_running = False
@@ -551,8 +566,10 @@ def _refresh_one(sid: int, data: Path, db: Path, conf: dict, fps: dict, standard
                 best = fuel_fit.classify(t, y, standards, **_bestfit_config(conf))
         except Exception as exc:
             # Unreadable now (a share blip, a file being replaced): cache
-            # nothing, so the next list request tries again.
+            # nothing, and don't try again for CACHE_FAILURE_TTL seconds.
             LOGGER.warning("sample_cache: sample %s: %s", sid, exc)
+            with _cache_refresh_lock:
+                _cache_failures[sid] = _monotonic()
             return
     fields = {"rules_fingerprint": fps["rules_fp"], "flags": json.dumps(flags)}
     if fps["bestfit_fp"] is not None:
@@ -793,6 +810,29 @@ def _safe_path(p: str) -> Path:
     return Path(p)
 
 
+_STANDARD_NAME_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def _standard_name_problem(name) -> Optional[str]:
+    """Why ``name`` can't be a comparison-standard file name (it becomes
+    ``<standards dir>/<name>.CDF``), or None. No path separators, no
+    Windows-reserved characters, not ``.``/``..`` or hidden."""
+    if not isinstance(name, str) or not name.strip():
+        return "A standard name is required"
+    if _STANDARD_NAME_BAD.search(name) or name.strip().startswith("."):
+        return f"Invalid standard name {name!r}: no slashes, dots first or characters like :*?\"<>|"
+    return None
+
+
+_FILENAME_UNSAFE = re.compile(r"[^A-Za-z0-9._ -]+")
+
+
+def _safe_filename(text) -> str:
+    """``text`` as one safe file-name component (lab IDs in export names)."""
+    out = _FILENAME_UNSAFE.sub("_", str(text or "")).replace("..", "_").strip(" .")
+    return out or "sample"
+
+
 def _error(msg: str, status: int = 400) -> tuple:
     return jsonify({"error": msg}), status
 
@@ -850,11 +890,36 @@ def _bad_sample_id(exc):
     return _error(str(exc), 400)
 
 
-def _sample_or_404(sample_id, db) -> dict:
+MAX_SAMPLE_ID = 2 ** 63 - 1     # SQLite INTEGER; larger ids can't exist (and overflow the driver)
+
+
+@app.errorhandler(OverflowError)
+def _overflow(exc):
+    """A number too large for SQLite reached a query: it can't name a row."""
+    return _error("Not found", 404)
+
+
+def _valid_id(value) -> Optional[int]:
+    """``value`` as a sample id (1..2^63-1), or None."""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
     try:
-        sid = int(sample_id)
+        i = int(value)
     except (TypeError, ValueError):
-        raise BadSampleId(f"sample_id must be an integer, not {sample_id!r}") from None
+        return None
+    return i if 1 <= i <= MAX_SAMPLE_ID else None
+
+
+def _sample_or_404(sample_id, db, *, from_path: bool = False) -> dict:
+    """The ``samples`` row. An id that isn't an integer in 1..2^63-1 is a 400
+    (``BadSampleId``) from a request body, a 404 from a URL path (which can
+    only name existing samples)."""
+    sid = _valid_id(sample_id)
+    if sid is None:
+        if from_path:
+            raise SampleNotFound(f"Sample {sample_id} not found")
+        raise BadSampleId(f"sample_id must be an integer from 1 to {MAX_SAMPLE_ID}, "
+                          f"not {sample_id!r}")
     s = store.samples.get(sid, db=db)
     if s is None:
         raise SampleNotFound(f"Sample {sample_id} not found")
@@ -863,16 +928,16 @@ def _sample_or_404(sample_id, db) -> dict:
 
 def _sample_ids(raw) -> list[int]:
     """A request's ``sample_ids`` as ints, in order, without repeats.
-    ``ValueError`` if it isn't a list of integers."""
+    ``ValueError`` if it isn't a list of integers in 1..2^63-1."""
     if raw is None:
         return []
     if not isinstance(raw, list):
         raise ValueError("sample_ids must be a list of integers")
     out: list[int] = []
     for v in raw:
-        if isinstance(v, bool) or not isinstance(v, (int, str)):
-            raise ValueError("sample_ids must be a list of integers")
-        i = int(v)
+        i = _valid_id(v)
+        if i is None:
+            raise ValueError(f"sample_ids must be integers from 1 to {MAX_SAMPLE_ID}, not {v!r}")
         if i not in out:
             out.append(i)
     return out
@@ -2034,7 +2099,7 @@ def _sample_entry(s: dict, cache: Optional[dict], recorded, fps: dict, run_no: i
 @app.route("/api/samples/<int:sample_id>/metadata", methods=["GET"])
 def api_sample_metadata(sample_id: int):
     _data, db = _hub()
-    s = _sample_or_404(sample_id, db)
+    s = _sample_or_404(sample_id, db, from_path=True)
     revisions = [{"revision": r["revision"], "reason": r["reason"], "by": r["by"],
                   "processed_at": r["processed_at"]}
                  for r in store.list_revisions(sample_id, db=db)]
@@ -2085,7 +2150,7 @@ def api_sample_trace(sample_id: int):
     """The chromatogram of the CDF the (current or ``?revision=``) revision was
     computed from; the sample's stored file when it has no revision."""
     data, db = _hub()
-    s = _sample_or_404(sample_id, db)
+    s = _sample_or_404(sample_id, db, from_path=True)
     p = _revision_cdf(s, _requested_revision(s, db), data)
     try:
         t, y = distill.gc_xy_from_cdf(p)
@@ -2142,7 +2207,7 @@ def api_sample_distillation_curve(sample_id: int):
     ``blank_used`` and its ``calibration_used`` anchors. 409 while the sample
     has no revision (the hold reason is in the message)."""
     data, db = _hub()
-    s = _sample_or_404(sample_id, db)
+    s = _sample_or_404(sample_id, db, from_path=True)
     rev = _requested_revision(s, db)
     if rev is None:
         why = s["status"] + (f": {s['error']}" if s["error"] else "")
@@ -3100,8 +3165,11 @@ def api_add_comparison_standard():
                             data)
     try:
         source_path = str(body.get("source_path") or src or "").strip()
-        name = body.get("name", "").strip()
-        if not source_path or not name:
+        name = str(body.get("name") or "").strip()
+        problem = _standard_name_problem(name)
+        if problem:
+            return _error(problem)
+        if not source_path:
             return _error("source_path (or sample_id) and name are required")
 
         src = src or _safe_path(source_path)
@@ -3121,6 +3189,9 @@ def api_add_comparison_standard():
 
 @app.route("/api/comparison-standard/<name>", methods=["DELETE"])
 def api_delete_comparison_standard(name: str):
+    problem = _standard_name_problem(name)
+    if problem:
+        return _error(problem)
     try:
         conf = settings_mod.load_settings()
         comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
@@ -3140,10 +3211,11 @@ def api_delete_comparison_standard(name: str):
 def api_rename_comparison_standard():
     try:
         body = request.get_json(force=True)
-        old_name = body.get("old_name", "").strip()
-        new_name = body.get("new_name", "").strip()
-        if not old_name or not new_name:
-            return _error("old_name and new_name are required")
+        old_name = str(body.get("old_name") or "").strip()
+        new_name = str(body.get("new_name") or "").strip()
+        problem = _standard_name_problem(old_name) or _standard_name_problem(new_name)
+        if problem:
+            return _error(problem)
 
         conf = settings_mod.load_settings()
         comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
@@ -3263,6 +3335,8 @@ def api_analysis():
 
 
 def _standard_path(conf: dict, standard_name: str) -> Optional[Path]:
+    if _standard_name_problem(standard_name):
+        return None
     comp_dir = _standards_dir(conf)
     for cand in (comp_dir / f"{standard_name}.CDF", comp_dir / f"{standard_name}.cdf"):
         if cand.is_file():
@@ -3361,7 +3435,7 @@ def api_export_pdf():
             return _error("Plotly/kaleido not installed for PDF generation", 500)
 
         pdf_bytes = _generate_chromatogram_pdf(p, title=_sample_title(s))
-        filename = f"{s['lab_id']}_chromatogram.pdf"
+        filename = f"{_safe_filename(s['lab_id'])}_chromatogram.pdf"
 
         return send_file(
             io.BytesIO(pdf_bytes),
@@ -3413,7 +3487,7 @@ def api_export_comparison():
             sample_name = s["lab_id"]
             html_content = _generate_comparison_html(p, standard_paths, sample_name=sample_name)
 
-            out_file = export_dir / f"{sample_name}_comparison.html"
+            out_file = export_dir / f"{_safe_filename(sample_name)}_comparison.html"
             out_file.write_text(html_content, encoding="utf-8")
             generated_files.append(str(out_file))
 
@@ -3432,7 +3506,7 @@ def api_export_comparison():
                     template="plotly_white",
                 )
                 pdf_bytes = pio.to_image(fig, format="pdf", width=1200, height=600)
-                pdf_file = export_dir / f"{sample_name}_comparison.pdf"
+                pdf_file = export_dir / f"{_safe_filename(sample_name)}_comparison.pdf"
                 pdf_file.write_bytes(pdf_bytes)
                 generated_files.append(str(pdf_file))
             except Exception as exc:
@@ -3530,7 +3604,7 @@ def api_export_analysis_report():
                                                      ladder=ladder)
 
         doc_name = body.get("doc_name", "analysis_report")
-        filename = f"{s['lab_id']}_{doc_name}.pdf"
+        filename = f"{_safe_filename(s['lab_id'])}_{_safe_filename(doc_name)}.pdf"
 
         return send_file(
             io.BytesIO(report_bytes),
@@ -3562,6 +3636,7 @@ def api_export_analysis_reports_zip():
         conf = settings_mod.load_settings()
 
         buf = io.BytesIO()
+        written = 0
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for item in items:
                 try:
@@ -3575,9 +3650,13 @@ def api_export_analysis_reports_zip():
                 report_bytes = _generate_analysis_report_pdf(params, analysis_result, ranges=ranges,
                                                              ladder=ladder)
                 doc_name = item.get("doc_name", "analysis_report")
-                filename = f"{s['lab_id']}_{doc_name}.pdf"
+                filename = f"{_safe_filename(s['lab_id'])}_{_safe_filename(doc_name)}.pdf"
                 zf.writestr(filename, report_bytes)
+                written += 1
 
+        if not written:
+            return _error(f"All {len(items)} report(s) were skipped (unknown sample, "
+                          "no CDF or standard not found); see the log", 409)
         buf.seek(0)
         return send_file(
             buf,
@@ -3641,12 +3720,12 @@ def api_qbench_upload():
     for item in body.get("queue") or []:
         if not isinstance(item, dict):
             return _error("queue items must be objects {sample_id, standard_name, ...}")
-        try:
-            sid = int(item.get("sample_id"))
-        except (TypeError, ValueError):
-            return _error("every queue item needs a sample_id")
-        s = _sample_or_404(sid, db)
-        if not store.samples.is_gated(sid, db=db):
+        s = _sample_or_404(item.get("sample_id"), db)
+        sid = s["id"]
+        if not s["cdf_path"]:
+            refused.append({"sample_id": sid, "lab_id": s["lab_id"],
+                            "error": "a result-only sample has no CDF to build the report from"})
+        elif not store.samples.is_gated(sid, db=db):
             refused.append({"sample_id": sid, "lab_id": s["lab_id"], "error": _gate_reason(s)})
         clean = {k: v for k, v in item.items() if k not in ("pdf_path", "sample_path", "lab_id")}
         new_queue.append(dict(clean, sample_id=sid, lab_id=s["lab_id"]))
@@ -3887,7 +3966,7 @@ def api_qbench_upload():
                     }
                     report_bytes = _generate_analysis_report_pdf(report_params, ar,
                                                                  ladder=(cal_times, cal_carbons))
-                    safe_id = lab_id.replace("/", "_").replace("\\", "_")
+                    safe_id = _safe_filename(lab_id)
                     out_file = export_dir / f"{safe_id}_analysis.pdf"
                     out_file.write_bytes(report_bytes)
                     pdf_path = str(out_file)

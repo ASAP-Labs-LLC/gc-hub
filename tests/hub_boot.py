@@ -18,7 +18,10 @@ The samples (``Hub.ids``):
   so it fails the gate;
 * ``other``: a ``D7096.M`` run: ``other_method`` (no revision);
 * ``held``: ``50001`` on ``gc2``, which has no calibration:
-  ``awaiting_calibration`` with its hold reason in ``samples.error``.
+  ``awaiting_calibration`` with its hold reason in ``samples.error``;
+* ``released``: backfill (``40298``), final and released, so it passes the gate;
+* ``slashed``: lab ID ``AB/../12`` (filename sanitising), final;
+* ``resultonly``: a result-only import (no CDF), final with a revision.
 
 Not a test module (no ``test_`` prefix); needs numpy, netCDF4, scipy.
 """
@@ -116,7 +119,22 @@ def build_hub(root: Path) -> Hub:
                                  shift=0.03, method_name="D7096.M"))
     hub.submit("held", hub._cdf("sample", name="50001", injected=datetime(2026, 9, 25, 18, 50, 0),
                                    shift=0.04, method_name=SIMDIS), instrument="gc2")
+    hub.submit("released", hub._cdf("sample", name="40298", injected=datetime(2026, 9, 19, 13, 30, 0),
+                                    shift=0.05, method_name=SIMDIS))
+    hub.submit("slashed", hub._cdf("sample", name="AB/../12", injected=datetime(2026, 9, 25, 19, 40, 0),
+                                   shift=0.06, method_name=SIMDIS))
     hub.worker().run_until_idle()
+    pipeline.release_backfill(hub.ids["released"], by="test", db=hub.db, data_dir=hub.data)
+
+    # A result-only import (no CDF): final, with the final sample's numbers.
+    rid = store.samples.insert_received("gc1", "39999", "2026-09-23 13:30:00", "csv",
+                                        cdf_sha256=None, cdf_path=None, status="final",
+                                        db=hub.db)
+    results = store.get_revision(hub.ids["final"], db=hub.db)["results"]
+    with store.connection(hub.db) as conn:
+        with store.write_txn(conn):
+            store.add_revision(conn, rid, results, reason="import", by="test")
+    hub.ids["resultonly"] = rid
 
     # A comparison standard for the Analysis routes: a copy of a sample run.
     shutil.copy2(hub.src / "sample2.CDF", hub.standards / "Diesel.CDF")

@@ -85,7 +85,7 @@ def test_files_filters_and_paging(hub_app):
     _, body = get(port, "/api/files?instrument=gc2")
     assert [s["sample_id"] for s in body["samples"]] == [hub.ids["held"]]
     _, body = get(port, "/api/files?backfill=1")
-    assert [s["sample_id"] for s in body["samples"]] == [hub.ids["backfill"]]
+    assert sorted(s["sample_id"] for s in body["samples"]) == sorted([hub.ids["backfill"], hub.ids["released"]])
     _, body = get(port, "/api/files?method=D7096.M")
     assert [s["sample_id"] for s in body["samples"]] == [hub.ids["other"]]
     _, body = get(port, "/api/files?date_from=2026-09-25&date_to=2026-09-25")
@@ -192,7 +192,7 @@ def test_table_is_current_revisions(hub_app):
     code, body = get(port, "/api/table")
     assert code == 200, body
     assert body["columns"] == distill.CSV_HEADER
-    with_results = [hub.ids[k] for k in ("blank", "final", "rerun", "backfill")]
+    with_results = [hub.ids[k] for k in ("blank", "final", "rerun", "backfill", "released", "slashed", "resultonly")]
     assert sorted(body["sample_ids"]) == sorted(with_results)
     row = body["rows"][body["sample_ids"].index(hub.ids["final"])]
     results = json.loads(store.get_revision(hub.ids["final"], db=hub.db)["results"])
@@ -384,6 +384,154 @@ def test_calibration_save_queues_awaiting_calibration(hub_app):
         assert any(j["sample_id"] == sid for j in store.jobs.list(state="queued", db=hub.db))
     finally:
         hub.worker().run_until_idle()
+
+
+# ── review fixes ────────────────────────────────────────────────────────────
+
+HUGE = 2 ** 70
+
+
+def _is_json_error(code, body, expected):
+    return code == expected and isinstance(body, dict) and "error" in body
+
+
+@pytest.mark.parametrize("path", [
+    f"/api/samples/{HUGE}/metadata", f"/api/samples/{HUGE}/trace",
+    f"/api/samples/{HUGE}/distillation-curve", f"/api/samples/{2 ** 63}/metadata",
+    "/api/samples/0/metadata",
+])
+def test_out_of_range_path_ids_are_json_404(hub_app, path):
+    port, _hub, _ = hub_app
+    code, body = get(port, path)
+    assert _is_json_error(code, body, 404), (code, body)
+
+
+@pytest.mark.parametrize("path,body", [
+    ("/api/export-lims", {"sample_ids": [HUGE]}),
+    ("/api/export-lims", {"sample_ids": [0]}),
+    ("/api/export-lims", {"sample_ids": [-3]}),
+    ("/api/reprocess", {"sample_ids": [HUGE]}),
+    ("/api/qbench-upload", {"queue": [{"sample_id": HUGE, "standard_name": "Diesel"}]}),
+    ("/api/qbench-upload", {"queue": [{"sample_id": -1, "standard_name": "Diesel"}]}),
+    ("/api/analysis", {"sample_id": HUGE, "standard_name": "Diesel"}),
+    ("/api/best-fit", {"sample_id": 2 ** 63}),
+    ("/api/export-analysis-report", {"sample_id": HUGE, "standard_name": "Diesel"}),
+])
+def test_out_of_range_body_ids_are_json_400(hub_app, path, body):
+    port, _hub, _ = hub_app
+    code, resp = post(port, path, body)
+    assert _is_json_error(code, resp, 400), (code, resp)
+
+
+def test_out_of_range_status_ids_are_json_400(hub_app):
+    port, _hub, _ = hub_app
+    code, body = get(port, f"/api/reprocess/status?sample_ids={HUGE}")
+    assert _is_json_error(code, body, 400), (code, body)
+
+
+def test_qbench_refuses_a_result_only_sample(hub_app):
+    port, hub, _ = hub_app
+    code, body = post(port, "/api/qbench-upload",
+                      {"queue": [{"sample_id": hub.ids["resultonly"], "standard_name": "Diesel"}]})
+    assert code == 409, body
+    assert body["refused"][0]["sample_id"] == hub.ids["resultonly"]
+    assert "CDF" in body["refused"][0]["error"]
+
+
+def test_a_released_backfill_sample_passes_the_gate(hub_app):
+    port, hub, store = hub_app
+    sid = hub.ids["released"]
+    # QBench: only the unreleased backfill is refused
+    code, body = post(port, "/api/qbench-upload",
+                      {"queue": [{"sample_id": sid, "standard_name": "Diesel"},
+                                 {"sample_id": hub.ids["backfill"], "standard_name": "Diesel"}]})
+    assert code == 409 and [r["sample_id"] for r in body["refused"]] == [hub.ids["backfill"]]
+    # LIMS: exported
+    code, body = post(port, "/api/export-lims", {"sample_ids": [sid]})
+    assert code == 200, body
+    assert [e["sample_id"] for e in body["exported"]] == [sid]
+
+
+@pytest.mark.parametrize("status,error", [("pending_corrections", "Corrections not set"),
+                                          ("error", "boom")])
+def test_held_and_failed_samples_are_refused(hub_app, status, error):
+    port, hub, store = hub_app
+    sid = hub.ids["rerun"]
+    store.samples.set_status(sid, status, error=error, db=hub.db)
+    try:
+        code, body = post(port, "/api/export-lims", {"sample_ids": [sid]})
+        assert code == 409 and status in body["refused"][0]["error"], body
+        code, body = post(port, "/api/qbench-upload",
+                          {"queue": [{"sample_id": sid, "standard_name": "Diesel"}]})
+        assert code == 409 and status in body["refused"][0]["error"], body
+        assert error in body["refused"][0]["error"]
+    finally:
+        store.samples.set_status(sid, "final", db=hub.db)
+
+
+def test_reports_zip_is_409_when_every_item_is_skipped(hub_app):
+    port, hub, _ = hub_app
+    code, body = post(port, "/api/export-analysis-reports-zip",
+                      {"items": [{"sample_id": UNKNOWN, "standard_name": "Diesel"},
+                                 {"sample_id": hub.ids["final"], "standard_name": "NoSuchStd"}]})
+    assert _is_json_error(code, body, 409), (code, body)
+    assert "skipped" in body["error"]
+
+
+@pytest.mark.parametrize("name", ["../evil", "a/b", "..", "x\\y", ""])
+def test_comparison_standard_names_cannot_escape_the_folder(hub_app, name):
+    port, hub, _ = hub_app
+    code, body = post(port, "/api/comparison-standard", {"sample_id": hub.ids["final"], "name": name})
+    assert _is_json_error(code, body, 400), (code, body)
+    assert not (hub.data / "evil.CDF").exists()
+    for path, payload in (("/api/comparison-standard/rename", {"old_name": "Diesel", "new_name": name}),):
+        code, body = post(port, path, payload)
+        assert _is_json_error(code, body, 400), (path, code, body)
+    assert (hub.standards / "Diesel.CDF").is_file()
+
+
+def test_export_comparison_sanitises_the_lab_id_in_file_names(hub_app):
+    port, hub, _ = hub_app
+    code, body = post(port, "/api/export-comparison", {"sample_ids": [hub.ids["slashed"]]})
+    assert code == 200, body
+    export_dir = hub.data / "exports"
+    for f in body["files"]:
+        p = Path(f).resolve()
+        assert p.parent == export_dir.resolve(), f
+        assert "/" not in p.name and ".." not in p.name.replace("_comparison", "")
+
+
+def test_an_unreadable_cdf_is_not_reread_on_every_list_request(hub_app):
+    port, hub, store = hub_app
+    from bootapp import wait_for
+    sid = hub.ids["slashed"]
+    cdf = hub.data / hub.sample("slashed")["cdf_path"]
+    log = hub.data / "app.log"
+    needle = f"sample_cache: sample {sid}:"
+    with store.connection(hub.db) as conn:
+        conn.execute("DELETE FROM sample_cache WHERE sample_id=?", (sid,))
+    cdf.rename(cdf.with_suffix(".away"))
+    try:
+        get(port, "/api/files")
+        assert wait_for(lambda: needle in log.read_text(encoding="utf-8", errors="replace"), timeout=20)
+        for _ in range(3):
+            get(port, "/api/files")
+        wait_for(lambda: False, timeout=1.5)
+        assert log.read_text(encoding="utf-8", errors="replace").count(needle) == 1
+    finally:
+        cdf.with_suffix(".away").rename(cdf)
+
+
+def test_server_search_with_filters(hub_app):
+    # The UI searches the server when the box is non-empty and the store
+    # holds more than the page it loaded: q + instrument + status + paging.
+    port, hub, _ = hub_app
+    code, body = get(port, "/api/files?q=4030&instrument=gc1&status=final&limit=1")
+    assert code == 200
+    assert body["total"] == 2            # both 40304 injections (gc1, final)
+    assert len(body["samples"]) == 1
+    code, body = get(port, "/api/files?q=4030&instrument=gc2")
+    assert body["total"] == 0
 
 
 def test_index_has_no_scan_controls_and_loads_the_sample_helpers(hub_app):
