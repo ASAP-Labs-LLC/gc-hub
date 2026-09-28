@@ -16,8 +16,9 @@ from pathlib import Path
 WEBAPP_DIR = Path(__file__).resolve().parent.parent
 
 # The distinct route paths the frontend consumes (── /api/settings serves
-# both GET and POST under one path). Sourced from the live, feature-complete
-# app.py at consolidation time.
+# both GET and POST under one path). Updated for phase 2 T4 (samples by
+# sample_id; scan/rebuild/refresh removed); tests/test_route_fates.py holds
+# the full fate of every route.
 EXPECTED_ROUTES = {
     "/",
     "/calibration",
@@ -30,16 +31,12 @@ EXPECTED_ROUTES = {
     "/api/comparison-standard/<name>",
     "/api/comparison-standard/rename",
     "/api/comparison-standards",
-    "/api/distillation-curve",
     "/api/export-analysis-report",
     "/api/export-analysis-reports-zip",
     "/api/export-comparison",
     "/api/export-lims",
     "/api/export-pdf",
     "/api/files",
-    "/api/files/refresh",
-    "/api/library/reindex-times",
-    "/api/metadata/<path:filepath>",
     "/api/notifications",
     "/api/notifications/<notif_id>/dismiss",
     "/api/notifications/dismiss-all",
@@ -52,20 +49,17 @@ EXPECTED_ROUTES = {
     "/api/qbench-upload",
     "/api/qbench-upload-status",
     "/api/qbench-upload/stream",
-    "/api/rebuild-db",
     "/api/reprocess",
     "/api/reprocess/preview",
     "/api/reprocess/status",
     "/api/restart",
+    "/api/samples/<int:sample_id>/distillation-curve",
+    "/api/samples/<int:sample_id>/metadata",
+    "/api/samples/<int:sample_id>/trace",
     "/api/save-analysis-defaults",
-    "/api/scan",
-    "/api/scan/status",
-    "/api/scan/stream",
     "/api/server-status",
     "/api/settings",
-    "/api/stop-scan",
     "/api/table",
-    "/api/trace",
 }
 
 
@@ -130,8 +124,12 @@ class RouteSurfaceTests(unittest.TestCase):
         self.assertIn("POST", methods.get("/api/notifications/<notif_id>/dismiss", set()))
         self.assertIn("POST", methods.get("/api/notifications/dismiss-all", set()))
 
-    def test_library_reindex_is_post(self) -> None:
-        self.assertIn("POST", _route_methods().get("/api/library/reindex-times", set()))
+    def test_sample_routes_take_a_sample_id(self) -> None:
+        # Phase 2 T4: samples are addressed by id, never by file path.
+        methods = _route_methods()
+        for leaf in ("metadata", "trace", "distillation-curve"):
+            self.assertIn("GET", methods.get(f"/api/samples/<int:sample_id>/{leaf}", set()))
+        self.assertFalse([p for p in methods if "<path:" in p])
 
 
 def _app_run_call() -> ast.Call:

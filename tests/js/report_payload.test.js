@@ -24,13 +24,14 @@ module.exports = (t) => {
 
     // buildReportItemPayload: queue item + its captured ranges
     const item = {
-        lab_id: 'AB123', sample_name: 'Doc', sample_path: '/p/s.CDF',
+        lab_id: 'AB123', sample_name: 'Doc', sample_id: 42,
         standard_name: 'Diesel', bullets: 'b', conclusion: 'c',
         overlay_standards: ['x'],
         ranges: [{ label: 'Gas', c_start: 5, c_end: 11, color: '#f0a50044' }],
     };
     const payload = buildReportItemPayload(item);
-    t.eq(payload.sample_path, '/p/s.CDF');
+    t.eq(payload.sample_id, 42);
+    t.eq('sample_path' in payload, false);   // samples are addressed by id (phase 2 T4)
     t.eq(payload.standard_name, 'Diesel');
     t.eq(payload.doc_name, 'Doc');
     t.eq(payload.lab_id, 'AB123');

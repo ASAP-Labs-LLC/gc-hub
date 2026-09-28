@@ -1610,6 +1610,41 @@ tbody tr.selected td.col-d2887 {
   flex-shrink: 0;
 }
 
+/* Sample status badge (non-final samples; tooltip = hold reason) */
+.status-badge {
+  font-size: 9px;
+  line-height: 1.4;
+  color: #e3b341;
+  background: rgba(210, 153, 34, 0.15);
+  border: 1px solid rgba(210, 153, 34, 0.45);
+  border-radius: 8px;
+  padding: 0 6px;
+  margin-left: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.status-badge.status-error {
+  color: #ff7b72;
+  background: rgba(248, 81, 73, 0.15);
+  border-color: rgba(248, 81, 73, 0.45);
+}
+.status-badge.status-other_method,
+.status-badge.status-raw_only,
+.status-badge.status-backfill {
+  color: #8b949e;
+  background: rgba(139, 148, 158, 0.12);
+  border-color: rgba(139, 148, 158, 0.4);
+}
+
+/* Injection time corrected from v1's misparsed stamp */
+.time-corrected-mark {
+  font-size: 10px;
+  color: #8b949e;
+  margin-left: 4px;
+  flex-shrink: 0;
+  cursor: help;
+}
+
 /* File item name within li */
 .file-list li .file-item-name {
   flex: 1;
