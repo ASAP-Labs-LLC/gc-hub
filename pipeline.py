@@ -61,6 +61,14 @@ Public API
         # outcome: 'created' | 'duplicate' | 'cross_instrument' | 'conflict'
     is_blank_name(name) -> bool
     cdf_problem(path) -> str | None      # truncated / no intensity data (submit refuses)
+    existing_result(sha, instrument_id, db) -> SubmitResult | None   # already held? (also 2D)
+    genuine_blank(path, lab_id, conf) -> int     safe_stem(lab_id) -> str
+    rel_path(path, data_dir) -> str              load_conf() -> dict
+    v1_time_forms(raw_stamp, *known) -> list[str]         # every time v1 may have written
+    find_result_only(conn, instrument_id, lab_id, forms) -> dict | None
+    attach_cdf_to_result_only(conn, sample_id, *, cdf_sha256, cdf_path, method_name,
+        injection_dt, injection_dt_source, source_name, is_blank=0,
+        legacy_injection_dt=None, status=None) -> dict   # in write_txn; submit and the 2D importer
     export_to_lims(sample_id, *, by, db=None, data_dir=None, format_line=None) -> {revision, seq}
     release_backfill(sample_id, *, by, db=None, data_dir=None, format_line=None) -> seq
     resolve_conflict_replace(conflict_id, *, by, conf=None, db=None, data_dir=None) -> job id
@@ -126,6 +134,16 @@ Decisions (where the spec left a choice):
   every other identity field agrees (tests/pipeline/test_pipeline_integ.py).
 * The lab ID rule is ``distill.cdf_lab_name`` (shared with the importer),
   compared with ``import_match.normalise_lab_id``.
+* **The CDF of an imported result-only sample** (same instrument and lab ID;
+  the sample's CSV time is the file's correct time or any v1 form,
+  ``v1_time_forms``) is attached to it in place
+  (``attach_cdf_to_result_only``): ``created`` for that sample id, its status
+  and v1 revisions kept, **nothing queued** (the record stays v1's until an
+  admin reprocesses it). Two candidates: nothing is attached. A conflict
+  Replace against a result-only sample is refused.
+* Export lines the hub builds from a stored revision (``release_backfill``,
+  ``export_to_lims``) carry the sample's ``injection_dt`` in
+  ``InjectionDateTime`` (an imported revision keeps v1's string).
 * A file that is shorter than its NetCDF-3 header says, or has no intensity
   data, is refused (``SubmitRejected``): netCDF4 would zero-fill it and the
   numbers would be wrong.
@@ -279,7 +297,7 @@ def _db(db, data_dir: Path):
     return db if db is not None else data_dir / store.DB_FILENAME
 
 
-def _load_conf() -> dict:
+def load_conf() -> dict:
     import settings
     return settings.load_settings()
 
@@ -304,12 +322,12 @@ def _naive_local(value) -> Optional[datetime]:
     return value
 
 
-def _safe_stem(lab_id: str) -> str:
+def safe_stem(lab_id: str) -> str:
     stem = _UNSAFE_FILENAME.sub("_", lab_id).strip().rstrip(". ")
     return (stem or "Sample")[:80]
 
 
-def _rel(p: Path, data_dir: Path) -> str:
+def rel_path(p: Path, data_dir: Path) -> str:
     return p.relative_to(data_dir).as_posix()
 
 
@@ -468,7 +486,7 @@ def sweep_incoming(data_dir, min_age_seconds: float = 600) -> int:
 
 # ── submit ──────────────────────────────────────────────────────────────────
 
-def _genuine_blank(path: Path, lab_id: str, conf: dict) -> int:
+def genuine_blank(path: Path, lab_id: str, conf: dict) -> int:
     """``is_blank`` for a CDF: a blank name and a plausible blank signal."""
     if not is_blank_name(lab_id):
         return 0
@@ -479,7 +497,7 @@ def _genuine_blank(path: Path, lab_id: str, conf: dict) -> int:
     return int(distill.is_plausible_blank(path, limit))
 
 
-def _existing_result(sha: str, instrument_id: str, db) -> Optional[SubmitResult]:
+def existing_result(sha: str, instrument_id: str, db) -> Optional[SubmitResult]:
     s = store.samples.find_by_sha(sha, db=db)
     if s is not None:
         if s["instrument_id"] == instrument_id:
@@ -511,6 +529,82 @@ def _existing_result(sha: str, instrument_id: str, db) -> Optional[SubmitResult]
         return SubmitResult("cross_instrument", sha, None, None, c["id"], c["instrument_id"],
                             f"this file is held for review on instrument {c['instrument_id']}")
     return None
+
+
+# Earlier private names (kept for compatibility).
+_existing_result = existing_result
+_genuine_blank = genuine_blank
+_safe_stem = safe_stem
+_rel = rel_path
+_load_conf = load_conf
+
+
+def v1_time_forms(raw_stamp: Optional[str], *known: Optional[str]) -> list:
+    """Every ``InjectionDateTime`` string v1 could have written for a CDF with
+    this raw stamp: the ``known`` forms given (the correct time, v1's legacy
+    string), then both emulated v1 families (``import_match.V1_FAMILIES``).
+    Ordered, without duplicates or blanks."""
+    import import_match
+    out: list = []
+    for s in known:
+        if s and s not in out:
+            out.append(s)
+    for fam in import_match.V1_FAMILIES:
+        dt = import_match._v1_parse(raw_stamp or "", fam)
+        if dt is not None and dt.isoformat(sep=" ") not in out:
+            out.append(dt.isoformat(sep=" "))
+    return out
+
+
+def find_result_only(conn, instrument_id: str, lab_id: str, forms) -> Optional[dict]:
+    """The imported **result-only** sample (no CDF, ``legacy_unverified=1``) on
+    this instrument with this lab ID whose (CSV) injection time is one of
+    ``forms`` (``v1_time_forms``). ``None`` when there is none, or more than
+    one (ambiguous: nothing is attached)."""
+    forms = [f for f in dict.fromkeys(forms) if f]
+    if not forms:
+        return None
+    marks = ", ".join("?" for _ in forms)
+    rows = conn.execute(
+        f"SELECT * FROM samples WHERE instrument_id=? AND lab_id=? AND cdf_sha256 IS NULL "
+        f"AND legacy_unverified=1 AND injection_dt IN ({marks}) ORDER BY id",
+        [instrument_id, lab_id, *forms]).fetchall()
+    return dict(rows[0]) if len(rows) == 1 else None
+
+
+def attach_cdf_to_result_only(conn, sample_id: int, *, cdf_sha256: str, cdf_path: str,
+                              method_name: Optional[str], injection_dt: str,
+                              injection_dt_source: str, source_name: Optional[str],
+                              is_blank: int = 0, legacy_injection_dt: Optional[str] = None,
+                              status: Optional[str] = None) -> dict:
+    """Upgrade an imported result-only sample **in place** now that its CDF has
+    arrived (the importer on a re-run, or a live ``submit``). Runs inside
+    ``write_txn(conn)``; the caller places the file at ``cdf_path``.
+
+    Sets the CDF (sha, path, method name, ``source_name``, ``is_blank``), the
+    correct ``injection_dt`` and its source, ``legacy_injection_dt`` (default:
+    the sample's CSV time, i.e. what v1 actually wrote), ``time_corrected``,
+    and clears ``legacy_unverified``/``time_unverifiable``. ``status`` is set
+    only when given (the importer passes the method rule's status); the
+    revisions are untouched and **nothing is recomputed or queued**: the
+    record stays v1's until an admin reprocesses it. ``ValueError`` if the
+    sample is not result-only. Returns the updated row."""
+    cur = store.samples.get(sample_id, db=conn)
+    if cur is None or cur["cdf_sha256"] is not None or not cur["legacy_unverified"]:
+        raise ValueError(f"sample {sample_id} is not an imported result-only sample")
+    legacy = legacy_injection_dt or cur["injection_dt"]
+    fields = dict(cdf_sha256=cdf_sha256, cdf_path=cdf_path,
+                  method_name=methods.normalise_method_name(method_name),
+                  source_name=source_name, is_blank=int(is_blank), injection_dt=injection_dt,
+                  injection_dt_source=injection_dt_source, legacy_injection_dt=legacy,
+                  time_corrected=int(legacy != injection_dt), legacy_unverified=0,
+                  time_unverifiable=0)
+    if status is not None:
+        fields["status"] = status
+    store.samples.update(sample_id, db=conn, **fields)
+    log.info("pipeline: result-only sample %s (%s) now has its CDF %s", sample_id,
+             cur["lab_id"], cdf_path)
+    return store.samples.get(sample_id, db=conn)
 
 
 def _flag_late_blank(conn, inst: dict, blank_id: int, blank_dt: str, method_name: str) -> list:
@@ -603,7 +697,7 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
                 else raw_mtime.timestamp() if raw_mtime is not None else None)
     sha = hashlib.sha256(body).hexdigest()
 
-    known = _existing_result(sha, instrument_id, db)
+    known = existing_result(sha, instrument_id, db)
     if known is not None:
         return known
 
@@ -632,24 +726,43 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
             legacy = v1.isoformat(sep=" ")
         else:   # v1 fell back to the file time
             legacy = raw_mtime.isoformat(sep=" ") if raw_mtime is not None else injection_dt
-        conf = conf if conf is not None else _load_conf()
-        is_blank = _genuine_blank(tmp, lab_id, conf)
+        conf = conf if conf is not None else load_conf()
+        is_blank = genuine_blank(tmp, lab_id, conf)
         backfill = int(force_backfill or store.is_backfill(inst.get("live_since"), injection_dt))
         month_dir = data_dir / "cdf" / instrument_id / f"{inj.year:04d}" / f"{inj.month:02d}"
 
         with store.connection(db) as conn:
             with store.write_txn(conn):
-                known = _existing_result(sha, instrument_id, conn)
+                known = existing_result(sha, instrument_id, conn)
                 if known is not None:
                     return known
+                ro = find_result_only(conn, instrument_id, lab_id,
+                                      v1_time_forms(raw_stamp, injection_dt, legacy))
+                if ro is not None:
+                    # the CDF of an imported result-only sample: attach it in
+                    # place; v1's revisions stay current, nothing is queued
+                    month_dir.mkdir(parents=True, exist_ok=True)
+                    final = month_dir / f"{safe_stem(lab_id)}_{ro['id']}.CDF"
+                    attach_cdf_to_result_only(
+                        conn, ro["id"], cdf_sha256=sha, cdf_path=rel_path(final, data_dir),
+                        method_name=method_name, injection_dt=injection_dt,
+                        injection_dt_source=dt_source, source_name=source_name,
+                        is_blank=is_blank)
+                    os.replace(tmp, final)
+                    if mtime_ts is not None:
+                        os.utime(final, (mtime_ts, mtime_ts))
+                    return SubmitResult(
+                        "created", sha, ro["id"], ro["status"], instrument_id=instrument_id,
+                        message=f"attached to the imported result-only sample {ro['id']}; its v1 "
+                                f"results are kept (not recomputed)")
                 existing = store.samples.find_by_key(instrument_id, lab_id, injection_dt, db=conn)
                 if existing is not None:
                     cdir = (data_dir / "cdf" / instrument_id / "conflicts"
                             / f"{inj.year:04d}" / f"{inj.month:02d}")
                     cdir.mkdir(parents=True, exist_ok=True)
-                    final = cdir / f"{_safe_stem(lab_id)}_{sha[:12]}.CDF"
+                    final = cdir / f"{safe_stem(lab_id)}_{sha[:12]}.CDF"
                     cid = store.conflicts.add(instrument_id, lab_id, injection_dt, existing["id"],
-                                              sha, _rel(final, data_dir), db=conn)
+                                              sha, rel_path(final, data_dir), db=conn)
                     os.replace(tmp, final)
                     if mtime_ts is not None:
                         os.utime(final, (mtime_ts, mtime_ts))
@@ -664,8 +777,8 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
                     backfill=backfill, legacy_injection_dt=legacy,
                     time_corrected=int(legacy != injection_dt), db=conn)
                 month_dir.mkdir(parents=True, exist_ok=True)
-                final = month_dir / f"{_safe_stem(lab_id)}_{sid}.CDF"
-                store.samples.update(sid, cdf_path=_rel(final, data_dir), db=conn)
+                final = month_dir / f"{safe_stem(lab_id)}_{sid}.CDF"
+                store.samples.update(sid, cdf_path=rel_path(final, data_dir), db=conn)
                 store.jobs.enqueue(PROCESS, {"sample_id": sid}, sample_id=sid, db=conn)
                 if is_blank:
                     flagged = _flag_late_blank(conn, inst, sid, injection_dt, method_name)
@@ -801,7 +914,7 @@ class Worker:
                  now_fn: Optional[Callable[[], datetime]] = None) -> None:
         self.data_dir = _data_dir(data_dir)
         self.db = _db(db, self.data_dir)
-        self.conf_fn = conf_fn or _load_conf
+        self.conf_fn = conf_fn or load_conf
         self.corrections_provider = corrections_provider
         self.format_line = format_line or exports.format_line
         self.notifier = notifier
@@ -978,7 +1091,7 @@ class Worker:
             _name, _dt, _src, method_name, _raw = distill.cdf_identity(held)
             src = {"conflict_id": c["id"], "cdf_sha256": c["cdf_sha256"],
                    "cdf_path": c["cdf_path"], "method_name": method_name,
-                   "is_blank": _genuine_blank(held, sample["lab_id"], self.conf_fn())}
+                   "is_blank": genuine_blank(held, sample["lab_id"], self.conf_fn())}
             self._process(job, sample, dict(payload, use_current_blank=True,
                                             use_current_corrections=True), True, src=src)
             return
@@ -1234,7 +1347,12 @@ def revision_blank_path(sample_id: int, revision: Optional[int] = None, *, db: s
 
 
 def _line_for(sample: dict, rev: dict, format_line) -> str:
-    return (format_line or exports.format_line)(rev["results"], sample["cdf_path"])
+    """The export line of a revision: its stored results, with ``Source File``
+    the sample's ``cdf_path`` and ``InjectionDateTime`` the sample's
+    ``injection_dt`` (an imported revision keeps v1's possibly misparsed time
+    verbatim; the hub always writes the corrected one)."""
+    return (format_line or exports.format_line)(
+        exports.with_injection_dt(rev["results"], sample["injection_dt"]), sample["cdf_path"])
 
 
 def export_to_lims(sample_id: int, *, by: Optional[str], db: store.Db = None, data_dir=None,
@@ -1314,8 +1432,13 @@ def resolve_conflict_replace(conflict_id: int, *, by: Optional[str], conf: Optio
             if c is None or c["resolved"] is not None:
                 raise ValueError(f"conflict {conflict_id} is missing or already resolved")
             sid = c["existing_sample_id"]
-            if sid is None or store.samples.get(sid, db=conn) is None:
+            existing = store.samples.get(sid, db=conn) if sid is not None else None
+            if existing is None:
                 raise ValueError(f"conflict {conflict_id} has no existing sample to replace")
+            if existing["cdf_sha256"] is None:
+                raise ValueError(f"sample {sid} is an imported result-only sample (no CDF); "
+                                 f"Replace can't recompute it. Keep the existing record, or "
+                                 f"re-run the history import with the file in place")
             rj = _replace_job(conn, sid)
             if rj is not None:
                 if rj["payload"].get("conflict_id") == conflict_id:

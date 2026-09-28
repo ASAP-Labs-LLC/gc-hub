@@ -94,6 +94,9 @@ SPEC_COLUMNS = {
     "sample_cache": {"sample_id", "rules_fingerprint", "flags", "bestfit_fingerprint",
                      "best_fit", "fit_score"},
     "settings_kv": {"key", "value"},
+    # 2D (beyond the spec): one row per real history-import run
+    "import_runs": {"id", "instrument_id", "started_at", "finished_at", "by", "sources",
+                    "counts", "stopped"},
 }
 
 

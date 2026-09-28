@@ -294,6 +294,16 @@ def format_line(results_json: Union[str, Mapping[str, Any]], source_file: Any) -
     return _csv_line(values)
 
 
+def with_injection_dt(results_json: Union[str, Mapping[str, Any]], injection_dt: Optional[str]) -> str:
+    """``results_json`` (JSON text or dict) with ``InjectionDateTime`` set to
+    ``injection_dt`` (unchanged when ``None``), as JSON text. Hub-written
+    lines use the sample's corrected time; stored revisions stay verbatim."""
+    results = json.loads(results_json) if isinstance(results_json, (str, bytes)) else dict(results_json)
+    if injection_dt is not None and isinstance(results, dict):
+        results["InjectionDateTime"] = injection_dt
+    return json.dumps(results)
+
+
 def _is_one_record(line: str) -> bool:
     if not line.endswith("\r\n"):
         return False
@@ -1165,7 +1175,7 @@ class HubExporter:
                 max_seq = conn.execute("SELECT MAX(seq) FROM export_rows WHERE instrument_id=?",
                                        (instrument,)).fetchone()[0] or 0
                 rows = conn.execute(
-                    'SELECT s.id, s.cdf_path, r.results, '
+                    'SELECT s.id, s.cdf_path, s.injection_dt, r.results, '
                     '(SELECT e."row" FROM export_rows e WHERE e.sample_id=s.id '
                     '   AND e.revision=s.current_revision ORDER BY e.seq DESC LIMIT 1) AS line, '
                     '(SELECT MAX(e.seq) FROM export_rows e WHERE e.sample_id=s.id '
@@ -1180,7 +1190,8 @@ class HubExporter:
         with_seq = sorted((r for r in rows if r["lseq"] is not None), key=lambda r: r["lseq"])
         without = sorted((r for r in rows if r["lseq"] is None), key=lambda r: r["id"])
         lines = [r["line"] for r in with_seq]
-        lines += [format_line(r["results"], r["cdf_path"]) for r in without]
+        lines += [format_line(with_injection_dt(r["results"], r["injection_dt"]), r["cdf_path"])
+                  for r in without]
         return lines, int(max_seq)
 
     def write_fresh(self, instrument: str, path: PathLike, *, by: Optional[str] = None) -> int:
