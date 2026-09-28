@@ -175,7 +175,12 @@ except OSError:
 # Flask app
 # ---------------------------------------------------------------------------
 app = Flask(__name__, static_folder="static", template_folder="templates")
-app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB upload limit
+# Every request body is capped at 1 MiB (a JSON 413, admin_auth's handler): no
+# route takes an upload any more (standards come from a sample_id, CDFs arrive
+# over /api/ingest). /api/ingest raises its own request's cap to 25 MB
+# (ingest_api.MAX_BODY) before reading; admin JSON is capped lower (64 KiB).
+MAX_REQUEST_BODY = 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BODY
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # disable static file caching in dev
 
 import admin_auth  # noqa: E402  (2B1: admin password + /admin/setup)
@@ -3347,11 +3352,13 @@ def api_qbench_cancel():
 @app.route("/api/qbench-update-credentials", methods=["POST"])
 def api_qbench_update_credentials():
     """Receive new credentials from the user after a login failure pause."""
-    body = request.get_json(force=True)
-    u = body.get("username", "").strip()
-    p = body.get("password", "").strip()
-    if not u or not p:
+    body = request.get_json(force=True, silent=True)
+    if not isinstance(body, dict):
+        return _error("Expected a JSON object with username and password")
+    u, p = body.get("username"), body.get("password")
+    if not isinstance(u, str) or not isinstance(p, str) or not u.strip() or not p.strip():
         return _error("Username and password are required")
+    u, p = u.strip(), p.strip()
     with _creds_lock:
         _creds_new["username"] = u
         _creds_new["password"] = p
