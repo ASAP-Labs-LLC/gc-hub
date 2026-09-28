@@ -3,23 +3,30 @@
 ``start(app_conf)`` owns everything that runs in the background, in this
 order, and ``HubRuntime.stop()`` undoes it:
 
-1. ``store.migrate`` → ``instruments.bootstrap_gc1`` → ``seed_gc1_corrections``
-   (first start: gc1's eleven factors from the phase-1 file into the hub's
-   ``instrument_corrections``) → ``instruments.startup``, which starts the one
-   ``pipeline.Worker`` (sweeps ``cdf/.incoming``, requeues, starts its
-   thread). The Worker's ``notifier`` is the notification store's ``add``,
-   its corrections are the hub's own (``corrections_provider(db)``) and its
-   ``on_final`` wakes the exporter (and calls the caller's ``on_final``,
-   which the app uses to refresh ``sample_cache`` for that sample).
+1. ``store.migrate`` → ``instruments.bootstrap_gc1`` → ``instruments.startup``,
+   which starts the one ``pipeline.Worker`` (sweeps ``cdf/.incoming``,
+   requeues, starts its thread). The Worker's ``notifier`` is the
+   notification store's ``add``, its corrections come **only** from the
+   hub's store (``corrections_provider(db)``, never the phase-1 file per
+   job) and its ``on_final`` wakes the exporter (and calls the caller's
+   ``on_final``, which the app uses to refresh ``sample_cache``).
 2. ``exports.HubExporter(notifier).start()``: appends every instrument's
    pending ledger rows to its export file, every ``export_interval``
    seconds and at once after a result becomes final (``wake_exports``).
-3. ``Maintenance``: a thread that, every ``maintenance_interval`` seconds,
-   writes the nightly ``store.backup_nightly`` (once per local day, from
+3. Outside the module lock (it reads a file that may be on the share):
+   ``seed_gc1_corrections``, gc1's eleven factors from the phase-1 file into
+   ``instrument_corrections`` once, through ``instrument_admin.seed_gc1``.
+4. ``Maintenance``: a thread that, every ``maintenance_interval`` seconds,
+   retries that seed every ``SEED_RETRY`` while gc1 has none, writes the
+   nightly ``store.backup_nightly`` (once per local day, from
    ``BACKUP_HOUR``; the day's file is the record, so a restart doesn't
    back up twice) and deletes ``done``/``superseded`` jobs older than
    ``PRUNE_DAYS`` (``store.jobs.prune_done``, once per day). A failed
    backup is notified once and retried after ``BACKUP_RETRY``.
+
+``start_with_retry(start_fn)`` is how the app calls it: retried with backoff
+(``START_BACKOFF``), notified after ``START_NOTIFY_AFTER`` failures.
+``background_busy(db)`` tells the auto-restart whether the Worker has work.
 
 One runtime per process (``running()``); the app calls ``start`` from
 ``_init_app`` and ``stop`` at exit. ``GC_DATA_DIR`` is required: without it
@@ -27,9 +34,10 @@ One runtime per process (``running()``); the app calls ``start`` from
 
 Corrections are hub-owned (D4b): the Worker reads only
 ``instrument_corrections`` (``StoreProvider``, source ``hub``). gc1 is seeded
-once from the phase-1 file; a missing or invalid file is notified and gc1
-stays ``pending_corrections`` (never silent zeros); every other instrument
-waits until its eleven values are entered on the Instruments page.
+once from the phase-1 file; a missing or invalid file is notified once and gc1
+stays ``pending_corrections`` (never silent zeros) until a retry succeeds or
+its values are entered on the Instruments page; every other instrument waits
+until its eleven values are entered.
 
 The running exporter is handed to ``instruments_api.set_exporter`` (2A2) and
 ``hub_admin.set_exporter`` when those modules exist, for the admin export

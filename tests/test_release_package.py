@@ -198,7 +198,9 @@ class PackageTests(unittest.TestCase):
         rel = self._rel()
         for must in ("app.py", "requirements.txt", "VERSION", "hub.py", "hub_admin.py",
                      "store.py", "pipeline.py", "exports.py", "methods/d2887.py",
-                     "jobs/load_folder.py", "tools/parity_report.py", "agent/agent_main.py",
+                     "jobs/load_folder.py", "jobs/import_history.py", "tools/import_history.py",
+                     "instruments_api.py", "instrument_admin.py", "standards.py",
+                     "templates/instruments.html", "tools/parity_report.py", "agent/agent_main.py",
                      "agent/gc_agent/core.py", "agent/requirements-agent.txt",
                      "templates/index.html", "templates/calibration.html",
                      "templates/hub_admin.html", "static/js/hub_admin.js",

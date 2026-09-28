@@ -302,14 +302,20 @@ notifications):
   admin release.
 - **gc1's correction factors are seeded once** from `correction_factors_json`
   into the hub (an info notification says so; check the values). If the file
-  is missing or invalid, an error notification says so and gc1's samples wait
-  as `pending_corrections` (never corrected with zeros): fix the path and
-  restart, or enter the values on the Instruments page. From then on the
-  factors are the hub's; **never enter GC factors in LEM** (they would be
-  applied twice). Changing `correction_factors_json` later changes nothing.
-- The calibration and the corrections path are read-only in Settings from v2
-  on (they are per instrument). Saving the calibration page needs the admin
-  password.
+  is missing or invalid (e.g. the share is unreachable at that moment), an
+  error notification says so and gc1's samples wait as `pending_corrections`
+  (never corrected with zeros); the hub retries the seed every 10 minutes, or
+  enter the values on the Instruments page. From then on the factors are the
+  hub's; **never enter GC factors in LEM** (they would be applied twice).
+  Editing `correction_factors.json` later changes nothing in the hub.
+- Settings in the browser can change only the flag rules and series colours
+  freely, and the best-fit settings with the admin password. Paths (standards
+  and export folders are fixed under `data\`), the calibration, the
+  corrections path and `blank_max_intensity_pa` are changed by editing
+  `settings.json` on the server (pause / stop / edit / resume, Step 4).
+  Saving the calibration page and adding, renaming or deleting comparison
+  standards need the admin password; standards are added from a sample
+  ("Set as comparison standard"), never from a server path.
 - An **admin setup code** is written (see "Admin password" below). Set the
   password first: every admin action needs it.
 - The nightly backup (from 1 AM, `data\backups\`, 14 kept, plus a copy of
@@ -323,7 +329,11 @@ password):
   GC's processed folder locally first, e.g. with robocopy), resumable, in
   injection-time order; the hub processes what it loads. Check what was
   loaded with `tools/parity_report.py` (the 2A1 plan's T6 runbook) before
-  sign-off.
+  sign-off. **Before a GC is cut over, never load CDFs of that GC injected
+  after the hub's first start** without *force backfill*: they are live
+  (after gc1's `live_since`) and would be appended to the export, while v1 on
+  the share still writes the same results to LEM's CSV, so LEM would get them
+  twice. History belongs to the import (below), which keeps it as backfill.
 - **Exports**: gc1 appends to `data\results\gc1_results.csv` by default. To
   keep feeding the CSV LEM tails on the share: **stop the v1 writer for that
   GC first**, then *New path* to that CSV and *Adopt* it (the hub appends
@@ -334,6 +344,34 @@ password):
   it is adopted again or moved. *Write fresh* starts a new file with every
   exportable result; never point LEM at one without setting its tail offset to
   the end.
+
+## Cutover runbook (per GC PC)
+
+Until a GC PC is cut over, its v1 copy on the share keeps processing and
+writing LEM's CSV; the hub holds that GC's history only as backfill. Cut over
+one PC at a time, **in this exact order**, so no row is lost or written twice
+between steps (spec, "Cutover runbook"):
+
+1. **Quit `run.pyw`** on that PC (tray > Quit) and remove its autostart
+   (Startup folder shortcut or scheduled task). Check nothing still listens on
+   its port (`netstat -ano | findstr :5560`, `taskkill /F /T /PID <pid>`).
+   From now on nothing processes that GC's new runs until step 4.
+2. **Re-run the history import for that instrument** (Hub admin: the history
+   import page lands with branch `t5/import-route`; until then the 2D CLI,
+   `tools/import_history.py`). It picks up only the delta since the last
+   import (files v1 processed after it); otherwise it is a no-op. Review the
+   summary (conflicts, rejected and truncated files).
+3. **Set that instrument's `live_since` to now** on the Instruments page.
+   Anything injected before it that arrives later is backfill and is listed
+   for review, never exported automatically.
+4. **Install the agent**: on the Instruments page, *Download installer* for
+   that instrument, run `install.pyw` on the PC, adopt the mirror file if
+   LEM tails a local CSV on that PC, and start the agent. Files v1 already
+   processed dedupe by sha256 against the imported copy.
+
+Then watch the first sync on the Instruments page and the hub's first appends
+to the adopted share CSV (Hub admin > Exports); LEM's read position carries
+on unchanged. Only after the last GC is cut over is v1 retired.
 
 ## Updating the share copies (v1.x only, from `maint/v1`)
 

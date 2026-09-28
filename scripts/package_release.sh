@@ -110,7 +110,9 @@ for f in app.py requirements.txt VERSION templates/index.html templates/calibrat
          supervisor.py restart_update.py restart_policy.py \
          hub.py hub_admin.py store.py pipeline.py exports.py corrections.py \
          import_match.py instruments.py admin_auth.py ingest_api.py notifications.py \
+         instruments_api.py instrument_admin.py standards.py templates/instruments.html \
          methods/__init__.py methods/d2887.py jobs/__init__.py jobs/load_folder.py \
+         jobs/import_history.py tools/import_history.py \
          tools/load_folder.py tools/parity_report.py tools/import_dry_run.py \
          agent/build_package.py agent/requirements-agent.txt \
          agent/launcher.pyw agent/install.pyw agent/gc_agent/__init__.py; do
