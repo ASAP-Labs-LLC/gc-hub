@@ -157,3 +157,35 @@ def test_normalise_method_name():
     assert distill.normalise_method_name("simdistb.m") == "SIMDISTB.M"
     assert distill.normalise_method_name("C:/Chem32/1/METHODS/SimDisB.M ") == "SIMDISB.M"
     assert distill.normalise_method_name("D:\\M\\x.m") == "X.M"
+
+
+def _nameless(path, name, stamp="20260925142300+0000"):
+    from netCDF4 import Dataset
+    with Dataset(path, "w", format="NETCDF3_CLASSIC") as ds:
+        if name is not None:
+            ds.sample_name = name
+        if stamp is not None:
+            ds.injection_date_time_stamp = stamp
+        ds.createDimension("point_number", 3)
+        ds.createVariable("ordinate_values", "f8", ("point_number",))[:] = [0, 1, 0]
+    return path
+
+
+@pytest.mark.parametrize("name", [None, "", "   "])
+def test_cdf_identity_falls_back_to_the_given_name(tmp_path, name):
+    p = _nameless(tmp_path / "stored_17.CDF", name)
+    assert distill.cdf_identity(p, fallback_name="40304")[0] == "40304"
+    assert distill.cdf_identity(p)[0] == "stored_17"
+
+
+def test_a_stamp_that_does_not_parse_is_logged(tmp_path, caplog):
+    p = _nameless(tmp_path / "x.CDF", "X1", stamp="sometime yesterday")
+    with caplog.at_level("WARNING", logger="distill"):
+        _s, _dt, source, _m, raw = distill.cdf_identity(p, mtime=D(2026, 9, 1))
+    assert (source, raw) == ("mtime", "sometime yesterday")
+    assert "sometime yesterday" in caplog.text
+    caplog.clear()
+    q = _nameless(tmp_path / "y.CDF", "X1", stamp=None)
+    with caplog.at_level("WARNING", logger="distill"):
+        distill.cdf_identity(q, mtime=D(2026, 9, 1))
+    assert "stamp" not in caplog.text

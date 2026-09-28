@@ -4,6 +4,8 @@ change only through the injection-time fix, which these fixtures don't hit.
 """
 from __future__ import annotations
 
+from pipeline_helpers import SIMDIS, hub  # noqa: F401  (hub: the fixture)
+
 import csv
 import io
 import json
@@ -17,7 +19,6 @@ import distill
 import make_golden
 import pipeline
 import store
-from pipeline_helpers import SIMDIS, hub  # noqa: F401  (hub: the fixture)
 
 GOLDEN = json.loads(make_golden.GOLDEN_JSON.read_text(encoding="utf-8"))
 BESTFIT = json.loads(make_golden.BESTFIT_JSON.read_text(encoding="utf-8"))

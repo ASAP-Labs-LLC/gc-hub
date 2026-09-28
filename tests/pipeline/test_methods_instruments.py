@@ -1,6 +1,8 @@
 """methods/ registry and instruments.py (2A1 T2)."""
 from __future__ import annotations
 
+from pipeline_helpers import hub  # noqa: F401  (the fixture)
+
 import json
 import os
 from datetime import datetime
@@ -14,7 +16,6 @@ import instruments
 import methods
 import store
 from methods import d2887
-from pipeline_helpers import hub  # noqa: F401  (the fixture)
 
 
 # ── methods ─────────────────────────────────────────────────────────────────

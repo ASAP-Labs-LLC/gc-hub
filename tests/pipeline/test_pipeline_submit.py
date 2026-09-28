@@ -2,6 +2,8 @@
 blank decided at receive time, legacy injection time, the process job."""
 from __future__ import annotations
 
+from pipeline_helpers import SIMDIS, hub  # noqa: F401  (hub: the fixture)
+
 import hashlib
 import os
 from datetime import datetime
@@ -11,7 +13,6 @@ import pytest
 
 import pipeline
 import store
-from pipeline_helpers import SIMDIS, hub  # noqa: F401  (hub: the fixture)
 
 
 def _sha(p: Path) -> str:

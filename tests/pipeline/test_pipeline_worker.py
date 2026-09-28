@@ -3,6 +3,8 @@ the one-transaction final write, the export gate, reprocess revisions,
 restart requeue and the enqueue hooks."""
 from __future__ import annotations
 
+from pipeline_helpers import SIMDIS, hub  # noqa: F401  (hub: the fixture)
+
 import csv
 import io
 import json
@@ -19,7 +21,6 @@ import corrections
 import distill
 import pipeline
 import store
-from pipeline_helpers import SIMDIS, hub  # noqa: F401  (hub: the fixture)
 
 
 def _run(hub, **kw) -> int:
