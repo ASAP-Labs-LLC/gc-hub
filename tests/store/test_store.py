@@ -71,7 +71,7 @@ SPEC_COLUMNS = {
                 "method_name", "legacy_injection_dt", "time_corrected", "cdf_sha256",
                 "cdf_path", "legacy_unverified", "source_name", "is_blank", "status",
                 "backfill", "error", "current_revision", "released_at", "released_by",
-                "qbench_revision", "qbench_uploaded_at", "received_at"},
+                "qbench_revision", "qbench_uploaded_at", "received_at", "time_unverifiable"},
     "sample_results": {"sample_id", "revision", "results", "d86_uncorrected",
                        "calibration_used", "blank_used", "corrections_used", "best_fit",
                        "fit_score", "flags", "reason", "by", "processed_at"},
@@ -438,6 +438,25 @@ def test_search_filters_and_paging(gc1):
     t = store.samples.search(instrument="gc1", date_from="2026-09-03T10:00:00",
                              date_to="2026-09-04T10:00:00", db=gc1)
     assert {r["id"] for r in t} == {ids[2], ids[3]}
+
+
+def test_time_unverifiable(gc1):
+    ok = store.samples.insert_received("gc1", "1", "2026-01-01 00:00:00", "csv", cdf_sha256=None,
+                                       cdf_path=None, status="final", backfill=1,
+                                       legacy_unverified=1, db=gc1)
+    odd = store.samples.insert_received("gc1", "2", "2026-01-01 02:45:00", "csv", cdf_sha256=None,
+                                        cdf_path=None, status="final", backfill=1,
+                                        legacy_unverified=1, time_unverifiable=1, db=gc1)
+    assert store.samples.get(ok, db=gc1)["time_unverifiable"] == 0  # default
+    assert store.samples.get(odd, db=gc1)["time_unverifiable"] == 1
+    assert [r["id"] for r in store.samples.search(time_unverifiable=True, db=gc1)] == [odd]
+    assert [r["id"] for r in store.samples.search(time_unverifiable=False, db=gc1)] == [ok]
+    assert store.samples.count(time_unverifiable=True, db=gc1) == 1
+    store.samples.update(ok, time_unverifiable=1, db=gc1)
+    assert store.samples.count(time_unverifiable=True, db=gc1) == 2
+    with store.connection(gc1) as conn:
+        col = [r for r in conn.execute("PRAGMA table_info(samples)") if r["name"] == "time_unverifiable"][0]
+    assert col["notnull"] == 1 and col["dflt_value"] == "0"
 
 
 def test_search_method_and_backfill_filters(gc1):

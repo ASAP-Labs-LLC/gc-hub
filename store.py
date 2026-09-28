@@ -46,7 +46,7 @@ Samples and revisions::
     samples.insert_received(instrument_id, lab_id, injection_dt, injection_dt_source, *,
         cdf_sha256, cdf_path, method_name=None, source_name=None, is_blank=0, backfill=0,
         status='received', legacy_injection_dt=None, time_corrected=0,
-        legacy_unverified=0, received_at=None, db=None) -> int (sample id)
+        legacy_unverified=0, received_at=None, time_unverifiable=0, db=None) -> int (sample id)
     samples.get(sample_id, *, db) -> dict | None
     samples.find_by_sha(sha256, *, db) -> dict | None          # across ALL instruments
     samples.find_by_key(instrument_id, lab_id, injection_dt, *, db) -> dict | None
@@ -58,7 +58,8 @@ Samples and revisions::
     samples.set_status(sample_id, status, *, error=None, db)   # error cleared unless given
     samples.update(sample_id, *, db, **fields)                 # whitelisted columns only
     samples.search(q=None, instrument=None, date_from=None, date_to=None, status=None,
-                   limit=100, offset=0, *, method_name=None, backfill=None, db) -> list[dict]
+                   limit=100, offset=0, *, method_name=None, backfill=None,
+                   time_unverifiable=None, db) -> list[dict]
     samples.count(<same filters>, *, db) -> int
     add_revision(conn, sample_id, results, *, reason, by=None, d86_uncorrected=None,
                  calibration_used=None, blank_used=None, corrections_used=None,
@@ -142,6 +143,9 @@ Conventions and decisions (where the spec left a choice)
   ``sqlite3.IntegrityError`` on a duplicate ``cdf_sha256`` (any instrument)
   or a duplicate (instrument, lab ID, injection time). Check and insert
   inside one ``write_txn``.
+* ``samples.time_unverifiable`` (0/1, beyond the spec text; Lane D) marks a
+  result-only import whose CSV time could be a v1 misparse, so its correct
+  injection time can't be established.
 * ``samples.time_corrected`` is an INTEGER flag (0/1). The spec's comment on
   that line (``'cdf'|'mtime'``) belongs to ``injection_dt_source``.
 * ``samples.id``, ``export_rows.seq`` and ``corrections_audit.id`` are
@@ -268,6 +272,7 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             qbench_revision INTEGER,
             qbench_uploaded_at TEXT,
             received_at TEXT NOT NULL,
+            time_unverifiable INTEGER NOT NULL DEFAULT 0,
             UNIQUE(instrument_id, lab_id, injection_dt))""",
         "CREATE INDEX samples_status ON samples(status)",
         "CREATE INDEX samples_inst_dt ON samples(instrument_id, injection_dt)",
@@ -390,7 +395,7 @@ REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
         "method_name", "legacy_injection_dt", "time_corrected", "cdf_sha256", "cdf_path",
         "legacy_unverified", "source_name", "is_blank", "status", "backfill", "error",
         "current_revision", "released_at", "released_by", "qbench_revision",
-        "qbench_uploaded_at", "received_at"}),
+        "qbench_uploaded_at", "received_at", "time_unverifiable"}),
     "sample_results": frozenset({
         "sample_id", "revision", "results", "d86_uncorrected", "calibration_used",
         "blank_used", "corrections_used", "best_fit", "fit_score", "flags", "reason",
@@ -915,7 +920,8 @@ def _listify(v: Union[str, Sequence[Any]]) -> list:
     return [v] if isinstance(v, str) else list(v)
 
 
-def _search_where(q, instrument, date_from, date_to, status, method_name, backfill) -> tuple[str, list]:
+def _search_where(q, instrument, date_from, date_to, status, method_name, backfill,
+                  time_unverifiable=None) -> tuple[str, list]:
     where, args = [], []
     if q:
         pat = f"%{_like_escape(str(q).strip())}%"
@@ -950,6 +956,9 @@ def _search_where(q, instrument, date_from, date_to, status, method_name, backfi
     if backfill is not None:
         where.append("backfill = ?")
         args.append(1 if backfill else 0)
+    if time_unverifiable is not None:
+        where.append("time_unverifiable = ?")
+        args.append(1 if time_unverifiable else 0)
     return (" WHERE " + " AND ".join(where)) if where else "", args
 
 
@@ -977,7 +986,7 @@ class samples:  # noqa: N801
                         backfill: int = 0, status: str = "received",
                         legacy_injection_dt: Optional[str] = None, time_corrected: int = 0,
                         legacy_unverified: int = 0, received_at: Optional[str] = None,
-                        db: Db = None) -> int:
+                        time_unverifiable: int = 0, db: Db = None) -> int:
         """Insert a new sample (status ``received`` by default); return its id.
 
         ``ValueError`` for a status outside ``STATUSES`` or a source outside
@@ -994,12 +1003,12 @@ class samples:  # noqa: N801
             cur = conn.execute(
                 "INSERT INTO samples(instrument_id, lab_id, injection_dt, injection_dt_source, "
                 "method_name, legacy_injection_dt, time_corrected, cdf_sha256, cdf_path, "
-                "legacy_unverified, source_name, is_blank, status, backfill, received_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "legacy_unverified, source_name, is_blank, status, backfill, received_at, "
+                "time_unverifiable) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (instrument_id, lab_id, injection_dt, injection_dt_source, method_name,
                  legacy_injection_dt, int(time_corrected), cdf_sha256, cdf_path,
                  int(legacy_unverified), source_name, int(is_blank), status, int(backfill),
-                 received_at or now_iso()))
+                 received_at or now_iso(), int(time_unverifiable)))
             return int(cur.lastrowid)
 
     @staticmethod
@@ -1104,7 +1113,8 @@ class samples:  # noqa: N801
                date_to: Union[None, str, datetime, date] = None,
                status: Union[None, str, Sequence[str]] = None, limit: int = 100,
                offset: int = 0, *, method_name: Union[None, str, Sequence[str]] = None,
-               backfill: Optional[bool] = None, db: Db = None) -> list[dict]:
+               backfill: Optional[bool] = None, time_unverifiable: Optional[bool] = None,
+               db: Db = None) -> list[dict]:
         """Filter samples, newest injection first (ties: newest id first).
 
         ``q``: case-insensitive substring of ``lab_id`` or ``source_name``
@@ -1113,7 +1123,8 @@ class samples:  # noqa: N801
         ``local_dt`` and compared with ``injection_dt``; a bare date
         ``date_to`` includes that whole day. ``backfill``: True/False/None.
         """
-        where, args = _search_where(q, instrument, date_from, date_to, status, method_name, backfill)
+        where, args = _search_where(q, instrument, date_from, date_to, status, method_name, backfill,
+                                    time_unverifiable)
         with connection(db) as conn:
             return _rows(conn.execute(
                 f"SELECT * FROM samples{where} ORDER BY injection_dt DESC, id DESC LIMIT ? OFFSET ?",
@@ -1125,9 +1136,11 @@ class samples:  # noqa: N801
               date_to: Union[None, str, datetime, date] = None,
               status: Union[None, str, Sequence[str]] = None, *,
               method_name: Union[None, str, Sequence[str]] = None,
-              backfill: Optional[bool] = None, db: Db = None) -> int:
+              backfill: Optional[bool] = None, time_unverifiable: Optional[bool] = None,
+              db: Db = None) -> int:
         """How many samples ``search`` would match without paging."""
-        where, args = _search_where(q, instrument, date_from, date_to, status, method_name, backfill)
+        where, args = _search_where(q, instrument, date_from, date_to, status, method_name, backfill,
+                                    time_unverifiable)
         with connection(db) as conn:
             return int(conn.execute(f"SELECT COUNT(*) FROM samples{where}", args).fetchone()[0])
 
