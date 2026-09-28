@@ -836,8 +836,21 @@ def _hub() -> tuple[Path, Path]:
     return Path(data), db
 
 
+class BadSampleId(ValueError):
+    """A sample_id that isn't an integer → 400."""
+
+
+@app.errorhandler(BadSampleId)
+def _bad_sample_id(exc):
+    return _error(str(exc), 400)
+
+
 def _sample_or_404(sample_id, db) -> dict:
-    s = store.samples.get(int(sample_id), db=db)
+    try:
+        sid = int(sample_id)
+    except (TypeError, ValueError):
+        raise BadSampleId(f"sample_id must be an integer, not {sample_id!r}") from None
+    s = store.samples.get(sid, db=db)
     if s is None:
         raise SampleNotFound(f"Sample {sample_id} not found")
     return s
@@ -2399,15 +2412,6 @@ _scan_status: Dict[str, Any] = {
     "current_file": "",
 }
 _force_snapshot = threading.Event()  # set when user clicks Scan & Parse
-
-# Reprocess has its own status, *decoupled from the watcher*. The 24/7 watcher
-# rewrites _scan_status (resetting processed=0) every WATCHER_POLL_SECONDS, so a
-# reprocess task can't safely report progress through it. The browser reprocess
-# toast polls /api/reprocess/status, which returns this dict.
-_reprocess_status: Dict[str, Any] = {
-    "phase": "idle",          # idle | processing | done | stopped | error
-    "total": 0, "processed": 0, "errors": 0, "skipped": 0,
-}
 
 # ── Directory snapshot cache ──────────────────────────────────────────
 # Stores {folder_path: {"size": total_bytes, "count": num_files}} for

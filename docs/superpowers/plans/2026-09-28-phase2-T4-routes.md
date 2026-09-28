@@ -21,7 +21,12 @@ the legacy tests of it, `_NON_ACTIVITY_PATHS` tidy-up (2B1 edits it; the stale
   `GC_DATA_DIR` is unset or `gc.db` does not exist yet. The app does **not**
   migrate or bootstrap in T4; `instruments.startup` does (T5 wires it; the
   boot tests call it before booting the app).
-- `_sample_or_404(sid)` → the `samples` row; `SampleNotFound` → **404** JSON.
+- `_sample_or_404(sid)` → the `samples` row; `SampleNotFound` → **404** JSON;
+  a non-integer id → **400**.
+- A revision's files: the trace and curve read the revision's own
+  `sample_results.cdf_path` (a1/replace) and the blank file recorded on the
+  revision (`pipeline.revision_blank_path`, a1/blankprov), never the
+  sample's or blank sample's *current* file.
 - A JSON 404 handler for `/api/*` (so a removed route answers
   `{"error": "Not found"}` with 404, not HTML).
 - `_gc1()` → the `gc1` instruments row (503 if missing); `_ctx(conf)` =

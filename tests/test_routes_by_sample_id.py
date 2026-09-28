@@ -168,6 +168,24 @@ def test_distillation_curve_is_the_revisions(hub_app):
     assert code == 409 and "calibration" in body["error"].lower()
 
 
+def test_distillation_curve_uses_the_revisions_own_blank_file(hub_app):
+    # The blank sample's CDF can be swapped later (a conflict Replace); the
+    # curve must still subtract the file the revision was computed with.
+    port, hub, store = hub_app
+    import numpy as np
+    sid, blank_id = hub.ids["final"], hub.ids["blank"]
+    results = json.loads(store.get_revision(sid, db=hub.db)["results"])
+    original = hub.sample("blank")["cdf_path"]
+    store.samples.update(blank_id, cdf_path=hub.sample("other")["cdf_path"], db=hub.db)
+    try:
+        code, body = get(port, f"/api/samples/{sid}/distillation-curve")
+    finally:
+        store.samples.update(blank_id, cdf_path=original, db=hub.db)
+    assert code == 200, body
+    pct, temp = np.array(body["percent"]), np.array(body["temperature"])
+    assert abs(float(np.interp(50.0, pct, temp)) - float(results["2887 T50"])) < 0.05
+
+
 def test_table_is_current_revisions(hub_app):
     port, hub, store = hub_app
     import distill
@@ -304,6 +322,8 @@ def test_analysis_and_best_fit_by_sample_id(hub_app):
     assert body["cal_times"][:2] == [0.5, 0.8] and body["cal_carbons"][:2] == [5, 6]
     assert post(port, "/api/analysis", {"sample_id": UNKNOWN, "standard_name": "Diesel"})[0] == 404
     assert post(port, "/api/analysis", {"standard_name": "Diesel"})[0] == 400
+    assert post(port, "/api/analysis", {"sample_id": "abc", "standard_name": "Diesel"})[0] == 400
+    assert post(port, "/api/export-lims", {"sample_ids": ["abc"]})[0] == 400
 
     code, body = post(port, "/api/best-fit", {"sample_id": sid})
     assert code == 200, body
