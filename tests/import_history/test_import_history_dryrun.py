@@ -79,8 +79,8 @@ def test_dry_run_without_a_store(hub, processed):
                          db=None, data_dir=None, dry_run=True)
     assert dry["store_checked"] is False
     c = dry["counts"]
-    assert c["imported"] == 5          # A1, M5; orphans WS, C3; R9 (WS's row has no key)
-    assert c["attached"] == 2 and c["orphans"] == 2 and c["result_only"] == 1
+    assert c["imported"] == 5          # A1, M5, WS (matched by time); orphan C3; R9
+    assert c["attached"] == 3 and c["orphans"] == 1 and c["result_only"] == 1
     assert c["conflicts"] == 1         # A1 copy against A1
 
 
@@ -94,7 +94,8 @@ def test_summary_counts_every_class(hub, processed):
     assert c["whitespace_only_names"] == 1
     assert s["examples"]["whitespace_only_names"][0]["cdf"].endswith("WS_09182026_153341.CDF")
     assert c["name_from_filename"] == 1
-    assert c["unmatched_without_key"] == 1       # v1's "   " row
+    assert c["unmatched_without_key"] == 0       # v1's "   " row...
+    assert c["whitespace_matched"] == 1          # ...matched to WS by its time
     assert c["truncated"] == 1
     assert c["mixed_rows"] == 1
     assert c["key_collisions"] == 1 and c["conflicts"] == 1

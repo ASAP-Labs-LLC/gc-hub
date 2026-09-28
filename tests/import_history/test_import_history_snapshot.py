@@ -38,7 +38,8 @@ def test_dry_run_over_the_snapshot_is_read_only_and_accounts_for_every_row():
     assert c["mixed_rows"] == 0                     # the CSV is not mixed
     # every row is imported, or listed in exactly one class
     listed = (c["ambiguous_rows"] + c["held_rows"] + c["mixed_rows"]
-              + c["unmatched_without_key"] + c["rows_not_imported"])
+              + c["unmatched_without_key"] + c["rows_not_imported"] + c["noncanonical_time"]
+              + c["rows_of_unreadable_cdfs"])
     assert c["revisions"] + listed == c["csv_rows"]
     assert set(s["method_names"]) <= {"SIMDISB.M", "SIMDISTB.M"}
     json.dumps(s)

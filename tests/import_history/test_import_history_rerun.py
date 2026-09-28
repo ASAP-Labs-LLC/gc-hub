@@ -150,6 +150,8 @@ def test_batches_commit_separately(hub, processed):
 
 
 def test_a_stop_keeps_committed_batches_and_a_rerun_completes(hub, processed):
+    """Progress events are sent after each batch commits (I5), so a stop
+    raised from the callback ends the run after that batch."""
     csv_path = _history(hub, processed)
     seen = []
 
@@ -163,18 +165,44 @@ def test_a_stop_keeps_committed_batches_and_a_rerun_completes(hub, processed):
         _run(hub, processed, csv_path, batch_size=2, progress=stop_on_third)
     partial = ei.value.import_summary
     assert "paused by the admin" in partial["stopped"]
-    assert partial["counts"]["imported"] == 2                 # the first batch only
-    assert len(store.samples.search(instrument="gc1", limit=100, db=hub.db)) == 2
-    stored = {p.name for p in (hub.data / "cdf").rglob("*.CDF")}
-    held = {s["cdf_path"].rsplit("/", 1)[-1] for s in store.samples.search(
-        instrument="gc1", limit=100, db=hub.db) if s["cdf_path"]}
-    assert stored == held                                      # the rolled-back batch left no file
+    assert partial["counts"]["imported"] == 4                 # batches 1 and 2 committed
+    assert len(store.samples.search(instrument="gc1", limit=100, db=hub.db)) == 4
+    assert store.conflicts.list(db=hub.db) == []              # batch 3 never started
+    run = store.import_runs.list(db=hub.db)[0]
+    assert "paused by the admin" in run["stopped"]
 
     summary = _run(hub, processed, csv_path)
-    assert summary["counts"]["imported"] == 2
-    assert summary["counts"]["already_imported"] == 2
+    assert summary["counts"]["imported"] == 0
+    assert summary["counts"]["already_imported"] == 4
     assert summary["counts"]["conflicts"] == 1
     assert set(by_lab(hub)) == {"A1", "B2", "C3", "R4"}
+
+
+def test_a_batch_that_fails_to_commit_rolls_back_and_removes_its_files(hub, processed,
+                                                                      monkeypatch):
+    csv_path = _history(hub, processed)
+    real = ih._add_revisions
+    calls = {"n": 0}
+
+    def crash_on_third(conn, ctx, sample_id, rows):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise KeyboardInterrupt("power cut")
+        return real(conn, ctx, sample_id, rows)
+
+    monkeypatch.setattr(ih, "_add_revisions", crash_on_third)
+    with pytest.raises(KeyboardInterrupt):
+        _run(hub, processed, csv_path, batch_size=2)
+    held = store.samples.search(instrument="gc1", limit=100, db=hub.db)
+    assert len(held) == 2                                      # batch 1 only
+    stored = {p.name for p in (hub.data / "cdf").rglob("*.CDF")
+              if ".incoming" not in p.parts}
+    assert stored == {s["cdf_path"].rsplit("/", 1)[-1] for s in held if s["cdf_path"]}
+    assert not list((hub.data / "cdf" / ".incoming").glob("*"))
+
+    monkeypatch.setattr(ih, "_add_revisions", real)
+    summary = _run(hub, processed, csv_path)
+    assert summary["counts"]["imported"] == 2 and summary["counts"]["failed"] == 0
 
 
 def test_one_failing_sample_is_recorded_and_the_rest_are_imported(hub, processed, monkeypatch):

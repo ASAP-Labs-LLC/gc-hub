@@ -33,6 +33,21 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 
+def _hub_settings(data_dir: Path) -> dict:
+    """The hub's global settings, read only: ``settings.DEFAULTS`` with
+    ``<data>/settings.json`` over them (``settings.load_settings`` would create
+    folders in the data dir)."""
+    import settings
+    conf = dict(settings.DEFAULTS)
+    f = data_dir / "settings.json"
+    if f.is_file():
+        try:
+            conf.update(json.loads(f.read_text(encoding="utf-8")))
+        except ValueError:
+            print(f"warning: {f} is not valid JSON; using the defaults", file=sys.stderr)
+    return conf
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -45,6 +60,11 @@ def main(argv=None) -> int:
                     help="the folder the CSV's Source File names for this instrument "
                          "(full share path or bare folder name); repeatable")
     ap.add_argument("--db", help="the hub's gc.db, opened read-only")
+    ap.add_argument("--data-dir", help="the hub's data folder: its gc.db (read-only, unless "
+                                       "--db is given) and settings.json (blank threshold)")
+    ap.add_argument("--compare-dir", action="append", default=[], metavar="FOLDER",
+                    help="another instrument's processed folder: report files present in both "
+                         "(D2); repeatable")
     ap.add_argument("--json", help="write the summary as JSON here")
     ap.add_argument("--examples", type=int, default=5, help="examples per class in the text")
     args = ap.parse_args(argv)
@@ -74,16 +94,26 @@ def main(argv=None) -> int:
     import store
     from jobs.import_history import format_summary, import_history
 
-    conn = None
-    if args.db:
-        if not Path(args.db).is_file():
-            print(f"no database at {args.db}", file=sys.stderr)
+    conf = {}
+    db_path = args.db
+    if args.data_dir:
+        data_dir = Path(args.data_dir)
+        if not data_dir.is_dir():
+            print(f"not a folder: {data_dir}", file=sys.stderr)
             return 2
-        conn = store.open_db(args.db, readonly=True)
+        conf = _hub_settings(data_dir)
+        if db_path is None and (data_dir / store.DB_FILENAME).is_file():
+            db_path = str(data_dir / store.DB_FILENAME)
+    conn = None
+    if db_path:
+        if not Path(db_path).is_file():
+            print(f"no database at {db_path}", file=sys.stderr)
+            return 2
+        conn = store.open_db(db_path, readonly=True)
     try:
         summary = import_history(args.instrument, processed, args.results_csv,
                                  instrument_folder_aliases=args.alias, db=conn, data_dir=None,
-                                 dry_run=True, conf={})
+                                 dry_run=True, conf=conf, compare_dirs=args.compare_dir)
     finally:
         if conn is not None:
             conn.close()
