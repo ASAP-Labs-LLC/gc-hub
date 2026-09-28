@@ -49,9 +49,11 @@ Public API
 ::
 
     submit(instrument_id, cdf, mtime=None, source_name=None, *, conf=None,
-           data_dir=None, db=None, notifier=None) -> SubmitResult
+           data_dir=None, db=None, notifier=None, force_backfill=False) -> SubmitResult
         # cdf: bytes, or a path (read only; mtime and source_name default to
         # the file's). Raises UnknownInstrument, InstrumentDisabled, SubmitRejected.
+        # force_backfill: a created sample is backfill whatever live_since says
+        # (the folder loader's "load as history" option).
         # The 2B1 ingest route maps InstrumentDisabled to 403 (the agent holds
         # and retries later) and every other SubmitRejected to 400 (the agent
         # marks the file rejected).
@@ -565,7 +567,7 @@ def _flag_blank_replaced(conn, cur: dict, src: dict) -> list:
 def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.PathLike],
            mtime: Union[None, datetime, str, float] = None, source_name: Optional[str] = None, *,
            conf: Optional[dict] = None, data_dir=None, db: store.Db = None,
-           notifier: Optional[Notifier] = None) -> SubmitResult:
+           notifier: Optional[Notifier] = None, force_backfill: bool = False) -> SubmitResult:
     """Receive one CDF for ``instrument_id``.
 
     ``cdf`` is the file's bytes or a path (read only, never moved or
@@ -575,6 +577,9 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
     no injection stamp. ``conf`` is the global settings (default
     ``settings.load_settings()``; only ``blank_max_intensity_pa`` is read).
     ``notifier`` hears about a late blank (see the module docstring).
+    ``force_backfill`` makes a created sample backfill even when it was
+    injected after the instrument's ``live_since`` (loading history into a
+    live instrument); otherwise ``store.is_backfill`` decides.
     """
     data_dir = _data_dir(data_dir)
     db = _db(db, data_dir)
@@ -629,7 +634,7 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
             legacy = raw_mtime.isoformat(sep=" ") if raw_mtime is not None else injection_dt
         conf = conf if conf is not None else _load_conf()
         is_blank = _genuine_blank(tmp, lab_id, conf)
-        backfill = int(store.is_backfill(inst.get("live_since"), injection_dt))
+        backfill = int(force_backfill or store.is_backfill(inst.get("live_since"), injection_dt))
         month_dir = data_dir / "cdf" / instrument_id / f"{inj.year:04d}" / f"{inj.month:02d}"
 
         with store.connection(db) as conn:

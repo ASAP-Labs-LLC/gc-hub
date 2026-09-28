@@ -306,6 +306,47 @@ only), `tests/pipeline/`.
 - **Tests:** synthetic fixtures where each tag is produced deliberately;
   `unexplained` is produced when a number is altered.
 
+**Runbook notes for T6 (as built, after two review rounds):**
+- **Load, then check exactly what was loaded.** Run
+  `python tools/load_folder.py --data-dir <data> --json gc1 <robocopy> > load.json`.
+  The summary's `sample_ids` (created or duplicate) is the parity scope:
+  `python tools/parity_report.py --data-dir <data> --v1-corrections <v1 correction_factors.json>
+  --sample-ids @load.json gc1 <v1 distill_results.csv>`. Without a scope, every
+  hub sample on the instrument must have a v1 row (`no-v1-row` fails).
+  `--since <ISO time>` is the alternative scope. The verdict line prints the
+  count of v1 rows outside the scope.
+- **Run the report only when the queue is empty.** A sample with no result
+  is `not-processed` and fails the report.
+- **`--v1-corrections` is required** to prove any numeric difference. The
+  file must exist and yield correction cuts (exit 2 otherwise).
+- **Excluded methods fail unless accepted.** Every method name the hub
+  didn't process fails the report until it is named with
+  `--accept-excluded-method NAME` (repeatable; case-insensitive, compared
+  like the hub compares names). Accept only names confirmed not to be D2887
+  runs. A D2887-mapped name, `SIMDISB.M` or `SIMDISTB.M` can never be
+  accepted. A CDF with no method name (`review-method`) always fails:
+  classify it on the Instruments page first. Accepted names are printed in
+  the verdict and the HTML.
+- **The gate:** exit 0 only when no failing tag is present (`no-v1-row`,
+  `lab-id-other-time`, `ambiguous-match`, `not-processed`, `review-method`,
+  `method-not-accepted`, `not-verified`, `unexplained`), at least one row
+  was numerically verified, and no excluded name is unaccepted or D2887.
+  `blank-rule`, `auto-detect-off` and `corrections` are claimed only when a
+  recomputation reproduces v1's row exactly. The HTML shows the largest
+  absolute difference for each of these tags, and lists the instrument's
+  open conflicts. Resolve those conflicts before sign-off.
+- **`--process` limits.** The loader's `--process` refuses to start only if
+  the hub's port answers on **this machine** (`--hub-port`, default the
+  hub's own). It cannot see a hub on another machine using the same data
+  folder, so never run `--process` against a data folder a hub is serving.
+  It holds `<data>/.gc-load-folder.lock` while it runs. If a crash leaves
+  the lock behind, check that no loader is running, then **delete the file
+  by hand**; nothing removes it automatically. Without `--process`, the
+  running hub's worker processes the queue.
+- **Exit codes, loader:** 0 loaded; 1 some files rejected or unreadable;
+  2 nothing loaded; 3 stopped partway. The summary is printed either way;
+  re-run to resume.
+
 ## Integration checkpoints
 
 - After T3 and after T6, the controller runs the **integration critic**
