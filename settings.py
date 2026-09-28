@@ -94,6 +94,41 @@ DEFAULTS: Dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
+# What /api/settings may change (T5 review C1). Everything else in
+# settings.json is read-only there: paths (a LAN user could otherwise point
+# the standards folder at the data folder and delete from it, or the logo at
+# the admin setup code), the per-instrument calibration and corrections
+# (the store owns those now), and blank_max_intensity_pa (which blank is
+# genuine). Those change by editing settings.json on the server (DEPLOY.md).
+# ---------------------------------------------------------------------------
+
+# Anyone on the LAN: display only. Flag rules drive the list's flag badges
+# (sample_cache, never a result or an export); series colours are a chart
+# preference.
+OPERATOR_KEYS = (
+    "sample_flag_rules",
+    "early_signal_enabled",             # legacy inputs sample_flag_rules migrates from
+    "early_signal_time_min",
+    "early_signal_intensity_threshold",
+    "series_colors",
+)
+
+# The admin password: these change what is recorded or reported. Best fit is
+# computed into every result's Best Fit / Fit Score export columns; the
+# analysis_* values are the saved defaults of the Analysis tab and of the
+# reports (and QBench PDFs) built from it, the same values "Set as Default"
+# (/api/save-analysis-defaults, admin) saves.
+ADMIN_KEYS = (
+    "bestfit_enabled", "bestfit_threshold", "bestfit_shift_tolerance_min",
+    "bestfit_mix_min_frac",
+    "analysis_quantile", "analysis_window", "analysis_sigma",
+    "analysis_thresh_marginal", "analysis_thresh_moderate", "analysis_thresh_significant",
+    "analysis_gas_c_start", "analysis_gas_c_end", "analysis_oil_c_start", "analysis_oil_c_end",
+    "analysis_x_max_min", "analysis_spike_min_width_min", "analysis_range_overlays",
+)
+
+
+# ---------------------------------------------------------------------------
 # I/O helpers
 # ---------------------------------------------------------------------------
 
@@ -107,6 +142,12 @@ def load_settings() -> Dict[str, str]:
         except Exception as exc:
             LOGGER.warning("Settings read failed, using defaults: %s", exc)
 
+    if paths.data_dir() is not None:
+        # Fixed under the data folder in the hub, whatever settings.json says:
+        # the standards folder is where standards are added and deleted, the
+        # export folder where report PDFs are written.
+        conf["comparison_defaults_dir"] = str(paths.standards_dir())
+        conf["export_folder"] = str(paths.default_export_dir())
     proc = str(conf.get("processed_cdf_dir") or "").strip()
     conf["blank_cache_file"] = str(Path(proc) / ".blank_cache.json") if proc else ""
     conf.setdefault("export_folder", DEFAULTS["export_folder"])
@@ -144,6 +185,23 @@ def _replace_retrying(tmp: str, path: Path) -> None:
             if attempt == SAVE_REPLACE_ATTEMPTS - 1:
                 raise
             time.sleep(SAVE_REPLACE_BACKOFF_SECONDS)
+
+
+def update_settings(changes: Dict[str, str]) -> None:
+    """Write only ``changes`` into ``settings.json``: the file as it is on disk
+    (not the defaults, nor the values ``load_settings`` computes or fixes)
+    with those keys replaced."""
+    on_disk: Dict[str, str] = {}
+    if CONFIG_PATH is not None and CONFIG_PATH.is_file():
+        try:
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                on_disk = data
+        except Exception as exc:
+            LOGGER.warning("Settings read failed before an update: %s", exc)
+            raise
+    on_disk.update(changes)
+    save_settings(on_disk)
 
 
 def save_settings(conf: Dict[str, str]) -> None:

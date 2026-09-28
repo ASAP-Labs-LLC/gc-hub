@@ -433,11 +433,6 @@ def _upload_log(msg: str) -> None:
     _publish(_upload_subscribers, _upload_sub_lock, msg)
 
 
-def _safe_path(p: str) -> Path:
-    """Return a Path, handling UNC paths with spaces."""
-    return Path(p)
-
-
 _STANDARD_NAME_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
@@ -1507,18 +1502,15 @@ def api_get_settings():
         return _error(str(exc), 500)
 
 
-# Per-instrument configuration lives in the store's instruments rows (the
-# calibration page / Instruments page, admin-gated); settings.json's copies
-# are read-only through /api/settings. A save may echo them back unchanged.
-READ_ONLY_SETTINGS = ("calibration_cdf", "calibration_assignments", "calibration_sensitivity",
-                      "correction_factors_json")
-
-
 @app.route("/api/settings", methods=["POST"])
 def api_save_settings():
-    """Save the global settings. JSON only (415 otherwise: a text/plain post
-    is a CORS "simple" request). ``READ_ONLY_SETTINGS`` keep their saved
-    values; a body that changes one is refused (400) and nothing is saved."""
+    """Save global settings: only ``settings.OPERATOR_KEYS`` (anyone) and
+    ``settings.ADMIN_KEYS`` (with the admin ``password`` in the body) can
+    change. A body may echo any other key back unchanged (the page posts what
+    it read); a body that changes one is refused (400, naming the keys) and
+    nothing is saved. JSON only (415 otherwise: a text/plain post is a CORS
+    "simple" request). Only the changed keys are written; paths and
+    computed values never are."""
     if not request.is_json:
         return _error("Expected Content-Type: application/json", 415)
     try:
@@ -1527,24 +1519,26 @@ def api_save_settings():
             return _error("Expected JSON object")
         current = settings_mod.load_settings()
         gc1_cal = _gc1_calibration_cdf()
-        effective = dict(current, calibration_cdf=gc1_cal) if gc1_cal is not None else current
-        changed = [k for k in READ_ONLY_SETTINGS
-                   if k in body and str(body[k] or "") != str(effective.get(k) or "")]
+        if gc1_cal is not None:
+            current = dict(current, calibration_cdf=gc1_cal)
+        changed = {k: v for k, v in body.items()
+                   if k != "password" and (k not in current
+                                           or str(v if v is not None else "")
+                                           != str(current.get(k) if current.get(k) is not None
+                                                  else ""))}
+        allowed = set(settings_mod.OPERATOR_KEYS) | set(settings_mod.ADMIN_KEYS)
+        refused = sorted(k for k in changed if k not in allowed)
+        if refused:
+            return _error(f"{', '.join(refused)} cannot be changed here: paths, calibration, "
+                          f"corrections and the blank limit are set on the server (settings.json, "
+                          f"DEPLOY.md) or per instrument (Calibration and Instruments pages).", 400)
+        if any(k in settings_mod.ADMIN_KEYS for k in changed) and not _check_admin(body):
+            return _error("Best-fit and analysis defaults need the admin password", 403)
         if changed:
-            return _error(f"{', '.join(changed)} cannot be changed here: calibration and "
-                          f"correction factors are per instrument now (the Calibration and "
-                          f"Instruments pages, admin).", 400)
-        body = {k: v for k, v in body.items() if k not in READ_ONLY_SETTINGS}
-        on_disk = {}
-        if settings_mod.CONFIG_PATH is not None and settings_mod.CONFIG_PATH.is_file():
-            try:
-                on_disk = json.loads(settings_mod.CONFIG_PATH.read_text(encoding="utf-8"))
-            except ValueError:
-                on_disk = {}
-        body.update({k: on_disk[k] for k in READ_ONLY_SETTINGS if k in on_disk})
-        # Flag rules and best-fit settings need no cache clearing: sample_cache
-        # rows carry the fingerprint they were computed with.
-        settings_mod.save_settings(body)
+            # Flag rules and best-fit settings need no cache clearing:
+            # sample_cache rows carry the fingerprint they were computed with.
+            settings_mod.update_settings(changed)
+            LOGGER.info("Settings changed by %s: %s", _who(), ", ".join(sorted(changed)))
 
         conf = settings_mod.load_settings()
         cal = _gc1_calibration_cdf()
@@ -1566,15 +1560,15 @@ def api_save_analysis_defaults():
             return _error("Incorrect password", 403)
         params = body.get("params", {})
         overlays = body.get("range_overlays", [])
-        conf = settings_mod.load_settings()
+        changes = {}
         # Trend line + thresholds
         for key in ("quantile", "window", "sigma", "thresh_marginal",
                      "thresh_moderate", "thresh_significant", "x_max_min"):
             if key in params:
-                conf[f"analysis_{key}"] = str(params[key])
+                changes[f"analysis_{key}"] = str(params[key])
         # Full range overlays as JSON
-        conf["analysis_range_overlays"] = json.dumps(overlays)
-        settings_mod.save_settings(conf)
+        changes["analysis_range_overlays"] = json.dumps(overlays)
+        settings_mod.update_settings(changes)
         return jsonify({"ok": True})
     except Exception as exc:
         return _error(str(exc), 500)
@@ -2294,35 +2288,49 @@ def api_comparison_standards():
         return _error(str(exc), 500)
 
 
+def _fixed_standards_dir() -> Path:
+    """The one standards folder, fixed under the data folder."""
+    return paths.standards_dir()
+
+
+def _standard_file(name: str) -> Optional[Path]:
+    """``<name>.CDF``/``.cdf`` in the standards folder, or None. Never outside it."""
+    comp_dir = _fixed_standards_dir()
+    for suffix in (".CDF", ".cdf"):
+        p = comp_dir / f"{name}{suffix}"
+        if p.is_file() and p.resolve().parent == comp_dir.resolve():
+            return p
+    return None
+
+
 @app.route("/api/comparison-standard", methods=["POST"])
 def api_add_comparison_standard():
-    body = request.get_json(force=True) or {}
-    src = None
-    if body.get("sample_id") is not None:
-        # A sample from the list: its current revision's CDF.
-        data, db = _hub()
-        s = _sample_or_404(body["sample_id"], db)
-        src = _revision_cdf(s, store.get_revision(s["id"], db=db) if s["current_revision"] else None,
-                            data)
+    """Admin: make a stored sample's CDF (``sample_id``, its current
+    revision's file) a comparison standard ``name``. Server paths are never
+    accepted (``source_path`` is refused)."""
+    body, err = _admin_json_body()
+    if err:
+        return err
+    if not _check_admin(body):
+        return _error("Incorrect password", 403)
+    if body.get("source_path") is not None:
+        return _error("source_path is not accepted: add a standard from a sample (sample_id)")
+    name = str(body.get("name") or "").strip()
+    problem = _standard_name_problem(name)
+    if problem:
+        return _error(problem)
+    if body.get("sample_id") is None:
+        return _error("sample_id and name are required")
+    data, db = _hub()
+    s = _sample_or_404(body["sample_id"], db)
+    src = _revision_cdf(s, store.get_revision(s["id"], db=db) if s["current_revision"] else None,
+                        data)
     try:
-        source_path = str(body.get("source_path") or src or "").strip()
-        name = str(body.get("name") or "").strip()
-        problem = _standard_name_problem(name)
-        if problem:
-            return _error(problem)
-        if not source_path:
-            return _error("source_path (or sample_id) and name are required")
-
-        src = src or _safe_path(source_path)
-        if not src.is_file():
-            return _error(f"Source file not found: {source_path}", 404)
-
-        conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
+        comp_dir = _fixed_standards_dir()
         comp_dir.mkdir(parents=True, exist_ok=True)
-
         dest = comp_dir / f"{name}.CDF"
         shutil.copy2(str(src), str(dest))
+        LOGGER.info("Comparison standard %s added from sample %s by %s", name, s["id"], _who())
         return jsonify({"status": "ok", "path": str(dest)})
     except Exception as exc:
         return _error(str(exc), 500)
@@ -2330,19 +2338,22 @@ def api_add_comparison_standard():
 
 @app.route("/api/comparison-standard/<name>", methods=["DELETE"])
 def api_delete_comparison_standard(name: str):
+    """Admin (JSON body with the password): delete a standard from the
+    standards folder."""
+    body, err = _admin_json_body()
+    if err:
+        return err
+    if not _check_admin(body):
+        return _error("Incorrect password", 403)
     problem = _standard_name_problem(name)
     if problem:
         return _error(problem)
     try:
-        conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
-        target = comp_dir / f"{name}.CDF"
-        if not target.is_file():
-            # Try lowercase
-            target = comp_dir / f"{name}.cdf"
-        if not target.is_file():
+        target = _standard_file(name)
+        if target is None:
             return _error(f"Standard not found: {name}", 404)
         target.unlink()
+        LOGGER.info("Comparison standard %s deleted by %s", name, _who())
         return jsonify({"status": "ok"})
     except Exception as exc:
         return _error(str(exc), 500)
@@ -2350,23 +2361,24 @@ def api_delete_comparison_standard(name: str):
 
 @app.route("/api/comparison-standard/rename", methods=["POST"])
 def api_rename_comparison_standard():
+    """Admin: rename a standard within the standards folder."""
+    body, err = _admin_json_body()
+    if err:
+        return err
+    if not _check_admin(body):
+        return _error("Incorrect password", 403)
     try:
-        body = request.get_json(force=True)
         old_name = str(body.get("old_name") or "").strip()
         new_name = str(body.get("new_name") or "").strip()
         problem = _standard_name_problem(old_name) or _standard_name_problem(new_name)
         if problem:
             return _error(problem)
-
-        conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
-        old_path = comp_dir / f"{old_name}.CDF"
-        if not old_path.is_file():
-            old_path = comp_dir / f"{old_name}.cdf"
-        if not old_path.is_file():
+        old_path = _standard_file(old_name)
+        if old_path is None:
             return _error(f"Standard not found: {old_name}", 404)
-
-        new_path = comp_dir / f"{new_name}{old_path.suffix}"
+        new_path = old_path.parent / f"{new_name}{old_path.suffix}"
+        if new_path.exists():
+            return _error(f"A standard named {new_name} already exists", 409)
         old_path.rename(new_path)
         return jsonify({"status": "ok", "path": str(new_path)})
     except Exception as exc:
@@ -3418,65 +3430,6 @@ def api_qbench_api_credentials_post():
 # ===================================================================== #
 #  API: Utility
 # ===================================================================== #
-
-@app.route("/api/browse", methods=["POST"])
-def api_browse():
-    """Open a native file/folder picker dialog (runs on the server machine).
-    Uses tkinter which is available in standard Python."""
-    body = request.get_json(force=True)
-    browse_type = body.get("type", "dir")  # "dir" or "file"
-    title = body.get("title", "Select")
-    initial = body.get("initial", "")
-
-    result = {"path": ""}
-    err = [None]
-
-    def _pick():
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            if browse_type == "dir":
-                path = filedialog.askdirectory(title=title, initialdir=initial or None)
-            else:
-                path = filedialog.askopenfilename(title=title, initialdir=initial or None)
-            root.destroy()
-            result["path"] = path or ""
-        except Exception as exc:
-            err[0] = str(exc)
-
-    # tkinter must run on the main thread on some OSes, but on Windows
-    # it works fine from any thread. Run in a thread with a timeout.
-    t = threading.Thread(target=_pick, daemon=True)
-    t.start()
-    t.join(timeout=120)  # 2 min timeout for user to pick
-
-    if err[0]:
-        return _error(f"Browse dialog failed: {err[0]}", 500)
-    return jsonify(result)
-
-
-@app.route("/api/open-folder", methods=["GET"])
-def api_open_folder():
-    folder = request.args.get("path", "").strip()
-    if not folder:
-        return _error("Missing 'path' query parameter")
-    try:
-        p = _safe_path(folder)
-        if not p.is_dir():
-            return _error(f"Not a directory: {folder}", 404)
-        if platform.system() == "Windows":
-            os.startfile(str(p))  # type: ignore[attr-defined]
-        elif platform.system() == "Darwin":
-            subprocess.Popen(["open", str(p)])
-        else:
-            subprocess.Popen(["xdg-open", str(p)])
-        return jsonify({"status": "ok"})
-    except Exception as exc:
-        return _error(str(exc), 500)
-
 
 # ===================================================================== #
 #  Serve the SPA index

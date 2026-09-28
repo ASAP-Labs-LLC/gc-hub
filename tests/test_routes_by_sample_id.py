@@ -378,10 +378,13 @@ def test_report_routes_take_sample_ids(hub_app):
 
 def test_comparison_standard_from_a_sample(hub_app):
     port, hub, _ = hub_app
-    code, body = post(port, "/api/comparison-standard", {"sample_id": hub.ids["rerun"], "name": "Rerun"})
+    pw = _admin(port, hub)
+    code, body = post(port, "/api/comparison-standard",
+                      {"sample_id": hub.ids["rerun"], "name": "Rerun", "password": pw})
     assert code == 200, body
     assert (hub.standards / "Rerun.CDF").is_file()
-    assert post(port, "/api/comparison-standard", {"sample_id": UNKNOWN, "name": "X"})[0] == 404
+    assert post(port, "/api/comparison-standard",
+                {"sample_id": UNKNOWN, "name": "X", "password": pw})[0] == 404
 
 
 def test_calibration_reads_and_writes_the_gc1_row(hub_app):
@@ -567,10 +570,13 @@ def test_reports_zip_is_409_when_every_item_is_skipped(hub_app):
 @pytest.mark.parametrize("name", ["../evil", "a/b", "..", "x\\y", ""])
 def test_comparison_standard_names_cannot_escape_the_folder(hub_app, name):
     port, hub, _ = hub_app
-    code, body = post(port, "/api/comparison-standard", {"sample_id": hub.ids["final"], "name": name})
+    pw = _admin(port, hub)
+    code, body = post(port, "/api/comparison-standard",
+                      {"sample_id": hub.ids["final"], "name": name, "password": pw})
     assert _is_json_error(code, body, 400), (code, body)
     assert not (hub.data / "evil.CDF").exists()
-    for path, payload in (("/api/comparison-standard/rename", {"old_name": "Diesel", "new_name": name}),):
+    for path, payload in (("/api/comparison-standard/rename",
+                           {"old_name": "Diesel", "new_name": name, "password": pw}),):
         code, body = post(port, path, payload)
         assert _is_json_error(code, body, 400), (path, code, body)
     assert (hub.standards / "Diesel.CDF").is_file()

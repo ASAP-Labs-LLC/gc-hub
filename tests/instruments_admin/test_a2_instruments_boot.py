@@ -49,7 +49,7 @@ def _prepare(tmp: Path):
     hub.worker(corrections_provider=instruments.corrections_provider(hub.db)).run_until_idle()
     assert store.samples.get(hub.b, db=hub.db)["status"] == "final"
     hub.conflict = hub.submit(hub.cdf(name="A1", injected=datetime(2026, 9, 10, 9), shift=0.3)).conflict_id
-    std = tmp / "standards"
+    std = hub.data / "gc_comparison_standards"      # fixed under the data folder (T5)
     std.mkdir()
     (std / "Diesel.CDF").write_bytes(hub.cal.read_bytes())
     settings = dict(hub.conf, comparison_defaults_dir=str(std))

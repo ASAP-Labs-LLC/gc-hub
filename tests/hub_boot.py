@@ -62,7 +62,7 @@ class Hub:
         self.src = self.root / "src"
         self.src.mkdir(exist_ok=True)
         self.db = self.data / store.DB_FILENAME
-        self.standards = self.data / "standards"
+        self.standards = self.data / "gc_comparison_standards"   # fixed in the hub
         self.standards.mkdir(exist_ok=True)
         self.cal = fx.calibration_cdf(self.src / "CAL_09162026_090000.CDF", method_name=SIMDIS)
         corr = self.src / "correction_factors.json"

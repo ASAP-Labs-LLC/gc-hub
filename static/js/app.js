@@ -303,6 +303,12 @@ async function apiPostRefusable(url, what, body) {
 async function apiPost(url, body) { return api('POST', url, body); }
 async function apiDelete(url) { return api('DELETE', url); }
 
+/** Ask for the admin password for one action (null if cancelled). */
+function adminPassword(what) {
+    const pw = window.prompt(`Admin password to ${what}:`);
+    return pw ? pw : null;
+}
+
 /** Download a blob response (for PDF/file exports). */
 async function downloadBlob(resp, fallbackName) {
     const blob = await resp.blob();
@@ -788,7 +794,9 @@ function showContextMenu(e, file) {
             const name = prompt('Enter a name for this comparison standard:', file.name.replace(/\.CDF$/i, ''));
             if (!name) return;
             try {
-                await apiPost('/api/comparison-standard', { sample_id: file.sample_id, name });
+                const password = adminPassword('save a comparison standard');
+                if (!password) return;
+                await apiPost('/api/comparison-standard', { sample_id: file.sample_id, name, password });
                 showNotification(`Saved comparison standard: ${name}`, 'success');
                 await loadComparisonStandards();
             } catch (err) {
@@ -1557,7 +1565,9 @@ function showStandardContextMenu(e, std) {
             const newName = prompt(`Rename "${std.name}" to:`, std.name);
             if (!newName || newName === std.name) return;
             try {
-                await apiPost('/api/comparison-standard/rename', { old_name: std.name, new_name: newName });
+                const password = adminPassword('rename a comparison standard');
+                if (!password) return;
+                await apiPost('/api/comparison-standard/rename', { old_name: std.name, new_name: newName, password });
                 showNotification(`Renamed to: ${newName}`, 'success');
                 if (state.selectedStandard && state.selectedStandard.name === std.name) {
                     state.selectedStandard.name = newName;
@@ -1578,7 +1588,9 @@ function showStandardContextMenu(e, std) {
             removeContextMenu();
             if (!confirm(`Delete comparison standard "${std.name}"?`)) return;
             try {
-                await apiDelete(`/api/comparison-standard/${encodeURIComponent(std.name)}`);
+                const password = adminPassword('delete a comparison standard');
+                if (!password) return;
+                await api('DELETE', `/api/comparison-standard/${encodeURIComponent(std.name)}`, { password });
                 showNotification(`Deleted standard: ${std.name}`, 'success');
                 if (state.selectedStandard && state.selectedStandard.name === std.name) {
                     state.selectedStandard = null;
@@ -3272,7 +3284,9 @@ function renderSettingsStandards() {
         li.querySelector('.range-delete').addEventListener('click', async () => {
             if (!confirm(`Remove standard "${std.name}"?`)) return;
             try {
-                await apiDelete('/api/comparison-standard/' + encodeURIComponent(std.name));
+                const password = adminPassword('delete a comparison standard');
+                if (!password) return;
+                await api('DELETE', '/api/comparison-standard/' + encodeURIComponent(std.name), { password });
                 await loadComparisonStandards();
                 renderSettingsStandards();
                 showNotification(`Removed: ${std.name}`, 'success');
@@ -3284,68 +3298,22 @@ function renderSettingsStandards() {
     }
 }
 
-async function browseAndAddStandard() {
-    try {
-        const result = await apiPost('/api/browse', {
-            type: 'file', title: 'Select CDF file for comparison standard',
-        });
-        if (!result.path) return;
-        const defaultName = result.path.split(/[/\\]/).pop().replace(/\.cdf$/i, '');
-        const name = prompt('Name for this comparison standard:', defaultName);
-        if (!name) return;
-        await apiPost('/api/comparison-standard', { source_path: result.path, name });
-        await loadComparisonStandards();
-        renderSettingsStandards();
-        showNotification(`Added standard: ${name}`, 'success');
-    } catch (e) {
-        showNotification('Failed: ' + e.message, 'error');
-    }
-}
-
-async function browseForPath(inputId, type) {
-    const inputEl = document.getElementById(inputId);
-    if (!inputEl) return;
-    const current = inputEl.value || '';
-    try {
-        const result = await apiPost('/api/browse', {
-            type: type || 'dir',
-            title: 'Select ' + (type === 'file' ? 'File' : 'Folder'),
-            initial: current,
-        });
-        if (result.path) {
-            inputEl.value = result.path;
-        }
-    } catch (e) {
-        showNotification('Browse failed: ' + e.message, 'error');
-    }
-}
-
 async function saveSettings() {
-    const fieldsMap = {
-        'set-watch-dir': 'watch_dir',
-        'set-processed-dir': 'processed_cdf_dir',
-        'set-distill-output': 'distill_output',
-        'set-calibration-cdf': 'calibration_cdf',
-        'set-export-folder': 'export_folder',
-        'set-comparison-dir': 'comparison_defaults_dir',
-        'set-correction-factors': 'correction_factors_json',
-        'set-series-colors': 'series_colors',
-        'set-report-logo': 'analysis_report_logo',
-    };
-
-    const newSettings = { ...state.settings };
-    for (const [elId, key] of Object.entries(fieldsMap)) {
-        const el = document.getElementById(elId);
-        if (el) newSettings[key] = el.value;
-    }
+    // v2 (T5 review C1): only operator keys save freely; best-fit needs the
+    // admin password; paths, calibration and corrections are read-only here.
+    // The Analysis tab's defaults are saved by "Set as Default" (admin).
+    const body = {};
+    const colors = document.getElementById('set-series-colors');
+    if (colors) body.series_colors = colors.value;
 
     // Flag rules (replaces the legacy early-signal fields)
     const flagRules = readFlagRulesFromDOM();
-    if (flagRules !== null) newSettings.sample_flag_rules = JSON.stringify(flagRules);
+    if (flagRules !== null) body.sample_flag_rules = JSON.stringify(flagRules);
 
-    // Best-fit settings
+    // Best-fit settings: an export column, so admin only
+    const bf = {};
     const bfEnabled = document.getElementById('set-bestfit-enabled');
-    if (bfEnabled) newSettings.bestfit_enabled = bfEnabled.checked ? 'true' : 'false';
+    if (bfEnabled) bf.bestfit_enabled = bfEnabled.checked ? 'true' : 'false';
     const bfSaveMap = {
         'set-bestfit-threshold': 'bestfit_threshold',
         'set-bestfit-shift': 'bestfit_shift_tolerance_min',
@@ -3353,31 +3321,21 @@ async function saveSettings() {
     };
     for (const [elId, key] of Object.entries(bfSaveMap)) {
         const el = document.getElementById(elId);
-        if (el && el.value !== '') newSettings[key] = el.value;
+        if (el && el.value !== '') bf[key] = el.value;
+    }
+    const bfChanged = Object.entries(bf).some(
+        ([k, v]) => String(v) !== String(state.settings[k] == null ? '' : state.settings[k]));
+    if (bfChanged) {
+        const password = adminPassword('change the best-fit settings');
+        if (!password) { showNotification('Best-fit settings not saved (no admin password)', 'info'); }
+        else { Object.assign(body, bf); body.password = password; }
     }
 
-    // Also persist current analysis params to settings
-    const p = state.analysisParams;
-    newSettings.analysis_quantile = String(p.quantile);
-    newSettings.analysis_window = String(p.window);
-    newSettings.analysis_sigma = String(p.sigma);
-    newSettings.analysis_thresh_marginal = String(p.thresh_marginal);
-    newSettings.analysis_thresh_moderate = String(p.thresh_moderate);
-    newSettings.analysis_thresh_significant = String(p.thresh_significant);
-    newSettings.analysis_x_max_min = String(p.x_max_min);
-    // Save range overlays
-    const gas = state.rangeOverlays.find(r => r.label === 'Gas');
-    const oil = state.rangeOverlays.find(r => r.label === 'Oil');
-    if (gas) { newSettings.analysis_gas_c_start = String(gas.c_start); newSettings.analysis_gas_c_end = String(gas.c_end); }
-    if (oil) { newSettings.analysis_oil_c_start = String(oil.c_start); newSettings.analysis_oil_c_end = String(oil.c_end); }
-
     try {
-        const saved = await apiPost('/api/settings', newSettings);
-        state.settings = newSettings;
+        const saved = await apiPost('/api/settings', body);
+        state.settings = saved;
         closeAllModals();
         showNotification('Settings saved — refreshing data...', 'success');
-        // e.g. "Watch folder is not set or not found — watcher idle"
-        if (saved && saved.warning) showNotification(saved.warning, 'warning');
         await refreshAll();
         showNotification('Data refreshed with new settings', 'success');
     } catch (e) {
@@ -3839,8 +3797,6 @@ async function exportComparison() {
         const result = await apiPost('/api/export-comparison', { sample_ids: ids });
         if (result && result.files && result.files.length > 0) {
             showNotification(`Comparison exported: ${result.files.length} file(s)`, 'success');
-            // Open the export folder
-            try { await apiGet(`/api/open-folder?path=${encodeURIComponent(state.settings.export_folder || '')}`); } catch (_) { /* ignore */ }
         } else {
             showNotification('No files were generated', 'info');
         }
@@ -3888,33 +3844,6 @@ async function exportAnalysisReport() {
 /* ===================================================================
    21. FOLDER OPEN
    =================================================================== */
-
-async function openProcessedFolder() {
-    try {
-        const dir = state.settings.processed_cdf_dir || '';
-        await apiGet(`/api/open-folder?path=${encodeURIComponent(dir)}`);
-    } catch (e) {
-        showNotification('Failed to open folder: ' + e.message, 'error');
-    }
-}
-
-async function openWatchFolder() {
-    try {
-        const dir = state.settings.watch_dir || '';
-        await apiGet(`/api/open-folder?path=${encodeURIComponent(dir)}`);
-    } catch (e) {
-        showNotification('Failed to open folder: ' + e.message, 'error');
-    }
-}
-
-async function openExportFolder() {
-    try {
-        const dir = state.settings.export_folder || '';
-        await apiGet(`/api/open-folder?path=${encodeURIComponent(dir)}`);
-    } catch (e) {
-        showNotification('Failed to open folder: ' + e.message, 'error');
-    }
-}
 
 /* ===================================================================
    22. HELP MODAL
@@ -3976,8 +3905,6 @@ function setupEventListeners() {
         'btn-settings': openSettingsModal,
         'btn-export': exportPDF,
         'btn-comparison-export': exportComparison,
-        'btn-open-processed': openProcessedFolder,
-        'btn-open-watch': openWatchFolder,
         'btn-refresh': () => refreshAll(),
         'btn-reprocess': openReprocessModal,
         'btn-help': openHelpModal,
@@ -4081,23 +4008,8 @@ function setupEventListeners() {
     // Initialize tooltips for info buttons
     initParamTooltips();
 
-    // Browse buttons in settings modal
-    document.querySelectorAll('.browse-btn[data-browse]').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const inputId = btn.dataset.browse;
-            const type = btn.dataset.type || 'dir';
-            browseForPath(inputId, type);
-        });
-    });
-
-    // "Add" button in settings comparison standards
-    const addStdBtn = document.getElementById('btn-settings-add-standard');
-    if (addStdBtn) {
-        addStdBtn.addEventListener('click', () => {
-            // Just open a native browse to pick a CDF file, then save as standard
-            browseAndAddStandard();
-        });
-    }
+    // (v2: no server-side Browse; paths are set on the server. Standards are
+    // added from a sample's context menu, "Set as comparison standard".)
 
     // Modal close handlers
     setupModalCloseHandlers();

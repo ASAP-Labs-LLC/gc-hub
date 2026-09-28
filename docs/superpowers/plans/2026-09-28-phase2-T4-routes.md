@@ -74,8 +74,8 @@ are exactly as written in the decorator (module constants resolved).
 | `/api/export-pdf` | POST | migrated | `{sample_id}`; 404 unknown |
 | `/api/export-comparison` | POST | migrated | `{sample_ids:[int]}` (was `sample_paths`) |
 | `/api/best-fit` | POST | migrated | `{sample_id}` → the live classification (`label, best_standard, score, ranking, mix`) plus `recorded:{best_fit, fit_score, revision}` from the stored revision; refreshes `sample_cache` |
-| `/api/comparison-standard` | POST | unchanged | also accepts `{sample_id, name}` in place of `source_path` |
-| `/api/settings` | GET, POST | unchanged | GET shows the gc1 row's `calibration_cdf`; a POST that changes `calibration_cdf` updates the gc1 row (assignments for the new CDF from the settings map, if any) and queues `awaiting_calibration` |
+| `/api/comparison-standard` | POST | unchanged | T5 review: admin (`password`), `{sample_id, name}` only (`source_path` → 400); the standards folder is fixed under the data folder |
+| `/api/settings` | GET, POST | unchanged | GET shows the gc1 row's `calibration_cdf` and the fixed standards/export folders; POST (JSON only) changes only `settings.OPERATOR_KEYS`, and `settings.ADMIN_KEYS` with the admin `password` (403 without); any other changed key → 400 (T5 review C1) |
 | `/api/save-analysis-defaults` | POST | unchanged | |
 | `/api/notifications` | GET | unchanged | |
 | `/api/notifications/<notif_id>/dismiss` | POST | unchanged | |
@@ -83,8 +83,8 @@ are exactly as written in the decorator (module constants resolved).
 | `/api/restart` | POST | unchanged | |
 | `/api/server-status` | GET | unchanged | |
 | `/api/comparison-standards` | GET | unchanged | |
-| `/api/comparison-standard/<name>` | DELETE | unchanged | |
-| `/api/comparison-standard/rename` | POST | unchanged | |
+| `/api/comparison-standard/<name>` | DELETE | unchanged | T5 review: admin (JSON body with `password`); only inside the standards folder |
+| `/api/comparison-standard/rename` | POST | unchanged | T5 review: admin (`password`) |
 | `/api/qbench-credentials` | GET | unchanged | |
 | `/api/qbench-upload/stream` | GET | unchanged | |
 | `/api/qbench-upload-status` | GET | unchanged | |
@@ -92,8 +92,8 @@ are exactly as written in the decorator (module constants resolved).
 | `/api/qbench-cancel` | POST | unchanged | |
 | `/api/qbench-update-credentials` | POST | unchanged | |
 | `/api/qbench-api-credentials` | GET, POST | unchanged | |
-| `/api/browse` | POST | unchanged | |
-| `/api/open-folder` | GET | unchanged | |
+| `/api/browse` | POST | removed | 404 (T5 review: a server-side desktop file picker; no meaning on ASAPSV1) |
+| `/api/open-folder` | GET | removed | 404 (T5 review: opened a folder on the server's desktop) |
 | `/admin/setup` | GET | new | 2B1 `admin_auth` blueprint; unchanged by T4 |
 | `/api/admin/setup` | POST | new | 2B1 `admin_auth` blueprint; unchanged by T4 |
 | `/api/admin/password` | POST | new | 2B1 `admin_auth` blueprint; unchanged by T4 |
