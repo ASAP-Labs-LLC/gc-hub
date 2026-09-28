@@ -100,3 +100,23 @@ test that is run and seen red.
    `cdf/`, plus the `webapp-live/distill_results.csv` found there, plus the
    processed index). Run the full suite. Report numbers and
    recommendations.
+
+## Review fixes (critic, 2026-09-28)
+
+7. **Injection time (C1).** Red: literal expectations for v1's
+   fromisoformat-first misparse (`_v1_parse`) and the fixed parse
+   (`_correct_parse`) over compact, `Z`, date-only and ISO stamps;
+   `CdfMeta.legacy_injection_dt` / `raw_stamp` / `v1_injection_dts`;
+   `method_name`; `normalise_lab_id`. Green. Commit.
+8. **Match (I1, I3–I6).** Red: rows match any v1 form; `key_collisions`
+   and `held_rows` report fields; Source File basename tie-breaks;
+   folder aliases; mixed rows whose key matches here; non-canonical times;
+   time zone; near misses; `no_injection_time` for kept CDFs only; dup
+   bytes keep the path a row names; method-name histogram; result-only
+   samples carry `dt_source='csv'`. Green. Commit.
+9. **Reader, dry run, summary, CLI (minors).** Red: last-wins duplicate
+   columns, header on `Lab ID` alone with missing columns reported, strict
+   UTF-8 then cp1252; dry run holds bad-layout rows, per-folder counts and
+   method names; summary labels and the mixed-folder warning; read-only
+   test on a chmod'ed tree; `--json` guard by samefile/normcase; repeatable
+   `--instrument-folder`. Green. Commit.

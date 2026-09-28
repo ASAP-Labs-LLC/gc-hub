@@ -15,13 +15,16 @@ or the CSV is ever written.
         --json D:\\import\\gc1-dry-run.json
 
 --instrument-folder is the folder the CSV's ``Source File`` column names for
-this instrument (the original share path, not the local robocopy).
+this instrument (the original share path, not the local robocopy). Repeat it
+for aliases; a bare folder name (``processed_cdfs2``) matches the parent
+folder of each Source File.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -32,11 +35,24 @@ if str(REPO) not in sys.path:
 import import_match  # noqa: E402
 
 
-def _inside(child: Path, parent: Path) -> bool:
+def _canon(p: Path) -> str:
+    return os.path.normcase(os.path.realpath(p))
+
+
+def _same_file(a: Path, b: Path) -> bool:
     try:
-        child.resolve().relative_to(parent.resolve())
-        return True
-    except ValueError:
+        if os.path.exists(a) and os.path.exists(b):
+            return os.path.samefile(a, b)
+    except OSError:
+        pass
+    return _canon(a) == _canon(b)
+
+
+def _inside(child: Path, parent: Path) -> bool:
+    c, p = _canon(child), _canon(parent)
+    try:
+        return os.path.commonpath([c, p]) == p
+    except ValueError:  # different drives
         return False
 
 
@@ -61,8 +77,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="folder of processed CDFs (searched recursively)")
     ap.add_argument("--results-csv", type=Path, default=None,
                     help="v1 distill_results.csv; omit for CDF-only mode")
-    ap.add_argument("--instrument-folder", required=True,
-                    help="this instrument's folder as the CSV's Source File names it")
+    ap.add_argument("--instrument-folder", required=True, action="append",
+                    help="this instrument's folder as the CSV's Source File names it; "
+                         "repeat for aliases (a mapped drive, or a bare folder name such "
+                         "as processed_cdfs2 that matches the file's parent folder)")
     ap.add_argument("--json", type=Path, default=None, help="also write the full report here")
     ap.add_argument("--examples", type=int, default=10,
                     help="examples printed per problem class (default 10)")
@@ -80,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         if _inside(args.json, args.processed_dir):
             ap.error("--json must not be inside --processed-dir (the source is read-only)")
         for src in (args.results_csv, args.processed_index):
-            if src is not None and args.json.resolve() == src.resolve():
+            if src is not None and _same_file(args.json, src):
                 ap.error(f"--json would overwrite a source file: {src}")
 
     def progress(done: int, total: int) -> None:

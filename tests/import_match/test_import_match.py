@@ -360,6 +360,48 @@ class ReadResultsCsvTests(_TmpCase):
     def test_empty_file(self) -> None:
         self.assertEqual(im.read_results_csv(write_csv_text(self.tmp / "e.csv", "")), [])
 
+    def test_duplicate_header_names_last_wins(self) -> None:
+        header = list(distill.CSV_HEADER) + ["Source File"]
+        cells = full_row("A", "2026-01-01 00:00:01", "first.CDF") + ["second.CDF"]
+        text = csv_line(header) + csv_line(cells)
+        rows, issues = im.read_results_csv_ex(write_csv_text(self.tmp / "dup.csv", text))
+        self.assertEqual(rows[0].source_file, "second.CDF")     # like csv.DictReader
+        self.assertTrue(any(i["kind"] == "duplicate-columns" and "Source File" in i["detail"]
+                            for i in issues))
+
+    def test_header_is_detected_on_lab_id_alone_and_missing_columns_reported(self) -> None:
+        header = ["Lab ID", "When", "2887 IBP"]
+        text = csv_line(header) + csv_line(["A", "x", "1.0"])
+        rows, issues = im.read_results_csv_ex(write_csv_text(self.tmp / "l.csv", text))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0].lab_id, rows[0].injection_dt_raw), ("A", ""))
+        missing = [i for i in issues if i["kind"] == "missing-columns"]
+        self.assertEqual(len(missing), 1)
+        self.assertIn("InjectionDateTime", missing[0]["detail"])
+
+    def test_cp1252_fallback_is_reported(self) -> None:
+        text = csv_line(distill.CSV_HEADER) + csv_line(full_row("Café – 1", "2026-01-01 00:00:01"))
+        p = self.tmp / "w.csv"
+        p.write_bytes(text.encode("cp1252"))
+        rows, issues = im.read_results_csv_ex(p)
+        self.assertEqual(rows[0].lab_id, "Café – 1")
+        self.assertIn({"line_no": 0, "kind": "encoding", "detail": "cp1252"}, issues)
+
+    def test_utf8_is_not_reported(self) -> None:
+        text = csv_line(distill.CSV_HEADER) + csv_line(full_row("Café", "2026-01-01 00:00:01"))
+        rows, issues = im.read_results_csv_ex(write_csv_text(self.tmp / "u.csv", text))
+        self.assertEqual(rows[0].lab_id, "Café")
+        self.assertEqual([i for i in issues if i["kind"] == "encoding"], [])
+
+    def test_bytes_undefined_in_cp1252_are_decode_errors(self) -> None:
+        data = (csv_line(distill.CSV_HEADER).encode()
+                + csv_line(full_row("A\x81B", "2026-01-01 00:00:01")).encode("latin-1"))
+        p = self.tmp / "x.csv"
+        p.write_bytes(data)
+        rows, issues = im.read_results_csv_ex(p)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(any(i["kind"] == "decode-error" and i["line_no"] == 2 for i in issues))
+
 
 # ── match() works on plain values; no files needed ─────────────────────────
 FOLDER = r"\\ASAPServer\Labsharedrive\Ryan C\GC Data\GC2025\GC2025.1\processed_cdf"
@@ -714,11 +756,13 @@ class _FolderFixture(_TmpCase):
     def _fixture(self):
         proc = self.tmp / "processed_cdf"
         write_cdf(proc / "AF26_09172026_142942.CDF", sample_name="AF26",
-                  stamp="20260917142942+0000", seed=1)
+                  stamp="20260917142942+0000", seed=1, method="SIMDISB.M")
         write_cdf(proc / "AF26_copy.cdf", sample_name="AF26",
-                  stamp="20260917142942+0000", seed=1)          # same bytes
+                  stamp="20260917142942+0000", seed=1, method="SIMDISB.M")  # same bytes
         write_cdf(proc / "sub" / "ORPH.CDF", sample_name="ORPH",
-                  stamp="20240101000000", seed=2)
+                  stamp="20240101000000", seed=2, method="simdistb.m")
+        write_cdf(proc / "sub" / "V1BUG.CDF", sample_name="40305",
+                  stamp="20260925002450+0000", seed=4, method="SIMDISB.M")
         write_cdf(proc / "notime.CDF", sample_name="NT", stamp=None, seed=3,
                   mtime=datetime(2023, 1, 26, 18, 38, 52).timestamp())
         (proc / "broken.CDF").write_bytes(b"not a netcdf file")
@@ -728,7 +772,9 @@ class _FolderFixture(_TmpCase):
                 + csv_line(full_row("AF26", "2026-09-17 14:29:42", FOLDER + r"\AF26_09172026_142942.CDF", ibp="2"))
                 + csv_line(full_row("NT", "2023-01-26 18:38:52", FOLDER + r"\NT.CDF"))
                 + csv_line(full_row("GONE", "2022-01-01 00:00:00", FOLDER + r"\GONE.CDF"))
-                + csv_line(full_row("THEIRS", "2026-09-17 17:28:12", OTHER + r"\THEIRS.CDF")))
+                + csv_line(full_row("THEIRS", "2026-09-17 17:28:12", OTHER + r"\THEIRS.CDF"))
+                + csv_line(full_row("40305", "2026-09-25 02:45:00", FOLDER + r"\40305.CDF"))
+                + csv_line(["SHORT", "2026-01-01 00:00:00", "1.0"]))
         results = write_csv_text(self.tmp / "distill_results.csv", text)
         return proc, results
 
@@ -739,7 +785,7 @@ class DryRunTests(_FolderFixture):
         proc, results = self._fixture()
         rep = im.dry_run(proc, results, instrument_folder=FOLDER)
         st = rep.stats
-        self.assertEqual(st["cdfs"], 4)                 # broken one is an error
+        self.assertEqual(st["cdfs"], 5)                 # broken one is an error
         self.assertEqual(len(st["cdf_errors"]), 1)
         self.assertIn("broken.CDF", st["cdf_errors"][0][0])
         self.assertEqual(len(rep.dup_sha), 1)
@@ -751,20 +797,38 @@ class DryRunTests(_FolderFixture):
         self.assertEqual(s[("NT", "2023-01-26 18:38:52")].rows[0].lab_id, "NT")
         self.assertIsNone(s[("GONE", "2022-01-01 00:00:00")].cdf)
         self.assertEqual([r.lab_id for r in rep.mixed_rows], ["THEIRS"])
-        self.assertEqual(st["dt_source"], {"cdf": 3, "mtime": 1})
-        self.assertEqual(st["csv_issues"], [])
+        self.assertEqual(st["dt_source"], {"cdf": 4, "mtime": 1})
+        self.assertEqual([i["kind"] for i in st["csv_issues"]], ["short-row"])
+        self.assertEqual([r.lab_id for r in rep.held_rows], ["SHORT"])
+        v1 = s[("40305", "2026-09-25 00:24:50")]
+        self.assertEqual([r.injection_dt_raw for r in v1.rows], ["2026-09-25 02:45:00"])
+        self.assertEqual(st["v1_misparsed_cdfs"], 1)
+        self.assertEqual(st["rows_matched_via_v1_form"], 1)
+        self.assertEqual(st["method_names"], {"SIMDISB.M": 2, "": 1, "SIMDISTB.M": 1})
+        self.assertEqual(st["cdfs_per_folder"], {".": 4, "sub": 2})
+        self.assertEqual(st["method_names_per_folder"],
+                         {".": {"SIMDISB.M": 2, "": 1}, "sub": {"SIMDISB.M": 1, "SIMDISTB.M": 1}})
+        self.assertEqual(st["csv_encoding"], "utf-8")
 
     def test_cdf_only_mode(self) -> None:
         proc, _ = self._fixture()
         rep = im.dry_run(proc, None, instrument_folder=FOLDER)
         self.assertEqual(rep.stats["rows"], 0)
         self.assertTrue(all(not s.rows for s in rep.samples))
-        self.assertEqual(rep.stats["orphan_cdfs"], 3)
+        self.assertEqual(rep.stats["orphan_cdfs"], 4)
 
     def test_never_writes_to_the_source(self) -> None:
         proc, results = self._fixture()
         before = snapshot_tree(self.tmp)
-        im.dry_run(proc, results, instrument_folder=FOLDER)
+        tree = [results, *sorted(proc.rglob("*"), reverse=True), proc]
+        for q in tree:
+            q.chmod(0o555 if q.is_dir() else 0o444)
+        try:
+            rep = im.dry_run(proc, results, instrument_folder=FOLDER)
+        finally:
+            for q in reversed(tree):
+                q.chmod(0o755 if q.is_dir() else 0o644)
+        self.assertEqual(rep.stats["cdfs"], 5)
         self.assertEqual(snapshot_tree(self.tmp), before)
 
     def test_progress_callback(self) -> None:
@@ -772,7 +836,7 @@ class DryRunTests(_FolderFixture):
         seen = []
         im.dry_run(proc, results, instrument_folder=FOLDER,
                    on_progress=lambda done, total: seen.append((done, total)))
-        self.assertEqual(seen[-1], (5, 5))
+        self.assertEqual(seen[-1], (6, 6))
 
     def test_name_from_filename_is_reported(self) -> None:
         proc = self.tmp / "p"
@@ -787,15 +851,28 @@ class DryRunTests(_FolderFixture):
         text = im.format_summary(rep, examples=3)
         for needle in ("CDFs", "attached", "orphan", "result-only", "revisions",
                        "identical bytes", "no injection time", "mixed", "unreadable",
-                       "AF26", "GONE", "THEIRS", "notime.CDF", "broken.CDF"):
+                       "AF26", "GONE", "THEIRS", "notime.CDF", "broken.CDF",
+                       "SIMDISB.M", "SIMDISTB.M", "(absent)", "v1 misparsed", "02:45:00",
+                       "held", "SHORT", "near misses", "non-canonical", "time zone",
+                       "sub"):
             self.assertIn(needle, text)
+        self.assertNotIn("WARNING", text)
+
+    def test_summary_labels_and_mixed_warning(self) -> None:
+        proc, results = self._fixture()
+        text = im.format_summary(im.dry_run(proc, None, instrument_folder=""))
+        self.assertIn("Results CSV: (none: CDF-only mode)", text)
+        self.assertIn("Instrument folder: (none: mixed-row check disabled)", text)
+        rep = im.dry_run(proc, results, instrument_folder=r"\\elsewhere\share\gc9")
+        self.assertTrue(rep.stats["mixed_warning"])
+        self.assertIn("WARNING", im.format_summary(rep))
 
     def test_report_serialises_to_json(self) -> None:
         import json
         proc, results = self._fixture()
         rep = im.dry_run(proc, results, instrument_folder=FOLDER)
         data = json.loads(json.dumps(im.report_to_dict(rep)))
-        self.assertEqual(data["stats"]["cdfs"], 4)
+        self.assertEqual(data["stats"]["cdfs"], 5)
         self.assertEqual(len(data["samples"]), rep.stats["samples"])
 
 
@@ -848,7 +925,7 @@ class CliTests(_FolderFixture):
         self.assertIn("orphan", res.stdout)
         self.assertIn("processed index", res.stdout.lower())
         data = json.loads(out_json.read_text())
-        self.assertEqual(data["report"]["stats"]["cdfs"], 4)
+        self.assertEqual(data["report"]["stats"]["cdfs"], 5)
         self.assertEqual(data["processed_index"]["entries"], 1)
         self.assertEqual(snapshot_tree(proc), before)
 
@@ -874,6 +951,26 @@ class CliTests(_FolderFixture):
                          "--json", proc / "report.json")
         self.assertEqual(res2.returncode, 2)
         self.assertFalse((proc / "report.json").exists())
+        # another spelling of the same file: relative, and through a symlink
+        res3 = self._run("--processed-dir", proc, "--results-csv", results,
+                         "--instrument-folder", FOLDER, "--json", "./distill_results.csv")
+        self.assertEqual(res3.returncode, 2)
+        link = self.tmp / "link.csv"
+        link.symlink_to(results)
+        res4 = self._run("--processed-dir", proc, "--results-csv", results,
+                         "--instrument-folder", FOLDER, "--json", link)
+        self.assertEqual(res4.returncode, 2)
+        self.assertEqual(results.read_bytes(), before)
+
+    def test_instrument_folder_aliases_on_the_command_line(self) -> None:
+        import json
+        proc, results = self._fixture()
+        out_json = self.tmp / "r.json"
+        res = self._run("--processed-dir", proc, "--results-csv", results,
+                        "--instrument-folder", FOLDER, "--instrument-folder", "processed_cdfs2",
+                        "--json", out_json)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(out_json.read_text())["report"]["stats"]["mixed_rows"], 0)
 
 
 if __name__ == "__main__":

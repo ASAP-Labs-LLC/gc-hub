@@ -8,18 +8,22 @@ writes to the source folder or the CSV. The hub's importer job (Lane A)
 turns a ``MatchReport`` into samples and revisions; ``tools/import_dry_run.py``
 prints it.
 
-Identity rule (spec "History import"): a CSV row attaches to a CDF only when
-``row.lab_id == cdf.lab_id.strip()`` **and** ``row.injection_dt_raw ==
-cdf.injection_dt``, where ``injection_dt`` is canonical
-``datetime.isoformat(sep=" ")``, exactly as v1's ``distill.process_cdf``
-wrote it. ``Source File`` values are used only to spot rows that belong to
-another instrument's folder, never to attach a row.
+Identity rule (spec "History import" and "Injection time"): a CSV row
+attaches to a CDF only when ``normalise_lab_id`` of both are equal **and**
+the row's ``InjectionDateTime`` equals, as a string, one of the forms v1
+could have written for that CDF (``CdfMeta.v1_injection_dts``: v1's
+fromisoformat-first misparse on Python >= 3.11, and the correct parse,
+which is also what v1 wrote on older Pythons). The sample is stored under
+the **correct** time (``CdfMeta.injection_dt``). ``Source File`` values only
+spot rows from another instrument's folder and break ties between CDFs that
+already match by metadata; they never attach a row on their own.
 """
 
 from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -213,8 +217,17 @@ class CsvRow:
 
 
 def _is_header(cells: list[str]) -> bool:
-    stripped = [c.strip() for c in cells]
-    return bool(stripped) and stripped[0] == "Lab ID" and "InjectionDateTime" in stripped
+    """A header is any record whose first cell is ``Lab ID``."""
+    return bool(cells) and cells[0].strip() == "Lab ID"
+
+
+def _decode_csv(data: bytes) -> tuple[str, str]:
+    """(text, encoding): strict UTF-8 (BOM dropped) first, else the whole
+    file as cp1252 (undefined bytes become U+FFFD and flag their rows)."""
+    try:
+        return data.decode("utf-8-sig"), "utf-8"
+    except UnicodeDecodeError:
+        return data.decode("cp1252", errors="replace"), "cp1252"
 
 
 def read_results_csv_ex(path) -> tuple[list[CsvRow], list[dict]]:
@@ -226,14 +239,19 @@ def read_results_csv_ex(path) -> tuple[list[CsvRow], list[dict]]:
     whatever layout it had at the time, so this reader is driven by headers,
     not positions:
 
-    * a record whose first cell is ``Lab ID`` and that contains
-      ``InjectionDateTime`` is a header and defines the columns from there on
-      (a header repeated mid-file is never a row);
+    * a record whose first cell is ``Lab ID`` is a header and defines the
+      columns from there on (a header repeated mid-file is never a row);
+      ``CSV_HEADER`` columns it lacks are reported (``missing-columns``); a
+      name it repeats is reported and the **last** one wins, like
+      ``csv.DictReader``;
     * a record with exactly ``len(CSV_HEADER)`` cells under an older, shorter
       header is read with ``CSV_HEADER`` (a new-format row appended to an
       unmigrated file);
-    * short records are padded with ``""``, extra cells are ignored, both
-      reported;
+    * short records are padded with ``""``, extra cells are ignored; both are
+      reported (``short-row``/``long-row``) and ``match`` holds those rows;
+    * the file is decoded as strict UTF-8, else as cp1252 (reported as
+      ``{"line_no": 0, "kind": "encoding", "detail": "cp1252"}``); a row with
+      undecodable bytes is reported as ``decode-error``;
     * blank and all-empty records are skipped; a BOM is ignored;
     * a file that starts without a header is read with ``CSV_HEADER``.
     """
@@ -246,54 +264,62 @@ def read_results_csv_ex(path) -> tuple[list[CsvRow], list[dict]]:
     def _issue(line_no: int, kind: str, detail: str = "") -> None:
         issues.append({"line_no": line_no, "kind": kind, "detail": detail})
 
-    with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as fh:
-        reader = csv.reader(fh)
-        for cells in reader:
-            line_no = prev_end + 1
-            prev_end = reader.line_num
-            if cells:
-                cells[0] = cells[0].lstrip("﻿")
-            if not any(c.strip() for c in cells):
-                continue
-            if _is_header(cells):
-                current = [c.strip() for c in cells]
-                unknown = [c for c in current if c and c not in distill.CSV_HEADER]
-                if unknown:
-                    _issue(line_no, "unknown-columns", ", ".join(unknown))
-                if seen_header or rows:
-                    _issue(line_no, "repeated-header",
-                           f"{len(current)} columns")
-                seen_header = True
-                continue
-            if not seen_header and not rows:
-                _issue(line_no, "no-header", "read with the current CSV_HEADER")
-            if any("�" in c for c in cells):
-                _issue(line_no, "decode-error", "not valid UTF-8")
+    with open(path, "rb") as fh:
+        text, encoding = _decode_csv(fh.read())
+    if encoding != "utf-8":
+        _issue(0, "encoding", encoding)
+    reader = csv.reader(io.StringIO(text, newline=""))
+    for cells in reader:
+        line_no = prev_end + 1
+        prev_end = reader.line_num
+        if cells:
+            cells[0] = cells[0].lstrip("﻿")
+        if not any(c.strip() for c in cells):
+            continue
+        if _is_header(cells):
+            current = [c.strip() for c in cells]
+            unknown = [c for c in current if c and c not in distill.CSV_HEADER]
+            if unknown:
+                _issue(line_no, "unknown-columns", ", ".join(unknown))
+            missing = [c for c in distill.CSV_HEADER if c not in current]
+            if missing:
+                _issue(line_no, "missing-columns", ", ".join(missing))
+            dups = sorted({c for c in current if c and current.count(c) > 1})
+            if dups:
+                _issue(line_no, "duplicate-columns", ", ".join(dups) + " (last wins)")
+            if seen_header or rows:
+                _issue(line_no, "repeated-header", f"{len(current)} columns")
+            seen_header = True
+            continue
+        if not seen_header and not rows:
+            _issue(line_no, "no-header", "read with the current CSV_HEADER")
+        if any("�" in c for c in cells):
+            _issue(line_no, "decode-error", f"undecodable bytes ({encoding})")
 
-            cols = current
-            if len(cells) != len(current):
-                if (len(cells) == len(distill.CSV_HEADER)
-                        and current != list(distill.CSV_HEADER)):
-                    cols = list(distill.CSV_HEADER)
-                    _issue(line_no, "full-width-row-under-old-header",
-                           f"header has {len(current)} columns")
-                elif len(cells) < len(current):
-                    _issue(line_no, "short-row", f"{len(cells)} of {len(current)} cells")
-                else:
-                    _issue(line_no, "long-row", f"{len(cells)} of {len(current)} cells")
+        cols = current
+        if len(cells) != len(current):
+            if (len(cells) == len(distill.CSV_HEADER)
+                    and current != list(distill.CSV_HEADER)):
+                cols = list(distill.CSV_HEADER)
+                _issue(line_no, "full-width-row-under-old-header",
+                       f"header has {len(current)} columns")
+            elif len(cells) < len(current):
+                _issue(line_no, "short-row", f"{len(cells)} of {len(current)} cells")
+            else:
+                _issue(line_no, "long-row", f"{len(cells)} of {len(current)} cells")
 
-            by_name = {}
-            for name, cell in zip(cols, cells):
-                if name and name not in by_name:
-                    by_name[name] = cell
-            values = {c: by_name.get(c, "") for c in distill.CSV_HEADER}
-            rows.append(CsvRow(
-                line_no=line_no,
-                lab_id=values["Lab ID"].strip(),
-                injection_dt_raw=values["InjectionDateTime"].strip(),
-                source_file=values["Source File"].strip(),
-                values=values,
-            ))
+        by_name = {}
+        for name, cell in zip(cols, cells):
+            if name:
+                by_name[name] = cell            # last wins, like csv.DictReader
+        values = {c: by_name.get(c, "") for c in distill.CSV_HEADER}
+        rows.append(CsvRow(
+            line_no=line_no,
+            lab_id=normalise_lab_id(values["Lab ID"]),
+            injection_dt_raw=values["InjectionDateTime"].strip(),
+            source_file=values["Source File"].strip(),
+            values=values,
+        ))
     return rows, issues
 
 
@@ -674,27 +700,38 @@ def iter_cdf_paths(processed_dir) -> list[Path]:
     return found
 
 
-def dry_run(processed_dir, results_csv, *, instrument_folder: str,
+def dry_run(processed_dir, results_csv, *, instrument_folder,
             on_progress: Callable[[int, int], None] | None = None) -> MatchReport:
     """Read-only: read every CDF's metadata under ``processed_dir`` (never
     the chromatogram arrays; sha256 is streamed) and the results CSV, then
-    ``match``. ``results_csv=None`` runs in CDF-only mode.
+    ``match`` (with the CSV's issues, so badly laid-out rows are held).
+    ``results_csv=None`` runs in CDF-only mode. ``instrument_folder`` is a
+    str or a sequence of aliases (see ``match``).
 
-    Extra ``stats`` keys: ``cdf_errors`` [(path, message)], ``csv_issues``
-    (from ``read_results_csv_ex``), ``name_from_filename`` [paths whose CDF
-    has no sample name], ``dt_source`` {'cdf': n, 'mtime': n}."""
-    paths = iter_cdf_paths(processed_dir)
+    Extra ``stats`` keys: ``cdf_errors`` [(path, message)], ``csv_issues``,
+    ``csv_encoding``, ``name_from_filename`` [paths whose CDF has no sample
+    name], ``dt_source`` {'cdf': n, 'mtime': n} over every CDF read,
+    ``cdfs_per_folder`` and ``method_names_per_folder`` keyed by the folder
+    relative to ``processed_dir`` ('.' for the top)."""
+    root = Path(processed_dir)
+    paths = iter_cdf_paths(root)
     total = len(paths)
     metas: list[CdfMeta] = []
     errors: list[tuple[str, str]] = []
     name_from_filename: list[str] = []
+    per_folder: dict[str, int] = {}
+    methods_per_folder: dict[str, dict[str, int]] = {}
     for i, p in enumerate(paths, 1):
+        folder = p.parent.relative_to(root).as_posix() if p.parent != root else "."
+        per_folder[folder] = per_folder.get(folder, 0) + 1
         try:
             meta, name_source = _read_cdf_meta_ex(p)
         except Exception as exc:  # noqa: BLE001 - reported, never fatal
             errors.append((str(p), f"{type(exc).__name__}: {exc}"))
         else:
             metas.append(meta)
+            hist = methods_per_folder.setdefault(folder, {})
+            hist[meta.method_name] = hist.get(meta.method_name, 0) + 1
             if name_source != "cdf":
                 name_from_filename.append(meta.path)
         if on_progress is not None and (i % 500 == 0 or i == total):
@@ -702,22 +739,34 @@ def dry_run(processed_dir, results_csv, *, instrument_folder: str,
 
     rows: list[CsvRow] = []
     csv_issues: list[dict] = []
+    csv_encoding = None
     if results_csv:
         rows, csv_issues = read_results_csv_ex(results_csv)
+        csv_encoding = next((i["detail"] for i in csv_issues if i["kind"] == "encoding"),
+                            "utf-8")
 
-    report = match(metas, rows, instrument_folder=instrument_folder)
+    report = match(metas, rows, instrument_folder=instrument_folder, csv_issues=csv_issues)
     dt_source = {"cdf": 0, "mtime": 0}
     for m in metas:
         dt_source[m.dt_source] = dt_source.get(m.dt_source, 0) + 1
+
+    def _sorted_hist(h: dict) -> dict:
+        return dict(sorted(h.items(), key=lambda kv: (-kv[1], kv[0])))
+
     report.stats.update({
         "processed_dir": str(processed_dir),
         "results_csv": str(results_csv) if results_csv else None,
-        "instrument_folder": instrument_folder,
+        "instrument_folder": instrument_folder if isinstance(instrument_folder, (str, type(None)))
+        else list(instrument_folder),
         "files_seen": total,
         "cdf_errors": errors,
         "csv_issues": csv_issues,
+        "csv_encoding": csv_encoding,
         "name_from_filename": name_from_filename,
         "dt_source": dt_source,
+        "cdfs_per_folder": dict(sorted(per_folder.items())),
+        "method_names_per_folder": {k: _sorted_hist(v)
+                                    for k, v in sorted(methods_per_folder.items())},
     })
     return report
 
@@ -732,18 +781,43 @@ def _row_brief(r: CsvRow) -> str:
     return f"line {r.line_no}: {r.lab_id!r} @ {r.injection_dt_raw!r}{src}"
 
 
+def _method_label(name: str) -> str:
+    return name if name else "(absent)"
+
+
 def format_summary(report: MatchReport, *, examples: int = 5) -> str:
-    """Human summary: counts, then the first ``examples`` of each class."""
+    """Human summary: warnings, counts, then the first ``examples`` of each
+    problem class."""
     st = report.stats
     n = max(0, int(examples))
     out: list[str] = []
     add = out.append
 
     add("History import dry run (read-only)")
-    for label, key in (("Processed folder", "processed_dir"), ("Results CSV", "results_csv"),
-                       ("Instrument folder", "instrument_folder")):
-        if key in st:
-            add(f"  {label}: {st[key] or '(none: CDF-only mode)'}")
+    if "processed_dir" in st:
+        add(f"  Processed folder: {st['processed_dir']}")
+    if "results_csv" in st:
+        add(f"  Results CSV: {st['results_csv'] or '(none: CDF-only mode)'}"
+            + (f"  [decoded as {st['csv_encoding']}]" if st.get("csv_encoding") else ""))
+    if "instrument_folder" in st:
+        folder = st["instrument_folder"]
+        if isinstance(folder, list):
+            folder = " | ".join(folder)
+        add(f"  Instrument folder: {folder or '(none: mixed-row check disabled)'}")
+    tz = st.get("timezone") or {}
+    if tz:
+        add(f"  Local time zone: {'/'.join(tz.get('tzname', []))} "
+            f"(UTC offset {tz.get('utc_offset_seconds', 0) / 3600:+.1f} h; "
+            "mtime fallbacks use it)")
+
+    if st.get("mixed_warning"):
+        add("")
+        add("!" * 72)
+        add(f"WARNING: {st['mixed_rows']} of {st['rows']} CSV rows name a Source File outside the")
+        add("instrument folder and none name a file inside it. The folder or its")
+        add("aliases are probably wrong; check the 'Source File folders' list below.")
+        add("!" * 72)
+
     add("")
     add("Counts")
     add(f"  CDFs read:                 {st['cdfs']}"
@@ -753,8 +827,11 @@ def format_summary(report: MatchReport, *, examples: int = 5) -> str:
         add(f"    injection time from CDF: {dts.get('cdf', 0)}; from file mtime: {dts.get('mtime', 0)}")
     add(f"  unreadable CDFs:           {len(st.get('cdf_errors', []))}")
     add(f"  identical bytes (dups):    {st['dup_sha']}")
-    add(f"  same key, different bytes: {st['key_collisions']}")
+    add(f"  same key, different bytes: {st['key_collisions']}"
+        f"  (rows involved: {len(st['collided_rows'])})")
     add(f"  no injection time (mtime): {st['no_injection_time']}")
+    add(f"  v1 misparsed time (CDFs):  {st['v1_misparsed_cdfs']}"
+        f"  (rows matched only through v1's misparsed form: {st['rows_matched_via_v1_form']})")
     add(f"  CSV rows:                  {st['rows']}")
     add(f"  samples:                   {st['samples']}")
     add(f"    attached (CDF + rows):   {st['attached_samples']}  ({st['rows_attached']} rows)")
@@ -765,14 +842,30 @@ def format_summary(report: MatchReport, *, examples: int = 5) -> str:
         f"  (same lab ID on a CDF at another time: {st['unmatched_same_lab_other_time']};"
         f" Source File in this folder: {st['unmatched_source_in_folder']};"
         f" no lab ID/time: {st['rows_missing_key']})")
-    add(f"  mixed rows (other folder): {st['mixed_rows']}")
+    add(f"  near misses:               {st['near_misses']['count']}"
+        "  (same lab ID, time off by <= 2 s or by whole hours)")
+    add(f"  held rows (bad layout):    {st['held_rows']}")
+    add(f"  mixed rows (other folder): {st['mixed_rows']}"
+        f"  (of which a CDF here has the key: {len(st['mixed_but_key_matches_here'])})")
     add(f"  rows without Source File:  {st['rows_without_source_file']}")
+    add(f"  non-canonical CSV times:   {st['rows_noncanonical_dt']['count']}")
     if st.get("csv_issues"):
         kinds: dict[str, int] = {}
         for i in st["csv_issues"]:
             kinds[i["kind"]] = kinds.get(i["kind"], 0) + 1
         add("  CSV layout issues:         "
             + ", ".join(f"{k} {v}" for k, v in sorted(kinds.items())))
+
+    add("")
+    add("Method names (detection_method_name) of the CDFs kept")
+    for name, count in st.get("method_names", {}).items():
+        add(f"  {count:6d}  {_method_label(name)}")
+    if st.get("method_names_per_folder"):
+        add("Per folder (CDFs read; method names)")
+        for folder, count in st.get("cdfs_per_folder", {}).items():
+            hist = st["method_names_per_folder"].get(folder, {})
+            add(f"  {folder}: {count} CDFs; "
+                + ", ".join(f"{_method_label(k)} {v}" for k, v in hist.items()))
     if st.get("source_folders"):
         add("")
         add("Source File folders in the CSV")
@@ -795,19 +888,28 @@ def format_summary(report: MatchReport, *, examples: int = 5) -> str:
     section("Same key, different bytes (kept, other)", report.key_collisions,
             lambda d: f"{d[0].path}  vs  {d[1].path}")
     section("No injection time in the CDF (mtime used)", report.no_injection_time, str)
+    section("v1 misparsed injection time (path, stamp, v1 wrote, correct)",
+            st.get("v1_misparsed_examples", []),
+            lambda e: f"{e[0]}: {e[1]!r} -> v1 {e[2]}, correct {e[3]}")
     section("CDF with no sample name (file stem used)", st.get("name_from_filename", []), str)
     section("Attached samples", [s for s in report.samples if s.cdf is not None and s.rows],
-            lambda s: f"{s.cdf.lab_id!r} @ {s.cdf.injection_dt}: {len(s.rows)} row(s)"
+            lambda s: f"{s.lab_id!r} @ {s.injection_dt}: {len(s.rows)} row(s)"
                       f"  [{s.cdf.path}]")
     section("Samples with revisions", [s for s in report.samples if len(s.rows) > 1],
-            lambda s: f"{s.rows[0].lab_id!r} @ {s.rows[0].injection_dt_raw}: {len(s.rows)} rows,"
+            lambda s: f"{s.lab_id!r} @ {s.injection_dt}: {len(s.rows)} rows,"
                       f" lines {', '.join(str(r.line_no) for r in s.rows)}")
     section("Orphan CDFs", [s for s in report.samples if s.cdf is not None and not s.rows],
-            lambda s: f"{s.cdf.lab_id!r} @ {s.cdf.injection_dt} ({s.cdf.dt_source})"
-                      f"  [{s.cdf.path}]")
+            lambda s: f"{s.lab_id!r} @ {s.injection_dt} ({s.dt_source}; "
+                      f"{_method_label(s.cdf.method_name)})  [{s.cdf.path}]")
     section("Result-only samples / unmatched rows", report.unmatched_rows, _row_brief)
+    section("Near misses (row, CDF)", st["near_misses"]["examples"],
+            lambda e: f"line {e['line_no']}: {e['lab_id']!r} CSV {e['csv_dt']} vs CDF "
+                      f"{e['cdf_dt']} ({e['delta_seconds']} s)  [{e['cdf_path']}]")
+    section("Held rows (layout problems; not imported)", report.held_rows, _row_brief)
     section("Mixed rows (Source File outside the instrument folder)", report.mixed_rows,
             _row_brief)
+    section("Non-canonical CSV times (line, value)", st["rows_noncanonical_dt"]["examples"],
+            lambda e: f"line {e[0]}: {e[1]!r}")
     section("CSV layout issues", st.get("csv_issues", []),
             lambda i: f"line {i['line_no']}: {i['kind']} {i['detail']}".rstrip())
     return "\n".join(out) + "\n"
