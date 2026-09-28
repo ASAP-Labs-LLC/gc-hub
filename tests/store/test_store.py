@@ -76,10 +76,11 @@ SPEC_COLUMNS = {
                 "review_note"},
     "sample_results": {"sample_id", "revision", "results", "d86_uncorrected",
                        "calibration_used", "blank_used", "corrections_used", "best_fit",
-                       "fit_score", "flags", "reason", "by", "processed_at", "notes"},
+                       "fit_score", "flags", "reason", "by", "processed_at", "notes",
+                       "cdf_sha256", "cdf_path"},
     "conflicts": {"id", "instrument_id", "lab_id", "injection_dt", "existing_sample_id",
                   "cdf_sha256", "cdf_path", "received_at", "resolved", "resolved_by",
-                  "resolved_at"},
+                  "resolved_at", "error"},
     "export_rows": {"seq", "instrument_id", "sample_id", "revision", "row", "hub_appended_at"},
     "jobs": {"id", "kind", "payload", "state", "attempts", "not_before", "last_error",
              "created_at", "sample_id", "finished_at"},
@@ -520,6 +521,29 @@ def test_add_revision_increments_and_sets_current(gc1):
     assert cur["results"] == '{"Lab ID": "40305", "IBP": "101.0"}'
     assert store.get_revision(sid, 1, db=gc1)["reason"] == "processed"
     assert [r["revision"] for r in store.list_revisions(sid, db=gc1)] == [1, 2]
+
+
+def test_add_revision_records_the_samples_cdf_by_default(gc1):
+    sid = _sample(gc1, sha="sha-one")
+    path = store.samples.get(sid, db=gc1)["cdf_path"]
+    with store.connection(gc1) as conn:
+        with store.write_txn(conn):
+            store.add_revision(conn, sid, {"a": 1}, reason="processed")
+            store.add_revision(conn, sid, {"a": 2}, reason="replace",
+                               cdf_sha256="sha-two", cdf_path="cdf/gc1/conflicts/x.CDF")
+    r1, r2 = store.list_revisions(sid, db=gc1)
+    assert (r1["cdf_sha256"], r1["cdf_path"]) == ("sha-one", path)
+    assert (r2["cdf_sha256"], r2["cdf_path"]) == ("sha-two", "cdf/gc1/conflicts/x.CDF")
+
+
+def test_add_revision_of_a_result_only_import_records_no_cdf(gc1):
+    sid = store.samples.insert_received("gc1", "40999", "2026-09-25 00:24:50", "csv",
+                                        cdf_sha256=None, cdf_path=None, db=gc1)
+    with store.connection(gc1) as conn:
+        with store.write_txn(conn):
+            store.add_revision(conn, sid, {"a": 1}, reason="import")
+    r = store.get_revision(sid, db=gc1)
+    assert (r["cdf_sha256"], r["cdf_path"]) == (None, None)
 
 
 def test_add_revision_requires_a_transaction(gc1):
@@ -1083,6 +1107,24 @@ def test_conflicts_add_list_resolve(gc1):
     assert store.conflicts.find_by_sha("s", db=gc1)["id"] == cid2
     assert store.conflicts.find_by_sha("othersha", db=gc1) is None  # resolved
     assert store.conflicts.find_by_sha("othersha", unresolved_only=False, db=gc1)["id"] == cid
+
+
+def test_conflicts_get_and_error(gc1):
+    sid = _sample(gc1)
+    cid = store.conflicts.add("gc1", "40305", "2026-09-25 00:24:50", sid, "othersha",
+                              "cdf/gc1/conflicts/x.CDF", db=gc1)
+    assert store.conflicts.get(cid, db=gc1)["error"] is None
+    assert store.conflicts.get(cid + 99, db=gc1) is None
+    store.conflicts.set_error(cid, "replace failed: boom", db=gc1)
+    assert store.conflicts.get(cid, db=gc1)["error"] == "replace failed: boom"
+    assert store.conflicts.get(cid, db=gc1)["resolved"] is None
+    store.conflicts.set_error(cid, None, db=gc1)
+    assert store.conflicts.get(cid, db=gc1)["error"] is None
+    with pytest.raises(ValueError):
+        store.conflicts.set_error(cid + 99, "x", db=gc1)
+    store.conflicts.set_error(cid, "old failure", db=gc1)
+    store.conflicts.resolve(cid, "kept-existing", by="ryan", db=gc1)
+    assert store.conflicts.get(cid, db=gc1)["error"] is None       # resolved: nothing pending
 
 
 

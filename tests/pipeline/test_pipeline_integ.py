@@ -224,14 +224,17 @@ def test_resolve_conflict_replace(hub):
     job = pipeline.resolve_conflict_replace(res.conflict_id, by="ryan", conf=hub.conf,
                                             db=hub.db, data_dir=hub.data)
     assert job
-    c = store.conflicts.list("gc1", unresolved_only=False, db=hub.db)[0]
-    assert (c["resolved"], c["resolved_by"]) == ("replaced", "ryan")
+    # only a job is queued: the conflict and the sample wait for the recompute
+    assert store.conflicts.get(res.conflict_id, db=hub.db)["resolved"] is None
+    assert hub.sample(sid) == old
+    _run(hub)
+    c = store.conflicts.get(res.conflict_id, db=hub.db)
+    assert (c["resolved"], c["resolved_by"], c["error"]) == ("replaced", "ryan", None)
     s = hub.sample(sid)
     assert s["cdf_sha256"] == res.sha256
     assert s["cdf_path"] == c["cdf_path"]
     assert (hub.data / s["cdf_path"]).read_bytes() == b.read_bytes()
     assert (hub.data / old["cdf_path"]).is_file()      # raw CDFs are kept forever (D7)
-    _run(hub)
     rev = store.get_revision(sid, db=hub.db)
     assert (rev["revision"], rev["reason"], rev["by"]) == (2, "replace", "ryan")
     assert rev["results"] != store.get_revision(sid, 1, db=hub.db)["results"]

@@ -64,7 +64,8 @@ Samples and revisions::
     samples.count(<same filters>, *, db) -> int
     add_revision(conn, sample_id, results, *, reason, by=None, d86_uncorrected=None,
                  calibration_used=None, blank_used=None, corrections_used=None,
-                 best_fit=None, fit_score=None, flags=None, processed_at=None, notes=None) -> int
+                 best_fit=None, fit_score=None, flags=None, processed_at=None, notes=None,
+                 cdf_sha256=<sample's>, cdf_path=<sample's>) -> int   # the CDF that produced it
                  # MUST run inside write_txn(conn); bumps samples.current_revision
     get_revision(sample_id, revision=None, *, db) -> dict | None   # None = current
     list_revisions(sample_id, *, db) -> list[dict]                 # ascending
@@ -105,7 +106,9 @@ Small tables::
                   cdf_path, *, received_at=None, db) -> int
     conflicts.list(instrument_id=None, unresolved_only=True, *, db) -> list[dict]
     conflicts.find_by_sha(sha256, unresolved_only=True, *, db) -> dict | None
-    conflicts.resolve(conflict_id, resolution, *, by, db)   # 'kept-existing' | 'replaced'
+    conflicts.get(conflict_id, *, db) -> dict | None
+    conflicts.set_error(conflict_id, error, *, db)          # why the last Replace failed (None clears)
+    conflicts.resolve(conflict_id, resolution, *, by, db)   # 'kept-existing' | 'replaced'; clears error
 
 Conventions and decisions (where the spec left a choice)
 ========================================================
@@ -155,6 +158,10 @@ Conventions and decisions (where the spec left a choice)
   earlier-injected blank arrived after it was processed). No revision is
   touched. ``sample_results.notes`` (JSON, beyond the spec) records how a
   revision was computed, e.g. ``{"blank_rejected": {"sample_id", "reason"}}``.
+* ``sample_results.cdf_sha256``/``cdf_path`` (beyond the spec; 2D) record the
+  CDF each revision was computed from (NULL for a result-only import), so a
+  conflict Replace leaves a trail. ``conflicts.error`` (beyond the spec) is
+  the last failed Replace attempt's message, cleared when it is resolved.
 * ``samples.time_corrected`` is an INTEGER flag (0/1). The spec's comment on
   that line (``'cdf'|'mtime'``) belongs to ``injection_dt_source``.
 * ``samples.id``, ``export_rows.seq`` and ``corrections_audit.id`` are
@@ -308,7 +315,10 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             "by" TEXT,
             processed_at TEXT NOT NULL,
             notes TEXT,
+            cdf_sha256 TEXT,
+            cdf_path TEXT,
             PRIMARY KEY(sample_id, revision))""",
+        "CREATE INDEX sample_results_sha ON sample_results(cdf_sha256)",
         """CREATE TABLE conflicts(
             id INTEGER PRIMARY KEY,
             instrument_id TEXT REFERENCES instruments(id),
@@ -320,7 +330,8 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             received_at TEXT,
             resolved TEXT,
             resolved_by TEXT,
-            resolved_at TEXT)""",
+            resolved_at TEXT,
+            error TEXT)""",
         "CREATE INDEX conflicts_sha ON conflicts(cdf_sha256)",
         """CREATE TABLE export_rows(
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -412,10 +423,11 @@ REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
     "sample_results": frozenset({
         "sample_id", "revision", "results", "d86_uncorrected", "calibration_used",
         "blank_used", "corrections_used", "best_fit", "fit_score", "flags", "reason",
-        "by", "processed_at", "notes"}),
+        "by", "processed_at", "notes", "cdf_sha256", "cdf_path"}),
     "conflicts": frozenset({
         "id", "instrument_id", "lab_id", "injection_dt", "existing_sample_id",
-        "cdf_sha256", "cdf_path", "received_at", "resolved", "resolved_by", "resolved_at"}),
+        "cdf_sha256", "cdf_path", "received_at", "resolved", "resolved_by", "resolved_at",
+        "error"}),
     "export_rows": frozenset({
         "seq", "instrument_id", "sample_id", "revision", "row", "hub_appended_at"}),
     "jobs": frozenset({
@@ -756,12 +768,15 @@ def backup_nightly(path: PathLike = None, keep: int = 14, *, settings_path: Path
 
 # ── revisions ───────────────────────────────────────────────────────────────
 
+_FROM_SAMPLE = object()     # add_revision: record the sample's current CDF
+
 def add_revision(conn: sqlite3.Connection, sample_id: int, results: Any, *, reason: str,
                  by: Optional[str] = None, d86_uncorrected: Any = None,
                  calibration_used: Any = None, blank_used: Optional[int] = None,
                  corrections_used: Any = None, best_fit: Optional[str] = None,
                  fit_score: Optional[float] = None, flags: Any = None,
-                 processed_at: Optional[str] = None, notes: Any = None) -> int:
+                 processed_at: Optional[str] = None, notes: Any = None,
+                 cdf_sha256: Any = _FROM_SAMPLE, cdf_path: Any = _FROM_SAMPLE) -> int:
     """Write the next ``sample_results`` revision and make it current.
 
     Must run inside ``write_txn(conn)``, so the revision, the export row and
@@ -769,18 +784,29 @@ def add_revision(conn: sqlite3.Connection, sample_id: int, results: Any, *, reas
     (1 for the first). The spec's reasons are in ``REVISION_REASONS``.
     ``notes`` is structured JSON about how the revision was computed (e.g.
     ``{"blank_rejected": {"sample_id", "reason"}}``), ``None`` when there is
-    nothing to say.
+    nothing to say. ``cdf_sha256``/``cdf_path`` record the CDF that produced
+    the revision; by default the sample's current file (both NULL for a
+    result-only import). A caller that computed from another file (a conflict
+    Replace) passes it.
     """
     _require_txn(conn, "add_revision")
+    if cdf_sha256 is _FROM_SAMPLE or cdf_path is _FROM_SAMPLE:
+        cur = conn.execute("SELECT cdf_sha256, cdf_path FROM samples WHERE id=?",
+                           (sample_id,)).fetchone()
+        if cdf_sha256 is _FROM_SAMPLE:
+            cdf_sha256 = cur[0] if cur is not None else None
+        if cdf_path is _FROM_SAMPLE:
+            cdf_path = cur[1] if cur is not None else None
     rev = conn.execute("SELECT COALESCE(MAX(revision), 0) + 1 FROM sample_results WHERE sample_id=?",
                        (sample_id,)).fetchone()[0]
     conn.execute(
         'INSERT INTO sample_results(sample_id, revision, results, d86_uncorrected, '
         'calibration_used, blank_used, corrections_used, best_fit, fit_score, flags, '
-        'reason, "by", processed_at, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        'reason, "by", processed_at, notes, cdf_sha256, cdf_path) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (sample_id, rev, _enc(results), _enc(d86_uncorrected), _enc(calibration_used),
          blank_used, _enc(corrections_used), best_fit, fit_score, _enc(flags), reason, by,
-         processed_at or now_iso(), _enc(notes)))
+         processed_at or now_iso(), _enc(notes), cdf_sha256, cdf_path))
     conn.execute("UPDATE samples SET current_revision=? WHERE id=?", (rev, sample_id))
     return rev
 
@@ -1478,6 +1504,20 @@ class conflicts:  # noqa: N801
             return int(cur.lastrowid)
 
     @staticmethod
+    def get(conflict_id: int, *, db: Db = None) -> Optional[dict]:
+        with connection(db) as conn:
+            return _row(conn.execute("SELECT * FROM conflicts WHERE id=?", (conflict_id,)).fetchone())
+
+    @staticmethod
+    def set_error(conflict_id: int, error: Optional[str], *, db: Db = None) -> None:
+        """Record (or clear, with ``None``) why the last Replace attempt failed.
+        ``ValueError`` if the conflict is missing."""
+        with _writing(db) as conn:
+            if conn.execute("UPDATE conflicts SET error=? WHERE id=?",
+                            (error, conflict_id)).rowcount != 1:
+                raise ValueError(f"conflict {conflict_id} is missing")
+
+    @staticmethod
     def list(instrument_id: Optional[str] = None, unresolved_only: bool = True, *,
              db: Db = None) -> list[dict]:
         """Conflicts, oldest first."""
@@ -1508,7 +1548,7 @@ class conflicts:  # noqa: N801
         if resolution not in CONFLICT_RESOLUTIONS:
             raise ValueError(f"unknown conflict resolution {resolution!r}")
         with _writing(db) as conn:
-            n = conn.execute("UPDATE conflicts SET resolved=?, resolved_by=?, resolved_at=? "
+            n = conn.execute("UPDATE conflicts SET resolved=?, resolved_by=?, resolved_at=?, error=NULL "
                              "WHERE id=? AND resolved IS NULL",
                              (resolution, by, now_iso(), conflict_id)).rowcount
             if n != 1:
