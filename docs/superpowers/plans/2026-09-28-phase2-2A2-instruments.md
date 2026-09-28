@@ -165,4 +165,45 @@ Strict TDD: every task starts with a failing test (red), then the code
   `pytest tests`, `node tests/js/run.js`.
 
 ## Carry-overs (for T5 and later)
-Filled in at the end of the plan.
+
+- **T5, start-up:** call `instruments_api.set_exporter(exporter)` with the
+  running `HubExporter`, so an Adopt/new path on the page clears the refusal
+  that exporter holds in memory at once (until then the page uses its own
+  exporter on the same store, and the running one clears at its next verified
+  flush). `instruments.startup` already passes
+  `corrections_provider(db)`; keep calling it.
+- **T5, D12 in app.js/PDF:** the comparison picker should call
+  `GET /api/standards?for_instrument=<sample's instrument>` (own instrument's
+  standards first; others carry `cross_instrument` and `warning`) and show
+  the warning; the analysis PDF prints
+  `standards.cross_instrument_warning(...)`; best-fit scores against
+  `standards.paths_for(comp_dir, sample's instrument)` (needs a paths-based
+  variant of `fuel_fit.load_standards`). The old
+  `/api/comparison-standard(s)` add/delete/rename routes still work on the
+  folder only: an added file shows up untagged, and a rename shows the old
+  row as missing plus a new untagged one. Move them onto the table.
+- **T4/T5, `/api/calibration`:** the Calibration page now uses the
+  instrument-scoped routes (`?instrument=`, default gc1; saving needs the admin
+  password). T4's gc1 `POST /api/calibration` is not admin-gated; gate it or
+  remove it (nothing in the page uses it any more). Settings' "Calibration
+  CDF" field still mirrors into gc1 (T4); the Instruments page is the place
+  for every instrument.
+- **Notifications** (spec): "agent not seen for 15 minutes", "samples
+  waiting for corrections", "samples waiting for calibration (once per
+  instrument per hour)" are not raised yet; the page shows the stale badge and
+  the counts. A background check belongs with T5's start-up owner.
+- **Main UI:** the instrument filter/search in the sample list and the
+  instrument in reports (Delivery row 2A2) are app.js/report work (T4/T5).
+- **review_method:** only "mark as other method" exists. Processing a
+  nameless CDF as D2887 anyway needs a per-sample override in the worker
+  (it re-checks the method name every time).
+- **raw_only backfill** (2D's orphans) is listed but can't be released until
+  processed; add a "Process" action (`pipeline.request_reprocess`) with 2D.
+- **2C leftovers:** "corrections changed since processing" on sample detail
+  (`corrections.values_differ`); whether gc1 is seeded automatically at first
+  start (spec) or only by the admin button (built here; until then gc1 keeps
+  reading the phase-1 file, as in 2A1).
+- `instrument_admin.conflicts_list` uses `pipeline._replace_job`; make it
+  public if another caller appears.
+- The page's GETs are open on the LAN, like `/api/agents` (correction values,
+  audit, conflict hashes and file names). Only changes are gated.
