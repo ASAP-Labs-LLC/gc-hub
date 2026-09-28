@@ -108,20 +108,18 @@ class StartupTests(unittest.TestCase):
                     "startup should log that the watch folder is not configured:\n"
                     + _read(data / "app.log")[-2000:])
 
-                # Stop works with no Looker, and the idle watcher must not
-                # overwrite the user's "stopped" on its next poll.
-                code, _ = post(port, "/api/stop-scan", {})
-                self.assertEqual(code, 200)
                 wait_for(lambda: False, timeout=WATCHER_POLL + 2)  # > one poll
-                self.assertEqual(get(port, "/api/scan/status")[1]["phase"], "stopped")
 
-                # Everything that goes through the Looker refuses cleanly.
-                for path, body in (("/api/scan", {}), ("/api/rebuild-db", {}),
-                                   ("/api/reprocess", {"samples": ["2025-0001"]}),
-                                   ("/api/export-lims", {"samples": ["2025-0001"]})):
+                # The scan routes are gone (phase 2 T4), and reprocess /
+                # export go through the hub store, which an empty data dir
+                # doesn't have yet: they refuse cleanly instead of scanning.
+                for path in ("/api/scan", "/api/rebuild-db", "/api/stop-scan"):
+                    self.assertEqual(post(port, path, {})[0], 404, path)
+                for path, body in (("/api/reprocess", {"sample_ids": [1]}),
+                                   ("/api/export-lims", {"sample_ids": [1]})):
                     code, resp = post(port, path, body)
-                    self.assertEqual(code, 409, f"{path}: {code} {resp}")
-                    self.assertIn("Settings", resp["error"], path)
+                    self.assertEqual(code, 503, f"{path}: {code} {resp}")
+                    self.assertIn("store", resp["error"], path)
             self.assertNotIn("[WATCHER] Scanning", _read(tmp / "boot.log"))
 
     def test_saving_a_watch_dir_starts_the_watcher_without_restart(self):
@@ -148,8 +146,6 @@ class StartupTests(unittest.TestCase):
                 self.assertTrue(
                     wait_for(lambda: f"Scanning {watch}" in _read(data / "app.log"), timeout=20),
                     "watcher did not start on the saved folder:\n" + _read(data / "app.log")[-3000:])
-                code, _ = post(port, "/api/scan", {})
-                self.assertEqual(code, 200)
 
     def test_unusable_watch_dir_still_applies_processed_dir(self):
         with tempfile.TemporaryDirectory() as t:
@@ -188,14 +184,13 @@ def _calls(fn: ast.FunctionDef) -> set:
 class SourceGuards(unittest.TestCase):
     """Behaviour a black-box boot can't observe, pinned at source level."""
 
-    def test_distillation_curve_does_not_wait_on_the_watch_folder(self):
-        # The blank cache comes from the existing Looker; going through the
-        # watch-folder-gated _get_looker() would silently drop blank
-        # subtraction (and stat a down share) on every request.
-        self.assertNotIn("_get_looker", _calls(_app_function("api_distillation_curve")))
-
-    def test_stop_scan_stops_an_existing_looker_regardless_of_watch_folder(self):
-        self.assertNotIn("_get_looker", _calls(_app_function("api_stop_scan")))
+    def test_distillation_curve_does_not_depend_on_the_looker(self):
+        # Phase 2 T4: the curve uses the revision's own recorded blank, never
+        # the Looker's "current blank" (and so never waits on the watch folder).
+        fn = _app_function("api_sample_distillation_curve")
+        self.assertNotIn("_get_looker", _calls(fn))
+        names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+        self.assertNotIn("_looker", names)
 
     def test_start_watcher_checks_and_starts_under_a_lock(self):
         # Settings save, /api/scan and init can all call _start_watcher at

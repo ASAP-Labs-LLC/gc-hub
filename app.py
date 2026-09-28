@@ -101,6 +101,9 @@ import looker as looker_mod
 import notifications as notifications_mod
 import reprocess_query
 import library_view
+import instruments
+import pipeline
+import store
 
 try:
     import qbench_pdf_uploader
@@ -423,114 +426,14 @@ def _add_to_files_cache(name: str, path: str, mtime: float) -> None:
         _files_cache.insert(0, entry)  # newest first
 
 
-# ── Sample flag-rules cache (generalizes early high-signal) ──────────
-# path → {"fp": rules-fingerprint, "flags": [{"name", "color"}]}
-_early_signal_cache: dict[str, dict] = {}
-_early_signal_cache_lock = threading.Lock()
-_early_signal_cache_file: Path | None = None
-
-
-def _load_early_signal_cache() -> None:
-    """Load the on-disk sample-flags cache into memory."""
-    global _early_signal_cache_file
-    conf = settings_mod.load_settings()
-    proc_dir = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
-    _early_signal_cache_file = proc_dir / ".sample_flags_cache.json"
-    if _early_signal_cache_file.is_file():
-        try:
-            with _early_signal_cache_file.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            # Only keep entries in the current shape (old bool entries dropped)
-            data = {k: v for k, v in data.items()
-                    if isinstance(v, dict) and "fp" in v and "flags" in v}
-            with _early_signal_cache_lock:
-                _early_signal_cache.update(data)
-            LOGGER.info("Loaded sample-flags cache (%d entries)", len(data))
-        except Exception as exc:
-            LOGGER.warning("Failed to read sample-flags cache: %s", exc)
-
-
-def _save_early_signal_cache() -> None:
-    """Persist the in-memory sample-flags cache to disk."""
-    if _early_signal_cache_file is None:
-        return
-    try:
-        _early_signal_cache_file.parent.mkdir(parents=True, exist_ok=True)
-        with _early_signal_cache_lock:
-            snapshot = dict(_early_signal_cache)
-        with _early_signal_cache_file.open("w", encoding="utf-8") as fh:
-            json.dump(snapshot, fh)
-    except Exception as exc:
-        LOGGER.debug("Failed to write sample-flags cache: %s", exc)
-
-
-def _compute_sample_flags(cdf_path: str, rules: list[dict]) -> list[dict]:
-    """Evaluate the flag rules against one CDF (empty list on any failure)."""
-    p = Path(cdf_path)
-    if not p.is_file():
-        return []
-    try:
-        t, y = distill.gc_xy_from_cdf(p)
-        return sample_flags.evaluate_rules(t, y, rules)
-    except Exception as exc:
-        LOGGER.debug("Flag-rule check failed for %s: %s", cdf_path, exc)
-        return []
-
-
-def _get_sample_flags(cdf_path: str, rules: list[dict], fp: str) -> list[dict]:
-    """Return cached flags for *cdf_path*, recomputing when the rules changed."""
-    with _early_signal_cache_lock:
-        entry = _early_signal_cache.get(cdf_path)
-        if entry and entry.get("fp") == fp:
-            return entry["flags"]
-    flags = _compute_sample_flags(cdf_path, rules)
-    with _early_signal_cache_lock:
-        _early_signal_cache[cdf_path] = {"fp": fp, "flags": flags}
-    return flags
-
-
-# ── Fuel-type best-fit cache ─────────────────────────────────────────
-# path → {"fp": config-fingerprint, "label": str, "score": float}
-_bestfit_cache: dict[str, dict] = {}
-_bestfit_cache_lock = threading.Lock()
-_bestfit_cache_file: Path | None = None
-
-
-def _load_bestfit_cache() -> None:
-    """Load the on-disk best-fit cache into memory."""
-    global _bestfit_cache_file
-    conf = settings_mod.load_settings()
-    proc_dir = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
-    _bestfit_cache_file = proc_dir / ".bestfit_cache.json"
-    if _bestfit_cache_file.is_file():
-        try:
-            with _bestfit_cache_file.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            data = {k: v for k, v in data.items()
-                    if isinstance(v, dict) and "fp" in v}
-            with _bestfit_cache_lock:
-                _bestfit_cache.update(data)
-            LOGGER.info("Loaded best-fit cache (%d entries)", len(data))
-        except Exception as exc:
-            LOGGER.warning("Failed to read best-fit cache: %s", exc)
-
-
-def _save_bestfit_cache() -> None:
-    """Persist the in-memory best-fit cache to disk."""
-    if _bestfit_cache_file is None:
-        return
-    try:
-        _bestfit_cache_file.parent.mkdir(parents=True, exist_ok=True)
-        with _bestfit_cache_lock:
-            snapshot = dict(_bestfit_cache)
-        with _bestfit_cache_file.open("w", encoding="utf-8") as fh:
-            json.dump(snapshot, fh)
-    except Exception as exc:
-        LOGGER.debug("Failed to write best-fit cache: %s", exc)
-
+# ── Flags and best-fit: the store's sample_cache ─────────────────────
+# One row per sample (flags keyed on the rules fingerprint, best-fit on the
+# best-fit config + standards fingerprint). The file list only reads it; stale
+# or missing rows are filled by one background thread that reads the CDFs off
+# the request path (_schedule_cache_refresh), so /api/files never reads a CDF.
 
 def _bestfit_config(conf: dict) -> dict:
-    """The classify() kwargs from settings (shared by route + enrichment)."""
+    """The classify() kwargs from settings (shared by route + refresher)."""
     return {
         "threshold": float(conf.get("bestfit_threshold", 0.93)),
         "shift_tolerance_min": float(conf.get("bestfit_shift_tolerance_min", 0.05)),
@@ -539,12 +442,15 @@ def _bestfit_config(conf: dict) -> dict:
     }
 
 
+def _standards_dir(conf: dict) -> Path:
+    return Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
+
+
 def _classify_cdf(cdf_path: str, conf: dict) -> dict | None:
     """Full best-fit classification of one CDF (None when unavailable)."""
     if fuel_fit is None:
         return None
-    comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
-    standards = fuel_fit.load_standards(comp_dir, distill.gc_xy_from_cdf)
+    standards = fuel_fit.load_standards(_standards_dir(conf), distill.gc_xy_from_cdf)
     if not standards:
         return None
     p = Path(cdf_path)
@@ -558,42 +464,97 @@ def _classify_cdf(cdf_path: str, conf: dict) -> dict | None:
         return None
 
 
-def _get_best_fit(cdf_path: str, conf: dict, fp: str) -> dict | None:
-    """Cached {label, score} for the file lists (recomputes on config change)."""
-    with _bestfit_cache_lock:
-        entry = _bestfit_cache.get(cdf_path)
-        if entry and entry.get("fp") == fp:
-            return {"label": entry["label"], "score": entry["score"]}
-    res = _classify_cdf(cdf_path, conf)
-    if res is None:
-        return None
-    slim = {"label": res["label"], "score": res["score"]}
-    with _bestfit_cache_lock:
-        _bestfit_cache[cdf_path] = dict(slim, fp=fp)
-    return slim
-
-
-def _enrich_files_with_early_signal(files: list[dict]) -> None:
-    """Add 'flags' (matched rules), legacy 'early_signal' bool, and the
-    'best_fit' fuel classification to each file entry (cached, lazy)."""
-    conf = settings_mod.load_settings()
+def _cache_fingerprints(conf: dict) -> dict:
+    """``{rules, rules_fp, bestfit_fp}`` for sample_cache. The best-fit
+    fingerprint covers the config and the standards folder's file names and
+    mtimes (listed, never read); ``None`` when best-fit is off."""
     rules = sample_flags.load_rules(conf)
-    fp = sample_flags.rules_fingerprint(rules)
-    for f in files:
-        flags = _get_sample_flags(f["path"], rules, fp)
-        f["flags"] = flags
-        f["early_signal"] = bool(flags)
-
+    bestfit_fp = None
     if fuel_fit is not None and str(conf.get("bestfit_enabled", "true")).lower() == "true":
-        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
-        standards = fuel_fit.load_standards(comp_dir, distill.gc_xy_from_cdf)
-        if standards:
-            bf_fp = sample_flags.rules_fingerprint([
-                _bestfit_config(conf),
-                {"standards": [s["name"] for s in standards]},
-            ])
-            for f in files:
-                f["best_fit"] = _get_best_fit(f["path"], conf, bf_fp)
+        stds = []
+        try:
+            for entry in os.scandir(_standards_dir(conf)):
+                if entry.is_file() and entry.name.lower().endswith(".cdf"):
+                    stds.append([entry.name, entry.stat().st_mtime_ns])
+        except OSError:
+            pass
+        if stds:
+            bestfit_fp = sample_flags.rules_fingerprint(
+                [_bestfit_config(conf), {"standards": sorted(stds)}])
+    return {"rules": rules, "rules_fp": sample_flags.rules_fingerprint(rules),
+            "bestfit_fp": bestfit_fp}
+
+
+_cache_refresh_lock = threading.Lock()
+_cache_refresh_pending: set[int] = set()
+_cache_refresh_running = False
+
+
+def _schedule_cache_refresh(sample_ids) -> None:
+    """Queue samples for the background sample_cache refresher (single flight)."""
+    global _cache_refresh_running
+    with _cache_refresh_lock:
+        _cache_refresh_pending.update(int(s) for s in sample_ids)
+        if _cache_refresh_running or not _cache_refresh_pending:
+            return
+        _cache_refresh_running = True
+    threading.Thread(target=_refresh_sample_cache, daemon=True, name="sample-cache").start()
+
+
+def _refresh_sample_cache() -> None:
+    """Fill sample_cache for the queued samples, 50 at a time, until none are left."""
+    global _cache_refresh_running
+    try:
+        while True:
+            with _cache_refresh_lock:
+                batch = sorted(_cache_refresh_pending)[:50]
+                _cache_refresh_pending.difference_update(batch)
+                if not batch:
+                    _cache_refresh_running = False
+                    return
+            try:
+                data, db = _hub()
+                conf = settings_mod.load_settings()
+                fps = _cache_fingerprints(conf)
+                standards = None
+                if fps["bestfit_fp"] is not None:
+                    standards = fuel_fit.load_standards(_standards_dir(conf), distill.gc_xy_from_cdf)
+                for sid in batch:
+                    _refresh_one(sid, data, db, conf, fps, standards)
+            except Exception:
+                LOGGER.exception("sample_cache refresh failed")
+    except BaseException:
+        with _cache_refresh_lock:
+            _cache_refresh_running = False
+        raise
+
+
+def _refresh_one(sid: int, data: Path, db: Path, conf: dict, fps: dict, standards) -> None:
+    """Evaluate the flag rules (and best-fit) on one sample's current CDF and
+    store them with their fingerprints."""
+    s = store.samples.get(sid, db=db)
+    if s is None:
+        return
+    flags: list = []
+    best = None
+    rel = s["cdf_path"]
+    if rel:     # a result-only sample (no CDF) is cached as "no flags"
+        try:
+            t, y = distill.gc_xy_from_cdf(data / rel)
+            flags = sample_flags.evaluate_rules(t, y, fps["rules"])
+            if standards:
+                best = fuel_fit.classify(t, y, standards, **_bestfit_config(conf))
+        except Exception as exc:
+            # Unreadable now (a share blip, a file being replaced): cache
+            # nothing, so the next list request tries again.
+            LOGGER.warning("sample_cache: sample %s: %s", sid, exc)
+            return
+    fields = {"rules_fingerprint": fps["rules_fp"], "flags": json.dumps(flags)}
+    if fps["bestfit_fp"] is not None:
+        fields.update(bestfit_fingerprint=fps["bestfit_fp"],
+                      best_fit=best["label"] if best else None,
+                      fit_score=float(best["score"]) if best else None)
+    store.sample_cache.put(sid, db=db, **fields)
 
 
 def _migrate_csv_header() -> None:
@@ -829,6 +790,163 @@ def _safe_path(p: str) -> Path:
 
 def _error(msg: str, status: int = 400) -> tuple:
     return jsonify({"error": msg}), status
+
+
+# ===================================================================== #
+#  The hub store: samples are addressed by sample_id (phase 2, 2A1 T4)
+# ===================================================================== #
+# Routes read the store in GC_DATA_DIR/gc.db. They never create or migrate
+# it: instruments.startup() does, once, at start-up (T5 wires it into
+# _init_app). Until it exists every store route answers 503.
+
+class HubUnavailable(RuntimeError):
+    """The hub store (or the gc1 instrument row) doesn't exist yet → 503."""
+
+
+class SampleNotFound(LookupError):
+    """No such sample (or it has no stored CDF where one is needed) → 404."""
+
+
+@app.errorhandler(HubUnavailable)
+def _hub_unavailable(exc):
+    return _error(str(exc), 503)
+
+
+@app.errorhandler(SampleNotFound)
+def _sample_not_found(exc):
+    return _error(str(exc), 404)
+
+
+@app.errorhandler(404)
+def _not_found(exc):
+    """JSON 404 for the API (a removed route answers ``{"error": "Not found"}``)."""
+    if request.path.startswith("/api/"):
+        return _error("Not found", 404)
+    return exc
+
+
+def _hub() -> tuple[Path, Path]:
+    """``(data_dir, db_path)`` of the hub store; ``HubUnavailable`` if absent."""
+    data = paths.data_dir()
+    if data is None:
+        raise HubUnavailable("The hub store needs GC_DATA_DIR (hub mode)")
+    db = Path(data) / store.DB_FILENAME
+    if not db.is_file():
+        raise HubUnavailable("The hub store has not been created yet")
+    return Path(data), db
+
+
+def _sample_or_404(sample_id, db) -> dict:
+    s = store.samples.get(int(sample_id), db=db)
+    if s is None:
+        raise SampleNotFound(f"Sample {sample_id} not found")
+    return s
+
+
+def _sample_ids(raw) -> list[int]:
+    """A request's ``sample_ids`` as ints, in order, without repeats.
+    ``ValueError`` if it isn't a list of integers."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("sample_ids must be a list of integers")
+    out: list[int] = []
+    for v in raw:
+        if isinstance(v, bool) or not isinstance(v, (int, str)):
+            raise ValueError("sample_ids must be a list of integers")
+        i = int(v)
+        if i not in out:
+            out.append(i)
+    return out
+
+
+def _json_col(value, default=None):
+    """A store JSON column decoded (``default`` for NULL or bad JSON)."""
+    if value is None or value == "":
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _revision_cdf(sample: dict, rev: Optional[dict], data: Path) -> Path:
+    """The CDF a revision was computed from (``sample_results.cdf_path``),
+    else the sample's current file. ``SampleNotFound`` if there is none."""
+    rel = (rev or {}).get("cdf_path") or sample.get("cdf_path")
+    if not rel:
+        raise SampleNotFound(f"Sample {sample['id']} has no stored CDF (result-only import)")
+    p = data / rel
+    if not p.is_file():
+        raise SampleNotFound(f"Sample {sample['id']}'s CDF is missing: {rel}")
+    return p
+
+
+def _revision_blank_path(data: Path, db: Path, rev: dict) -> Optional[Path]:
+    """The blank CDF a revision subtracted, or None.
+
+    INTEGRATION NOTE: a1/blankprov records the blank's own file on the
+    revision (``pipeline.revision_blank_path``); swap this lookup for that
+    helper once it is merged. Until then this reads the blank sample's
+    current ``cdf_path``, which a later conflict Replace could change.
+    """
+    if rev.get("blank_used") is None:
+        return None
+    blank = store.samples.get(rev["blank_used"], db=db)
+    if blank is None or not blank.get("cdf_path"):
+        return None
+    p = data / blank["cdf_path"]
+    return p if p.is_file() else None
+
+
+def _gc1(db) -> dict:
+    row = store.instruments.get(instruments.GC1, db=db)
+    if row is None:
+        raise HubUnavailable("Instrument gc1 has not been set up yet")
+    return row
+
+
+def _instrument_ctx(instrument_id: str, conf: dict, db, data: Path) -> dict:
+    """``instruments.context`` for a sample's instrument (every calibration
+    consumer gets this merged conf; GC_CAL_CDF plays no part)."""
+    row = store.instruments.get(instrument_id, db=db) or _gc1(db)
+    return instruments.context(row, conf, data_dir=data)
+
+
+def _revision_ladder(sample: dict, conf: dict, db, data: Path) -> tuple[list, list]:
+    """``(times, carbons)`` for labelling a sample's carbon ranges: the anchor
+    pairs its current revision was computed with (``calibration_used``), else
+    the instrument's calibration ladder."""
+    rev = store.get_revision(sample["id"], db=db) if sample.get("current_revision") else None
+    cal = _json_col(rev.get("calibration_used"), {}) if rev else {}
+    anchors = cal.get("anchors") if isinstance(cal, dict) else None
+    if anchors and len(anchors) >= 2:
+        return [float(a[0]) for a in anchors], [int(a[1]) for a in anchors]
+    return distill.calibration_ladder(_instrument_ctx(sample["instrument_id"], conf, db, data))
+
+
+def _who() -> str:
+    return request.remote_addr or "unknown"
+
+
+def _gate_reason(s: dict) -> str:
+    """Why a sample fails the export/QBench gate (``store.GATE_SQL``)."""
+    if s["status"] != "final":
+        return f"not final (status {s['status']}" + (f": {s['error']})" if s["error"] else ")")
+    if s["backfill"] and not s["released_at"]:
+        return "backfill sample that has not been released"
+    return "not exportable"
+
+
+def _record_qbench_upload(sample_id, revision: Optional[int], db) -> None:
+    """After a successful QBench upload: which revision the PDF was built from."""
+    if sample_id is None or revision is None:
+        return
+    try:
+        store.samples.update(int(sample_id), qbench_revision=revision,
+                             qbench_uploaded_at=store.now_iso(), db=db)
+    except Exception:
+        LOGGER.exception("Could not record the QBench upload of sample %s", sample_id)
 
 
 # OPEN ITEM (spec: "Open items"): the admin password is a hardcoded "admin".
@@ -1215,22 +1333,25 @@ def _figure_to_png_bytes(fig: "go.Figure", width: int = 1200, height: int = 500)
     return pio.to_image(fig, format="png", width=width, height=height)
 
 
-def _generate_chromatogram_pdf(cdf_path: Path) -> bytes:
-    """Generate a single-page chromatogram PDF for *cdf_path*."""
+def _generate_chromatogram_pdf(cdf_path: Path, title: Optional[str] = None) -> bytes:
+    """Generate a single-page chromatogram PDF for *cdf_path* (``title``
+    defaults to the CDF's own name and time)."""
     t, y = distill.gc_xy_from_cdf(cdf_path)
-    sample, inj_dt = distill.cdf_metadata(cdf_path)
-    title = f"{sample} - {inj_dt.strftime('%Y-%m-%d %H:%M')}"
+    if title is None:
+        sample, inj_dt = distill.cdf_metadata(cdf_path)
+        title = f"{sample} - {inj_dt.strftime('%Y-%m-%d %H:%M')}"
     fig = _make_chromatogram_figure(t, y, title)
     return pio.to_image(fig, format="pdf", width=1200, height=600)
 
 
 def _generate_comparison_html(
-    sample_path: Path, standard_paths: list[Path]
+    sample_path: Path, standard_paths: list[Path], sample_name: Optional[str] = None
 ) -> str:
     """Generate an HTML page with overlaid chromatograms (sample vs standards)."""
     fig = go.Figure()
     t_s, y_s = distill.gc_xy_from_cdf(sample_path)
-    sample_name, _ = distill.cdf_metadata(sample_path)
+    if sample_name is None:
+        sample_name, _ = distill.cdf_metadata(sample_path)
     fig.add_trace(go.Scatter(
         x=t_s.tolist(), y=y_s.tolist(), mode="lines",
         name=f"Sample: {sample_name}",
@@ -1255,6 +1376,7 @@ def _generate_analysis_report_pdf(
     params: dict,
     analysis_result: dict,
     ranges: list[dict] | None = None,
+    ladder: tuple[list, list] | None = None,
 ) -> bytes:
     """Generate a styled PDF report matching the old desktop app's
     ``_send_to_analysis_queue`` output 1:1.
@@ -1281,7 +1403,9 @@ def _generate_analysis_report_pdf(
     conf = settings_mod.load_settings()
     x_max_min = float(conf.get("analysis_x_max_min", 7.0))
 
-    cal_times, cal_carbons = distill.calibration_ladder(conf)
+    # The sample revision's anchors when the caller has them (every hub
+    # route does); the configured calibration otherwise.
+    cal_times, cal_carbons = ladder if ladder is not None else distill.calibration_ladder(conf)
 
     # ── Data arrays ───────────────────────────────────────────────────
     t_common = np.array(analysis_result["sample_raw"]["x"])
@@ -1670,10 +1794,50 @@ def _generate_analysis_report_pdf(
 #  API: Settings
 # ===================================================================== #
 
+def _gc1_calibration_cdf() -> Optional[str]:
+    """The gc1 row's calibration CDF (None when there is no store yet)."""
+    try:
+        _data, db = _hub()
+        row = store.instruments.get(instruments.GC1, db=db)
+    except HubUnavailable:
+        return None
+    return None if row is None else (row.get("calibration_cdf") or "")
+
+
+def _mirror_calibration_cdf(body: dict, saved_conf: dict) -> None:
+    """A settings save that changes ``calibration_cdf`` changes the gc1 row
+    (the processing source of truth), taking the saved assignments for the
+    new CDF from the settings map when there are any, and queues gc1's
+    ``awaiting_calibration`` samples. No-op without a store."""
+    if "calibration_cdf" not in body:
+        return
+    try:
+        _data, db = _hub()
+        row = _gc1(db)
+    except HubUnavailable:
+        return
+    new = str(body.get("calibration_cdf") or "").strip()
+    if new == (row.get("calibration_cdf") or ""):
+        return
+    entries = None
+    if new:
+        found = distill.parse_assignment_map(saved_conf.get("calibration_assignments", "")) \
+            .get(distill._cal_key(Path(new)))
+        entries = json.dumps(found) if isinstance(found, list) and found else None
+    store.instruments.upsert({"id": instruments.GC1, "calibration_cdf": new or None,
+                              "calibration_assignments": entries}, db=db)
+    with distill._CAL_LOCK:
+        distill._CAL_CACHE.clear()
+    pipeline.on_calibration_saved(instruments.GC1, db=db)
+
+
 @app.route("/api/settings", methods=["GET"])
 def api_get_settings():
     try:
         conf = settings_mod.load_settings()
+        cal = _gc1_calibration_cdf()
+        if cal is not None:
+            conf = dict(conf, calibration_cdf=cal)
         return jsonify(conf)
     except Exception as exc:
         return _error(str(exc), 500)
@@ -1685,24 +1849,16 @@ def api_save_settings():
         body = request.get_json(force=True)
         if not isinstance(body, dict):
             return _error("Expected JSON object")
-        # Detect if flag-rule settings changed — clear the cache
-        old_conf = settings_mod.load_settings()
-        es_keys = ("sample_flag_rules", "early_signal_enabled",
-                   "early_signal_time_min", "early_signal_intensity_threshold")
-        es_changed = any(
-            k in body and str(body.get(k, "")) != str(old_conf.get(k, ""))
-            for k in es_keys
-        )
-
+        # Flag rules and best-fit settings need no cache clearing: sample_cache
+        # rows carry the fingerprint they were computed with.
         settings_mod.save_settings(body)
         warning = _refresh_looker_paths()
 
-        if es_changed:
-            with _early_signal_cache_lock:
-                _early_signal_cache.clear()
-            _save_early_signal_cache()
-
         conf = settings_mod.load_settings()
+        _mirror_calibration_cdf(body, conf)
+        cal = _gc1_calibration_cdf()
+        if cal is not None:
+            conf = dict(conf, calibration_cdf=cal)
         if warning:
             conf = dict(conf, warning=warning)
         return jsonify(conf)
@@ -1741,74 +1897,177 @@ def api_save_analysis_defaults():
 
 @app.route("/api/files", methods=["GET"])
 def api_files():
-    """Return the in-memory file list (built at startup, updated incrementally).
-    Falls back to a quick os.scandir rebuild if the cache is empty.
-    Each entry includes an ``early_signal`` boolean flag."""
+    """The sample list: a store query, newest injection first, with paging and
+    filters (``instrument``, ``status`` and ``method`` take comma lists; ``q``,
+    ``date_from``, ``date_to``, ``backfill``, ``limit``, ``offset``). Flags and
+    best-fit come from ``sample_cache`` (and the current revision's recorded
+    best-fit); this route never reads a CDF. Stale cache rows are refreshed
+    in the background and counted in ``cache_pending``."""
+    _data, db = _hub()
+    args = request.args
     try:
-        # If the background build hasn't finished yet, wait briefly then
-        # return whatever we have (even if empty — the UI will auto-refresh).
-        if not _files_cache_ready.is_set():
-            _files_cache_ready.wait(timeout=2.0)
-
-        with _files_cache_lock:
-            files = [dict(f) for f in _files_cache]
-
-        # Enrich with early-signal flags (uses cache, fast)
-        _enrich_files_with_early_signal(files)
-        # Persist cache after enrichment (background, non-blocking)
-        threading.Thread(target=_save_early_signal_cache, daemon=True).start()
-        threading.Thread(target=_save_bestfit_cache, daemon=True).start()
-
-        return jsonify(files)
-    except Exception as exc:
-        return _error(str(exc), 500)
-
-
-@app.route("/api/files/refresh", methods=["POST"])
-def api_files_refresh():
-    """Force a rebuild of the in-memory file cache."""
+        limit = min(max(int(args.get("limit", FILES_DEFAULT_LIMIT)), 1), FILES_MAX_LIMIT)
+        offset = max(int(args.get("offset", 0)), 0)
+    except ValueError:
+        return _error("limit and offset must be integers")
+    backfill = args.get("backfill")
+    filters = {
+        "q": (args.get("q") or "").strip() or None,
+        "instrument": _list_arg(args.get("instrument")),
+        "date_from": args.get("date_from") or None,
+        "date_to": args.get("date_to") or None,
+        "status": _list_arg(args.get("status")),
+        "method_name": _list_arg(args.get("method")),
+        "backfill": None if backfill in (None, "") else backfill.lower() in ("1", "true", "yes"),
+    }
+    fps = _cache_fingerprints(settings_mod.load_settings())
     try:
-        threading.Thread(target=_rebuild_files_cache, daemon=True).start()
-        return jsonify({"status": "rebuilding"})
-    except Exception as exc:
-        return _error(str(exc), 500)
+        with store.connection(db) as conn:
+            rows = store.samples.search(limit=limit, offset=offset, db=conn, **filters)
+            total = store.samples.count(db=conn, **filters)
+            insts = [i["id"] for i in store.instruments.list(db=conn)]
+            ids = [r["id"] for r in rows]
+            marks = ",".join("?" * len(ids))
+            cache = {c["sample_id"]: dict(c) for c in conn.execute(
+                f"SELECT * FROM sample_cache WHERE sample_id IN ({marks})", ids)} if ids else {}
+            recorded = {r[0]: (r[1], r[2]) for r in conn.execute(
+                "SELECT r.sample_id, r.best_fit, r.fit_score FROM sample_results r "
+                "JOIN samples s ON s.id = r.sample_id AND r.revision = s.current_revision "
+                f"WHERE s.id IN ({marks})", ids)} if ids else {}
+            run_no = _run_numbers(conn, rows)
+    except ValueError as exc:            # a malformed date bound
+        return _error(str(exc))
+    samples, stale = [], []
+    for s in rows:
+        entry, is_stale = _sample_entry(s, cache.get(s["id"]), recorded.get(s["id"]), fps,
+                                        run_no.get(s["id"], 1))
+        samples.append(entry)
+        if is_stale:
+            stale.append(s["id"])
+    if stale:
+        _schedule_cache_refresh(stale)
+    return jsonify({"samples": samples, "total": total, "limit": limit, "offset": offset,
+                    "instruments": insts, "cache_pending": len(stale)})
 
 
-@app.route("/api/metadata/<path:filepath>", methods=["GET"])
-def api_metadata(filepath: str):
+FILES_DEFAULT_LIMIT = 500
+FILES_MAX_LIMIT = 5000
+
+
+def _list_arg(raw: Optional[str]) -> Optional[list]:
+    items = [x.strip() for x in (raw or "").split(",") if x.strip()]
+    return items or None
+
+
+def _run_numbers(conn, rows: list[dict]) -> dict:
+    """``{sample id: run number}``: the order of each injection among its
+    instrument's injections of the same lab ID (oldest = 1), for the
+    ``AF25 (2)`` labels."""
+    labs = sorted({r["lab_id"] for r in rows})
+    if not labs:
+        return {}
+    marks = ",".join("?" * len(labs))
+    return {r[0]: r[1] for r in conn.execute(
+        "SELECT id, ROW_NUMBER() OVER (PARTITION BY instrument_id, lab_id "
+        f"ORDER BY injection_dt, id) FROM samples WHERE lab_id IN ({marks})", labs)}
+
+
+def _sample_entry(s: dict, cache: Optional[dict], recorded, fps: dict, run_no: int):
+    """One /api/files entry and whether its sample_cache row is stale."""
+    flags = None
+    if cache and cache.get("rules_fingerprint") == fps["rules_fp"]:
+        flags = _json_col(cache.get("flags"), [])
+    best = None
+    bestfit_fresh = fps["bestfit_fp"] is None or (
+        cache is not None and cache.get("bestfit_fingerprint") == fps["bestfit_fp"])
+    if fps["bestfit_fp"] is not None and bestfit_fresh and cache.get("best_fit"):
+        best = {"label": cache["best_fit"], "score": cache.get("fit_score")}
+    elif recorded and recorded[0]:
+        best = {"label": recorded[0], "score": recorded[1]}
+    stale = flags is None or not bestfit_fresh
+    flags = flags or []
+    name = s["lab_id"]
+    return {
+        "sample_id": s["id"],
+        "uid": str(s["id"]),
+        "instrument": s["instrument_id"],
+        "lab_id": name,
+        "name": name,
+        "display_name": name if run_no <= 1 else f"{name} ({run_no})",
+        "injection_dt": s["injection_dt"],
+        "status": s["status"],
+        "error": s["error"],
+        "review_note": s.get("review_note"),
+        "flags": flags,
+        "early_signal": bool(flags),
+        "best_fit": best,
+        "backfill": s["backfill"],
+        "released": s["released_at"] is not None,
+        "time_corrected": s["time_corrected"],
+        "method_name": s["method_name"],
+        "current_revision": s["current_revision"],
+    }, stale
+
+
+@app.route("/api/samples/<int:sample_id>/metadata", methods=["GET"])
+def api_sample_metadata(sample_id: int):
+    _data, db = _hub()
+    s = _sample_or_404(sample_id, db)
+    revisions = [{"revision": r["revision"], "reason": r["reason"], "by": r["by"],
+                  "processed_at": r["processed_at"]}
+                 for r in store.list_revisions(sample_id, db=db)]
+    return jsonify({
+        "sample_id": s["id"],
+        "instrument": s["instrument_id"],
+        "lab_id": s["lab_id"],
+        "sample_name": s["lab_id"],
+        "injection_datetime": s["injection_dt"],
+        "injection_dt_source": s["injection_dt_source"],
+        "legacy_injection_dt": s["legacy_injection_dt"],
+        "time_corrected": s["time_corrected"],
+        "method_name": s["method_name"],
+        "source_name": s["source_name"],
+        "status": s["status"],
+        "error": s["error"],
+        "review_note": s.get("review_note"),
+        "backfill": s["backfill"],
+        "released_at": s["released_at"],
+        "current_revision": s["current_revision"],
+        "qbench_revision": s["qbench_revision"],
+        "qbench_uploaded_at": s["qbench_uploaded_at"],
+        "revisions": revisions,
+    })
+
+
+def _requested_revision(sample: dict, db) -> Optional[dict]:
+    """The revision named by ``?revision=`` (404 if it doesn't exist), else the
+    current one (None if the sample has none)."""
+    raw = request.args.get("revision")
+    if raw in (None, ""):
+        return store.get_revision(sample["id"], db=db) if sample["current_revision"] else None
     try:
-        p = _safe_path(filepath)
-        if not p.is_file():
-            return _error(f"File not found: {filepath}", 404)
-        sample, inj_dt = distill.cdf_metadata(p)
-        return jsonify({
-            "sample_name": sample,
-            "injection_datetime": inj_dt.isoformat(sep=" "),
-        })
-    except Exception as exc:
-        return _error(str(exc), 500)
+        rev = store.get_revision(sample["id"], int(raw), db=db)
+    except ValueError:
+        rev = None
+    if rev is None:
+        raise SampleNotFound(f"Sample {sample['id']} has no revision {raw}")
+    return rev
 
 
 # ===================================================================== #
 #  API: Chromatogram trace
 # ===================================================================== #
 
-@app.route("/api/trace", methods=["GET"])
-def api_trace():
-    cdf_path = request.args.get("path", "").strip()
-    if not cdf_path:
-        return _error("Missing 'path' query parameter")
+@app.route("/api/samples/<int:sample_id>/trace", methods=["GET"])
+def api_sample_trace(sample_id: int):
+    """The chromatogram of the CDF the (current or ``?revision=``) revision was
+    computed from; the sample's stored file when it has no revision."""
+    data, db = _hub()
+    s = _sample_or_404(sample_id, db)
+    p = _revision_cdf(s, _requested_revision(s, db), data)
     try:
-        p = _safe_path(cdf_path)
-        if not p.is_file():
-            return _error(f"File not found: {cdf_path}", 404)
         t, y = distill.gc_xy_from_cdf(p)
-        sample, _ = distill.cdf_metadata(p)
-        return jsonify({
-            "x": t.tolist(),
-            "y": y.tolist(),
-            "name": sample,
-        })
+        return jsonify({"sample_id": s["id"], "x": t.tolist(), "y": y.tolist(), "name": s["lab_id"]})
     except Exception as exc:
         return _error(str(exc), 500)
 
@@ -1817,157 +2076,147 @@ def api_trace():
 #  API: Distillation curve
 # ===================================================================== #
 
-@app.route("/api/distillation-curve", methods=["GET"])
-def api_distillation_curve():
-    cdf_path = request.args.get("path", "").strip()
-    if not cdf_path:
-        return _error("Missing 'path' query parameter")
+_D2887_COLS = distill.CSV_HEADER[2:15]
+_D86_COLS = distill.CSV_HEADER[15:28]
+_D86_COL_FOR_CUT = {
+    "IBP": "D86 IBP", "5%": "D86 T5", "10%": "D86 T10", "20%": "D86 T20",
+    "30%": "D86 T30", "40%": "D86 T40", "50%": "D86 T50", "60%": "D86 T60",
+    "70%": "D86 T70", "80%": "D86 T80", "90%": "D86 T90", "95%": "D86 T95",
+    "FBP": "D86 FBP",
+}
+
+
+def _numbers(src: dict, keys) -> dict:
+    out = {}
+    for k in keys:
+        v = src.get(k)
+        if v in (None, ""):
+            continue
+        try:
+            out[k] = float(v)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _revision_curve(cdf: Path, anchors: list, blank_path: Optional[Path]):
+    """(percent, temperature) exactly as ``distill.compute`` built them for the
+    revision: its blank subtracted (or none), then its anchor pairs."""
+    t, y = distill.gc_xy_from_cdf(cdf)
+    blank = distill.gc_xy_from_cdf(blank_path) if blank_path is not None else None
+    t, y = distill._apply_blank_and_clip(t, y, blank)
+    cbp = distill.carbon_bp_map()
+    rt = np.array([float(a[0]) for a in anchors], float)
+    bp = np.array([cbp[int(a[1])] for a in anchors], float)
+    cal = distill.build_calibration_from_anchors(rt, bp)
+    return distill._cumulative_percent(t, y), cal(t)
+
+
+@app.route("/api/samples/<int:sample_id>/distillation-curve", methods=["GET"])
+def api_sample_distillation_curve(sample_id: int):
+    """The distillation curve and numbers of one revision (current, or
+    ``?revision=``). The numbers are the revision's stored results, never
+    recomputed; the curve is rebuilt from the revision's CDF, its recorded
+    ``blank_used`` and its ``calibration_used`` anchors. 409 while the sample
+    has no revision (the hold reason is in the message)."""
+    data, db = _hub()
+    s = _sample_or_404(sample_id, db)
+    rev = _requested_revision(s, db)
+    if rev is None:
+        why = s["status"] + (f": {s['error']}" if s["error"] else "")
+        return _error(f"Sample {sample_id} has no result yet ({why})", 409)
+    cdf = _revision_cdf(s, rev, data)
     try:
-        p = _safe_path(cdf_path)
-        if not p.is_file():
-            return _error(f"File not found: {cdf_path}", 404)
-
-        # Use cached blank for consistency with process_cdf
-        blank_path = None
-        try:
-            # The existing Looker's blank, not _get_looker(): that is gated on
-            # the watch folder, and a down share must not silently drop blank
-            # subtraction (or stat the share on every request).
-            lk = _looker
-            if lk is not None and lk._latest_blank_path and lk._latest_blank_path.is_file():
-                sample_name, _ = distill.cdf_metadata(p)
-                if "blank" not in sample_name.lower():
-                    blank_path = lk._latest_blank_path
-        except Exception:
-            pass
-
-        pct, temp = distill.distillation_curve_from_cdf(p, blank_path=blank_path)
-
-        # Also return the pre-computed D2887/D86 from CSV so the dashboard
-        # can use authoritative values instead of re-computing client-side
-        d2887_csv = {}
-        d86_csv = {}
-        d86_uncorrected_csv: dict = {}
-        try:
-            sample_name, _ = distill.cdf_metadata(p)
-            conf = settings_mod.load_settings()
-            csv_path = Path(conf.get("distill_output", str(paths.default_results_csv())))
-            if csv_path.is_file():
-                import csv as csv_mod
-                # Read under the lock (a reader's open handle makes a
-                # rewrite's os.replace fail on Windows); process after.
-                with distill._CSV_LOCK:
-                    with csv_path.open("r", encoding="utf-8", newline="") as fh:
-                        csv_rows = list(csv_mod.DictReader(fh))
-                best_row = None
-                for row in csv_rows:
-                    if (row.get("Lab ID", "").strip() == sample_name.strip()):
-                        best_row = row  # keep last match (most recent)
-                if best_row:
-                    for k in distill.CSV_HEADER[2:15]:
-                        v = best_row.get(k, "")
-                        if v:
-                            try: d2887_csv[k] = float(v)
-                            except ValueError: pass
-                    for k in distill.CSV_HEADER[15:28]:  # D86 columns only (Source File at [28] excluded)
-                        v = best_row.get(k, "")
-                        if v:
-                            try: d86_csv[k] = float(v)
-                            except ValueError: pass
-
-            # Pre-calculate uncorrected D86 from D2887 so the frontend toggle
-            # can switch between before/after without recomputing in the browser.
-            if d2887_csv:
-                _csv_to_label = {
-                    "2887 IBP": "IBP", "2887 T5": "5%",  "2887 T10": "10%",
-                    "2887 T20": "20%", "2887 T30": "30%", "2887 T40": "40%",
-                    "2887 T50": "50%", "2887 T60": "60%", "2887 T70": "70%",
-                    "2887 T80": "80%", "2887 T90": "90%", "2887 T95": "95%",
-                    "2887 FBP": "FBP",
-                }
-                _label_to_d86key = {
-                    "IBP": "D86 IBP", "5%": "D86 T5",  "10%": "D86 T10",
-                    "20%": "D86 T20", "30%": "D86 T30", "50%": "D86 T50",
-                    "70%": "D86 T70", "80%": "D86 T80", "90%": "D86 T90",
-                    "95%": "D86 T95", "FBP": "D86 FBP",
-                }
-                d2887_for_conv = {
-                    label: d2887_csv[csv_k]
-                    for csv_k, label in _csv_to_label.items()
-                    if csv_k in d2887_csv
-                }
-                raw_d86 = distill._convert_to_d86(d2887_for_conv)
-                for label, d86_key in _label_to_d86key.items():
-                    if label in raw_d86:
-                        d86_uncorrected_csv[d86_key] = raw_d86[label]
-        except Exception:
-            pass
-
+        cal = _json_col(rev["calibration_used"], {}) or {}
+        anchors = cal.get("anchors") or []
+        blank_path = _revision_blank_path(data, db, rev)
+        if len(anchors) >= 2:
+            pct, temp = _revision_curve(cdf, anchors, blank_path)
+            calibration = {"cdf": cal.get("cdf"), "anchors": anchors, "source": "revision"}
+        else:   # a legacy (imported) revision records no anchors
+            ctx = _instrument_ctx(s["instrument_id"], settings_mod.load_settings(), db, data)
+            pct, temp = distill.distillation_curve_from_cdf(cdf, blank_path=blank_path, conf=ctx)
+            calibration = {"cdf": ctx.get("calibration_cdf"), "anchors": [], "source": "instrument"}
+        results = _json_col(rev["results"], {}) or {}
+        unc = _json_col(rev["d86_uncorrected"], {}) or {}
+        d86_unc = {}
+        for cut, v in unc.items():
+            col = _D86_COL_FOR_CUT.get(cut)
+            if col and v not in (None, ""):
+                try:
+                    d86_unc[col] = float(v)
+                except (TypeError, ValueError):
+                    pass
         return jsonify({
+            "sample_id": s["id"],
+            "revision": rev["revision"],
             "percent": pct.tolist(),
             "temperature": temp.tolist(),
-            "d2887": d2887_csv,
-            "d86": d86_csv,                          # corrected (CSV, source of truth)
-            "d86_uncorrected": d86_uncorrected_csv,  # before EQM corrections
+            "d2887": _numbers(results, _D2887_COLS),
+            "d86": _numbers(results, _D86_COLS),       # corrected: the revision's reported values
+            "d86_uncorrected": d86_unc,                # before the correction factors
+            "blank_used": rev["blank_used"],
+            "calibration": calibration,
         })
     except Exception as exc:
         return _error(str(exc), 500)
 
 
 # ===================================================================== #
-#  API: Table data (distillation CSV)
+#  API: Table data (current revisions)
 # ===================================================================== #
+
+def _csv_cell(v) -> str:
+    return "" if v is None else str(v)
+
 
 @app.route("/api/table", methods=["GET"])
 def api_table():
-    try:
-        conf = settings_mod.load_settings()
-        csv_path = Path(conf.get("distill_output", str(paths.default_results_csv())))
-        if not csv_path.is_file():
-            return jsonify({"columns": distill.CSV_HEADER, "rows": []})
-
-        # Under the lock: a reader's open handle makes a rewrite's
-        # os.replace fail on Windows. Read into memory, then release.
-        with distill._CSV_LOCK:
-            with csv_path.open("r", encoding="utf-8", newline="") as fh:
-                all_rows = list(csv.reader(fh))
-        if not all_rows:
-            return jsonify({"columns": distill.CSV_HEADER, "rows": []})
-        header, rows = all_rows[0], all_rows[1:]
-
-        # NOTE: D86 corrections are already applied in distill.process_cdf()
-        # step 5b before writing to CSV.  Do NOT re-apply them here or the
-        # values will be double-corrected.  The CSV is the source of truth.
-
-        return jsonify({"columns": header, "rows": rows})
-    except Exception as exc:
-        return _error(str(exc), 500)
+    """Every sample's current revision in the results-CSV columns (cells as
+    the CSV writes them), oldest injection first; ``sample_ids`` runs
+    parallel to ``rows``."""
+    _data, db = _hub()
+    header = list(distill.CSV_HEADER)
+    rows, ids = [], []
+    with store.connection(db) as conn:
+        for sid, results in conn.execute(
+                "SELECT s.id, r.results FROM samples s JOIN sample_results r "
+                "ON r.sample_id = s.id AND r.revision = s.current_revision "
+                "ORDER BY s.injection_dt, s.id"):
+            vals = _json_col(results, {}) or {}
+            rows.append([_csv_cell(vals.get(c)) for c in header])
+            ids.append(sid)
+    return jsonify({"columns": header, "rows": rows, "sample_ids": ids})
 
 
 # ===================================================================== #
-#  API: Calibration
+#  API: Calibration (the gc1 instrument row)
 # ===================================================================== #
 
 @app.route("/api/calibration", methods=["GET"])
 def api_calibration():
     """Return detected peaks, compound choices, and any saved assignments.
 
-    Powers the manual calibration page. ``peak_times``/``carbon_numbers``/
-    ``boiling_points`` are retained for backward compatibility.
+    Powers the manual calibration page. The calibration is the gc1
+    instrument row's (``instruments.context``); ``peak_times``/
+    ``carbon_numbers``/``boiling_points`` are retained for backward
+    compatibility.
     """
+    data, db = _hub()
+    row = _gc1(db)
     try:
-        conf = settings_mod.load_settings()
-        cal_path = distill.active_calibration_path(conf)
+        ctx = instruments.context(row, settings_mod.load_settings(), data_dir=data)
+        cal_path = distill.active_calibration_path(ctx, honour_env=False)
         if cal_path is None:
             return _error("No calibration CDF configured", 404)
         if not cal_path.is_file():
             return _error(f"Calibration file not found: {cal_path}", 404)
 
-        # Sensitivity: query param overrides the saved setting (default 50).
+        # Sensitivity: query param overrides the saved one (default 50).
         try:
             sensitivity = float(
                 request.args.get("sensitivity")
-                or conf.get("calibration_sensitivity", "50")
+                or ctx.get("calibration_sensitivity", "50")
             )
         except (TypeError, ValueError):
             sensitivity = 50.0
@@ -1986,17 +2235,13 @@ def api_calibration():
             {"carbon": c, "bp": bp}
             for c, bp in zip(distill.N_ALKANE_CARBON, distill.N_ALKANE_BP)
         ]
-        amap = distill.parse_assignment_map(
-            conf.get("calibration_assignments", "")
-        )
+        amap = distill.parse_assignment_map(ctx.get("calibration_assignments", ""))
         saved = amap.get(distill._cal_key(cal_path), [])
 
         # Overlay arrays (peak_times/carbon_numbers/boiling_points) drive the
-        # dashboard chromatogram markers. Prefer the saved manual assignments so
-        # the overlay matches the calibration the distillation actually uses
-        # (same source as calibration_ladder/anchors_for: distill._assignment_pairs
-        # drops ignored/unknown carbons and de-dupes); fall back to sequential
-        # auto-detection when nothing is assigned.
+        # dashboard chromatogram markers: the saved manual assignments (the
+        # same distill._assignment_pairs source calibration_ladder/anchors_for
+        # use), else sequential auto-detection when nothing is assigned.
         cbp = distill.carbon_bp_map()
         assigned = distill._assignment_pairs(amap, cal_path)
         if assigned:
@@ -2012,6 +2257,7 @@ def api_calibration():
         # Downsample the trace for plotting (keep payload small).
         step = max(1, len(t) // 3000)
         return jsonify({
+            "instrument": row["id"],
             "cdf_name": cal_path.name,
             "cdf_path": str(cal_path),
             "sensitivity": sensitivity,
@@ -2030,10 +2276,14 @@ def api_calibration():
 
 @app.route("/api/calibration", methods=["POST"])
 def api_calibration_save():
-    """Persist manual peak→carbon assignments for the configured cal CDF."""
+    """Persist manual peak→carbon assignments (and the sensitivity) on the gc1
+    instrument row, then queue gc1's ``awaiting_calibration`` samples (only
+    those: nothing final is reprocessed)."""
+    data, db = _hub()
+    row = _gc1(db)
     try:
-        conf = settings_mod.load_settings()
-        cal_path = distill.active_calibration_path(conf)
+        ctx = instruments.context(row, settings_mod.load_settings(), data_dir=data)
+        cal_path = distill.active_calibration_path(ctx, honour_env=False)
         if cal_path is None:
             return _error("No calibration CDF configured", 404)
 
@@ -2065,29 +2315,29 @@ def api_calibration_save():
                 400,
             )
 
-        conf["calibration_assignments"] = distill.upsert_assignments(
-            conf.get("calibration_assignments", ""), cal_path, clean
-        )
+        fields = {"id": row["id"], "calibration_assignments": json.dumps(clean) if clean else None}
         # Remember the sensitivity so reopening re-detects the same peaks.
         if body.get("sensitivity") is not None:
             try:
-                conf["calibration_sensitivity"] = str(float(body["sensitivity"]))
+                fields["calibration_sensitivity"] = float(body["sensitivity"])
             except (TypeError, ValueError):
                 pass
-        settings_mod.save_settings(conf)
+        store.instruments.upsert(fields, db=db)
 
         # Drop any cached calibration so the next build uses the new mapping.
         with distill._CAL_LOCK:
             distill._CAL_CACHE.clear()
+        queued = pipeline.on_calibration_saved(row["id"], db=db)
 
         anchors = distill.anchors_for(
-            distill.parse_assignment_map(conf["calibration_assignments"]),
+            distill.parse_assignment_map(distill.upsert_assignments("", cal_path, clean)),
             cal_path,
         )
         return jsonify({
             "ok": True,
             "saved": len(clean),
             "anchors": 0 if anchors is None else int(anchors[0].size),
+            "queued": queued,
         })
     except Exception as exc:
         return _error(str(exc), 500)
@@ -2095,33 +2345,34 @@ def api_calibration_save():
 
 @app.route("/api/calibration/active", methods=["GET"])
 def api_calibration_active():
-    """Diagnostic: report which calibration the running server actually uses.
-
-    Read-only. Reveals whether manual assignments are being applied to the
-    distillation (mode=manual) or whether it falls back to auto-detection, and
-    surfaces the resolved settings key so a path mismatch is visible.
-    """
+    """Diagnostic: the calibration gc1 processes with (read-only). ``mode`` is
+    ``manual`` when it is usable (a CDF and at least two assignment pairs) and
+    ``unusable`` otherwise, with the reason in ``problem``; the hub never
+    falls back to auto-detection."""
+    data, db = _hub()
+    row = _gc1(db)
     try:
-        conf = settings_mod.load_settings()
-        resolved = distill.active_calibration_path(conf)
+        ctx = instruments.context(row, settings_mod.load_settings(), data_dir=data)
+        resolved = distill.active_calibration_path(ctx, honour_env=False)
         cal_path = resolved if resolved is not None else Path("")
-        cal_cdf = str(resolved) if resolved is not None else ""
-        raw = conf.get("calibration_assignments", "")
-        amap = distill.parse_assignment_map(raw)
+        amap = distill.parse_assignment_map(ctx.get("calibration_assignments", ""))
         key = distill._cal_key(cal_path)
         saved = amap.get(key, [])
         carbon_count = sum(
             1 for e in saved
             if isinstance(e, dict) and e.get("carbon") is not None
         )
+        problem = instruments.calibration_problem(ctx)
         anchors = distill.anchors_for(amap, cal_path)
         out = {
-            "calibration_cdf": cal_cdf,
+            "instrument": row["id"],
+            "calibration_cdf": str(resolved) if resolved is not None else "",
             "cal_key": key,
             "assignment_map_keys": list(amap.keys()),
             "key_present_in_map": key in amap,
             "saved_carbon_assignments": carbon_count,
-            "mode": "manual" if anchors is not None else "auto-detect (fallback)",
+            "mode": "manual" if problem is None else "unusable",
+            "problem": problem,
         }
         if anchors is not None:
             rt, bp = anchors
@@ -2138,6 +2389,7 @@ def api_calibration_active():
 # ===================================================================== #
 #  API: Scanning
 # ===================================================================== #
+
 
 _scan_status: Dict[str, Any] = {
     "phase": "idle",          # idle | scanning | processing | done | stopped
@@ -2584,71 +2836,7 @@ def _watcher_loop() -> None:
         _scan_stop.clear()
 
 
-@app.route("/api/scan", methods=["POST"])
-def api_scan():
-    """Trigger an immediate scan cycle by waking the background watcher.
-
-    Does NOT clear the Looker's ``_seen`` set — doing so would cause already-
-    processed files to be re-submitted, risking duplicate CSV rows.  New files
-    (not yet in ``_seen``) are picked up automatically.  For a full rebuild use
-    ``/api/rebuild-db`` instead.
-
-    Clears ``_scan_halt`` and ``_suppressed_paths`` so an explicit Scan re-attacks
-    any backlog a previous Stop abandoned.
-    """
-    _, err = _looker_or_409()
-    if err:
-        return err
-    _scan_halt.clear()
-    with _suppressed_lock:
-        _suppressed_paths.clear()
-    _start_watcher()
-    _scan_stop.set()        # wake the watcher from its sleep
-    return jsonify({"status": "started"})
-
-
-@app.route("/api/scan/status", methods=["GET"])
-def api_scan_status():
-    """Return current scan status for polling."""
-    return jsonify(_scan_status)
-
-
-@app.route("/api/scan/stream", methods=["GET"])
-def api_scan_stream():
-    return Response(
-        stream_with_context(_sse_stream(_scan_subscribers, _scan_sub_lock)),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
-
-
-@app.route("/api/stop-scan", methods=["POST"])
-def api_stop_scan():
-    _scan_halt.set()
-    # Propagate to the Looker so in-progress _handle_new() calls abort at their
-    # next checkpoint. Without this, worker threads run to completion regardless.
-    # Use the existing Looker directly, not _get_looker(): Stop must reach
-    # in-flight work even if the watch folder has just become unusable.
-    try:
-        lk = _looker
-        if lk is not None:
-            lk._stop_event.set()
-    except Exception as exc:
-        LOGGER.warning(f"[WATCHER] Could not signal Looker stop: {exc}")
-    # Invalidate the directory cache so the next scan re-snapshots and finds
-    # the unprocessed files that were skipped due to the stop.
-    _invalidate_dir_cache()
-    _scan_status["phase"] = "stopped"
-    LOGGER.info("[WATCHER] HALT requested by user")
-    _scan_log("Stop requested")
-    return jsonify({"status": "stopped"})
-
-
-# ── Task queue for reprocess / rebuild (never blocks, always queues) ──
+# ── Task queue (legacy watcher scaffolding; removed with the watcher in T5) ──
 _task_queue: queue.Queue = queue.Queue()
 _task_worker: Optional[threading.Thread] = None
 _task_worker_lock = threading.Lock()
@@ -2680,147 +2868,126 @@ def _task_worker_loop() -> None:
             _task_queue.task_done()
 
 
-def _enqueue_reprocess(paths, samples, *, label: str = "Reprocess"):
-    """Queue a compute+append run through the distillation tunnel.
+# ===================================================================== #
+#  API: Reprocess (pipeline jobs, by sample_id)
+# ===================================================================== #
 
-    Shared by /api/reprocess and /api/export-lims so there is ONE write path:
-    looker.reprocess_paths/reprocess_samples → distill.process_cdf →
-    distill._append_csv_row (a new CSV row per run). Surfaces a notification when
-    any sample fails (e.g. missing calibration) so silent failures are visible.
-
-    Returns ``(count, pending)``.
-    """
-    count = len(paths) if paths else len(samples)
-    pending = _task_queue.qsize()
-    # Mark in-progress synchronously so the toast never catches a stale "idle"
-    # (or a previous run's "done") between enqueue and the worker picking it up.
-    _reprocess_status.update(phase="processing", total=count,
-                             processed=0, errors=0, skipped=0)
-
-    def _do_reprocess():
-        _scan_stop.clear()
-        total = count
-        _reprocess_status.update(phase="processing", total=total,
-                                 processed=0, errors=0, skipped=0)
-        try:
-            lk = _get_looker()
-            _scan_log(f"{label}: {total} sample(s)...")
-            _publish_json(_scan_subscribers, _scan_sub_lock,
-                          {"type": "total", "total": total, "new": total, "already": 0})
-
-            if paths:
-                results = lk.reprocess_paths(paths, stop_event=_scan_stop)
-            else:
-                results = lk.reprocess_samples(samples, stop_event=_scan_stop)
-
-            ok = sum(1 for r in results.values() if r.get("status") == "ok")
-            errs = sum(1 for r in results.values() if r.get("status") == "error")
-            skipped = sum(1 for r in results.values() if r.get("status") == "missing")
-            cancelled = any(r.get("status") == "cancelled" for r in results.values())
-
-            for sid, info in results.items():
-                status = info.get("status", "unknown")
-                _scan_log(f"  {sid}: {status}")
-
-            # Surface failures so "nothing appended" never looks like a no-op.
-            if errs:
-                first_err = next((r.get("error") for r in results.values()
-                                  if r.get("status") == "error" and r.get("error")),
-                                 "see log for details")
-                notifications_mod.get_store().add(
-                    "error",
-                    f"{label}: {errs} of {total} sample(s) failed — {first_err}",
-                )
-
-            _scan_log(f"{label} complete: {ok} OK, {skipped} skipped, {errs} errors")
-            _reprocess_status.update(
-                phase="stopped" if cancelled else "done",
-                total=total, processed=ok, errors=errs, skipped=skipped)
-            _publish_json(_scan_subscribers, _scan_sub_lock,
-                          {"type": "done", "processed": ok, "skipped": skipped,
-                           "errors": errs, "total": total})
-
-            if ok > 0:
-                try:
-                    _rebuild_files_cache()
-                except Exception:
-                    pass
-        except Exception as exc:
-            _scan_log(f"{label} error: {exc}")
-            notifications_mod.get_store().add("error", f"{label} failed: {exc}")
-            _reprocess_status.update(phase="error")
-            _publish_json(_scan_subscribers, _scan_sub_lock,
-                          {"type": "error", "message": str(exc)})
-
-    _task_queue.put(_do_reprocess)
-    _ensure_task_worker()
-
-    if pending > 0:
-        _scan_log(f"Queued {label.lower()} of {count} sample(s) ({pending} task(s) ahead)")
-    return count, pending
+def _resolve_lab_query(query: str, instrument_id: Optional[str], db) -> dict:
+    """Expand a Re-process query (IDs, lists, integer ranges) against one
+    instrument's lab IDs. ``{matched, missing, sample_ids, instrument}``:
+    ``sample_ids`` holds the latest injection of each matched lab ID.
+    ``ValueError`` (400) without an instrument or for a bad query;
+    ``SampleNotFound`` (404) for an unknown instrument."""
+    inst = (instrument_id or "").strip()
+    if not inst:
+        raise ValueError("A lab-ID selection needs an instrument")
+    if store.instruments.get(inst, db=db) is None:
+        raise SampleNotFound(f"Unknown instrument {inst!r}")
+    tokens = reprocess_query.parse_reprocess_query(query)
+    latest: dict[str, int] = {}
+    with store.connection(db) as conn:
+        for sid, lab in conn.execute(
+                "SELECT id, lab_id FROM samples WHERE instrument_id=? ORDER BY injection_dt, id",
+                (inst,)):
+            latest[lab] = sid           # later injections win
+    result = reprocess_query.resolve_query(tokens, list(latest))
+    result["sample_ids"] = [latest[name] for name in result["matched"]]
+    result["instrument"] = inst
+    return result
 
 
 @app.route("/api/reprocess", methods=["POST"])
 def api_reprocess():
-    body = request.get_json(force=True)
-    samples = body.get("samples", [])
-    # ``paths`` targets exact CDF files (e.g. a specific daily-QC run) instead of
-    # resolving a Lab ID to the newest matching CDF. Takes precedence when given.
-    paths = body.get("paths", [])
+    """Queue reprocess jobs (``pipeline.request_reprocess``) by ``sample_ids``,
+    or by ``{query, instrument}`` (a lab-ID selection must name its
+    instrument). The recorded blank and corrections are kept (D5) unless
+    ``use_current_blank``/``use_current_corrections``. Result-only samples
+    are refused; an unknown id fails the whole request (404)."""
+    _data, db = _hub()
+    body = request.get_json(silent=True) or {}
     # ``missing`` = Lab IDs the user asked for (e.g. inside a typed range) that
     # had no matching sample. Surface them in the persistent notification tray.
     missing = [str(m) for m in body.get("missing", []) if str(m).strip()]
+    try:
+        if body.get("query") is not None:
+            resolved = _resolve_lab_query(str(body.get("query") or ""), body.get("instrument"), db)
+            ids = resolved["sample_ids"]
+            missing += [m for m in resolved["missing"] if m not in missing]
+        else:
+            ids = _sample_ids(body.get("sample_ids"))
+    except ValueError as exc:
+        return _error(str(exc))
     if missing:
         preview = ", ".join(missing[:50]) + ("…" if len(missing) > 50 else "")
         notifications_mod.get_store().add(
             "warning",
             f"Re-process: {len(missing)} Lab ID(s) not found and skipped: {preview}",
         )
-    if not samples and not paths:
+    if not ids:
         if missing:
             return jsonify({"status": "no-match", "missing": missing})
-        return _error("No samples provided")
-    _, err = _looker_or_409()
-    if err:
-        return err
+        return _error("No samples provided (sample_ids)")
+    samples = [_sample_or_404(sid, db) for sid in ids]
 
-    count, pending = _enqueue_reprocess(paths, samples, label="Reprocess")
-    return jsonify({"status": "queued", "count": count, "pending": pending})
+    queued, job_ids, refused = [], [], []
+    for s in samples:
+        if not s["cdf_path"]:
+            refused.append({"sample_id": s["id"], "error": "a result-only sample has no CDF to reprocess"})
+            continue
+        job_ids.append(pipeline.request_reprocess(
+            s["id"], by=_who(), use_current_blank=bool(body.get("use_current_blank")),
+            use_current_corrections=bool(body.get("use_current_corrections")), db=db))
+        queued.append(s["id"])
+    return jsonify({"status": "queued", "count": len(queued), "sample_ids": queued,
+                    "job_ids": job_ids, "refused": refused})
 
 
 @app.route("/api/reprocess/status", methods=["GET"])
 def api_reprocess_status():
-    """Return reprocess progress for the toast to poll.
-
-    Separate from /api/scan/status because the background watcher continuously
-    rewrites _scan_status (resetting processed=0), which would clobber any
-    reprocess progress reported through it.
-    """
-    return jsonify(_reprocess_status)
-
-
-def _library_lab_ids() -> list[str]:
-    """Visible Lab IDs currently in the sample library (file cache)."""
-    if not _files_cache_ready.is_set():
-        _files_cache_ready.wait(timeout=2.0)
-    with _files_cache_lock:
-        return [f.get("name", "") for f in _files_cache if f.get("name")]
+    """Progress of the reprocess of ``?sample_ids=1,2,3`` for the toast:
+    ``pending`` = their queued/running process jobs; once none is left the
+    phase is ``done`` with ``processed`` (final, last run succeeded) and
+    ``errors``. Without ids: ``idle`` (even with no store yet: it is polled)."""
+    try:
+        ids = _sample_ids(_list_arg(request.args.get("sample_ids")))
+    except ValueError as exc:
+        return _error(str(exc))
+    if not ids:
+        return jsonify({"phase": "idle", "total": 0, "processed": 0, "errors": 0,
+                        "pending": 0, "samples": []})
+    _data, db = _hub()
+    samples = [_sample_or_404(sid, db) for sid in ids]
+    busy = {j["sample_id"] for state in ("queued", "running")
+            for j in store.jobs.list(state=state, kind=pipeline.PROCESS, db=db)}
+    pending = processed = errors = 0
+    out = []
+    for s in samples:
+        failed = s["status"] == "error" or (s["error"] or "").startswith("last reprocess failed")
+        if s["id"] in busy:
+            pending += 1
+        elif failed:
+            errors += 1
+        elif s["status"] == "final":
+            processed += 1
+        out.append({"sample_id": s["id"], "status": s["status"],
+                    "current_revision": s["current_revision"], "error": s["error"]})
+    return jsonify({"phase": "processing" if pending else "done", "total": len(samples),
+                    "processed": processed, "errors": errors, "pending": pending,
+                    "samples": out})
 
 
 @app.route("/api/reprocess/preview", methods=["POST"])
 def api_reprocess_preview():
-    """Expand a reprocess query (single IDs, lists, integer ranges) against the
-    library and return which samples match and which IDs are missing, so the
-    modal can preview before the user confirms.
-    """
-    body = request.get_json(force=True)
-    query = body.get("query", "")
+    """Expand a reprocess query (single IDs, lists, integer ranges) against one
+    instrument's samples and return which lab IDs match (with the sample ids
+    that would be queued) and which are missing, so the modal can preview
+    before the user confirms. ``instrument`` is required."""
+    _data, db = _hub()
+    body = request.get_json(silent=True) or {}
     try:
-        tokens = reprocess_query.parse_reprocess_query(query)
+        return jsonify(_resolve_lab_query(str(body.get("query") or ""), body.get("instrument"), db))
     except ValueError as exc:
         return _error(str(exc))
-    result = reprocess_query.resolve_query(tokens, _library_lab_ids())
-    return jsonify(result)
 
 
 # ── Persistent system-notification tray ──────────────────────────────
@@ -2839,107 +3006,6 @@ def api_notifications_dismiss(notif_id: str):
 def api_notifications_dismiss_all():
     count = notifications_mod.get_store().dismiss_all()
     return jsonify({"status": "ok", "removed": count})
-
-
-@app.route("/api/library/reindex-times", methods=["POST"])
-def api_library_reindex_times():
-    """Re-derive each row's InjectionDateTime from its source CDF and rewrite
-    that column, so the library re-sorts into true chronological (run) order.
-
-    Manual (Settings button) and queued on the background worker so it never
-    slows the normal cache build. Does NOT recompute distillation results.
-    """
-    pending = _task_queue.qsize()
-    _task_queue.put(_do_reindex_injection_times)
-    _ensure_task_worker()
-    _scan_log(f"Queued library reorder ({pending} task(s) ahead)")
-    return jsonify({"status": "queued", "pending": pending})
-
-
-def _do_reindex_injection_times() -> None:
-    """Worker body for /api/library/reindex-times."""
-    conf = settings_mod.load_settings()
-    csv_path = Path(conf.get("distill_output", str(paths.default_results_csv())))
-    if not csv_path.is_file():
-        notifications_mod.get_store().add("warning", "Library reorder: no results CSV found.")
-        return
-
-    _scan_log("Re-deriving injection times from CDFs…")
-    updated = 0
-    unreadable = 0
-
-    def _read_rows():
-        with csv_path.open("r", encoding="utf-8", newline="") as fh:
-            reader = csv.DictReader(fh)
-            return reader.fieldnames or [], list(reader)
-
-    try:
-        # Snapshot under the lock, then read every CDF with it released: that
-        # can take minutes on a share, and the table, the distillation curve
-        # and the Looker's appends all wait on this lock.
-        with distill._CSV_LOCK:
-            _fieldnames, snapshot = _read_rows()
-        derived, unreadable = distill.derive_injection_times(snapshot)
-
-        # Re-read and apply only to rows still present, so rows appended,
-        # deleted or edited meanwhile are kept as they now are.
-        with distill._CSV_LOCK:
-            fieldnames, rows = _read_rows()
-            updated = distill.apply_injection_times(rows, derived)
-
-            # Back up before mutating historical data.
-            try:
-                shutil.copy2(csv_path, csv_path.with_suffix(csv_path.suffix + ".bak"))
-            except Exception as exc:
-                LOGGER.warning("Could not back up CSV before reorder: %s", exc)
-
-            distill._atomic_write_csv(csv_path, fieldnames, rows)
-    except Exception as exc:
-        LOGGER.exception("Library reorder failed")
-        notifications_mod.get_store().add("error", f"Library reorder failed: {exc}")
-        return
-
-    try:
-        _rebuild_files_cache()
-    except Exception:
-        pass
-
-    msg = f"Library reorder complete: {updated} row(s) updated"
-    if unreadable:
-        msg += f", {unreadable} CDF(s) unreadable/missing"
-    _scan_log(msg)
-    notifications_mod.get_store().add("success", msg)
-
-
-@app.route("/api/rebuild-db", methods=["POST"])
-def api_rebuild_db():
-    _, err = _looker_or_409()
-    if err:
-        return err
-    pending = _task_queue.qsize()
-
-    def _do_rebuild():
-        _scan_stop.clear()
-        try:
-            lk = _get_looker()
-            _scan_log("Rebuilding database (backup + delete + rescan)...")
-            lk.rebuild_database(backup=True)
-            _scan_log("Database cleared. Starting full rescan...")
-            lk.scan_now()
-            _scan_log("Rebuild complete")
-            _publish_json(_scan_subscribers, _scan_sub_lock,
-                          {"type": "done", "processed": 0, "skipped": 0,
-                           "errors": 0, "total": 0})
-            try:
-                _rebuild_files_cache()
-            except Exception:
-                pass
-        except Exception as exc:
-            _scan_log(f"Rebuild error: {exc}")
-
-    _task_queue.put(_do_rebuild)
-    _ensure_task_worker()
-    return jsonify({"status": "queued", "pending": pending})
 
 
 # ===================================================================== #
@@ -3011,14 +3077,21 @@ def api_comparison_standards():
 
 @app.route("/api/comparison-standard", methods=["POST"])
 def api_add_comparison_standard():
+    body = request.get_json(force=True) or {}
+    src = None
+    if body.get("sample_id") is not None:
+        # A sample from the list: its current revision's CDF.
+        data, db = _hub()
+        s = _sample_or_404(body["sample_id"], db)
+        src = _revision_cdf(s, store.get_revision(s["id"], db=db) if s["current_revision"] else None,
+                            data)
     try:
-        body = request.get_json(force=True)
-        source_path = body.get("source_path", "").strip()
+        source_path = str(body.get("source_path") or src or "").strip()
         name = body.get("name", "").strip()
         if not source_path or not name:
-            return _error("source_path and name are required")
+            return _error("source_path (or sample_id) and name are required")
 
-        src = _safe_path(source_path)
+        src = src or _safe_path(source_path)
         if not src.is_file():
             return _error(f"Source file not found: {source_path}", 404)
 
@@ -3080,28 +3153,26 @@ def api_rename_comparison_standard():
 
 @app.route("/api/analysis", methods=["POST"])
 def api_analysis():
+    """Sample-vs-standard trend analysis for one sample (``sample_id``): the
+    CDF of its current revision, labelled with that revision's calibration
+    anchors."""
+    body = request.get_json(force=True) or {}
+    standard_name = str(body.get("standard_name") or "").strip()
+    if body.get("sample_id") is None:
+        return _error("sample_id is required")
+    if not standard_name:
+        return _error("standard_name is required")
+    data, db = _hub()
+    s = _sample_or_404(body["sample_id"], db)
+    sample_p = _revision_cdf(s, store.get_revision(s["id"], db=db) if s["current_revision"] else None,
+                             data)
     try:
-        body = request.get_json(force=True)
-        sample_path = body.get("sample_path", "").strip()
-        standard_name = body.get("standard_name", "").strip()
-        if not sample_path:
-            return _error("sample_path is required")
-        if not standard_name:
-            return _error("standard_name is required")
-
         conf = settings_mod.load_settings()
 
         # Resolve standard CDF path
-        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
-        std_path = comp_dir / f"{standard_name}.CDF"
-        if not std_path.is_file():
-            std_path = comp_dir / f"{standard_name}.cdf"
-        if not std_path.is_file():
+        std_path = _standard_path(conf, standard_name)
+        if std_path is None:
             return _error(f"Standard not found: {standard_name}", 404)
-
-        sample_p = _safe_path(sample_path)
-        if not sample_p.is_file():
-            return _error(f"Sample file not found: {sample_path}", 404)
 
         # Parameters with defaults from settings
         quantile = float(body.get("quantile", conf.get("analysis_quantile", 0.20)))
@@ -3123,20 +3194,10 @@ def api_analysis():
                 "c_end": int(r.get("c_end", 15)),
             })
 
-        # Load chromatograms
-        t_sample, y_sample = distill.gc_xy_from_cdf(sample_p)
-        t_std, y_std = distill.gc_xy_from_cdf(std_path)
+        t_common, y_sample, y_std_interp = _load_pair(sample_p, std_path)
 
-        # Interpolate standard onto sample time axis if different
-        if len(t_sample) != len(t_std) or not np.allclose(t_sample, t_std, atol=1e-6):
-            y_std_interp = np.interp(t_sample, t_std, y_std)
-            t_common = t_sample
-        else:
-            y_std_interp = y_std
-            t_common = t_sample
-
-        # Calibration data for carbon mapping
-        cal_times, cal_carbons = distill.calibration_ladder(conf)
+        # Calibration data for carbon mapping: the revision's anchors
+        cal_times, cal_carbons = _revision_ladder(s, conf, db, data)
 
         # Trend difference + both detection channels (trend + raw-diff spikes)
         spike_min_width = float(conf.get(
@@ -3163,6 +3224,7 @@ def api_analysis():
 
         x_max = float(body.get("x_max_min", conf.get("analysis_x_max_min", 7.0)))
         result = {
+            "sample_id": s["id"],
             "trend": {
                 "sample_x": t_common.tolist(),
                 "sample_y": y_sample.tolist(),
@@ -3187,27 +3249,51 @@ def api_analysis():
         return _error(str(exc), 500)
 
 
+def _standard_path(conf: dict, standard_name: str) -> Optional[Path]:
+    comp_dir = _standards_dir(conf)
+    for cand in (comp_dir / f"{standard_name}.CDF", comp_dir / f"{standard_name}.cdf"):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _load_pair(sample_p: Path, std_path: Path):
+    """``(t, y_sample, y_standard)`` with the standard on the sample's time axis."""
+    t_sample, y_sample = distill.gc_xy_from_cdf(sample_p)
+    t_std, y_std = distill.gc_xy_from_cdf(std_path)
+    if len(t_sample) != len(t_std) or not np.allclose(t_sample, t_std, atol=1e-6):
+        y_std = np.interp(t_sample, t_std, y_std)
+    return t_sample, y_sample, y_std
+
+
 @app.route("/api/best-fit", methods=["POST"])
 def api_best_fit():
-    """Full fuel-type best-fit classification for one sample: label, score,
-    per-standard ranking, and mix breakdown (used by the Analysis tab)."""
+    """Full fuel-type best-fit classification for one sample (``sample_id``):
+    label, score, per-standard ranking and mix breakdown (the Analysis tab),
+    plus ``recorded``: the best fit its current revision reported."""
+    body = request.get_json(force=True) or {}
+    if body.get("sample_id") is None:
+        return _error("sample_id is required")
+    data, db = _hub()
+    s = _sample_or_404(body["sample_id"], db)
+    rev = store.get_revision(s["id"], db=db) if s["current_revision"] else None
+    p = _revision_cdf(s, rev, data)
+    recorded = {"best_fit": rev["best_fit"] if rev else None,
+                "fit_score": rev["fit_score"] if rev else None,
+                "revision": rev["revision"] if rev else None}
     try:
         if fuel_fit is None:
             return _error("fuel_fit module not available", 500)
-        body = request.get_json(force=True)
-        path = body.get("path", "").strip()
-        if not path:
-            return _error("path is required")
-        p = _safe_path(path)
-        if not p.is_file():
-            return _error(f"File not found: {path}", 404)
-
         conf = settings_mod.load_settings()
         res = _classify_cdf(str(p), conf)
         if res is None:
             return jsonify({"label": "", "best_standard": "", "score": 0.0,
-                            "ranking": [], "mix": None})
-        return jsonify(res)
+                            "ranking": [], "mix": None, "recorded": recorded})
+        fp = _cache_fingerprints(conf)["bestfit_fp"]
+        if fp is not None:
+            store.sample_cache.put(s["id"], bestfit_fingerprint=fp, best_fit=res["label"],
+                                   fit_score=float(res["score"]), db=db)
+        return jsonify(dict(res, recorded=recorded))
     except Exception as exc:
         LOGGER.exception("Best-fit classification failed")
         return _error(str(exc), 500)
@@ -3219,43 +3305,50 @@ def api_best_fit():
 
 @app.route("/api/export-lims", methods=["POST"])
 def api_export_lims():
-    """Export the selected sample(s) to LIMS by sending them down the SAME
-    distillation tunnel as reprocess: each is (re)computed and a new row is
-    appended to the results CSV (``distill_output``). Batch-aware via the
-    library multi-selection. One tunnel, one write path — not a second system.
-
-    Body: ``{"paths": [...], "samples": [...]}`` (same shape as /api/reprocess).
-    """
-    body = request.get_json(force=True) or {}
-    samples = body.get("samples", [])
-    paths = body.get("paths", [])
-    if not samples and not paths:
-        return _error("No samples provided")
-    _, err = _looker_or_409()
-    if err:
-        return err
-
-    count, pending = _enqueue_reprocess(paths, samples, label="Export to LIMS")
-    return jsonify({"status": "queued", "count": count, "pending": pending})
+    """Export to LIMS by ``sample_ids``: for each sample that passes the gate
+    (final, and not backfill unless released) ``pipeline.export_to_lims``
+    writes a new revision (``export-lims``, the current values copied, never
+    recomputed) and its export row in one transaction. Samples that fail the
+    gate are refused and listed; 409 if none was exported. Any unknown id
+    fails the whole request (404) before anything is written."""
+    data, db = _hub()
+    body = request.get_json(silent=True) or {}
+    try:
+        ids = _sample_ids(body.get("sample_ids"))
+    except ValueError as exc:
+        return _error(str(exc))
+    if not ids:
+        return _error("No samples provided (sample_ids)")
+    for sid in ids:
+        _sample_or_404(sid, db)
+    exported, refused = [], []
+    for sid in ids:
+        try:
+            r = pipeline.export_to_lims(sid, by=_who(), db=db, data_dir=data)
+            exported.append({"sample_id": sid, "revision": r["revision"], "seq": r["seq"]})
+        except pipeline.NotExportable as exc:
+            refused.append({"sample_id": sid, "error": str(exc)})
+    if refused:
+        notifications_mod.get_store().add(
+            "warning", f"Export to LIMS: {len(refused)} of {len(ids)} sample(s) refused — "
+                       f"{refused[0]['error']}")
+    return jsonify({"exported": exported, "refused": refused}), (200 if exported else 409)
 
 
 @app.route("/api/export-pdf", methods=["POST"])
 def api_export_pdf():
+    body = request.get_json(force=True) or {}
+    if body.get("sample_id") is None:
+        return _error("sample_id is required")
+    data, db = _hub()
+    s = _sample_or_404(body["sample_id"], db)
+    p = _revision_cdf(s, store.get_revision(s["id"], db=db) if s["current_revision"] else None, data)
     try:
-        body = request.get_json(force=True)
-        cdf_path = body.get("path", "").strip()
-        if not cdf_path:
-            return _error("path is required")
-        p = _safe_path(cdf_path)
-        if not p.is_file():
-            return _error(f"File not found: {cdf_path}", 404)
-
         if go is None or pio is None:
             return _error("Plotly/kaleido not installed for PDF generation", 500)
 
-        pdf_bytes = _generate_chromatogram_pdf(p)
-        sample, _ = distill.cdf_metadata(p)
-        filename = f"{sample}_chromatogram.pdf"
+        pdf_bytes = _generate_chromatogram_pdf(p, title=_sample_title(s))
+        filename = f"{s['lab_id']}_chromatogram.pdf"
 
         return send_file(
             io.BytesIO(pdf_bytes),
@@ -3267,19 +3360,27 @@ def api_export_pdf():
         return _error(str(exc), 500)
 
 
+def _sample_title(s: dict) -> str:
+    return f"{s['lab_id']} - {str(s['injection_dt'])[:16]}"
+
+
 @app.route("/api/export-comparison", methods=["POST"])
 def api_export_comparison():
+    body = request.get_json(force=True) or {}
     try:
-        body = request.get_json(force=True)
-        sample_paths = body.get("sample_paths", [])
-        if not sample_paths:
-            return _error("sample_paths is required")
-
+        ids = _sample_ids(body.get("sample_ids"))
+    except ValueError as exc:
+        return _error(str(exc))
+    if not ids:
+        return _error("sample_ids is required")
+    data, db = _hub()
+    samples = [_sample_or_404(sid, db) for sid in ids]
+    try:
         if go is None or pio is None:
             return _error("Plotly/kaleido not installed", 500)
 
         conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
+        comp_dir = _standards_dir(conf)
         standard_paths = []
         if comp_dir.is_dir():
             for fp in comp_dir.iterdir():
@@ -3290,12 +3391,14 @@ def api_export_comparison():
         export_dir.mkdir(parents=True, exist_ok=True)
 
         generated_files: list[str] = []
-        for sp in sample_paths:
-            p = _safe_path(sp)
-            if not p.is_file():
+        for s in samples:
+            try:
+                p = _revision_cdf(s, store.get_revision(s["id"], db=db) if s["current_revision"]
+                                  else None, data)
+            except SampleNotFound:
                 continue
-            sample_name, _ = distill.cdf_metadata(p)
-            html_content = _generate_comparison_html(p, standard_paths)
+            sample_name = s["lab_id"]
+            html_content = _generate_comparison_html(p, standard_paths, sample_name=sample_name)
 
             out_file = export_dir / f"{sample_name}_comparison.html"
             out_file.write_text(html_content, encoding="utf-8")
@@ -3327,29 +3430,24 @@ def api_export_comparison():
         return _error(str(exc), 500)
 
 
-def _run_export_analysis(params: dict, conf: dict) -> tuple[dict, list[dict]]:
+def _run_export_analysis(sample: dict, params: dict, conf: dict, data: Path, db):
     """Shared analysis pass for the report export routes.
 
     Resolves the standard, runs both detection channels (trend + spike, same
-    as ``/api/analysis``), and returns ``(analysis_result, ranges)`` ready for
-    ``_generate_analysis_report_pdf``.  Raises ``ValueError`` with a
-    user-facing message on missing files.
+    as ``/api/analysis``) on the sample's current-revision CDF, and returns
+    ``(analysis_result, ranges, ladder)`` ready for
+    ``_generate_analysis_report_pdf``; the ladder is the revision's
+    calibration anchors. Raises ``ValueError`` with a user-facing message on
+    a missing standard, ``SampleNotFound`` on a missing CDF.
     """
-    sample_path = params.get("sample_path", "").strip()
-    standard_name = params.get("standard_name", "").strip()
-    if not sample_path or not standard_name:
-        raise ValueError("sample_path and standard_name are required")
-
-    comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
-    std_path = comp_dir / f"{standard_name}.CDF"
-    if not std_path.is_file():
-        std_path = comp_dir / f"{standard_name}.cdf"
-    if not std_path.is_file():
+    standard_name = str(params.get("standard_name") or "").strip()
+    if not standard_name:
+        raise ValueError("standard_name is required")
+    std_path = _standard_path(conf, standard_name)
+    if std_path is None:
         raise ValueError(f"Standard not found: {standard_name}")
-
-    sample_p = _safe_path(sample_path)
-    if not sample_p.is_file():
-        raise ValueError(f"Sample not found: {sample_path}")
+    sample_p = _revision_cdf(sample, store.get_revision(sample["id"], db=db)
+                             if sample["current_revision"] else None, data)
 
     quantile = float(params.get("quantile", conf.get("analysis_quantile", 0.20)))
     window = int(params.get("window", conf.get("analysis_window", 301)))
@@ -3359,17 +3457,9 @@ def _run_export_analysis(params: dict, conf: dict) -> tuple[dict, list[dict]]:
     thresh_significant = float(params.get("thresh_significant", conf.get("analysis_thresh_significant", 2000)))
     ranges = analysis_core.resolve_report_ranges(params.get("ranges"), conf)
 
-    t_sample, y_sample = distill.gc_xy_from_cdf(sample_p)
-    t_std, y_std = distill.gc_xy_from_cdf(std_path)
+    t_common, y_sample, y_std_interp = _load_pair(sample_p, std_path)
 
-    if len(t_sample) != len(t_std) or not np.allclose(t_sample, t_std, atol=1e-6):
-        y_std_interp = np.interp(t_sample, t_std, y_std)
-        t_common = t_sample
-    else:
-        y_std_interp = y_std
-        t_common = t_sample
-
-    cal_times, cal_carbons = distill.calibration_ladder(conf)
+    cal_times, cal_carbons = _revision_ladder(sample, conf, db, data)
 
     spike_min_width = float(conf.get(
         "analysis_spike_min_width_min",
@@ -3402,28 +3492,32 @@ def _run_export_analysis(params: dict, conf: dict) -> tuple[dict, list[dict]]:
         "conclusion": params.get("conclusion") or conclusion_text,
         "bullets": params.get("bullets") or bullets_text,
     }
-    return analysis_result, ranges
+    return analysis_result, ranges, (cal_times, cal_carbons)
 
 
 @app.route("/api/export-analysis-report", methods=["POST"])
 def api_export_analysis_report():
+    body = request.get_json(force=True) or {}
+    if body.get("sample_id") is None:
+        return _error("sample_id is required")
+    data, db = _hub()
+    s = _sample_or_404(body["sample_id"], db)
     try:
-        body = request.get_json(force=True)
-
         if go is None or pio is None:
             return _error("Plotly/kaleido not installed", 500)
 
         conf = settings_mod.load_settings()
         try:
-            analysis_result, ranges = _run_export_analysis(body, conf)
+            analysis_result, ranges, ladder = _run_export_analysis(s, body, conf, data, db)
         except ValueError as exc:
             return _error(str(exc), 404 if "not found" in str(exc) else 400)
 
-        report_bytes = _generate_analysis_report_pdf(body, analysis_result, ranges=ranges)
+        params = dict(body, lab_id=s["lab_id"])
+        report_bytes = _generate_analysis_report_pdf(params, analysis_result, ranges=ranges,
+                                                     ladder=ladder)
 
         doc_name = body.get("doc_name", "analysis_report")
-        lab_id = body.get("lab_id", "sample")
-        filename = f"{lab_id}_{doc_name}.pdf"
+        filename = f"{s['lab_id']}_{doc_name}.pdf"
 
         return send_file(
             io.BytesIO(report_bytes),
@@ -3431,6 +3525,8 @@ def api_export_analysis_report():
             as_attachment=True,
             download_name=filename,
         )
+    except SampleNotFound:
+        raise
     except Exception as exc:
         LOGGER.exception("Analysis report generation failed")
         return _error(str(exc), 500)
@@ -3438,43 +3534,35 @@ def api_export_analysis_report():
 
 @app.route("/api/export-analysis-reports-zip", methods=["POST"])
 def api_export_analysis_reports_zip():
-    """Generate multiple analysis report PDFs and return them in a single ZIP."""
+    """Generate multiple analysis report PDFs (items by ``sample_id``) and
+    return them in a single ZIP. Unknown samples and missing standards are
+    skipped."""
+    body = request.get_json(force=True) or {}
+    items = body.get("items", [])
+    if not items:
+        return _error("items list is required")
+    data, db = _hub()
     try:
-        body = request.get_json(force=True)
-        items = body.get("items", [])
-        if not items:
-            return _error("items list is required")
-
         if go is None or pio is None:
             return _error("Plotly/kaleido not installed", 500)
 
         conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
 
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for item in items:
-                sample_path = item.get("sample_path", "").strip()
-                standard_name = item.get("standard_name", "").strip()
-                if not sample_path or not standard_name:
-                    continue
-
-                std_path = comp_dir / f"{standard_name}.CDF"
-                if not std_path.is_file():
-                    std_path = comp_dir / f"{standard_name}.cdf"
-                if not std_path.is_file():
-                    continue
-
                 try:
-                    analysis_result, ranges = _run_export_analysis(item, conf)
-                except ValueError as exc:
+                    s = _sample_or_404(item.get("sample_id"), db)
+                    analysis_result, ranges, ladder = _run_export_analysis(s, item, conf, data, db)
+                except (ValueError, TypeError, SampleNotFound) as exc:
                     LOGGER.warning("Skipping ZIP item: %s", exc)
                     continue
 
-                report_bytes = _generate_analysis_report_pdf(item, analysis_result, ranges=ranges)
-                lab_id = item.get("lab_id", "sample")
+                params = dict(item, lab_id=s["lab_id"])
+                report_bytes = _generate_analysis_report_pdf(params, analysis_result, ranges=ranges,
+                                                             ladder=ladder)
                 doc_name = item.get("doc_name", "analysis_report")
-                filename = f"{lab_id}_{doc_name}.pdf"
+                filename = f"{s['lab_id']}_{doc_name}.pdf"
                 zf.writestr(filename, report_bytes)
 
         buf.seek(0)
@@ -3527,13 +3615,35 @@ def api_qbench_credentials():
 
 @app.route("/api/qbench-upload", methods=["POST"])
 def api_qbench_upload():
+    """Queue analysis-report uploads to QBench by ``sample_id``. The server
+    resolves each sample's lab ID and CDF and builds the PDF itself (a
+    client ``pdf_path``/``sample_path`` is ignored). Every sample must pass
+    the export gate (final; backfill only once released), checked here and
+    again just before its upload: any refusal refuses the whole request (409)
+    and nothing is queued. A successful upload records ``qbench_revision``
+    (the revision the PDF was built from) and ``qbench_uploaded_at``."""
+    body = request.get_json(force=True) or {}
+    data, db = _hub()
+    new_queue, refused = [], []
+    for item in body.get("queue") or []:
+        if not isinstance(item, dict):
+            return _error("queue items must be objects {sample_id, standard_name, ...}")
+        try:
+            sid = int(item.get("sample_id"))
+        except (TypeError, ValueError):
+            return _error("every queue item needs a sample_id")
+        s = _sample_or_404(sid, db)
+        if not store.samples.is_gated(sid, db=db):
+            refused.append({"sample_id": sid, "lab_id": s["lab_id"], "error": _gate_reason(s)})
+        clean = {k: v for k, v in item.items() if k not in ("pdf_path", "sample_path", "lab_id")}
+        new_queue.append(dict(clean, sample_id=sid, lab_id=s["lab_id"]))
+    if not new_queue:
+        return _error("queue is required (list of {sample_id, standard_name})")
+    if refused:
+        return jsonify({"error": f"{len(refused)} sample(s) can't be uploaded to QBench",
+                        "refused": refused}), 409
     if qbench_pdf_uploader is None:
         return _error("qbench_pdf_uploader module not available", 500)
-
-    body = request.get_json(force=True)
-    new_queue = body.get("queue", [])
-    if not new_queue:
-        return _error("queue is required (list of {lab_id, pdf_path})")
 
     username = body.get("username", "").strip()
     password = body.get("password", "").strip()
@@ -3596,6 +3706,9 @@ def api_qbench_upload():
         "username": username, "password": password,
         "client_id": client_id, "client_secret": client_secret,
     })
+
+    hub_data, hub_db = data, db
+    item_revs: dict[int, Optional[int]] = {}   # queue index -> revision its PDF was built from
 
     def _do_upload():
       login_fail_count = 0
@@ -3693,77 +3806,87 @@ def api_qbench_upload():
                     _emit_item(idx, "?", "error", msg="No lab_id")
                     continue
 
-                pdf_path = item.get("pdf_path", "").strip()
+                pdf_path = ""
+                sid = item.get("sample_id")
 
-                # ── Step 0: Generate report if needed ─────────────────
+                # ── Step 0: Generate the report from the stored sample ─
                 _emit_item(idx, lab_id, "generating", step=0, msg="Generating report...")
-                if not pdf_path or not Path(pdf_path).is_file():
-                    sample_path = item.get("sample_path", "").strip()
-                    standard_name = item.get("standard_name", "").strip()
-                    if not sample_path or not standard_name:
+                # The gate again: the sample may have changed since it was queued.
+                sample_row = store.samples.get(sid, db=hub_db)
+                if sample_row is None or not store.samples.is_gated(sid, db=hub_db):
+                    fail_count += 1
+                    _emit_item(idx, lab_id, "error", msg="Not exportable: " + (
+                        _gate_reason(sample_row) if sample_row else "sample no longer exists"))
+                    continue
+                rev_no = sample_row["current_revision"]
+                item_revs[idx] = rev_no
+                standard_name = item.get("standard_name", "").strip()
+                if not standard_name:
+                    fail_count += 1
+                    _emit_item(idx, lab_id, "error", msg="No standard")
+                    continue
+                try:
+                    sample_p = _revision_cdf(sample_row, store.get_revision(sid, rev_no, db=hub_db),
+                                             hub_data)
+                    report_params = {
+                        "lab_id": lab_id,
+                        "doc_name": item.get("sample_name", "GC Analysis"),
+                        "standard_name": standard_name,
+                        "conclusion": item.get("conclusion", ""),
+                        "bullets": item.get("bullets", ""),
+                        "overlay_standards": item.get("overlay_standards", []),
+                    }
+                    comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
+                    std_path = comp_dir / f"{standard_name}.CDF"
+                    if not std_path.is_file():
+                        std_path = comp_dir / f"{standard_name}.cdf"
+                    if not std_path.is_file():
                         fail_count += 1
-                        _emit_item(idx, lab_id, "error", msg="No sample/standard")
+                        _emit_item(idx, lab_id, "error", msg=f"Standard '{standard_name}' not found")
                         continue
-                    try:
-                        report_params = {
-                            "lab_id": lab_id,
-                            "doc_name": item.get("sample_name", "GC Analysis"),
-                            "standard_name": standard_name,
-                            "conclusion": item.get("conclusion", ""),
-                            "bullets": item.get("bullets", ""),
-                            "overlay_standards": item.get("overlay_standards", []),
-                        }
-                        sample_p = _safe_path(sample_path)
-                        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
-                        std_path = comp_dir / f"{standard_name}.CDF"
-                        if not std_path.is_file():
-                            std_path = comp_dir / f"{standard_name}.cdf"
-                        if not std_path.is_file():
-                            fail_count += 1
-                            _emit_item(idx, lab_id, "error", msg=f"Standard '{standard_name}' not found")
-                            continue
 
-                        q = float(conf.get("analysis_quantile", 0.20))
-                        w = int(conf.get("analysis_window", 301))
-                        sig = float(conf.get("analysis_sigma", 34.0))
-                        tm = float(conf.get("analysis_thresh_marginal", 100))
-                        tmod = float(conf.get("analysis_thresh_moderate", 500))
-                        ts = float(conf.get("analysis_thresh_significant", 2000))
+                    q = float(conf.get("analysis_quantile", 0.20))
+                    w = int(conf.get("analysis_window", 301))
+                    sig = float(conf.get("analysis_sigma", 34.0))
+                    tm = float(conf.get("analysis_thresh_marginal", 100))
+                    tmod = float(conf.get("analysis_thresh_moderate", 500))
+                    ts = float(conf.get("analysis_thresh_significant", 2000))
 
-                        t_s, y_s = distill.gc_xy_from_cdf(sample_p)
-                        t_st, y_st = distill.gc_xy_from_cdf(std_path)
-                        if len(t_s) != len(t_st) or not np.allclose(t_s, t_st, atol=1e-6):
-                            y_st = np.interp(t_s, t_st, y_st)
-                        trend_s = compute_trend_line(t_s, y_s, q, w, sig)
-                        trend_st = compute_trend_line(t_s, y_st, q, w, sig)
-                        diff = trend_s - trend_st
-                        cal_times, cal_carbons = distill.calibration_ladder(conf)
-                        segs = detect_deviation_segments(diff, t_s, tm, tmod, ts, cal_times, cal_carbons) if cal_times else []
+                    t_s, y_s = distill.gc_xy_from_cdf(sample_p)
+                    t_st, y_st = distill.gc_xy_from_cdf(std_path)
+                    if len(t_s) != len(t_st) or not np.allclose(t_s, t_st, atol=1e-6):
+                        y_st = np.interp(t_s, t_st, y_st)
+                    trend_s = compute_trend_line(t_s, y_s, q, w, sig)
+                    trend_st = compute_trend_line(t_s, y_st, q, w, sig)
+                    diff = trend_s - trend_st
+                    cal_times, cal_carbons = _revision_ladder(sample_row, conf, hub_db, hub_data)
+                    segs = detect_deviation_segments(diff, t_s, tm, tmod, ts, cal_times, cal_carbons) if cal_times else []
 
-                        ar = {
-                            "sample_trend": {"x": t_s.tolist(), "y": trend_s.tolist()},
-                            "std_trend": {"x": t_s.tolist(), "y": trend_st.tolist()},
-                            "sample_raw": {"x": t_s.tolist(), "y": y_s.tolist()},
-                            "std_raw": {"x": t_s.tolist(), "y": y_st.tolist()},
-                            "difference": {"x": t_s.tolist(), "y": diff.tolist()},
-                            "segments": segs,
-                            "conclusion": report_params.get("conclusion", ""),
-                            "bullets": report_params.get("bullets", ""),
-                        }
-                        report_bytes = _generate_analysis_report_pdf(report_params, ar)
-                        safe_id = lab_id.replace("/", "_").replace("\\", "_")
-                        out_file = export_dir / f"{safe_id}_analysis.pdf"
-                        out_file.write_bytes(report_bytes)
-                        pdf_path = str(out_file)
-                    except Exception as exc:
-                        fail_count += 1
-                        _emit_item(idx, lab_id, "error", msg=f"Report failed: {exc}")
-                        LOGGER.exception("Report generation failed for %s", lab_id)
-                        # Soft precheck: on very first item error, emit globally
-                        if idx == 0:
-                            _emit_overall("precheck_failed",
-                                          f"First sample failed: {exc}")
-                        continue
+                    ar = {
+                        "sample_trend": {"x": t_s.tolist(), "y": trend_s.tolist()},
+                        "std_trend": {"x": t_s.tolist(), "y": trend_st.tolist()},
+                        "sample_raw": {"x": t_s.tolist(), "y": y_s.tolist()},
+                        "std_raw": {"x": t_s.tolist(), "y": y_st.tolist()},
+                        "difference": {"x": t_s.tolist(), "y": diff.tolist()},
+                        "segments": segs,
+                        "conclusion": report_params.get("conclusion", ""),
+                        "bullets": report_params.get("bullets", ""),
+                    }
+                    report_bytes = _generate_analysis_report_pdf(report_params, ar,
+                                                                 ladder=(cal_times, cal_carbons))
+                    safe_id = lab_id.replace("/", "_").replace("\\", "_")
+                    out_file = export_dir / f"{safe_id}_analysis.pdf"
+                    out_file.write_bytes(report_bytes)
+                    pdf_path = str(out_file)
+                except Exception as exc:
+                    fail_count += 1
+                    _emit_item(idx, lab_id, "error", msg=f"Report failed: {exc}")
+                    LOGGER.exception("Report generation failed for %s", lab_id)
+                    # Soft precheck: on very first item error, emit globally
+                    if idx == 0:
+                        _emit_overall("precheck_failed",
+                                      f"First sample failed: {exc}")
+                    continue
 
                 _emit_item(idx, lab_id, "report_ok", step=1, msg="Report ready")
 
@@ -3797,6 +3920,7 @@ def api_qbench_upload():
                     if result:
                         ok_count += 1
                         login_fail_count = 0
+                        _record_qbench_upload(item.get("sample_id"), item_revs.get(idx), hub_db)
                         _emit_item(idx, lab_id, "ok", step=steps_per + 2, msg="Uploaded")
                         if not _creds_saved and username and password:
                             _save_qbench_credentials(username, password)
@@ -3859,6 +3983,8 @@ def api_qbench_upload():
                                 )
                                 if result:
                                     ok_count += 1
+                                    _record_qbench_upload(item.get("sample_id"),
+                                                          item_revs.get(idx), hub_db)
                                     _emit_item(idx, lab_id, "ok",
                                                step=steps_per + 2, msg="Uploaded")
                                     if not _creds_saved and username and password:
@@ -4202,19 +4328,9 @@ def _init_app() -> None:
         except Exception:
             LOGGER.exception("CSV migration failed (non-fatal)")
 
-        try:
-            LOGGER.info("Loading early-signal cache ...")
-            _load_early_signal_cache()
-            _load_bestfit_cache()
-        except Exception:
-            LOGGER.exception("Early-signal cache load failed (non-fatal)")
-
-        try:
-            LOGGER.info("Building processed-file cache ...")
-            _rebuild_files_cache()
-        except Exception:
-            LOGGER.exception("File cache build failed")
-            _files_cache_ready.set()  # unblock /api/files anyway
+        # The sample list, flags and best-fit come from the hub store
+        # (sample_cache); the JSON caches and the CSV-built file cache are
+        # no longer loaded.
 
         try:
             LOGGER.info("Initialising Looker (this may take a moment with many files)...")
