@@ -174,6 +174,11 @@ app = Flask(__name__, static_folder="static", template_folder="templates")
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB upload limit
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # disable static file caching in dev
 
+import admin_auth  # noqa: E402  (2B1: admin password + /admin/setup)
+import ingest_api  # noqa: E402  (2B1: the agent API, contract §1)
+app.register_blueprint(admin_auth.bp)
+app.register_blueprint(ingest_api.bp)
+
 # ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
@@ -963,18 +968,12 @@ def _record_qbench_upload(sample_id, revision: Optional[int], db) -> None:
         LOGGER.exception("Could not record the QBench upload of sample %s", sample_id)
 
 
-# OPEN ITEM (spec: "Open items"): the admin password is a hardcoded "admin".
-# It should become a hashed setting in the data dir; that changes who can do
-# what, so it waits for Ryan's call. Every gated route goes through here.
-_ADMIN_PASSWORD = b"admin"
-
-
 def _check_admin(body) -> bool:
-    """True when the request body carries the admin password (constant-time)."""
-    supplied = (body or {}).get("password") if isinstance(body, dict) else None
-    if not isinstance(supplied, str):
-        return False
-    return hmac.compare_digest(supplied.encode("utf-8"), _ADMIN_PASSWORD)
+    """True when the request body carries the admin password. Every gated
+    route goes through here. ``admin_auth`` (D13) checks the salted PBKDF2
+    hash with hmac.compare_digest and a per-client backoff; until a password
+    is set at /admin/setup, every admin action is refused with that message."""
+    return admin_auth.check_admin_body(body)
 
 
 # ===================================================================== #
@@ -1039,9 +1038,15 @@ def _admin_json_body():
     """The JSON body of an admin-gated route, or an error response. These
     routes require ``Content-Type: application/json`` on top of the
     cross-site guard, so no form or text/plain post can reach them."""
+    admin_auth.limit_json_body()     # 64 KiB, before anything reads the body (2B1 review I4)
     if not request.is_json:
         return None, _error("Expected Content-Type: application/json", 415)
-    return request.get_json(silent=True) or {}, None
+    try:
+        return request.get_json(silent=True) or {}, None
+    except RecursionError:                       # nested too deep (2B1 re-review G2)
+        return None, _error("The request body is nested too deeply", 400)
+    except admin_auth.RequestEntityTooLarge:
+        return None, _error("The request body is too large.", 413)
 
 
 # ===================================================================== #
@@ -1071,6 +1076,9 @@ _NON_ACTIVITY_PATHS = {
     "/api/scan/status",
     "/api/reprocess/status",
     "/api/qbench-upload-status",
+    # 2B1: GC-PC agents are machines, never users (ingest_api)
+    "/api/ingest", "/api/agent/heartbeat", "/api/agent/results",
+    "/api/agent/package", "/api/agent/package.zip",
 }
 
 

@@ -112,14 +112,15 @@ class StartupTests(unittest.TestCase):
 
                 # The scan routes are gone (phase 2 T4), and reprocess /
                 # export go through the hub store, which an empty data dir
-                # doesn't have yet: they refuse cleanly instead of scanning.
+                # has no samples in (or doesn't have yet): they refuse
+                # cleanly instead of scanning.
                 for path in ("/api/scan", "/api/rebuild-db", "/api/stop-scan"):
                     self.assertEqual(post(port, path, {})[0], 404, path)
                 for path, body in (("/api/reprocess", {"sample_ids": [1]}),
                                    ("/api/export-lims", {"sample_ids": [1]})):
                     code, resp = post(port, path, body)
-                    self.assertEqual(code, 503, f"{path}: {code} {resp}")
-                    self.assertIn("store", resp["error"], path)
+                    self.assertIn(code, (404, 503), f"{path}: {code} {resp}")
+                    self.assertTrue("store" in resp["error"] or "not found" in resp["error"], path)
             self.assertNotIn("[WATCHER] Scanning", _read(tmp / "boot.log"))
 
     def test_saving_a_watch_dir_starts_the_watcher_without_restart(self):

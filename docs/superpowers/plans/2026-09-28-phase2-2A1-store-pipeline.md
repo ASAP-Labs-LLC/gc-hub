@@ -350,3 +350,5 @@ only), `tests/pipeline/`.
     spaces to the CSV.
   - Run `pipeline.cdf_problem` over the whole real share during the dry run
     and report truncated files.
+
+**Release rule (T4 review):** T4 (routes/UI on the store) and T5 (startup ownership, legacy removal) merge and ship **together**. Never tag between them: without T5, the app still starts the v1 Looker and no Worker.

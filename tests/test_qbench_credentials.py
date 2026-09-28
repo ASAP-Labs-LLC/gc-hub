@@ -24,7 +24,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bootapp import ROOT, booted, get, post, send  # noqa: E402
+from bootapp import ROOT, TEST_ADMIN_PASSWORD, booted, get, post, send, setup_admin  # noqa: E402
 
 sys.path.insert(0, str(ROOT))
 import qbench_secrets  # noqa: E402
@@ -213,8 +213,12 @@ class AdminGateShapeTests(unittest.TestCase):
         self.fail(f"{name} not defined in app.py")
 
     def test_check_admin_uses_compare_digest(self):
+        # 2B1 (D13): the gate is admin_auth's salted hash, compared in constant time.
         body = ast.unparse(self._func("_check_admin"))
-        self.assertIn("compare_digest", body)
+        self.assertIn("admin_auth.check_admin_body(", body)
+        auth = (ROOT / "admin_auth.py").read_text(encoding="utf-8")
+        self.assertIn("hmac.compare_digest", auth)
+        self.assertNotIn("_ADMIN_PASSWORD", self.src)
 
     def test_both_gated_routes_use_check_admin(self):
         for name in ("api_save_analysis_defaults", "api_qbench_api_credentials_post"):
@@ -290,6 +294,7 @@ class CredentialRouteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t, fake_token_server() as url:
             tmp = Path(t)
             with booted(tmp, extra_env={"QBENCH_TOKEN_URL": url}) as (port, _p, _data, home):
+                setup_admin(port, _data)   # 2B1: no default admin password
                 store = home / "qbench.json"
                 seen = []
 
@@ -317,7 +322,7 @@ class CredentialRouteTests(unittest.TestCase):
 
                 # Blank fields: 400.
                 code, body = post(port, ROUTE, {"client_id": " ", "client_secret": GOOD_SECRET,
-                                                "password": "admin"})
+                                                "password": TEST_ADMIN_PASSWORD})
                 seen.append(body)
                 self.assertEqual(code, 400)
                 self.assertFalse(store.exists())
@@ -326,7 +331,7 @@ class CredentialRouteTests(unittest.TestCase):
                 # nothing written, upstream echo not forwarded.
                 code, body = post(port, ROUTE, {"client_id": GOOD_ID,
                                                 "client_secret": BAD_SECRET,
-                                                "password": "admin"})
+                                                "password": TEST_ADMIN_PASSWORD})
                 seen.append(body)
                 self.assertEqual(code, 400)
                 self.assertIn("401", body["error"])
@@ -337,7 +342,7 @@ class CredentialRouteTests(unittest.TestCase):
                 # Accepted: 200, store written, status reflects it.
                 code, body = post(port, ROUTE, {"client_id": GOOD_ID,
                                                 "client_secret": GOOD_SECRET,
-                                                "password": "admin"})
+                                                "password": TEST_ADMIN_PASSWORD})
                 seen.append(body)
                 self.assertEqual(code, 200, body)
                 self.assertIs(body["configured"], True)
@@ -353,7 +358,7 @@ class CredentialRouteTests(unittest.TestCase):
                 # A later rejected attempt leaves the saved pair alone.
                 code, body = post(port, ROUTE, {"client_id": "other-id",
                                                 "client_secret": BAD_SECRET,
-                                                "password": "admin"})
+                                                "password": TEST_ADMIN_PASSWORD})
                 seen.append(body)
                 self.assertEqual(code, 400)
                 self.assertEqual(json.loads(store.read_text())["client_id"], GOOD_ID)
@@ -375,9 +380,10 @@ class CredentialRouteTests(unittest.TestCase):
             tmp = Path(t)
             with booted(tmp, extra_env={"QBENCH_TOKEN_URL": "http://127.0.0.1:1/token"}) \
                     as (port, _p, _data, home):
+                setup_admin(port, _data)   # 2B1: no default admin password
                 code, body = post(port, ROUTE, {"client_id": GOOD_ID,
                                                 "client_secret": GOOD_SECRET,
-                                                "password": "admin"})
+                                                "password": TEST_ADMIN_PASSWORD})
                 self.assertEqual(code, 400)
                 self.assertIn("error", body)
                 self.assert_no_secret(body)
@@ -537,11 +543,12 @@ class ProbeShapeTests(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_DEPS, "flask/netCDF4/jwt/requests not installed")
 class BoundedProbeRouteTests(unittest.TestCase):
-    BODY = {"client_id": GOOD_ID, "client_secret": BAD_SECRET, "password": "admin"}
+    BODY = {"client_id": GOOD_ID, "client_secret": BAD_SECRET, "password": TEST_ADMIN_PASSWORD}
 
     def test_rejection_is_one_token_request(self):
         with tempfile.TemporaryDirectory() as t, counting_token_server() as (url, srv):
-            with booted(Path(t), extra_env={"QBENCH_TOKEN_URL": url}) as (port, *_):
+            with booted(Path(t), extra_env={"QBENCH_TOKEN_URL": url}) as (port, _p, _d, _h):
+                setup_admin(port, _d)   # 2B1: no default admin password
                 code, body = post(port, ROUTE, self.BODY)
             self.assertEqual(code, 400, body)
             self.assertIn("400", body["error"])
@@ -550,6 +557,7 @@ class BoundedProbeRouteTests(unittest.TestCase):
     def test_hanging_token_server_times_out_quickly(self):
         with tempfile.TemporaryDirectory() as t, counting_token_server(hang=True) as (url, srv):
             with booted(Path(t), extra_env={"QBENCH_TOKEN_URL": url}) as (port, _p, _d, home):
+                setup_admin(port, _d)   # 2B1: no default admin password
                 start = time.time()
                 code, body = post(port, ROUTE, self.BODY, timeout=25)
                 elapsed = time.time() - start
@@ -570,16 +578,17 @@ class CrossSiteTests(unittest.TestCase):
     def test_guard(self):
         with tempfile.TemporaryDirectory() as t, fake_token_server() as url:
             with booted(Path(t), extra_env={"QBENCH_TOKEN_URL": url}) as (port, _p, _d, home):
+                setup_admin(port, _d)   # 2B1: no default admin password
                 store = home / "qbench.json"
                 good = json.dumps({"client_id": GOOD_ID, "client_secret": GOOD_SECRET,
-                                   "password": "admin"}).encode()
+                                   "password": TEST_ADMIN_PASSWORD}).encode()
                 me = f"http://127.0.0.1:{port}"
 
                 # text/plain is a CORS "simple" request: refused on gated routes.
                 code, body = send(port, ROUTE, good, {"Content-Type": "text/plain"})
                 self.assertEqual(code, 415, body)
                 code, body = send(port, "/api/save-analysis-defaults",
-                                  json.dumps({"password": "admin", "params": {}}).encode(),
+                                  json.dumps({"password": TEST_ADMIN_PASSWORD, "params": {}}).encode(),
                                   {"Content-Type": "text/plain"})
                 self.assertEqual(code, 415, body)
                 self.assertFalse(store.exists())

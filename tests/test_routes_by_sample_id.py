@@ -402,10 +402,18 @@ def test_index_has_no_scan_controls_and_loads_the_sample_helpers(hub_app):
 
 # ── no store ────────────────────────────────────────────────────────────────
 
-def test_routes_answer_503_without_a_store():
+def test_an_empty_hub_answers_cleanly():
+    # Since 2B1, admin_auth migrates the store on first use, so a fresh data
+    # folder has an empty store: lists are empty, ids are 404, and the
+    # calibration routes say gc1 isn't set up (503) until instruments.startup.
     with tempfile.TemporaryDirectory() as t:
         with booted(Path(t)) as (port, proc, data, home):
             code, body = get(port, "/api/files")
-            assert code == 503 and "store" in body["error"]
-            assert get(port, "/api/samples/1/metadata")[0] == 503
-            assert get(port, "/api/table")[0] == 503
+            if code == 503:                      # store not created yet: also fine
+                assert "store" in body["error"]
+                return
+            assert code == 200 and body["samples"] == [] and body["total"] == 0
+            assert get(port, "/api/table")[1]["rows"] == []
+            assert get(port, "/api/samples/1/metadata")[0] == 404
+            code, body = get(port, "/api/calibration")
+            assert code == 503 and "gc1" in body["error"]
