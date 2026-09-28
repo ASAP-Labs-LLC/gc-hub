@@ -111,8 +111,12 @@ bearer secret on the LAN (see Security).
   `CSV_HEADER` row, **plus the uncorrected D86 values and the anchor pairs
   used**, without writing anything.
 - The calibration cache key is (calibration path, mtime, assignment
-  signature, sensitivity), so two instruments can never share a cached
-  function.
+  signature), so two instruments can never share a cached function.
+  Sensitivity is **not** part of the key: `_build_calibration`'s auto-detect
+  always uses 50, and hub mode never auto-detects (`allow_auto=False`).
+- Hub callers pass `honour_env=False` (`GC_CAL_CDF` is ignored),
+  `allow_auto=False`, and an explicit keyword-only `corrections`, so
+  nothing is ever silently uncorrected.
 - **Golden tests:** `compute` + the phase 1 CSV formatting must equal
   `process_cdf`'s row byte for byte, on synthetic fixtures and on the
   snapshot CDFs when those exist locally.
