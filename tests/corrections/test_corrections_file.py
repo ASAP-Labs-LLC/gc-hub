@@ -1,4 +1,5 @@
-"""FileProvider: the phase-1 JSON file, served only to instrument `gc1` (2A1).
+"""FileProvider / seed_from_file: the phase-1 JSON file, read once to SEED the
+hub's corrections for instrument `gc1` (the hub owns them afterwards).
 
 Phase 1 (`distill.load_d86_corrections`) answered `{}` for a missing or broken
 file, and `{}` means "no correction" — so a share outage silently reported
@@ -9,8 +10,9 @@ What phase 1 did right is kept: a cut the file does not list is uncorrected
 (0.0, now recorded explicitly). V4 held five Agilent offsets, so the file
 lists five cuts; raising on the other six would hold every sample.
 
-The file's names are fixed (`PHASE1_FILE_MAP`); an instrument's
-`correction_map` is for LEM's names and is ignored here.
+The file's names are fixed (`PHASE1_FILE_MAP`). Every failure is `config`:
+seeding is a one-off admin act, and a person has to look at a file that
+cannot be read.
 """
 import json
 import os
@@ -82,13 +84,6 @@ def test_matches_phase1_for_the_listed_cuts(tmp_path):
     assert all(got[c] == 0.0 for c in C.D86_CUTS if c not in phase1)
 
 
-def test_the_instruments_correction_map_is_ignored(tmp_path):
-    path = _write(tmp_path, {"Agilent GC": _full_section()})
-    inst = dict(GC1, correction_map=json.dumps({"Initial BP": "IBP"}))
-    assert _provider(path).get(inst).values == _provider(path).get(GC1).values
-    assert _provider(path).get(dict(GC1, correction_map="{broken")).source == "file"
-
-
 def test_only_gc1(tmp_path):
     path = _write(tmp_path, {"Agilent GC": _full_section()})
     err = _raises(_provider(path), {"id": "gc2", "lem_machine_uid": None,
@@ -147,31 +142,50 @@ def test_an_unreadable_unmapped_value_is_ignored(tmp_path):
 
 @pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
                     reason="needs POSIX permissions and a non-root user")
-def test_an_os_error_other_than_missing_is_unreachable(tmp_path):
-    """The file lives on the share: a permission or network error is the share
-    not answering, retried, not a setup mistake."""
+def test_an_os_error_other_than_missing_is_config_too(tmp_path):
+    """Seeding is a one-off admin act: a file that cannot be read needs a
+    person, and there is nothing to retry into."""
     path = _write(tmp_path, {"Agilent GC": _full_section()})
     os.chmod(path, 0)
     try:
-        _raises(_provider(path), GC1, "unreachable")
+        err = _raises(_provider(path), GC1, "config")
+        assert "could not be read" in err.reason
     finally:
         os.chmod(path, 0o644)
 
 
-def test_refresh_reads_the_file_again(tmp_path):
-    path = _write(tmp_path, {"Agilent GC": _full_section()})
-    p = _provider(path)
-    assert p.get(GC1).values["IBP"] == 0.0
-    _write(tmp_path, {"Agilent GC": _full_section(offset=1.0)})
-    assert p.refresh(GC1).values["IBP"] == 1.0
+def test_a_value_beyond_the_sanity_bound_is_config(tmp_path):
+    path = _write(tmp_path, {"Agilent GC": {"IBP - D86": {"correction_value": 75.0}}})
+    err = _raises(_provider(path), GC1, "config")
+    assert "IBP" in err.reason
 
 
-def test_changed_since(tmp_path):
+# ── seeding gc1 ───────────────────────────────────────────────────────────
+
+def test_seed_from_file_returns_the_eleven_values(tmp_path):
+    path = _write(tmp_path, {"Agilent GC": {
+        "IBP - D86": {"correction_value": -12.08},
+        "FBP - D86": {"correction_value": -5.57}}})
+    got = C.seed_from_file(path)
+    assert list(got) == C.D86_CUTS
+    assert got["IBP"] == -12.08 and got["FBP"] == -5.57 and got["50%"] == 0.0
+    assert C.validate_values(got) == []
+
+
+def test_seed_from_file_returns_a_plain_dict(tmp_path):
     path = _write(tmp_path, {"Agilent GC": _full_section()})
-    p = _provider(path)
-    assert p.changed_since(GC1, C.Corrections("file", "x", {"IBP": 9.0})) is False
-    used = p.get(GC1)
-    assert p.changed_since(GC1, used) is False
-    _write(tmp_path, {"Agilent GC": _full_section(offset=0.5)})
-    p.refresh(GC1)
-    assert p.changed_since(GC1, used) is True
+    got = C.seed_from_file(path)
+    got["IBP"] = 99.0
+    assert C.seed_from_file(path)["IBP"] == 0.0
+
+
+@pytest.mark.parametrize("data", ["{not json", {"PAC Flash 2": {}}, {"Agilent GC": {}}])
+def test_seed_from_file_keeps_the_strict_rules(tmp_path, data):
+    with pytest.raises(C.CorrectionsUnavailable) as info:
+        C.seed_from_file(_write(tmp_path, data))
+    assert info.value.kind == "config"
+
+
+def test_seed_from_a_missing_file_is_config(tmp_path):
+    with pytest.raises(C.CorrectionsUnavailable):
+        C.seed_from_file(str(tmp_path / "gone.json"))

@@ -1,5 +1,18 @@
 # Phase 2 / Lane C: corrections provider + the LEM upstream flag (implementation plan)
 
+> **SUPERSEDED 2026-09-28 (design change by Ryan).** GC correction factors now
+> live in the hub, per instrument, edited on the Instruments page; LEM holds
+> none for the GCs and only forwards results. `LemProvider`, the cache store,
+> freshness/max-age, the LEM default map and the fake-LEM tests were removed.
+> `corrections.py` now holds `D86_CUTS`, `MAX_ABS_CORRECTION_C`,
+> `PHASE1_FILE_MAP`, `Corrections` (source `hub`|`file`|`legacy`),
+> `CorrectionsUnavailable` (kind `config` only), `validate_values`,
+> `values_differ` (missing cut = 0.0), `StoreProvider(read_fn)`,
+> `FileProvider` and `seed_from_file` (seeding gc1 once). The LEM branch
+> `gc-hub-upstream-corrections` (scratch clone, commit 744f703) is shelved:
+> no push, no tag. The rest of this document is the history of the LEM-fed
+> design.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:test-driven-development. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** (1) `corrections.py` in gc-hub, implementing contract §2 of
