@@ -1511,33 +1511,6 @@ def _gc1_calibration_cdf() -> Optional[str]:
     return None if row is None else (row.get("calibration_cdf") or "")
 
 
-def _mirror_calibration_cdf(body: dict, saved_conf: dict) -> None:
-    """A settings save that changes ``calibration_cdf`` changes the gc1 row
-    (the processing source of truth), taking the saved assignments for the
-    new CDF from the settings map when there are any, and queues gc1's
-    ``awaiting_calibration`` samples. No-op without a store."""
-    if "calibration_cdf" not in body:
-        return
-    try:
-        _data, db = _hub()
-        row = _gc1(db)
-    except HubUnavailable:
-        return
-    new = str(body.get("calibration_cdf") or "").strip()
-    if new == (row.get("calibration_cdf") or ""):
-        return
-    entries = None
-    if new:
-        found = distill.parse_assignment_map(saved_conf.get("calibration_assignments", "")) \
-            .get(distill._cal_key(Path(new)))
-        entries = json.dumps(found) if isinstance(found, list) and found else None
-    store.instruments.upsert({"id": instruments.GC1, "calibration_cdf": new or None,
-                              "calibration_assignments": entries}, db=db)
-    with distill._CAL_LOCK:
-        distill._CAL_CACHE.clear()
-    pipeline.on_calibration_saved(instruments.GC1, db=db)
-
-
 @app.route("/api/settings", methods=["GET"])
 def api_get_settings():
     try:
@@ -1550,18 +1523,46 @@ def api_get_settings():
         return _error(str(exc), 500)
 
 
+# Per-instrument configuration lives in the store's instruments rows (the
+# calibration page / Instruments page, admin-gated); settings.json's copies
+# are read-only through /api/settings. A save may echo them back unchanged.
+READ_ONLY_SETTINGS = ("calibration_cdf", "calibration_assignments", "calibration_sensitivity",
+                      "correction_factors_json")
+
+
 @app.route("/api/settings", methods=["POST"])
 def api_save_settings():
+    """Save the global settings. JSON only (415 otherwise: a text/plain post
+    is a CORS "simple" request). ``READ_ONLY_SETTINGS`` keep their saved
+    values; a body that changes one is refused (400) and nothing is saved."""
+    if not request.is_json:
+        return _error("Expected Content-Type: application/json", 415)
     try:
-        body = request.get_json(force=True)
+        body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return _error("Expected JSON object")
+        current = settings_mod.load_settings()
+        gc1_cal = _gc1_calibration_cdf()
+        effective = dict(current, calibration_cdf=gc1_cal) if gc1_cal is not None else current
+        changed = [k for k in READ_ONLY_SETTINGS
+                   if k in body and str(body[k] or "") != str(effective.get(k) or "")]
+        if changed:
+            return _error(f"{', '.join(changed)} cannot be changed here: calibration and "
+                          f"correction factors are per instrument now (the Calibration and "
+                          f"Instruments pages, admin).", 400)
+        body = {k: v for k, v in body.items() if k not in READ_ONLY_SETTINGS}
+        on_disk = {}
+        if settings_mod.CONFIG_PATH is not None and settings_mod.CONFIG_PATH.is_file():
+            try:
+                on_disk = json.loads(settings_mod.CONFIG_PATH.read_text(encoding="utf-8"))
+            except ValueError:
+                on_disk = {}
+        body.update({k: on_disk[k] for k in READ_ONLY_SETTINGS if k in on_disk})
         # Flag rules and best-fit settings need no cache clearing: sample_cache
         # rows carry the fingerprint they were computed with.
         settings_mod.save_settings(body)
 
         conf = settings_mod.load_settings()
-        _mirror_calibration_cdf(body, conf)
         cal = _gc1_calibration_cdf()
         if cal is not None:
             conf = dict(conf, calibration_cdf=cal)
@@ -1989,7 +1990,13 @@ def api_calibration():
 def api_calibration_save():
     """Persist manual peak→carbon assignments (and the sensitivity) on the gc1
     instrument row, then queue gc1's ``awaiting_calibration`` samples (only
-    those: nothing final is reprocessed)."""
+    those: nothing final is reprocessed). Admin-gated (JSON body with the
+    admin ``password``): the calibration decides every result."""
+    body, err = _admin_json_body()
+    if err:
+        return err
+    if not _check_admin(body):
+        return _error("Incorrect password", 403)
     data, db = _hub()
     row = _gc1(db)
     try:
@@ -1998,7 +2005,6 @@ def api_calibration_save():
         if cal_path is None:
             return _error("No calibration CDF configured", 404)
 
-        body = request.get_json(silent=True) or {}
         assignments = body.get("assignments")
         if not isinstance(assignments, list):
             return _error("Body must contain an 'assignments' list")

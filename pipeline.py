@@ -89,10 +89,12 @@ Injection points:
 
 * ``corrections_provider``: an object with ``get(instrument_row) ->
   corrections.Corrections`` (e.g. ``corrections.StoreProvider(read_fn)`` in
-  D4b), or a callable ``(global_conf) -> provider``. Default: 2A1's interim
-  ``corrections.FileProvider(conf['correction_factors_json'])``, built per
-  job, which serves ``gc1`` only (other instruments stay
-  ``pending_corrections``).
+  D4b), or a callable ``(global_conf) -> provider``. Default: the hub's
+  own corrections, ``corrections.StoreProvider`` over this Worker's store
+  (an instrument with no saved values is ``pending_corrections``), so hub
+  edits can never be silently ignored. ``hub.start`` seeds gc1 once from
+  the phase-1 file; tests that want the file pass
+  ``lambda conf: corrections.FileProvider(conf['correction_factors_json'])``.
 * ``format_line(results_json, source_file) -> str``: the frozen export line.
   ``results_json`` is the revision's ``results`` column (JSON text keyed by
   ``CSV_HEADER``), ``source_file`` the hub-relative ``cdf_path``. Default
@@ -179,6 +181,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import functools
 import json
 import logging
 import os
@@ -890,8 +893,9 @@ class Worker:
     # one job
     def _provider(self, conf: dict):
         p = self.corrections_provider
-        if p is None:
-            return corrections_mod.FileProvider(conf.get("correction_factors_json", "") or "")
+        if p is None:     # hub-owned (D4b): never the phase-1 file by default
+            return corrections_mod.StoreProvider(functools.partial(store.corrections.read,
+                                                                   db=self.db))
         if hasattr(p, "get"):
             return p
         return p(conf)

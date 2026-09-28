@@ -275,11 +275,14 @@ async function save(){
     if(s.choice!=="") return {rt:s.rt, carbon:parseInt(s.choice,10)};
     return {rt:s.rt};   // unassigned — backend omits it
   });
+  // The calibration decides every result: saving it needs the admin password.
+  const password = window.prompt("Admin password to save the calibration:");
+  if(!password){ setStatus("Not saved (no admin password).", "err"); return; }
   setStatus("Saving…");
   try{
     const r = await fetch("/api/calibration", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({assignments, sensitivity: +$("sens").value})
+      body: JSON.stringify({assignments, sensitivity: +$("sens").value, password})
     });
     const j = await r.json();
     if(!r.ok){ throw new Error(j.error || ("HTTP "+r.status)); }

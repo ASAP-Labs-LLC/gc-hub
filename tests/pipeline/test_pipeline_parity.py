@@ -65,7 +65,8 @@ def _run_case(hub, name, *, provider=None):
         res = hub.submit(_with_method(blank_src, hub.src / f"{name}-blank.CDF"))
         assert hub.sample(res.sample_id)["is_blank"] == 1
     sid = hub.submit(_with_method(sample_src, hub.src / f"{name}-sample.CDF")).sample_id
-    hub.worker(corrections_provider=provider).run_until_idle()
+    kw = {"corrections_provider": provider} if provider is not None else {}
+    hub.worker(**kw).run_until_idle()
     s = hub.sample(sid)
     assert s["status"] == "final", s["error"]
     (export,) = [r for r in store.export_rows.rows_after("gc1", 0, db=hub.db) if r["sample_id"] == sid]

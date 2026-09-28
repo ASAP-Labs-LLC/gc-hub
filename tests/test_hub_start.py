@@ -108,6 +108,29 @@ def test_corrections_are_hub_owned(tmp_path):
     assert got.source == "hub" and got.values == values
 
 
+def test_worker_default_corrections_are_the_hubs_never_the_file(tmp_path):
+    # I4: a Worker built without a provider must not read the phase-1 file,
+    # or hub-edited corrections could be silently ignored.
+    h = _hub_folder(tmp_path)
+    store.migrate(h.db)
+    import instruments
+    instruments.bootstrap_gc1(h.conf, db=h.db, now=datetime(2020, 1, 1))
+    cdf = fx.sample_cdf(h.src / "d.CDF", name="40304",
+                        injected=datetime(2026, 9, 25, 14, 23, 0), method_name=SIMDIS)
+    sid = pipeline.submit("gc1", cdf, conf=h.conf, data_dir=h.data, db=h.db).sample_id
+    w = pipeline.Worker(db=h.db, data_dir=h.data, conf_fn=lambda: h.conf)
+    w.run_until_idle()
+    assert store.samples.get(sid, db=h.db)["status"] == "pending_corrections"
+    values = corrections.seed_from_file(h.conf["correction_factors_json"])
+    with store.connection(h.db) as conn, store.write_txn(conn):
+        store.corrections.set_all(conn, "gc1", values, by="test", reason="t")
+    pipeline.requeue_on_start(db=h.db)
+    w.run_until_idle()
+    assert store.samples.get(sid, db=h.db)["status"] == "final"
+    used = json.loads(store.get_revision(sid, db=h.db)["corrections_used"])
+    assert used["source"] == "hub"
+
+
 def test_first_start_seeds_gc1_corrections_from_the_phase1_file(tmp_path):
     h = _hub_folder(tmp_path)
     notes = []

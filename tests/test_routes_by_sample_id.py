@@ -302,13 +302,13 @@ def test_reprocess_by_sample_ids(hub_app):
     assert body["status"] == "queued" and body["count"] == 1
     assert body["sample_ids"] == [hub.ids["final"]]
     job = store.jobs.get(body["job_ids"][0], db=hub.db)
-    assert job["state"] == "queued" and job["payload"]["sample_id"] == hub.ids["final"]
+    assert job["payload"]["sample_id"] == hub.ids["final"]
     assert job["payload"]["reason"] == "reprocess"
-
-    code, st = get(port, f"/api/reprocess/status?sample_ids={hub.ids['final']}")
-    assert code == 200 and st["phase"] == "processing" and st["pending"] == 1
-    hub.worker().run_until_idle()
-    code, st = get(port, f"/api/reprocess/status?sample_ids={hub.ids['final']}")
+    # the app's own Worker (hub.start) runs it; no worker in the test
+    status = f"/api/reprocess/status?sample_ids={hub.ids['final']}"
+    assert get(port, status)[1]["phase"] in ("processing", "done")
+    assert wait_for(lambda: get(port, status)[1]["phase"] == "done", timeout=30)
+    code, st = get(port, status)
     assert st["phase"] == "done" and st["processed"] == 1 and st["errors"] == 0
     assert st["samples"][0]["current_revision"] == 2
     assert get(port, "/api/reprocess/status")[1]["phase"] == "idle"
@@ -395,14 +395,23 @@ def test_calibration_reads_and_writes_the_gc1_row(hub_app):
     assert code == 200 and active["mode"] == "manual" and active["calibration_cdf"] == str(hub.cal)
 
     entries = body["assignments"]
-    code, saved = post(port, "/api/calibration", {"assignments": entries, "sensitivity": 40})
+    # admin-gated (2A1 T5): no password, no change
+    code, refused = post(port, "/api/calibration", {"assignments": [], "sensitivity": 40})
+    assert code == 403, refused
+    assert json.loads(store.instruments.get("gc1", db=hub.db)["calibration_assignments"]) == entries
+    code, _ = send(port, "/api/calibration", json.dumps({"assignments": entries}).encode(),
+                   {"Content-Type": "text/plain"})
+    assert code == 415
+    pw = _admin(port, hub)
+    code, saved = post(port, "/api/calibration",
+                       {"assignments": entries, "sensitivity": 40, "password": pw})
     assert code == 200, saved
     assert saved["ok"] and saved["queued"] == 0
     row = store.instruments.get("gc1", db=hub.db)
     assert json.loads(row["calibration_assignments"]) == entries
     assert row["calibration_sensitivity"] == 40
     bad = [{"rt": 1.0, "carbon": 9}, {"rt": 2.0, "carbon": 7}]
-    assert post(port, "/api/calibration", {"assignments": bad})[0] == 400
+    assert post(port, "/api/calibration", {"assignments": bad, "password": pw})[0] == 400
     assert json.loads(store.instruments.get("gc1", db=hub.db)["calibration_assignments"]) == entries
 
 
@@ -413,11 +422,54 @@ def test_calibration_save_queues_awaiting_calibration(hub_app):
     store.samples.set_status(sid, "awaiting_calibration", error="test hold", db=hub.db)
     try:
         _, body = get(port, "/api/calibration")
-        code, saved = post(port, "/api/calibration", {"assignments": body["assignments"]})
+        code, saved = post(port, "/api/calibration",
+                           {"assignments": body["assignments"], "password": _admin(port, hub)})
         assert code == 200 and saved["queued"] == 1
-        assert any(j["sample_id"] == sid for j in store.jobs.list(state="queued", db=hub.db))
+        assert any(j["sample_id"] == sid for j in store.jobs.list(db=hub.db))
+        # the app's Worker processes it back to final
+        assert wait_for(lambda: hub.sample("rerun")["status"] == "final", timeout=30)
     finally:
         hub.worker().run_until_idle()
+
+
+def test_settings_save_needs_json_and_leaves_instrument_config_alone(hub_app):
+    port, hub, store = hub_app
+    before = store.instruments.get("gc1", db=hub.db)
+    # text/plain with no Origin (not a browser): refused before anything is read
+    code, _ = send(port, "/api/settings", json.dumps({"calibration_cdf": "/etc/hosts"}).encode(),
+                   {"Content-Type": "text/plain"})
+    assert code == 415
+    _, conf = get(port, "/api/settings")
+    for key, value in (("calibration_cdf", "/etc/hosts"),
+                       ("correction_factors_json", "/tmp/other.json"),
+                       ("calibration_sensitivity", "10"),
+                       ("calibration_assignments", "{}")):
+        code, body = post(port, "/api/settings", dict(conf, **{key: value}))
+        assert code == 400 and key in body["error"], (key, body)
+    after = store.instruments.get("gc1", db=hub.db)
+    assert (after["calibration_cdf"], after["calibration_assignments"]) == \
+        (before["calibration_cdf"], before["calibration_assignments"])
+    on_disk = json.loads((hub.data / "settings.json").read_text())
+    assert on_disk["correction_factors_json"] == hub.conf["correction_factors_json"]
+    # echoing them back unchanged is fine, and other settings save
+    code, saved = post(port, "/api/settings", dict(conf, series_colors="#123456"))
+    assert code == 200, saved
+    on_disk = json.loads((hub.data / "settings.json").read_text())
+    assert on_disk["series_colors"] == "#123456"
+    assert on_disk["correction_factors_json"] == hub.conf["correction_factors_json"]
+    assert on_disk["calibration_assignments"] == hub.conf["calibration_assignments"]
+    assert store.instruments.get("gc1", db=hub.db)["calibration_cdf"] == before["calibration_cdf"]
+
+
+_ADMIN_PW = {}
+
+
+def _admin(port, hub):
+    """Set the booted hub's admin password once (first-use setup) and return it."""
+    from bootapp import setup_admin
+    if port not in _ADMIN_PW:
+        _ADMIN_PW[port] = setup_admin(port, hub.data)
+    return _ADMIN_PW[port]
 
 
 # ── review fixes ────────────────────────────────────────────────────────────

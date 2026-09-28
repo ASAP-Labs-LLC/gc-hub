@@ -3,7 +3,7 @@ time fallbacks, resolved-conflict re-sends, late blanks, blank-named
 samples, corrections error classes, and the worker/startup lifecycle."""
 from __future__ import annotations
 
-from pipeline_helpers import SIMDIS, hub  # noqa: F401  (hub: the fixture)
+from pipeline_helpers import SIMDIS, file_corrections, hub  # noqa: F401  (hub: the fixture)
 
 import json
 import os
@@ -282,7 +282,7 @@ def test_ten_transient_retries_notify_once_per_instrument_until_a_success(hub, c
     assert notes.calls[0][0] == "error" and "GC-1" in notes.calls[0][1]
     assert hub.sample(a)["status"] == "received"
     # a success clears the latch; a new run of failures notifies again
-    w.corrections_provider = None
+    w.corrections_provider = file_corrections
     clock[0] += timedelta(minutes=2)
     w.run_until_idle()
     assert hub.sample(a)["status"] == "final"
@@ -463,7 +463,8 @@ def test_instruments_startup_bootstraps_requeues_and_starts(hub):
     (incoming / "dead.CDF").write_bytes(b"x")
     os.utime(incoming / "dead.CDF", (time.time() - 3600, time.time() - 3600))
     w = instruments.startup(hub.conf, notes, db=hub.db, data_dir=hub.data,
-                            conf_fn=lambda: hub.conf, poll_seconds=0.05)
+                            conf_fn=lambda: hub.conf, poll_seconds=0.05,
+                            corrections_provider=file_corrections)
     try:
         assert w.is_alive()
         assert store.instruments.get("gc1", db=hub.db)["live_since"] is not None
