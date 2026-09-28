@@ -39,7 +39,7 @@ into the hub is Lane A's job after 2A1.
 |---|---|---|
 | 201 | `{"sample_id": int, "sha256": str, "status": str}` | mark sent (only if the returned `sha256` equals the one sent) |
 | 200 | `{"sample_id": int, "sha256": str, "duplicate": true}` | mark sent |
-| 202 | `{"sha256": str, "conflict_id": int}` | mark sent (the hub holds it for review) |
+| 202 | `{"sha256": str, "conflict_id": int}`, where `sha256` is the **received body's** sha | mark sent (the hub holds it for review) |
 | 400, 409, 413, 415 | `{"error": str}` | mark **rejected** with the reason; retry only on `retry-rejected` |
 | 401, 403, 404, 405, other 4xx | `{"error": str}` | **hold**: stop sending, tray red, keep the queue, retry every 300 s or on config change |
 | 429, 5xx, network error | — | back off exponentially from 5 s up to 300 s |
@@ -87,6 +87,18 @@ into the hub is Lane A's job after 2A1.
   `{"size": int, "sha256": str, "seq": int, "adopted_at": str}`.
 - **Launcher exit codes:** 0 = quit, 3 = restart (re-read `current.txt`),
   anything else = crash.
+- **Other agent files** (amended after the Lane B review):
+  `versions/<v>/PACKAGE_SHA256`, `revert.json`, `bad_packages.json`,
+  `failed_packages.json`, `launcher.log`, `launcher.lock` (POSIX only). The
+  mirror sidecar may briefly carry an extra `"pending"` key during an append;
+  readers must tolerate it.
+- **Installer download (2B1 produces it):** `install.pyw`, `launcher.pyw`,
+  `install.json` = `{"hub_url", "token"}`, plus optional `agent-package.zip`
+  and `agent-package.json` = `{"version", "sha256"}`. The hub builds the
+  agent package with `agent/build_package.py`, which ships in releases.
+- **Client-side rules:** files over 25 MB are rejected locally without being
+  sent. A sha mismatch in a 200/201/202 body marks the file rejected. A
+  non-JSON 2xx backs off. 3xx holds. Only the listed commands are obeyed.
 
 ## §2 Corrections (REWRITTEN 2026-09-28 for D4b: hub-owned; Lane C builds it, the Lane A pipeline calls it)
 
