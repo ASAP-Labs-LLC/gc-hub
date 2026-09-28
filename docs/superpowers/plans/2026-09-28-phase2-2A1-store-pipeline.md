@@ -317,3 +317,27 @@ only), `tests/pipeline/`.
 - 2A1 ships as the next MAJOR only after the whole suite, the node tests
   and CI pass, and the integration critic approves. The parity gate runs on
   ASAPSV1 after deploy, before GC PCs cut over.
+
+## Integration-critic carry-overs (2026-09-28, after T1–T3 merged)
+
+- **T4/T5 (I4):** one startup function owns everything that runs in the
+  background: the Worker, `HubExporter(notifier).start()`, `backup_nightly`,
+  `jobs.prune_done` and the notifier (`notifications.get_store().add`).
+  `app._init_app` stops starting the Looker, the watcher and
+  `_migrate_csv_header` in hub mode.
+- **T6 (I2):** the parity report gets an expected-difference tag for
+  `Source File` (hub-relative vs v1's absolute path). `blank-rule` also
+  covers `(Blank)` and `[b] Blank` (v1 blank-subtracted them; the hub
+  doesn't).
+- **2B1:**
+  - (I1) `urllib.parse.unquote` `X-GC-Filename` before passing it as
+    `source_name`; it is the lab-ID fallback, not "informational only".
+  - Catch `InstrumentDisabled` **before** `SubmitRejected` (→ 403, agent
+    holds). `UnknownInstrument` → 401/403 (hold).
+  - Results feed: `rows_after` has no `more` flag, so fetch `limit+1`.
+  - Add `agents.package_sha256` (additive migration).
+  - (M4) Clock skew compares `agent_time` with hub **local** time, not with
+    `last_seen` (UTC).
+  - The runbook checks the GC PC clock skew before setting `live_since`.
+- **2C:** `StoreProvider(read_fn=functools.partial(store.corrections.read, db=db))`
+  when the db isn't the default one.
