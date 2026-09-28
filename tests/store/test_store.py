@@ -11,6 +11,7 @@ from __future__ import annotations
 import itertools
 import logging
 import os
+import shutil
 import sqlite3
 import sys
 import threading
@@ -166,18 +167,31 @@ def test_pre_migrate_backup_is_written(tmp_path):
 
 
 def _wal_v1_with_unflushed_rows(tmp_path):
+    """A v1 database whose 20 settings_kv rows live only in un-checkpointed WAL frames.
+
+    The writer connection is returned still open: SQLite checkpoints (and on
+    Linux deletes) the -wal when the last connection closes, and whether an
+    idle reader counts as "still open" varies by SQLite build. An open writer
+    with autocheckpoint off keeps the frames in the WAL on every platform. The
+    caller closes it.
+    """
     path = tmp_path / "gc.db"
     store.migrate(path)
-    holder = sqlite3.connect(path)  # an open reader keeps the WAL from being checkpointed away
-    holder.execute("PRAGMA wal_autocheckpoint=0")
-    holder.execute("SELECT 1").fetchone()
     w = sqlite3.connect(path, isolation_level=None)
     w.execute("PRAGMA wal_autocheckpoint=0")
     for i in range(20):
         w.execute("INSERT INTO settings_kv(key, value) VALUES (?, ?)", (f"k{i}", str(i)))
-    w.close()
-    assert Path(str(path) + "-wal").stat().st_size > 0
-    return path, holder
+    # The rows must be in WAL frames only: the main file on its own has none of them.
+    main_only = tmp_path / "main-only" / "gc.db"
+    main_only.parent.mkdir()
+    shutil.copyfile(path, main_only)
+    probe = sqlite3.connect(main_only)
+    try:
+        assert probe.execute("SELECT COUNT(*) FROM settings_kv").fetchone()[0] == 0
+    finally:
+        probe.close()
+    assert w.execute("SELECT COUNT(*) FROM settings_kv").fetchone()[0] == 20
+    return path, w
 
 
 def test_pre_migrate_backup_captures_wal_frames(tmp_path, monkeypatch):
@@ -200,11 +214,13 @@ def test_pre_migrate_backup_captures_wal_frames(tmp_path, monkeypatch):
 
 def test_failed_migration_step_is_atomic(tmp_path, monkeypatch):
     path, holder = _wal_v1_with_unflushed_rows(tmp_path)
-    holder.close()
     v2 = ("CREATE TABLE extra_v2(x)", "THIS IS NOT SQL")
     monkeypatch.setattr(store, "MIGRATIONS", store.MIGRATIONS + (v2,))
-    with pytest.raises(sqlite3.OperationalError):
-        store.migrate(path)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            store.migrate(path)
+    finally:
+        holder.close()
     with store.connection(path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
         assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='extra_v2'").fetchone()
