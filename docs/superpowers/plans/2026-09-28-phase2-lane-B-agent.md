@@ -74,6 +74,18 @@ heartbeat), `bad_packages.json` (shas the launcher reverted from; the updater sk
    least 1 s between exit-3 relaunches and backs off after 5 quick ones; the builder moved to
    `agent/build_package.py` (the hub release drops `scripts/`); the installer updates a running
    agent's `hub_url`/`token` in place and offers to delete `install.json`.
+11. **Second review:** the scan's time budget starts at the first *unknown* file (walking known
+   files is free) and every pass queues at least one ready file before a cap can stop it;
+   `FALLING_BEHIND_PASSES` (10) capped passes with no progress set `last_error`
+   ("scan falling behind: …"). The ledger's in-memory key set changes only after a commit;
+   sqlite errors in the scan/send path are logged and reported, and the loop carries on. The
+   ledger has `PRAGMA user_version` (2) and migrates the first layout (no `pkey`). An `OSError`
+   while unpacking an update is recorded in `failed_packages.json`. The installer's in-place
+   update re-reads, merges and verifies (retrying) so it never clobbers the agent's own
+   `paused` write; the launcher's atomic write retries sharing violations.
+   *Possible optimisation (not done):* each poll still walks the whole watch folder; with a very
+   large history it could skip folders whose mtime has not changed since the last pass (NTFS
+   updates a folder's mtime when entries are added or removed).
 
 ## Tasks (strict TDD: write the test, run it red, implement, run green, commit)
 
