@@ -159,7 +159,8 @@ class CsvRow:
 class MatchedSample:
     cdf: CdfMeta | None               # None = result-only (legacy_unverified, dt_source 'csv')
     rows: list[CsvRow]                # CSV order; last = current revision; [] = orphan CDF
-    # derived: lab_id, injection_dt (correct), dt_source
+    # derived: lab_id (normalised), lab_id_display (verbatim), injection_dt (correct), dt_source,
+    #          time_unverifiable (result-only rows whose CSV time could be a v1 misparse)
 
 @dataclass
 class MatchReport:
@@ -169,10 +170,13 @@ class MatchReport:
     no_injection_time: list[str]
     mixed_rows: list[CsvRow]
     key_collisions: list[tuple[CdfMeta, CdfMeta]]   # (kept, other): store `other` as a conflict
+    ambiguous_rows: list[tuple[CsvRow, CdfMeta, list[CdfMeta]]]  # one CSV key fitting several CDFs (row, chosen, others)
     held_rows: list[CsvRow]                         # short/long/decode-error rows: never imported blindly
     stats: dict   # method_names, v1_misparsed_cdfs, rows_matched_via_v1_form, collided_rows, near_misses, timezone, ...
 
 def normalise_lab_id(s) -> str: ...   # strip only; keep the original for display
+V1_FAMILIES = ('py311_313', 'py314')  # interpreter-independent emulation of v1's misparse
+def _v1_parse(raw, family) -> datetime | None: ...
 def read_cdf_meta(path) -> CdfMeta: ...
 def read_results_csv_ex(path) -> (rows, issues): ...
 def match(cdfs, rows, *, instrument_folder: str | Sequence[str], csv_issues=None) -> MatchReport: ...
@@ -183,5 +187,9 @@ def dry_run(processed_dir, results_csv=None, *, instrument_folder, on_progress=N
   equals **any** of the CDF's `v1_injection_dts`, as an exact string. The
   hub stores `injection_dt` (the correct time), `legacy_injection_dt`, and
   `time_corrected` when the two differ.
-- **Schema amendment:** `samples.injection_dt_source` also allows `'csv'`
-  (result-only imports).
+- **Schema amendments:**
+  - `samples.injection_dt_source` also allows `'csv'` (result-only imports).
+  - `samples.time_unverifiable` flags result-only imports whose CSV time
+    could be a v1 misparse.
+  - `legacy_injection_dt` holds the py311_313 form.
+  - Matching tries both families and the correct form.

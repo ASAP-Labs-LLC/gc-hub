@@ -144,7 +144,8 @@ samples(
   injection_dt_source TEXT NOT NULL,
   method_name TEXT,                   -- the CDF's detection_method_name, e.g. 'SIMDISB.M' ('' if absent)
   legacy_injection_dt TEXT,           -- v1's (possibly misparsed) string; set for EVERY CDF-backed sample (parity/importer lookup)
-  time_corrected INTEGER NOT NULL DEFAULT 0,  -- 'cdf'|'mtime'  (mtime = the sender's X-GC-Mtime, never the hub receive time)
+  time_corrected INTEGER NOT NULL DEFAULT 0,
+  time_unverifiable INTEGER NOT NULL DEFAULT 0,  -- result-only import whose CSV time could be a v1 misparse  -- 'cdf'|'mtime'  (mtime = the sender's X-GC-Mtime, never the hub receive time)
   cdf_sha256 TEXT UNIQUE,             -- unique across ALL instruments (I18); NULL only for result-only imports
   cdf_path TEXT,                      -- relative to the data dir; NULL only for result-only imports
   legacy_unverified INTEGER NOT NULL DEFAULT 0,  -- imported CSV result with no matching CDF
