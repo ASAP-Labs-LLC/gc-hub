@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover
 
 pytestmark = pytest.mark.skipif(not HAVE_DEPS, reason="needs flask, netCDF4, scipy")
 
-from bootapp import booted, get, post, send  # noqa: E402
+from bootapp import booted, get, post, send, wait_for  # noqa: E402
 
 UNKNOWN = 999999
 
@@ -551,17 +551,16 @@ def test_index_has_no_scan_controls_and_loads_the_sample_helpers(hub_app):
 # ── no store ────────────────────────────────────────────────────────────────
 
 def test_an_empty_hub_answers_cleanly():
-    # Since 2B1, admin_auth migrates the store on first use, so a fresh data
-    # folder has an empty store: lists are empty, ids are 404, and the
-    # calibration routes say gc1 isn't set up (503) until instruments.startup.
+    # The app's start-up (hub.start, 2A1 T5) creates the store and gc1 on a
+    # background thread: until then store routes answer 503, then a fresh
+    # data folder has an empty store: lists are empty, ids are 404, and gc1
+    # exists with no calibration.
     with tempfile.TemporaryDirectory() as t:
         with booted(Path(t)) as (port, proc, data, home):
+            assert wait_for(lambda: get(port, "/api/calibration/active")[0] == 200, timeout=30)
             code, body = get(port, "/api/files")
-            if code == 503:                      # store not created yet: also fine
-                assert "store" in body["error"]
-                return
             assert code == 200 and body["samples"] == [] and body["total"] == 0
             assert get(port, "/api/table")[1]["rows"] == []
             assert get(port, "/api/samples/1/metadata")[0] == 404
-            code, body = get(port, "/api/calibration")
-            assert code == 503 and "gc1" in body["error"]
+            code, body = get(port, "/api/calibration/active")
+            assert code == 200 and body["mode"] == "unusable", body

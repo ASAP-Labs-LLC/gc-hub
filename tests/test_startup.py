@@ -23,8 +23,6 @@ try:
 except Exception:
     HAVE_DEPS = False
 
-UNCONFIGURED = "not set or missing"
-WATCHER_POLL = 5  # app.WATCHER_POLL_SECONDS
 
 
 def _read(p: Path) -> str:
@@ -99,74 +97,22 @@ class StartupTests(unittest.TestCase):
             with booted(Path(t), cmd=[sys.executable, "-c", boot]) as (port, proc, data, home):
                 self.assertEqual(get(port, "/healthz")[0], 200)
 
-    def test_empty_watch_dir_never_scans_the_release_folder(self):
+    def test_empty_data_dir_starts_the_hub_and_never_scans(self):
+        # Phase 2: there is no watcher. An empty data folder gets a store and
+        # gc1 from the start-up; the scan routes are gone.
         with tempfile.TemporaryDirectory() as t:
             tmp = Path(t)
             with booted(tmp) as (port, proc, data, home):
-                self.assertTrue(
-                    wait_for(lambda: UNCONFIGURED in _read(data / "app.log")),
-                    "startup should log that the watch folder is not configured:\n"
-                    + _read(data / "app.log")[-2000:])
-
-                wait_for(lambda: False, timeout=WATCHER_POLL + 2)  # > one poll
-
-                # The scan routes are gone (phase 2 T4), and reprocess /
-                # export go through the hub store, which an empty data dir
-                # has no samples in (or doesn't have yet): they refuse
-                # cleanly instead of scanning.
+                self.assertTrue(wait_for(lambda: (data / "gc.db").is_file()
+                                         and "hub: started" in _read(data / "app.log")),
+                                _read(data / "app.log")[-2000:])
                 for path in ("/api/scan", "/api/rebuild-db", "/api/stop-scan"):
                     self.assertEqual(post(port, path, {})[0], 404, path)
                 for path, body in (("/api/reprocess", {"sample_ids": [1]}),
                                    ("/api/export-lims", {"sample_ids": [1]})):
                     code, resp = post(port, path, body)
-                    self.assertIn(code, (404, 503), f"{path}: {code} {resp}")
-                    self.assertTrue("store" in resp["error"] or "not found" in resp["error"], path)
-            self.assertNotIn("[WATCHER] Scanning", _read(tmp / "boot.log"))
-
-    def test_saving_a_watch_dir_starts_the_watcher_without_restart(self):
-        with tempfile.TemporaryDirectory() as t:
-            tmp = Path(t)
-            watch = tmp / "instrument_share"
-            watch.mkdir()
-            with booted(tmp) as (port, proc, data, home):
-                self.assertTrue(wait_for(lambda: UNCONFIGURED in _read(data / "app.log")))
-                code, conf = get(port, "/api/settings")
-                self.assertEqual(code, 200)
-
-                code, saved = post(port, "/api/settings", dict(conf, watch_dir=""))
-                self.assertEqual(code, 200, saved)
-                self.assertIn("watcher idle", saved.get("warning", ""))
-
-                code, saved = post(port, "/api/settings", dict(conf, watch_dir=str(watch)),
-                                   timeout=30)
-                self.assertEqual(code, 200, saved)
-                self.assertEqual(saved["watch_dir"], str(watch))
-                self.assertNotIn("warning", saved)
-                # Watcher diagnostics must reach app.log: under the updater
-                # nobody reads stdout.
-                self.assertTrue(
-                    wait_for(lambda: f"Scanning {watch}" in _read(data / "app.log"), timeout=20),
-                    "watcher did not start on the saved folder:\n" + _read(data / "app.log")[-3000:])
-
-    def test_unusable_watch_dir_still_applies_processed_dir(self):
-        with tempfile.TemporaryDirectory() as t:
-            tmp = Path(t)
-            watch = tmp / "instrument_share"
-            watch.mkdir()
-            moved = tmp / "processed_elsewhere"
-            with booted(tmp) as (port, proc, data, home):
-                code, conf = get(port, "/api/settings")
-                code, _ = post(port, "/api/settings", dict(conf, watch_dir=str(watch)), timeout=30)
-                self.assertEqual(code, 200)
-                watch.rmdir()  # the share goes away...
-                code, saved = post(port, "/api/settings",
-                                   dict(conf, watch_dir=str(watch), processed_cdf_dir=str(moved)),
-                                   timeout=30)
-                self.assertEqual(code, 200, saved)
-                self.assertIn("warning", saved)
-                # ...but the existing Looker still moved to the new processed folder.
-                self.assertTrue((moved / ".processed_index.json").is_file(),
-                                _read(data / "app.log")[-3000:])
+                    self.assertEqual(code, 404, f"{path}: {code} {resp}")
+            self.assertNotIn("[WATCHER]", _read(tmp / "boot.log"))
 
 
 def _app_function(name: str) -> ast.FunctionDef:
@@ -192,17 +138,6 @@ class SourceGuards(unittest.TestCase):
         self.assertNotIn("_get_looker", _calls(fn))
         names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
         self.assertNotIn("_looker", names)
-
-    def test_start_watcher_checks_and_starts_under_a_lock(self):
-        # Settings save, /api/scan and init can all call _start_watcher at
-        # once; check-then-start without a lock can start two watchers.
-        fn = _app_function("_start_watcher")
-        withs = [n for n in ast.walk(fn) if isinstance(n, ast.With)]
-        self.assertTrue(withs, "_start_watcher must hold a lock")
-        body_calls = {getattr(c.func, "attr", None) for w in withs for c in ast.walk(w)
-                      if isinstance(c, ast.Call)}
-        self.assertIn("is_alive", body_calls)
-        self.assertIn("start", body_calls)
 
 
 if __name__ == "__main__":

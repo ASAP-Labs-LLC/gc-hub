@@ -27,6 +27,17 @@ def _env(env: Optional[Mapping[str, str]]) -> Mapping[str, str]:
     return os.environ if env is None else env
 
 
+class DataDirMissing(RuntimeError):
+    """``GC_DATA_DIR`` is unset or blank."""
+
+
+def require_data_dir(env=None) -> Path:
+    d = data_dir(env)
+    if d is None:
+        raise DataDirMissing(f"{DATA_ENV} is not set; see DEPLOY.md")
+    return d
+
+
 def data_dir(env=None) -> Optional[Path]:
     raw = (_env(env).get(DATA_ENV) or "").strip()
     if not raw:

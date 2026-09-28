@@ -73,7 +73,8 @@ Public API
     sweep_incoming(data_dir, min_age_seconds=600) -> int       # start-up
 
     Worker(*, db=None, data_dir=None, conf_fn=None, corrections_provider=None,
-           format_line=None, notifier=None, poll_seconds=2.0, now_fn=None)
+           format_line=None, notifier=None, poll_seconds=2.0, now_fn=None,
+           on_final=None)     # on_final(sample_id): after a final revision commits
         .start()            # one per process (another running → RuntimeError);
                             # sweeps .incoming, requeue_on_start, then the thread.
                             # After a stop() that timed out, waits for the old thread.
@@ -798,8 +799,10 @@ class Worker:
                  format_line: Optional[Callable[[str, str], str]] = None,
                  notifier: Optional[Notifier] = None,
                  poll_seconds: float = 2.0,
-                 now_fn: Optional[Callable[[], datetime]] = None) -> None:
+                 now_fn: Optional[Callable[[], datetime]] = None,
+                 on_final: Optional[Callable[[int], Any]] = None) -> None:
         self.data_dir = _data_dir(data_dir)
+        self.on_final = on_final
         self.db = _db(db, self.data_dir)
         self.conf_fn = conf_fn or _load_conf
         self.corrections_provider = corrections_provider
@@ -1205,6 +1208,11 @@ class Worker:
                 store.jobs.complete(job["id"], db=conn)
         self._stuck.discard(sample["instrument_id"])
         log.info("pipeline: sample %s final at revision %s", sid, rev)
+        if self.on_final is not None:
+            try:
+                self.on_final(sid)
+            except Exception:  # noqa: BLE001 - a hook never undoes a committed result
+                log.exception("pipeline: on_final hook failed for sample %s", sid)
         if flagged:
             _notify(self.notifier, "warning",
                     f"The CDF of sample {sid} ({cur['lab_id']}, injected {cur['injection_dt']}) "

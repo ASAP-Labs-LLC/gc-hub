@@ -71,6 +71,7 @@ import version
 # bootstrap whose sys.argv is ['-c']) parses the real argv: when app is
 # imported (tests), sys.argv belongs to someone else.
 import argparse
+import atexit
 
 _ap = argparse.ArgumentParser(prog="app.py", description="GC Hub web app",
                               allow_abbrev=False)  # --d must not mean --dev
@@ -101,6 +102,7 @@ import looker as looker_mod
 import notifications as notifications_mod
 import reprocess_query
 import library_view
+import hub
 import instruments
 import pipeline
 import store
@@ -184,6 +186,7 @@ app.register_blueprint(ingest_api.bp)
 # ---------------------------------------------------------------------------
 _looker: Optional[looker_mod.Looker] = None
 _looker_lock = threading.Lock()
+_hub_runtime: Optional["hub.HubRuntime"] = None   # set by _init_app (hub.start)
 
 # SSE queues -- one per connected client
 _scan_subscribers: list[queue.Queue] = []
@@ -1260,6 +1263,7 @@ def _do_restart(reason: str = "restart") -> None:
         LOGGER.exception("could not decide whether to respawn — not respawning")
         spawn = False
 
+    _stop_hub()        # let the Worker finish its job and the exporter its append
     _hold_csv_lock_for_exit()
     if not spawn:
         LOGGER.info("Exiting without a respawn; the updater restarts the app")
@@ -3415,6 +3419,8 @@ def api_export_lims():
             exported.append({"sample_id": sid, "revision": r["revision"], "seq": r["seq"]})
         except pipeline.NotExportable as exc:
             refused.append({"sample_id": sid, "error": str(exc)})
+    if exported:
+        _wake_exports()
     if refused:
         notifications_mod.get_store().add(
             "warning", f"Export to LIMS: {len(refused)} of {len(ids)} sample(s) refused — "
@@ -4412,37 +4418,80 @@ def calibration_page():
 # ===================================================================== #
 
 def _init_app() -> None:
-    """Start Looker + watcher + file cache in background so the server starts instantly."""
-    def _bg_init():
-        try:
-            LOGGER.info("Migrating CSV header if needed ...")
-            _migrate_csv_header()
-        except Exception:
-            LOGGER.exception("CSV migration failed (non-fatal)")
-
-        # The sample list, flags and best-fit come from the hub store
-        # (sample_cache); the JSON caches and the CSV-built file cache are
-        # no longer loaded.
-
-        try:
-            LOGGER.info("Initialising Looker (this may take a moment with many files)...")
-            _get_looker()
-            LOGGER.info("Looker initialised — starting watcher")
-        except WatchDirNotConfigured as exc:
-            # Fresh deploy / health check (empty data dir) or a share that is
-            # down. Don't build a Looker; the watcher below idles and picks the
-            # folder up as soon as Settings (or the network) provides it.
-            LOGGER.warning("Looker not started: watch folder %r is not set or missing - "
-                           "configure it in Settings", exc.raw)
-        except Exception:
-            LOGGER.exception("Looker init failed (will retry on first request)")
-        try:
-            _start_watcher()
-        except Exception:
-            LOGGER.exception("Watcher start failed")
-
-    threading.Thread(target=_bg_init, daemon=True, name="init").start()
+    """Start the hub on a background thread (``_start_hub``) and the 3 AM
+    auto-restart loop, so the server answers /healthz at once: the start-up
+    may read the phase-1 corrections file on the share (seeding gc1), which
+    can stall on an unreachable UNC path. Store routes answer 503 until the
+    store exists."""
+    threading.Thread(target=_start_hub, daemon=True, name="hub-start").start()
     threading.Thread(target=_auto_restart_loop, daemon=True, name="auto-restart").start()
+
+
+def _start_hub() -> None:
+    """``hub.start``: store migrate, gc1 bootstrap and corrections seed, the
+    pipeline Worker, the export flusher, the nightly backup and job prune;
+    then prime ``sample_cache``. A hub that cannot start (e.g. an unreadable
+    database) is logged and notified, and the app still serves, so /healthz
+    and the logs can say why."""
+    global _hub_runtime
+    try:
+        _hub_runtime = hub.start(settings_mod.load_settings(), on_final=_on_sample_final)
+        atexit.register(_stop_hub)
+    except Exception as exc:
+        LOGGER.exception("The hub did not start (processing and exports are stopped)")
+        try:
+            notifications_mod.get_store().add(
+                "error", f"The GC hub did not start: {exc}. Nothing is processed or exported "
+                         f"until it is fixed and the app restarted; see app.log.")
+        except Exception:
+            LOGGER.exception("Could not raise the start-up notification")
+        return
+    _prime_sample_cache()
+
+
+def _stop_hub() -> None:
+    """Stop the Worker, exporter and maintenance threads (best effort)."""
+    rt = _hub_runtime
+    if rt is not None:
+        try:
+            rt.stop(timeout=5.0)
+        except Exception:
+            LOGGER.exception("Could not stop the hub cleanly")
+
+
+def _wake_exports() -> None:
+    """A ledger row was written outside the Worker: flush it now."""
+    rt = _hub_runtime
+    if rt is not None:
+        rt.wake_exports()
+
+
+def _on_sample_final(sample_id: int) -> None:
+    """Worker hook: a sample became final; compute its flags/best-fit off
+    the request path."""
+    _schedule_cache_refresh([sample_id])
+
+
+CACHE_PRIME_LIMIT = 2000
+
+
+def _prime_sample_cache() -> None:
+    """At start, queue the newest samples with no ``sample_cache`` row (or
+    one from other rules) so the first list after a start is warm."""
+    try:
+        _data, db = _hub()
+        fps = _cache_fingerprints(settings_mod.load_settings())
+        with store.connection(db) as conn:
+            ids = [r[0] for r in conn.execute(
+                "SELECT s.id FROM samples s LEFT JOIN sample_cache c ON c.sample_id = s.id "
+                "WHERE c.sample_id IS NULL OR c.rules_fingerprint IS NOT ? "
+                "ORDER BY s.injection_dt DESC LIMIT ?", (fps["rules_fp"], CACHE_PRIME_LIMIT))]
+        if ids:
+            _schedule_cache_refresh(ids)
+    except HubUnavailable:
+        pass
+    except Exception:
+        LOGGER.exception("Could not prime sample_cache (non-fatal)")
 
 
 def _sweep_csv_temps() -> None:
