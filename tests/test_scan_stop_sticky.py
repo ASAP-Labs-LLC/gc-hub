@@ -1,5 +1,6 @@
 """Sticky-stop behaviour: a stopped backlog must not auto-resume, but
-genuinely new files still get processed. Pure-helper + route tests.
+genuinely new files still get processed. Pure-helper tests of the legacy
+watcher (removed with it in T5; the /api/scan route is gone since T4).
 
 Imports app (flask-gated); the watcher is stopped in setUp.
 """
@@ -44,17 +45,6 @@ class ScanStopStickyTests(unittest.TestCase):
         self.app._suppress_backlog(["x.cdf", "y.cdf"])
         with self.app._suppressed_lock:
             self.assertEqual(self.app._suppressed_paths, {"x.cdf", "y.cdf"})
-
-    def test_api_scan_clears_suppression_and_halt(self):
-        with self.app._suppressed_lock:
-            self.app._suppressed_paths.update({"z.cdf"})
-        self.app._scan_halt.set()
-        client = self.app.app.test_client()
-        resp = client.post("/api/scan")
-        self.assertEqual(resp.status_code, 200)
-        self.assertFalse(self.app._scan_halt.is_set())
-        with self.app._suppressed_lock:
-            self.assertEqual(self.app._suppressed_paths, set())
 
 
 if __name__ == "__main__":
