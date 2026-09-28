@@ -1,6 +1,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import time
@@ -58,9 +59,15 @@ def _runs(root):
     return (root / "runs.txt").read_text().split()
 
 
-def _launcher(root):
+def _launcher(root, run_seconds=None):
     sleeps = []
-    lc = L.Launcher(str(root), sleep=sleeps.append)
+    kw = {}
+    if run_seconds is not None:
+        # The launcher reads the clock once at each child's start and once at
+        # its exit, so each child "runs" exactly run_seconds.
+        ticks = iter(range(10 ** 6))
+        kw["clock"] = lambda: next(ticks) * run_seconds
+    lc = L.Launcher(str(root), sleep=sleeps.append, **kw)
     return lc, sleeps
 
 
@@ -73,9 +80,26 @@ def test_exit_0_quits(tmp_path):
 
 def test_exit_3_restarts_and_rereads_current(tmp_path):
     root = _root(tmp_path, {"v1": [{"switch": "v2"}], "v2": [0]})
-    lc, sleeps = _launcher(root)
+    lc, sleeps = _launcher(root, run_seconds=0.25)
     assert lc.run() == 0
-    assert _runs(root) == ["v1", "v2"] and sleeps == []
+    assert _runs(root) == ["v1", "v2"]
+    assert sleeps == [0.75]                               # 1 s floor between starts
+
+
+def test_rapid_exit_3_loop_backs_off(tmp_path):
+    root = _root(tmp_path, {"v1": [3, 3, 3, 3, 3, 3, 3, 3, 0]})
+    lc, sleeps = _launcher(root, run_seconds=0.25)
+    assert lc.run() == 0
+    assert _runs(root) == ["v1"] * 9
+    assert sleeps == [0.75] * 5 + [2, 4, 8]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_lock_name_is_resolved(tmp_path):
+    (tmp_path / "a").mkdir()
+    os.symlink(str(tmp_path / "a"), str(tmp_path / "link"))
+    assert L._lock_name(str(tmp_path / "a")) == L._lock_name(str(tmp_path) + "/b/../a/")
+    assert L._lock_name(str(tmp_path / "a")) == L._lock_name(str(tmp_path / "link"))
 
 
 def test_crash_restarts_with_backoff(tmp_path):

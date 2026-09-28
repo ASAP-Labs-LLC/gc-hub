@@ -8,7 +8,9 @@ it is kept small and stdlib-only.
 * Runs ``versions/<current.txt>/agent_main.py --root <root>`` as a child with
   the interpreter recorded in ``agent.json`` ("python"; the installer writes
   the pythonw.exe it ran under).
-* Child exit 0 → quit. 3 → restart, re-reading ``current.txt``. Anything
+* Child exit 0 → quit. 3 → restart, re-reading ``current.txt``, at most one
+  start per second; after 5 restarts in a row that each ran under 30 s it
+  backs off (2 s doubling to 60 s), so an exit-3 loop cannot spin. Anything
   else is a crash → restart with backoff (1 s doubling to 60 s).
 * A version that ``current.txt`` newly switched to and that crashes three
   times, each within 30 s of starting, is reverted to ``previous.txt``. The
@@ -37,6 +39,8 @@ EXIT_RESTART = 3
 QUICK_CRASH_SECONDS = 30
 CRASHES_TO_REVERT = 3
 BACKOFF_MAX = 60
+RESTART_FLOOR = 1.0
+RAPID_RESTARTS_FREE = 5
 MISSING_VERSION_WAIT = 30
 _VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$")
 _IS_WIN = sys.platform == "win32"
@@ -86,7 +90,7 @@ class _Held:
 
 
 def _lock_name(root):
-    key = os.path.normcase(os.path.abspath(str(root)))
+    key = os.path.normcase(str(Path(root).resolve()))
     return "Local\\ASAPLabs.gc-agent.launcher." + hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
 
 
@@ -180,6 +184,7 @@ class Launcher:
         running = None
         newly_switched = False
         quick_crashes = 0
+        rapid_restarts = 0
         backoff = 1
         while True:
             v = read_pointer(self.root, "current.txt")
@@ -189,7 +194,7 @@ class Launcher:
                 self.sleep(MISSING_VERSION_WAIT)
                 continue
             if running is not None and v != running:
-                newly_switched, quick_crashes = True, 0
+                newly_switched, quick_crashes, rapid_restarts = True, 0, 0
                 log.info("switched from %s to %s", running, v)
             running = v
             cmd = [self.python(), str(main), "--root", str(self.root)]
@@ -202,7 +207,15 @@ class Launcher:
             if rc == EXIT_RESTART:
                 log.info("agent asked for a restart")
                 backoff = 1
+                rapid_restarts = rapid_restarts + 1 if ran < QUICK_CRASH_SECONDS else 0
+                if rapid_restarts > RAPID_RESTARTS_FREE:
+                    delay = min(2 ** (rapid_restarts - RAPID_RESTARTS_FREE), BACKOFF_MAX)
+                    log.warning("%d quick restarts in a row; waiting %d s", rapid_restarts, delay)
+                    self.sleep(delay)
+                elif ran < RESTART_FLOOR:
+                    self.sleep(RESTART_FLOOR - ran)
                 continue
+            rapid_restarts = 0
             log.warning("agent %s exited with %s after %.0f s", v, rc, ran)
             if newly_switched:
                 if ran < QUICK_CRASH_SECONDS:
