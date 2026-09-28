@@ -70,10 +70,11 @@ class SharedModulesTests(unittest.TestCase):
 
 class RestartDecisionTests(unittest.TestCase):
     def test_supervised_restart_exits_without_spawning(self):
+        # v2 is hub mode only: the updater always supervises it, so a restart
+        # only exits (there is no legacy respawn mode).
         import restart_policy
         self.assertEqual(restart_policy.restart_mode(env={"GC_DATA_DIR": "C:/x"}), "exit")
-        self.assertEqual(restart_policy.restart_mode(env={"GC_DATA_DIR": "  "}), "respawn")
-        self.assertEqual(restart_policy.restart_mode(env={}), "respawn")
+        self.assertEqual(restart_policy.restart_mode(env={}), "exit")
 
     def test_respawn_blocked_while_switching(self):
         import restart_policy
@@ -403,37 +404,15 @@ class RestartRouteTests(unittest.TestCase):
 
 
 class PolicyDecisionTests(unittest.TestCase):
-    def test_respawn_command_deployed_runs_via_the_junction(self):
+    def test_respawn_command_runs_via_the_junction(self):
         import restart_policy as rp
         args, cwd, flags = rp.respawn_command(
-            "py.exe", ["app.py", "--no-tray"], deployed=True, app_dir=Path("C:/r/releases/v1"),
-            cwd="C:/r/current", windows=True)
+            "py.exe", ["app.py", "--no-tray"], cwd="C:/r/current", windows=True)
         self.assertEqual(args, ["py.exe", "app.py", "--no-tray"])
         self.assertEqual(cwd, "C:/r/current")
         self.assertEqual(flags, rp.CREATE_NO_WINDOW | rp.CREATE_NEW_PROCESS_GROUP)
-        _, _, flags = rp.respawn_command("py", ["-c"], deployed=True, app_dir=Path("/a"),
-                                         cwd="/c", windows=False)
+        _, _, flags = rp.respawn_command("py", ["-c"], cwd="/c", windows=False)
         self.assertEqual(flags, 0)
-
-    def test_respawn_command_legacy_uses_the_app_dir(self):
-        import restart_policy as rp
-        args, cwd, flags = rp.respawn_command(
-            "py.exe", ["-c"], deployed=False, app_dir=Path("/share/gc"), cwd="/elsewhere",
-            windows=True)
-        self.assertEqual(args, ["py.exe", str(Path("/share/gc") / "app.py")])
-        self.assertEqual(cwd, str(Path("/share/gc")))
-        self.assertEqual(flags, rp.CREATE_NEW_PROCESS_GROUP)
-
-    def test_respawn_decision_legacy(self):
-        import restart_policy
-        with tempfile.TemporaryDirectory() as t:
-            d = Path(t)
-            self.assertTrue(restart_policy.should_respawn(d, env={}))
-            (d / "switching").write_text("")
-            self.assertFalse(restart_policy.should_respawn(d, env={}))
-            (d / "switching").unlink()
-            (d / "switch-accepted").write_text("{}")
-            self.assertFalse(restart_policy.should_respawn(d, env={}))
 
     def test_respawn_decision_under_the_updater(self):
         import restart_policy

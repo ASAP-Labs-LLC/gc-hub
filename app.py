@@ -793,12 +793,13 @@ def _is_server_idle() -> bool:
 
     "Idle" means:
       - No HTTP requests in the last AUTO_RESTART_IDLE_SECONDS
-      - No user-initiated upload thread running
-      - No queued reprocess / rebuild tasks being worked on
+      - No user-initiated QBench upload thread running
+      - No admin job running (``hub_admin.JOBS``: folder load, history import)
+      - No Worker job running or due now (``hub.background_busy``; a retry
+        scheduled for later, e.g. pending corrections, doesn't count)
 
-    The background file **watcher** and auto-scan are infrastructure —
-    they run 24/7 and do NOT block the restart.  SSE keep-alive pings
-    also don't count; the idle timer only advances on real requests.
+    SSE keep-alive pings and machine polling don't count; the idle timer
+    only advances on real requests.
     """
     with _last_activity_lock:
         idle_seconds = time.time() - _last_activity
@@ -806,6 +807,14 @@ def _is_server_idle() -> bool:
         return False
     # Block if user-initiated upload is running
     if _upload_thread and _upload_thread.is_alive():
+        return False
+    # Block while an admin job (folder load, history import) runs
+    job = hub_admin.JOBS.current()
+    if job is not None and job.get("state") == "running":
+        return False
+    # Block while the Worker has due jobs (a retry scheduled later doesn't count)
+    data = paths.data_dir()
+    if data is not None and hub.background_busy(data / store.DB_FILENAME):
         return False
     return True
 
@@ -816,8 +825,8 @@ APP_DIR = Path(__file__).resolve().parent
 # One restart per process (button, second click or 3 AM): _restart_claimed is
 # the single-flight flag. Under the updater a restart only ever EXITS — the
 # updater's supervise() relaunches within ~20 s, and a replacement we spawned
-# would race it for the port. Legacy mode spawns its replacement, except
-# while a switch is under way (restart_policy.may_respawn).
+# would race it for the port. Only while the updater is paused do we spawn a
+# replacement, never while a switch is under way (restart_policy.should_respawn).
 _restart_lock = threading.RLock()
 _restart_claimed = False
 _restart_decision: tuple = ("restart", None)   # what the pending restart is doing
@@ -833,40 +842,13 @@ def _claim_restart() -> bool:
         return True
 
 
-CSV_LOCK_EXIT_TIMEOUT_SECONDS = 30.0
-_csv_lock_held_for_exit = False
-
-
-def _hold_csv_lock_for_exit() -> bool:
-    """Take distill._CSV_LOCK for the rest of this process's life, so an exit
-    (ours, or the updater's taskkill /F) cannot land mid-write. Idempotent:
-    the lock is not reentrant, and both the switch watcher and _do_restart
-    call this. False if it stayed busy past the timeout."""
-    global _csv_lock_held_for_exit
-    if _csv_lock_held_for_exit:
-        return True
-    if distill._CSV_LOCK.acquire(timeout=CSV_LOCK_EXIT_TIMEOUT_SECONDS):
-        _csv_lock_held_for_exit = True
-        return True
-    LOGGER.error("Results CSV still busy after %.0fs — exiting anyway",
-                 CSV_LOCK_EXIT_TIMEOUT_SECONDS)
-    return False
-
-
-def _release_csv_lock_for_exit() -> None:
-    global _csv_lock_held_for_exit
-    if _csv_lock_held_for_exit:
-        _csv_lock_held_for_exit = False
-        distill._CSV_LOCK.release()
-
-
 def _do_restart(reason: str = "restart") -> None:
-    """Exit so a fresh process takes over: the updater relaunches us when
-    deployed; legacy mode (or a paused updater) spawns its own replacement
-    first — never while a switch is under way (restart_policy.should_respawn).
-
-    Holds distill._CSV_LOCK through the exit so os._exit cannot land in the
-    middle of a results-CSV write."""
+    """Exit so a fresh process takes over: the updater relaunches us, or,
+    while it is paused, we spawn our own replacement first (never while a
+    switch is under way: restart_policy.should_respawn). The hub (Worker,
+    exporter, maintenance) is stopped right before the exit, so a job or an
+    export append finishes first; if the replacement can't be spawned the
+    hub is started again and this process stays up."""
     global _restart_claimed
     LOGGER.info("=== SERVER RESTART INITIATED (%s) ===", reason)
     # Give a moment for any in-flight response to finish
@@ -881,26 +863,26 @@ def _do_restart(reason: str = "restart") -> None:
         os._exit(0)
 
     try:
-        spawn = restart_policy.should_respawn(paths.data_dir() or APP_DIR)
+        spawn = restart_policy.should_respawn(paths.require_data_dir())
     except Exception:
         LOGGER.exception("could not decide whether to respawn — not respawning")
         spawn = False
 
-    _stop_hub()        # let the Worker finish its job and the exporter its append
-    _hold_csv_lock_for_exit()
     if not spawn:
         LOGGER.info("Exiting without a respawn; the updater restarts the app")
+        _stop_hub()
         _exit()
+    _stop_hub()
     try:
         # Spawn a new process *then* exit.  On Windows os.execv can be
         # unreliable, so use subprocess + os._exit instead.
         args, cwd, flags = restart_policy.respawn_command(
-            _sys.executable, _sys.argv, deployed=paths.data_dir() is not None,
-            app_dir=APP_DIR, cwd=os.getcwd(), windows=platform.system() == "Windows")
+            _sys.executable, _sys.argv, cwd=os.getcwd(),
+            windows=platform.system() == "Windows")
         subprocess.Popen(args, cwd=cwd, close_fds=True, creationflags=flags)
     except Exception:
-        LOGGER.exception("Failed to spawn new server process")
-        _release_csv_lock_for_exit()
+        LOGGER.exception("Failed to spawn new server process — staying up")
+        _restart_hub()
         with _restart_lock:   # stay up; a later request may try again
             _restart_claimed = False
         return  # don't exit if we couldn't start the replacement
@@ -909,17 +891,12 @@ def _do_restart(reason: str = "restart") -> None:
 
 
 def _await_switch_then_restart(data_dir: Path, tag: str, at: float) -> None:
-    """Watch for the updater's answer, then restart. When it has the request
-    this only exits (should_respawn: the switch files are gone by now, so
-    only a paused updater makes us start our own replacement)."""
-    # By design: once the updater has taken the request, on_taken holds
-    # distill._CSV_LOCK until this process dies, so the updater's taskkill /F
-    # cannot cut a results-CSV write in half. Until then every request that
-    # reads the CSV (/api/table, /api/distillation-curve, the Looker's appends,
-    # ...) blocks, for up to restart_policy.ACCEPTED_WAIT_SECONDS (~45 s) if
-    # the updater is slow to stop us. Normally the stop comes within seconds.
-    action = restart_policy.await_switch(data_dir, tag, at,
-                                         on_taken=_hold_csv_lock_for_exit)
+    """Watch for the updater's answer, then restart. Once the updater has
+    taken the request (``on_taken``), the hub is stopped: the Worker finishes
+    its job and the exporter its append before the updater's taskkill can
+    land. Then this only exits (should_respawn: the switch files are gone by
+    now, so only a paused updater makes us start our own replacement)."""
+    action = restart_policy.await_switch(data_dir, tag, at, on_taken=_stop_hub)
     _do_restart(f"switch to {tag}: {action}")
 
 
@@ -3562,35 +3539,47 @@ def _init_app() -> None:
 
 
 def _start_hub() -> None:
-    """``hub.start``: store migrate, gc1 bootstrap and corrections seed, the
-    pipeline Worker, the export flusher, the nightly backup and job prune;
-    then prime ``sample_cache``. A hub that cannot start (e.g. an unreadable
-    database) is logged and notified, and the app still serves, so /healthz
-    and the logs can say why."""
+    """``hub.start`` (store migrate, gc1 bootstrap, the pipeline Worker, the
+    export flusher, the gc1 corrections seed, nightly backup and job prune),
+    retried with backoff (``hub.start_with_retry``: 5 s doubling to 5 min,
+    notified after repeated failures) so a locked or briefly unreachable
+    store doesn't leave the hub down until someone restarts it. Meanwhile the
+    app serves: /healthz answers, and ingest keeps accepting (samples queue).
+    Then primes ``sample_cache``."""
     global _hub_runtime
-    try:
-        _hub_runtime = hub.start(settings_mod.load_settings(), on_final=_on_sample_final)
-        atexit.register(_stop_hub)
-    except Exception as exc:
-        LOGGER.exception("The hub did not start (processing and exports are stopped)")
-        try:
-            notifications_mod.get_store().add(
-                "error", f"The GC hub did not start: {exc}. Nothing is processed or exported "
-                         f"until it is fixed and the app restarted; see app.log.")
-        except Exception:
-            LOGGER.exception("Could not raise the start-up notification")
+    rt = hub.start_with_retry(
+        lambda: hub.start(settings_mod.load_settings(), on_final=_on_sample_final),
+        notifier=hub.default_notifier())
+    if rt is None:
         return
+    _hub_runtime = rt
+    if not _stop_hub_registered.is_set():
+        _stop_hub_registered.set()
+        atexit.register(_stop_hub)
     _prime_sample_cache()
 
 
+_stop_hub_registered = threading.Event()
+
+
 def _stop_hub() -> None:
-    """Stop the Worker, exporter and maintenance threads (best effort)."""
+    """Stop the Worker, exporter and maintenance threads (best effort,
+    idempotent: the switch watcher and the restart may both call it)."""
+    global _hub_runtime
     rt = _hub_runtime
     if rt is not None:
+        _hub_runtime = None
         try:
             rt.stop(timeout=5.0)
         except Exception:
             LOGGER.exception("Could not stop the hub cleanly")
+
+
+def _restart_hub() -> None:
+    """Start the hub again after a restart that didn't happen (the respawn
+    failed), on a background thread like at start-up."""
+    if _hub_runtime is None and hub.running() is None:
+        threading.Thread(target=_start_hub, daemon=True, name="hub-restart").start()
 
 
 def _wake_exports() -> None:

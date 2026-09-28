@@ -40,6 +40,7 @@ from __future__ import annotations
 import functools
 import logging
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -71,38 +72,43 @@ def corrections_provider(db) -> corrections.StoreProvider:
     return corrections.StoreProvider(functools.partial(store.corrections.read, db=db))
 
 
-SEED_REASON = "seeded from correction_factors.json"
 SEED_BY = "startup"
+SEED_RETRY = timedelta(minutes=10)
+SEED_FAILED_TEXT = ("GC-1 has no correction factors: they could not be seeded from the "
+                    "phase-1 file ({why}). GC-1 samples wait as pending_corrections. The hub "
+                    "retries the seed every 10 minutes (fix correction_factors_json or the "
+                    "share), or enter the 11 factors on the Instruments page.")
 
 
-def seed_gc1_corrections(app_conf: dict, db, notifier: Optional[Notifier] = None) -> bool:
+def seed_gc1_corrections(app_conf: dict, db, notifier: Optional[Notifier] = None, *,
+                         notify_failure: bool = True) -> Optional[bool]:
     """Give ``gc1`` its corrections from the phase-1 file (``settings.json``'s
-    ``correction_factors_json``) if the hub has none for it yet. Returns True
-    when it seeded. An existing hub row is never touched. A missing, unreadable
-    or invalid file (``corrections.seed_from_file`` raises, never zeros) is
-    logged and notified, and gc1 stays ``pending_corrections`` until its
-    values are entered (or the file is fixed and the hub restarted)."""
+    ``correction_factors_json``) once, through ``instrument_admin.seed_gc1``
+    (the one seed implementation: audited, and gc1's ``pending_corrections``
+    samples are queued in the same transaction). ``None`` when gc1 already has
+    hub corrections (never touched); True when it seeded (info notification);
+    False when the file is missing, unreadable or invalid (the seed never
+    writes zeros): logged, and notified when ``notify_failure``."""
+    import instrument_admin
     if store.corrections.read(instruments.GC1, db=db) is not None:
-        return False
-    path = str((app_conf or {}).get("correction_factors_json") or "").strip()
+        return None
+    conf = app_conf or {}
+    path = str(conf.get("correction_factors_json") or "").strip()
     try:
         if not path:
-            raise corrections.CorrectionsUnavailable("correction_factors_json is not set")
-        values = corrections.seed_from_file(path)
-        with store.connection(db) as conn, store.write_txn(conn):
-            if store.corrections.read(instruments.GC1, db=conn) is not None:
-                return False
-            store.corrections.set_all(conn, instruments.GC1, values, by=SEED_BY, reason=SEED_REASON)
-    except corrections.CorrectionsUnavailable as exc:
-        msg = (f"GC-1 has no correction factors: they could not be seeded from the phase-1 "
-               f"file ({exc}). GC-1 samples wait as pending_corrections until the factors "
-               f"are entered on the Instruments page (or the file is fixed and the hub "
-               f"restarted).")
+            raise instrument_admin.AdminError("correction_factors_json is not set", 409)
+        result = instrument_admin.seed_gc1(conf, by=SEED_BY, db=db)
+    except instrument_admin.AdminError as exc:
+        if store.corrections.read(instruments.GC1, db=db) is not None:
+            return None                      # seeded meanwhile (the Instruments page)
+        msg = SEED_FAILED_TEXT.format(why=exc.message)
         log.error("%s", msg)
-        _notify(notifier, "error", msg)
+        if notify_failure:
+            _notify(notifier, "error", msg)
         return False
-    msg = (f"GC-1 correction factors were seeded from {path}. Check them on the Instruments "
-           f"page; never also enter GC factors in LEM.")
+    msg = (f"GC-1 correction factors were seeded from {path} ({result['queued']} waiting "
+           f"sample(s) queued). Check them on the Instruments page; never also enter GC "
+           f"factors in LEM.")
     log.info("%s", msg)
     _notify(notifier, "info", msg)
     return True
@@ -127,14 +133,21 @@ def default_notifier() -> Optional[Notifier]:
 
 
 class Maintenance:
-    """The nightly backup and the job-table prune (``run_once`` is one pass)."""
+    """The nightly backup, the job-table prune and, while gc1 has no hub
+    corrections, the seed retry every ``SEED_RETRY`` (``run_once`` is one
+    pass). ``conf_fn`` supplies ``settings.json`` for the seed (default
+    ``settings.load_settings``); ``seed_attempted_at`` is when the start-up
+    last tried (so the first retry waits the full interval)."""
 
     def __init__(self, db, data_dir, *, notifier: Optional[Notifier] = None,
-                 keep: int = BACKUP_KEEP) -> None:
+                 keep: int = BACKUP_KEEP, conf_fn: Optional[Callable[[], dict]] = None,
+                 seed_attempted_at: Optional[datetime] = None) -> None:
         self.db = Path(db)
         self.data_dir = Path(data_dir)
         self.notifier = notifier
         self.keep = keep
+        self.conf_fn = conf_fn
+        self._seed_at = seed_attempted_at
         self._failed_at: Optional[datetime] = None
         self._notified_day: Optional[str] = None
         self._pruned_day: Optional[str] = None
@@ -186,10 +199,29 @@ class Maintenance:
             log.info("hub: pruned %d finished job(s) older than %d days", n, PRUNE_DAYS)
         return n
 
+    def _seed(self, now: datetime) -> Optional[bool]:
+        if store.corrections.read(instruments.GC1, db=self.db) is not None:
+            return None
+        if self._seed_at is not None and now - self._seed_at < SEED_RETRY:
+            return None
+        self._seed_at = now
+        if self.conf_fn is not None:
+            conf = self.conf_fn()
+        else:
+            import settings
+            conf = settings.load_settings()
+        # quiet on failure: the start-up already raised the notification
+        return seed_gc1_corrections(conf, self.db, self.notifier, notify_failure=False)
+
     def run_once(self, now: Optional[datetime] = None) -> dict:
         """``now`` is local and naive (default the current time)."""
         now = now or datetime.now()
-        return {"backup": self._backup(now), "pruned": self._prune(now)}
+        try:
+            seeded = self._seed(now)
+        except Exception:  # noqa: BLE001 - never stops the backup
+            log.exception("hub: gc1 corrections seed retry failed")
+            seeded = False
+        return {"seeded": seeded, "backup": self._backup(now), "pruned": self._prune(now)}
 
     def start(self, interval: float = MAINTENANCE_INTERVAL_SECONDS) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -299,7 +331,6 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
             raise RuntimeError("the hub is already running in this process")
         store.migrate(db)
         instruments.bootstrap_gc1(app_conf, db=db)
-        seed_gc1_corrections(app_conf, db, notifier)
         exporter = exports.HubExporter(db, data_dir=data, notifier=notifier)
 
         def final_hook(sample_id: int) -> None:
@@ -307,23 +338,82 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
             if on_final is not None:
                 on_final(sample_id)
 
-        # 2A2's instruments.corrections_provider (hub corrections; gc1's file
-        # only until seeded, which the line above just did), else the hub's own.
-        provider_for = getattr(instruments, "corrections_provider", None) or corrections_provider
-        worker_kw.setdefault("corrections_provider", provider_for(db))
+        # Hub corrections only, never the phase-1 file per job (I1): an
+        # unseeded gc1 waits for the seed (below, then Maintenance).
+        worker_kw.setdefault("corrections_provider", corrections_provider(db))
         worker = instruments.startup(app_conf, notifier, db=db, data_dir=data, conf_fn=conf_fn,
                                      on_final=final_hook, **worker_kw)
         try:
             exporter.start(export_interval)
-            maint = None
-            if maintenance:
-                maint = Maintenance(db, data, notifier=notifier)
-                maint.start(maintenance_interval)
         except BaseException:
             worker.stop()
-            exporter.stop()
             raise
-        _running = HubRuntime(data, db, worker, exporter, maint, notifier)
+        rt = _running = HubRuntime(data, db, worker, exporter, None, notifier)
     _share_exporter(exporter)
+    # The seed reads the corrections file (often on the share, which can
+    # stall), so it runs outside the lock; the Worker is already up and gc1's
+    # samples simply wait until it succeeds (the seed queues them).
+    seeded_at = datetime.now()
+    try:
+        seed_gc1_corrections(app_conf, db, notifier)
+    except Exception:  # noqa: BLE001 - Maintenance retries it
+        log.exception("hub: gc1 corrections seed failed")
+    if maintenance:
+        rt.maintenance = Maintenance(db, data, notifier=notifier, conf_fn=conf_fn,
+                                     seed_attempted_at=seeded_at)
+        rt.maintenance.start(maintenance_interval)
     log.info("hub: started (data %s)", data)
-    return _running
+    return rt
+
+
+START_BACKOFF = (5, 10, 20, 40, 80, 160, 300)     # seconds; then every 300 s
+START_NOTIFY_AFTER = 3                             # consecutive failures
+
+
+def start_with_retry(start_fn: Callable[[], Any], *, sleep: Callable[[float], Any] = time.sleep,
+                     notifier: Optional[Notifier] = None,
+                     stop: Optional[threading.Event] = None):
+    """Call ``start_fn()`` until it succeeds, waiting ``START_BACKOFF`` between
+    tries (5 s doubling to 5 min, then every 5 min). One error notification
+    after ``START_NOTIFY_AFTER`` consecutive failures and one info when it then
+    starts; nothing for a blip. Returns ``start_fn``'s result, or None when
+    ``stop`` is set. Meanwhile ingest keeps accepting: ``submit`` only needs
+    the store, and the queued jobs run once the Worker starts."""
+    failures = 0
+    notified = False
+    while True:
+        if stop is not None and stop.is_set():
+            return None
+        try:
+            result = start_fn()
+        except Exception as exc:  # noqa: BLE001
+            failures += 1
+            log.exception("hub: start failed (attempt %d)", failures)
+            if failures >= START_NOTIFY_AFTER and not notified:
+                notified = True
+                _notify(notifier, "error", f"The GC hub has not started after {failures} "
+                                           f"attempts: {exc}. Nothing is processed or exported "
+                                           f"until it starts; it keeps retrying every few "
+                                           f"minutes. See app.log.")
+            sleep(START_BACKOFF[min(failures, len(START_BACKOFF)) - 1])
+            continue
+        if notified:
+            _notify(notifier, "info", f"The GC hub started after {failures + 1} attempts.")
+        return result
+
+
+def background_busy(db, *, now: Optional[datetime] = None) -> bool:
+    """True while the Worker has work now: a job ``running``, or ``queued``
+    and due (``not_before`` unset or passed). A retry scheduled later (e.g.
+    ``pending_corrections`` every 5 minutes) is not work now. False when the
+    store can't be read (never blocks a restart on an error)."""
+    stamp = store._ts((now or datetime.now()).astimezone())
+    try:
+        with store.connection(db) as conn:
+            r = conn.execute("SELECT 1 FROM jobs WHERE state='running' OR (state='queued' AND "
+                             "(not_before IS NULL OR not_before <= ?)) LIMIT 1",
+                             (stamp,)).fetchone()
+    except Exception:  # noqa: BLE001
+        log.exception("hub: could not read the job queue")
+        return False
+    return r is not None
