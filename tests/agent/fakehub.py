@@ -31,6 +31,12 @@ class Recorded:
         self.headers = headers
         self.body = body
 
+    def header(self, name):
+        for k, v in self.headers.items():
+            if k.lower() == name.lower():
+                return v
+        return None
+
     def json(self):
         return json.loads(self.body.decode("utf-8"))
 
