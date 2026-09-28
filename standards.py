@@ -4,10 +4,11 @@ The standards' CDFs stay where they are, in the comparison-standards folder
 (``settings['comparison_defaults_dir']``, default ``paths.standards_dir()``).
 The store's ``standards`` table tags each file with an instrument:
 
-* **Migration.** The first time ``sync`` runs with ``gc1`` present, every
-  ``*.cdf`` already in the folder is registered as ``gc1`` (they were all run
-  on GC-1), once, recorded in ``settings_kv[MIGRATED_KEY]``. Without ``gc1``
-  nothing is registered yet.
+* **Migration.** The first time ``sync`` finds the folder with at least one
+  ``*.cdf`` and ``gc1`` present, every file in it is registered as ``gc1``
+  (they were all run on GC-1), once, recorded in ``settings_kv[MIGRATED_KEY]``.
+  An unreachable or empty folder, or no ``gc1`` yet, registers nothing and
+  leaves the migration for a later call.
 * **Later files** (added through the old comparison-standard routes) are
   registered untagged (``instrument_id`` NULL) until an admin tags them.
 * A registered file that has gone is listed with ``missing: true``; its tag is
@@ -54,13 +55,22 @@ def _files(comp_dir) -> list:
 def sync(comp_dir, *, db: store.Db = None) -> dict:
     """Register the folder's files: all as ``gc1`` on the first run with gc1
     present, afterwards new ones untagged."""
-    files = _files(comp_dir)
+    try:
+        files = _files(comp_dir)
+    except OSError as exc:              # an unreachable share: try again next time
+        log.warning("standards: cannot list %s: %s", comp_dir, exc)
+        return {"migrated": 0, "registered": 0}
     migrated = registered = 0
     with store.connection(db) as conn:
         with store.write_txn(conn):
             if conn.execute("SELECT 1 FROM instruments WHERE id=?", (GC1,)).fetchone() is None:
                 return {"migrated": 0, "registered": 0}
             first = store.settings_kv.get(MIGRATED_KEY, db=conn) is None
+            if first and not files:
+                # Review I2: the migration counts as done only once it has seen
+                # the folder with at least one CDF (a share offline at first use,
+                # or an empty folder, must not turn later files into "untagged").
+                return {"migrated": 0, "registered": 0}
             known = {r["cdf_path"] for r in conn.execute("SELECT cdf_path FROM standards")}
             for p in files:
                 if str(p) in known:

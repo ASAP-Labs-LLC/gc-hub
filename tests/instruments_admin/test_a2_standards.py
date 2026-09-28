@@ -46,6 +46,28 @@ def test_no_gc1_yet_means_no_migration(hub):
 def test_missing_folder_is_fine(hub):
     hub.gc1()
     assert standards.list_standards(hub.root / "nope", db=hub.db) == []
+    assert store.settings_kv.get(standards.MIGRATED_KEY, db=hub.db) is None
+
+
+def test_offline_first_use_still_migrates_later(hub):
+    """Review I2: the folder is unreachable (a share offline) at first use; the
+    migration must still tag the files gc1 once it comes back."""
+    hub.gc1()
+    d = hub.root / "standards"
+    assert standards.sync(d, db=hub.db) == {"migrated": 0, "registered": 0}
+    assert store.settings_kv.get(standards.MIGRATED_KEY, db=hub.db) is None
+    _dir(hub, "Diesel.CDF")
+    assert standards.sync(d, db=hub.db) == {"migrated": 1, "registered": 0}
+    assert standards.list_standards(d, db=hub.db)[0]["instrument_id"] == "gc1"
+
+
+def test_empty_folder_first_use_still_migrates_later(hub):
+    hub.gc1()
+    d = _dir(hub)                                  # exists, no CDFs
+    assert standards.sync(d, db=hub.db) == {"migrated": 0, "registered": 0}
+    assert store.settings_kv.get(standards.MIGRATED_KEY, db=hub.db) is None
+    (d / "Jet.CDF").write_bytes(b"x")
+    assert standards.sync(d, db=hub.db)["migrated"] == 1
 
 
 def test_retag_and_filter(hub):
