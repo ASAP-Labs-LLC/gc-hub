@@ -120,6 +120,7 @@ class Scenario:
     def report(self, **kw):
         kw.setdefault("v1_corrections", self.hub.corrections)
         kw.setdefault("conf", self.hub.conf)
+        kw.setdefault("accept_excluded_methods", ["D7096.M"])
         return parity_report("gc1", self.csv, db=self.hub.db, out_dir=self.out, **kw)
 
 

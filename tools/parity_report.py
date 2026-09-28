@@ -38,8 +38,15 @@ Tags. **Failing** tags fail the report; the others are informational.
 ``corrections``       info     proven: v1's corrections file (with the hub's
                                blank and calibration) reproduces v1
 ``method-excluded``   info     the hub doesn't process the CDF's method
-                               (``other_method``/``review_method``); the names
-                               are listed, and a D2887 name among them fails
+                               (``other_method``) and the name was accepted
+                               (``accept_excluded_methods`` /
+                               ``--accept-excluded-method``); never a D2887 name
+``method-not-accepted`` FAIL   the same with a name not accepted (or a D2887
+                               name, which can't be accepted)
+``review-method``     FAIL     the CDF has no method name (held for review)
+``not-verified``      FAIL     compared, but no numeric column was checked (the
+                               v1 header lacked them), or the v1 row is
+                               malformed (long-row, short-row, decode-error)
 ``not-in-hub``        info     a v1 row no hub sample matches (its CDF wasn't
                                loaded)
 ``v1-short-row``      info     a column the v1 header in effect for that row
@@ -111,7 +118,8 @@ import store  # noqa: E402
 
 INFO_TAGS = ("source-file", "injection-time-fix", "blank-rule", "auto-detect-off", "corrections",
              "method-excluded", "not-in-hub", "v1-short-row")
-FAILING_TAGS = ("no-v1-row", "lab-id-other-time", "ambiguous-match", "not-processed", "unexplained")
+FAILING_TAGS = ("no-v1-row", "lab-id-other-time", "ambiguous-match", "not-processed",
+                "review-method", "method-not-accepted", "not-verified", "unexplained")
 TAGS = INFO_TAGS + FAILING_TAGS
 PROVEN_TAGS = ("blank-rule", "auto-detect-off", "corrections")
 TAG_HELP = {
@@ -123,7 +131,13 @@ TAG_HELP = {
     "auto-detect-off": "Proven by recomputation: v1's auto-detected calibration reproduces "
                        "v1's values.",
     "corrections": "Proven by recomputation: v1's corrections file reproduces v1's values.",
-    "method-excluded": "The CDF's method isn't processed by the hub (names listed below).",
+    "method-excluded": "The CDF's method isn't processed by the hub, and its name was accepted "
+                       "(--accept-excluded-method).",
+    "method-not-accepted": "The CDF's method isn't processed by the hub and its name wasn't "
+                           "accepted: its numbers were never compared.",
+    "review-method": "The CDF has no method name; the hub holds it for review, unprocessed.",
+    "not-verified": "Compared, but no numeric column could be checked (the v1 header lacked them "
+                    "or the v1 row is malformed).",
     "not-in-hub": "A v1 row no hub sample matches (its CDF wasn't loaded). Informational.",
     "v1-short-row": "A column the v1 header in effect for that row didn't have.",
     "no-v1-row": "A hub sample with no v1 row: nothing to compare it with.",
@@ -133,6 +147,7 @@ TAG_HELP = {
     "unexplained": "Nothing proven explains it.",
 }
 D2887_NAMES = frozenset(instruments.DEFAULT_METHOD_MAP)
+MALFORMED_ISSUES = ("long-row", "short-row", "decode-error")
 OUT_COLUMNS = ("v1_line", "lab_id", "v1_injection_dt", "sample_id", "hub_status", "column", "v1",
                "hub", "tag", "detail")
 RESULT_COLUMNS = tuple(c for c in distill.CSV_HEADER
@@ -248,8 +263,11 @@ def _since_utc(since) -> Optional[str]:
 
 class _Report:
     def __init__(self, instrument_id, v1_csv, *, db, data_dir, conf, v1_corr, sample_ids, since,
-                 blank_window_days, max_blank_candidates):
+                 blank_window_days, max_blank_candidates, accepted=()):
         self.inst_id = instrument_id
+        self.accepted = frozenset(n for n in (distill.normalise_method_name(a) for a in accepted) if n)
+        self.scope_info = {"sample_ids": None if sample_ids is None else len(set(sample_ids)),
+                           "since": None if since is None else str(since)}
         self.v1_csv = v1_csv
         self.db = db
         self.data_dir = Path(data_dir)
@@ -264,6 +282,10 @@ class _Report:
         self.method_names: dict = {}
         with store.connection(db) as conn:
             self.inst = store.instruments.get(instrument_id, db=conn) or {"id": instrument_id}
+            self.open_conflicts = [
+                {k: c[k] for k in ("id", "lab_id", "injection_dt", "existing_sample_id", "cdf_path",
+                                   "received_at")}
+                for c in store.conflicts.list(instrument_id, unresolved_only=True, db=conn)]
             self.samples = [dict(r) for r in conn.execute(
                 "SELECT * FROM samples WHERE instrument_id=? AND cdf_path IS NOT NULL ORDER BY id",
                 (instrument_id,))]
@@ -288,6 +310,10 @@ class _Report:
     def run(self):
         rows, self.issues = import_match.read_results_csv_ex(self.v1_csv)
         self.rows = rows
+        self.malformed: dict = {}
+        for i in self.issues:
+            if i["kind"] in MALFORMED_ISSUES:
+                self.malformed.setdefault(i["line_no"], []).append(i["kind"])
         columns = _row_columns(self.v1_csv)
         by_key: dict = {}
         for s in self.samples:
@@ -395,16 +421,34 @@ class _Report:
             for col, a, b in result_diffs:
                 self._diff(row, sample, col, a, b, tag or "unexplained", detail)
             failing_result = failing_result or tag is None
-        if numeric_checked and not failing_result:
+        why = []
+        if not numeric_checked:
+            why.append("no numeric column could be compared (the v1 header in effect lacks them, "
+                       "or the values are empty)")
+        if row.line_no in self.malformed:
+            why.append(f"the v1 row is malformed ({', '.join(self.malformed[row.line_no])})")
+        if why:
+            self._diff(row, sample, "*", "", "", "not-verified", "; ".join(why))
+        elif not failing_result:
             self.verified += 1
 
     def _no_result(self, row, sample, v1_state, present) -> None:
         status = sample["status"]
         if status in ("other_method", "review_method"):
-            name = sample.get("method_name") or ""
+            name = distill.normalise_method_name(sample.get("method_name"))
             self.method_names[name or "(none)"] = self.method_names.get(name or "(none)", 0) + 1
-            self._diff(row, sample, "*", "", "", "method-excluded",
-                       f"hub status {status} (method {name or 'none'})")
+            if status == "review_method" or not name:
+                self._diff(row, sample, "*", "", "", "review-method",
+                           "the CDF has no method name; held for review and never processed")
+            elif name in self.accepted and not self._is_d2887(name):
+                self._diff(row, sample, "*", "", "", "method-excluded",
+                           f"hub status {status}, method {name} (accepted as not D2887)")
+            else:
+                why = ("a D2887 method name: it must be mapped, not excluded" if self._is_d2887(name)
+                       else "not accepted: pass --accept-excluded-method " + name
+                       + " if it really isn't a D2887 run")
+                self._diff(row, sample, "*", "", "", "method-not-accepted",
+                           f"hub status {status}, method {name}; {why}")
         elif status == "awaiting_calibration":
             tag, detail = self._prove(row, sample, None, v1_state, present)
             if tag == "auto-detect-off":
@@ -417,6 +461,10 @@ class _Report:
                        f"hub status error: {sample.get('error') or ''}".strip())
         else:
             self._diff(row, sample, "*", "", "", "not-processed", f"hub status {status}")
+
+    def _is_d2887(self, name: str) -> bool:
+        return (name in D2887_NAMES
+                or instruments.method_map(self.inst).get(name) == instruments.DEFAULT_METHOD)
 
     # ── proof by recomputation ─────────────────────────────────────────────
     def _cdf(self, sample: dict, rev: Optional[dict]) -> Path:
@@ -548,9 +596,15 @@ class _Report:
             by_row.setdefault(key, set()).add(d["tag"])
         ordered = {t: {"differences": tags[t]["differences"], "rows": len(tags[t]["rows"])}
                    for t in TAGS if t in tags}
-        mm = instruments.method_map(self.inst)
-        d2887 = sorted(n for n in self.method_names
-                       if n in D2887_NAMES or mm.get(n) == instruments.DEFAULT_METHOD)
+        d2887 = sorted(n for n in self.method_names if self._is_d2887(n))
+        biggest: dict = {}
+        for d in self.differences:
+            if d["tag"] in PROVEN_TAGS and d["column"] in NUMERIC_COLUMNS:
+                try:
+                    delta = abs(float(d["v1"]) - float(d["hub"]))
+                except ValueError:
+                    continue
+                biggest[d["tag"]] = max(biggest.get(d["tag"], 0.0), delta)
         kinds: dict = {}
         for i in self.issues:
             kinds[i["kind"]] = kinds.get(i["kind"], 0) + 1
@@ -559,10 +613,18 @@ class _Report:
             fail.append("no rows were numerically verified")
         if d2887:
             fail.append(f"D2887 method name(s) excluded from processing: {', '.join(d2887)}")
+        unaccepted = sorted(n for n in self.method_names
+                            if n not in d2887 and (n == "(none)" or n not in self.accepted))
+        if unaccepted:
+            fail.append(f"excluded method name(s) not accepted: {', '.join(unaccepted)}")
         failing_keys = {k for k, v in by_row.items() if v & set(FAILING_TAGS)}
         matching = sum(1 for sid in self.compared_ids if not by_row.get(sid, set()) - {"source-file"})
-        return {
+        out = {
             "instrument": self.inst_id,
+            "scope": dict(self.scope_info),
+            "accepted_methods": sorted(self.accepted),
+            "open_conflicts": list(self.open_conflicts),
+            "max_abs_difference": {t: round(v, 6) for t, v in biggest.items()},
             "v1_csv": str(self.v1_csv),
             "generated_at": store.now_iso(),
             "hub_samples": len(self.scope),
@@ -583,13 +645,16 @@ class _Report:
             "fail_reasons": fail,
             "verdict": "FAIL" if fail else "PASS",
         }
+        out["verdict_line"] = verdict_line(out)
+        return out
 
 
 def parity_report(instrument_id: str, v1_results_csv, *, db: store.Db, out_dir, data_dir=None,
                   conf: Optional[dict] = None,
                   v1_corrections: Union[None, str, os.PathLike, dict] = None,
                   sample_ids: Optional[Iterable[int]] = None, since=None,
-                  blank_window_days: float = 7, max_blank_candidates: int = 6) -> dict:
+                  blank_window_days: float = 7, max_blank_candidates: int = 6,
+                  accept_excluded_methods: Iterable[str] = ()) -> dict:
     """Compare the hub's samples with v1's CSV (see the module docstring)."""
     v1_corr = load_v1_corrections(v1_corrections)
     if data_dir is None:
@@ -600,7 +665,8 @@ def parity_report(instrument_id: str, v1_results_csv, *, db: store.Db, out_dir, 
     rep = _Report(instrument_id, v1_results_csv, db=db, data_dir=data_dir, conf=conf,
                   v1_corr=v1_corr, sample_ids=sample_ids, since=since,
                   blank_window_days=blank_window_days,
-                  max_blank_candidates=max_blank_candidates).run()
+                  max_blank_candidates=max_blank_candidates,
+                  accepted=accept_excluded_methods).run()
     summary = rep.summary()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -627,21 +693,35 @@ HTML_LIMIT = 5000
 def verdict_line(summary: dict) -> str:
     head = ("PASS: every difference is explained" if summary["verdict"] == "PASS"
             else "FAIL: " + "; ".join(summary["fail_reasons"]))
-    return f"{head}. rows numerically verified: {summary['rows_numerically_verified']}"
+    line = (f"{head}. rows numerically verified: {summary['rows_numerically_verified']}; "
+            f"v1 rows outside the scope: {summary['v1_rows_out_of_scope']}")
+    if summary.get("accepted_methods"):
+        line += f"; accepted excluded methods: {', '.join(summary['accepted_methods'])}"
+    return line
 
 
 def _render_html(summary: dict, differences: list) -> str:
     e = html.escape
     ok = summary["verdict"] == "PASS"
+    big = summary.get("max_abs_difference", {})
     tag_rows = "".join(
         f"<tr><td class='tag {'bad' if t in FAILING_TAGS else ''}'>{e(t)}</td>"
         f"<td>{'fails' if t in FAILING_TAGS else 'info'}</td><td class='n'>{c['differences']}</td>"
-        f"<td class='n'>{c['rows']}</td><td>{e(TAG_HELP[t])}</td></tr>"
+        f"<td class='n'>{c['rows']}</td>"
+        f"<td class='n'>{'' if t not in big else f'{big[t]:.2f}'}</td><td>{e(TAG_HELP[t])}</td></tr>"
         for t, c in summary["tags"].items())
+    conflicts = "".join(
+        f"<tr><td class='n'>{c['id']}</td><td>{e(c['lab_id'])}</td><td>{e(c['injection_dt'])}</td>"
+        f"<td class='n'>{c['existing_sample_id']}</td><td>{e(c['cdf_path'] or '')}</td></tr>"
+        for c in summary.get("open_conflicts", [])) or "<tr><td colspan='5'>none</td></tr>"
+    sc = summary.get("scope", {})
+    scope_text = ", ".join(
+        [f"sample ids ({sc['sample_ids']})"] * (sc.get("sample_ids") is not None)
+        + [f"received since {sc['since']}"] * (sc.get("since") is not None)) or "every hub sample"
     methods = "".join(
         f"<tr><td>{e(n)}</td><td class='n'>{c}</td>"
         f"<td class='{'bad' if n in summary['method_excluded_d2887'] else ''}'>"
-        f"{'D2887 name: FAILS' if n in summary['method_excluded_d2887'] else 'not processed'}</td></tr>"
+        f"{'D2887 name: FAILS' if n in summary['method_excluded_d2887'] else ('accepted' if n in summary.get('accepted_methods', []) else 'not accepted: FAILS')}</td></tr>"
         for n, c in summary["method_excluded_names"].items()) or "<tr><td colspan='3'>none</td></tr>"
     shown = [d for d in differences if d["tag"] not in ("source-file", "not-in-hub")]
     listed = "".join(
@@ -656,6 +736,7 @@ def _render_html(summary: dict, differences: list) -> str:
     issues = ", ".join(f"{k}: {v}" for k, v in summary["csv_issues"].items()) or "none"
     facts = [("Instrument", summary["instrument"]), ("v1 CSV", summary["v1_csv"]),
              ("Generated", summary["generated_at"]),
+             ("Scope", scope_text),
              ("Hub samples in scope", summary["hub_samples"]),
              ("Compared with a v1 row", summary["compared_rows"]),
              ("Rows numerically verified", summary["rows_numerically_verified"]),
@@ -664,6 +745,7 @@ def _render_html(summary: dict, differences: list) -> str:
              ("v1 rows not in the hub (info)", summary["v1_rows_not_in_hub"]),
              ("v1 rows outside the scope", summary["v1_rows_out_of_scope"]),
              ("Superseded v1 rows", summary["superseded_v1_rows"]),
+             ("Accepted excluded methods", ", ".join(summary.get("accepted_methods", [])) or "none"),
              ("CSV reader notes", issues)]
     fact_rows = "".join(f"<tr><th>{e(k)}</th><td>{e(str(v))}</td></tr>" for k, v in facts)
     return f"""<!DOCTYPE html>
@@ -687,10 +769,14 @@ td.tag {{ white-space:nowrap; font-weight:600; }} .bad {{ color:var(--bad); }}
 <p class="verdict{'' if ok else ' bad'}">{e(verdict_line(summary))}</p>
 <div class="wrap"><table>{fact_rows}</table></div>
 <h2>Differences by tag</h2>
-<div class="wrap"><table><tr><th>Tag</th><th>Gate</th><th>Differences</th><th>Rows</th><th>Meaning</th></tr>
+<div class="wrap"><table><tr><th>Tag</th><th>Gate</th><th>Differences</th><th>Rows</th>
+<th>Largest difference (°C)</th><th>Meaning</th></tr>
 {tag_rows}</table></div>
 <h2>Methods not processed</h2>
 <div class="wrap"><table><tr><th>Method</th><th>Samples</th><th></th></tr>{methods}</table></div>
+<h2>Open conflicts on this instrument</h2>
+<div class="wrap"><table><tr><th>Conflict</th><th>Lab ID</th><th>Injection</th><th>Existing sample</th>
+<th>Held file</th></tr>{conflicts}</table></div>
 <h2>Differences (Source File and not-in-hub omitted)</h2>{more}
 <div class="wrap"><table><tr><th>v1 line</th><th>Lab ID</th><th>v1 InjectionDateTime</th><th>Sample</th>
 <th>Column</th><th>v1</th><th>Hub</th><th>Tag</th><th>Detail</th></tr>
@@ -711,6 +797,8 @@ def format_summary(summary: dict) -> str:
     if summary["method_excluded_names"]:
         lines.append("  methods not processed: " + ", ".join(
             f"{n} ({c})" for n, c in summary["method_excluded_names"].items()))
+    if summary.get("open_conflicts"):
+        lines.append(f"  open conflicts on this instrument: {len(summary['open_conflicts'])}")
     lines.append(f"unexplained: {summary['unexplained']}")
     return "\n".join(lines)
 
@@ -742,6 +830,9 @@ def main(argv=None) -> int:
     ap.add_argument("--sample-ids", default=None,
                     help="scope: 1,2,3 or @file (a loader --json summary, or ids)")
     ap.add_argument("--since", default=None, help="scope: hub samples received at or after this time")
+    ap.add_argument("--accept-excluded-method", action="append", default=[], metavar="NAME",
+                    help="a method name the hub doesn't process that is known not to be D2887 "
+                         "(repeatable; compared like the hub compares names)")
     ap.add_argument("--json", action="store_true", help="print the summary as JSON")
     args = ap.parse_args(argv)
     data_dir = args.data_dir or (Path(os.environ["GC_DATA_DIR"]) if os.environ.get("GC_DATA_DIR") else None)
@@ -771,7 +862,7 @@ def main(argv=None) -> int:
     rep = parity_report(args.instrument, args.v1_csv, db=data_dir / store.DB_FILENAME,
                         out_dir=args.out_dir or data_dir / "reports", data_dir=data_dir,
                         conf=settings.load_settings(), v1_corrections=v1_corr, sample_ids=ids,
-                        since=args.since)
+                        since=args.since, accept_excluded_methods=args.accept_excluded_method)
     print(json.dumps(rep["summary"], indent=2) if args.json else format_summary(rep["summary"]))
     print(f"CSV:  {rep['csv']}\nHTML: {rep['html']}")
     return rep["exit_code"]
