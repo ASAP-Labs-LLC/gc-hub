@@ -39,9 +39,101 @@ _HASH_CHUNK = 1 << 20
 class CdfMeta:
     path: str
     sha256: str
-    lab_id: str
-    injection_dt: str   # canonical naive isoformat(sep=" ")
-    dt_source: str      # 'cdf' | 'mtime'
+    lab_id: str               # sample name verbatim (display); compare via normalise_lab_id
+    injection_dt: str         # the CORRECT time, canonical naive isoformat(sep=" ")
+    dt_source: str            # 'cdf' | 'mtime' (how injection_dt was obtained)
+    method_name: str = ""     # detection_method_name: trimmed, basename, upper-cased; '' if absent
+    legacy_injection_dt: str = ""   # what v1 wrote on Python >= 3.11 ('' = same as injection_dt)
+    raw_stamp: str = ""       # the CDF's raw injection stamp text
+    v1_injection_dts: tuple = ()    # distinct strings v1 may have written: (>=3.11 form, <3.11 form)
+
+
+def normalise_lab_id(s: str) -> str:
+    """Identity form of a lab ID: outer whitespace stripped, nothing else
+    (inner spaces and case are significant). Keep the original for display."""
+    return (s or "").strip()
+
+
+def _v1_strings(c: CdfMeta) -> tuple:
+    """Every InjectionDateTime string v1 could have written for ``c``."""
+    out: list[str] = []
+    for s in (*c.v1_injection_dts, c.legacy_injection_dt or c.injection_dt, c.injection_dt):
+        if s and s not in out:
+            out.append(s)
+    return tuple(out)
+
+
+# ── Injection time parsing ─────────────────────────────────────────────────
+# v1 (distill.parse_injection_datetime as of phase 1) tried fromisoformat
+# FIRST. On Python >= 3.11 fromisoformat accepts some compact ANDI stamps
+# ("20260925002450+0000") and misreads them: 02:45:00 instead of 00:24:50.
+# The hub (2A1) fixes distill; the import still has to reproduce the bug to
+# find v1's CSV rows, so a bug-for-bug copy is pinned here.
+_V1_COMPACT = re.compile(r"^(\d{14})(?:\s*[+-]\d{2}:?\d{2})?$")
+_CORRECT_COMPACT = re.compile(r"^(\d{14})(?:Z|\s*[+-]\d{2}:?\d{2})?$")
+_ISO_DATE = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}")
+_OTHER_FORMATS = ("%d-%b-%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S")
+
+
+def _v1_parse(raw: str) -> datetime | None:
+    """Bug-for-bug copy of v1's ``distill.parse_injection_datetime``. Do not
+    fix: it must return what v1 returned, on the running Python (>= 3.11 is
+    what the hub runs, and what reproduces v1's CSV)."""
+    if not raw:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text).replace(tzinfo=None)
+    except ValueError:
+        pass
+    m = _V1_COMPACT.match(text)
+    if m:
+        try:
+            return datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
+        except ValueError:
+            pass
+    for fmt in _OTHER_FORMATS:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _correct_parse(raw: str) -> datetime | None:
+    """The fixed parse: the ANDI compact stamp (``YYYYMMDDHHMMSS`` with an
+    optional ``Z`` or ``±HH[:]MM`` zone, dropped) is matched explicitly
+    before anything else; ISO is tried only when the text has ``-`` or ``/``
+    date separators. Naive wall-clock result, or None."""
+    if not raw:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    m = _CORRECT_COMPACT.match(text)
+    if m:
+        try:
+            return datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
+        except ValueError:
+            return None
+    if _ISO_DATE.match(text):
+        try:
+            return datetime.fromisoformat(text.replace("/", "-")).replace(tzinfo=None)
+        except ValueError:
+            pass
+    for fmt in _OTHER_FORMATS:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _method_basename(raw: str) -> str:
+    text = (raw or "").strip()
+    return re.split(r"[\\/]", text)[-1].strip().upper() if text else ""
 
 
 def _sha256_file(path: Path) -> str:
@@ -52,8 +144,9 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _read_cdf_names(path: Path) -> tuple[str, str, str]:
-    """(sample_name as distill reads it, how the name was found, raw stamp).
+def _read_cdf_names(path: Path) -> tuple[str, str, str, str]:
+    """(sample_name as distill reads it, how the name was found, raw stamp,
+    raw detection_method_name).
 
     Mirrors ``distill.cdf_metadata`` exactly (variables before global
     attributes; ``injection_date_time_stamp`` → ``injection_date`` →
@@ -77,22 +170,35 @@ def _read_cdf_names(path: Path) -> tuple[str, str, str]:
                 or _get("injection_date")
                 or _get("injection_time")
             )
+            method = _get("detection_method_name")
     if name:
-        return name, "cdf", raw_date
-    return (path.stem or "Unknown"), "filename", raw_date
+        return name, "cdf", raw_date, method
+    return (path.stem or "Unknown"), "filename", raw_date, method
 
 
 def _read_cdf_meta_ex(path) -> tuple[CdfMeta, str]:
     """``read_cdf_meta`` plus where the lab ID came from ('cdf'|'filename')."""
     p = Path(path)
-    name, name_source, raw_date = _read_cdf_names(p)
-    inj_dt = distill.parse_injection_datetime(raw_date)
-    dt_source = "cdf"
-    if inj_dt is None:
-        inj_dt = datetime.fromtimestamp(p.stat().st_mtime)
-        dt_source = "mtime"
+    name, name_source, raw_date, method = _read_cdf_names(p)
+    mtime_str = None
+
+    def _mtime() -> str:
+        nonlocal mtime_str
+        if mtime_str is None:
+            mtime_str = datetime.fromtimestamp(p.stat().st_mtime).isoformat(sep=" ")
+        return mtime_str
+
+    correct = _correct_parse(raw_date)
+    dt_source = "cdf" if correct is not None else "mtime"
+    injection_dt = correct.isoformat(sep=" ") if correct is not None else _mtime()
+    v1 = _v1_parse(raw_date)
+    legacy = v1.isoformat(sep=" ") if v1 is not None else _mtime()
+    # (>= 3.11 form, < 3.11 form); the < 3.11 form is the correct parse.
+    forms = tuple(dict.fromkeys((legacy, injection_dt)))
     meta = CdfMeta(path=str(path), sha256=_sha256_file(p), lab_id=name,
-                   injection_dt=inj_dt.isoformat(sep=" "), dt_source=dt_source)
+                   injection_dt=injection_dt, dt_source=dt_source,
+                   method_name=_method_basename(method), legacy_injection_dt=legacy,
+                   raw_stamp=raw_date, v1_injection_dts=forms)
     return meta, name_source
 
 

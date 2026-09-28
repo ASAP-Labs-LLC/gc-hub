@@ -36,7 +36,7 @@ if HAVE_DEPS:
 
 def write_cdf(path, *, sample_name="S1", stamp="20260924153027+0000",
               stamp_key="injection_date_time_stamp", as_variables=False,
-              points=64, seed=0, mtime=None):
+              points=64, seed=0, mtime=None, method=None):
     """Write a small CDF shaped like ChemStation's export. ``stamp=None``
     leaves the injection time out entirely; ``sample_name=None`` likewise."""
     path = Path(path)
@@ -46,6 +46,8 @@ def write_cdf(path, *, sample_name="S1", stamp="20260924153027+0000",
         ds.createDimension("_255_byte_string", 255)
         ds.dataset_completeness = "C1+C2"
         ds.retention_unit = "seconds"
+        if method is not None:
+            ds.detection_method_name = method
         meta = {}
         if sample_name is not None:
             meta["sample_name"] = sample_name
@@ -141,6 +143,102 @@ class ReadCdfMetaTests(_TmpCase):
         meta = im.read_cdf_meta(write_cdf(self.tmp / "f.CDF"))
         with self.assertRaises(Exception):
             meta.lab_id = "other"  # type: ignore[misc]
+
+
+# v1's parse_injection_datetime tries datetime.fromisoformat first. On Python
+# >= 3.11 that accepts some compact ANDI stamps and misreads them (the 9th
+# character becomes the date/time separator). (stamp, v1 on >=3.11, correct)
+MISPARSE_CASES = [
+    ("20260924010203+0000", "2026-09-24 10:20:00", "2026-09-24 01:02:03"),
+    ("20260924100000+0000", "2026-09-24 00:00:00", "2026-09-24 10:00:00"),
+    ("20260925002450+0000", "2026-09-25 02:45:00", "2026-09-25 00:24:50"),
+    ("20260925002450Z", "2026-09-25 02:45:00", "2026-09-25 00:24:50"),
+]
+UNAFFECTED_CASES = [
+    ("20260924153027+0000", "2026-09-24 15:30:27"),
+    ("20220224150925+0000", "2022-02-24 15:09:25"),
+    ("20260924153027", "2026-09-24 15:30:27"),
+    ("2026-09-24T15:30:27", "2026-09-24 15:30:27"),
+    ("2026-09-24 15:30:27+05:00", "2026-09-24 15:30:27"),
+    ("24-Feb-2022 15:09:25", "2022-02-24 15:09:25"),
+    ("02/24/2022 15:09:25", "2022-02-24 15:09:25"),
+]
+
+
+@unittest.skipUnless(HAVE_DEPS and sys.version_info >= (3, 11),
+                     "needs numpy + netCDF4, and the Python >= 3.11 fromisoformat")
+class InjectionTimeParseTests(unittest.TestCase):
+    def test_v1_parse_is_bug_for_bug(self) -> None:
+        for stamp, legacy, _correct in MISPARSE_CASES:
+            self.assertEqual(im._v1_parse(stamp).isoformat(sep=" "), legacy, stamp)
+        for stamp, good in UNAFFECTED_CASES:
+            self.assertEqual(im._v1_parse(stamp).isoformat(sep=" "), good, stamp)
+        self.assertEqual(im._v1_parse("20260924").isoformat(sep=" "), "2026-09-24 00:00:00")
+        self.assertIsNone(im._v1_parse("20260924153027Z"))    # v1 fell back to mtime
+        self.assertIsNone(im._v1_parse(""))
+
+    def test_correct_parse(self) -> None:
+        for stamp, _legacy, correct in MISPARSE_CASES:
+            self.assertEqual(im._correct_parse(stamp).isoformat(sep=" "), correct, stamp)
+        for stamp, good in UNAFFECTED_CASES:
+            self.assertEqual(im._correct_parse(stamp).isoformat(sep=" "), good, stamp)
+        self.assertEqual(im._correct_parse("20260924153027Z").isoformat(sep=" "),
+                         "2026-09-24 15:30:27")
+        self.assertEqual(im._correct_parse("20260924100000 +0000").isoformat(sep=" "),
+                         "2026-09-24 10:00:00")
+        self.assertIsNone(im._correct_parse("20260924"))       # no '-': not ISO, no time
+        self.assertIsNone(im._correct_parse("garbage"))
+        self.assertIsNone(im._correct_parse(""))
+
+
+@unittest.skipUnless(HAVE_DEPS and sys.version_info >= (3, 11),
+                     "needs numpy + netCDF4, and the Python >= 3.11 fromisoformat")
+class CdfMetaLegacyTimeTests(_TmpCase):
+    def test_misparsed_stamps_carry_both_forms(self) -> None:
+        for i, (stamp, legacy, correct) in enumerate(MISPARSE_CASES):
+            meta = im.read_cdf_meta(write_cdf(self.tmp / f"m{i}.CDF", stamp=stamp))
+            self.assertEqual(meta.injection_dt, correct, stamp)
+            self.assertEqual(meta.legacy_injection_dt, legacy, stamp)
+            self.assertEqual(meta.dt_source, "cdf")
+            self.assertEqual(meta.raw_stamp, stamp)
+            self.assertEqual(meta.v1_injection_dts, (legacy, correct))
+
+    def test_unaffected_stamp_has_one_form(self) -> None:
+        meta = im.read_cdf_meta(write_cdf(self.tmp / "u.CDF", stamp="20260924153027+0000"))
+        self.assertEqual(meta.legacy_injection_dt, meta.injection_dt)
+        self.assertEqual(meta.v1_injection_dts, ("2026-09-24 15:30:27",))
+
+    def test_date_only_stamp(self) -> None:
+        mt = datetime(2026, 9, 24, 8, 0, 1).timestamp()
+        meta = im.read_cdf_meta(write_cdf(self.tmp / "d.CDF", stamp="20260924", mtime=mt))
+        self.assertEqual(meta.legacy_injection_dt, "2026-09-24 00:00:00")
+        self.assertEqual(meta.injection_dt, "2026-09-24 08:00:01")
+        self.assertEqual(meta.dt_source, "mtime")
+        self.assertEqual(meta.v1_injection_dts, ("2026-09-24 00:00:00", "2026-09-24 08:00:01"))
+
+    def test_z_stamp_v1_used_mtime(self) -> None:
+        mt = datetime(2026, 9, 24, 16, 0, 0).timestamp()
+        meta = im.read_cdf_meta(write_cdf(self.tmp / "z.CDF", stamp="20260924153027Z", mtime=mt))
+        self.assertEqual(meta.injection_dt, "2026-09-24 15:30:27")
+        self.assertEqual(meta.dt_source, "cdf")
+        self.assertEqual(meta.legacy_injection_dt, "2026-09-24 16:00:00")
+    # The legacy form is pinned by literal values above, not by comparing
+    # with distill: 2A1 fixes distill's parse, and v1's CSV keeps the bug.
+
+
+@unittest.skipUnless(HAVE_DEPS, "needs numpy + netCDF4")
+class MethodNameTests(_TmpCase):
+    def test_method_name_forms(self) -> None:
+        cases = [("SIMDISB.M", "SIMDISB.M"), ("  simdistb.m ", "SIMDISTB.M"),
+                 (r"C:\CHEM32\1\METHODS\SimDisB.M", "SIMDISB.M"),
+                 ("/methods/d7096.m", "D7096.M"), (None, "")]
+        for i, (raw, want) in enumerate(cases):
+            meta = im.read_cdf_meta(write_cdf(self.tmp / f"k{i}.CDF", method=raw))
+            self.assertEqual(meta.method_name, want, raw)
+
+    def test_normalise_lab_id_strips_only(self) -> None:
+        self.assertEqual(im.normalise_lab_id("  D2887-12  Std "), "D2887-12  Std")
+        self.assertEqual(im.normalise_lab_id("(Blank)"), "(Blank)")
 
 
 # ── CSV helpers ────────────────────────────────────────────────────────────
