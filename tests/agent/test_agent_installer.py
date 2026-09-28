@@ -197,6 +197,42 @@ def test_reinstall_keeps_settings_and_ledger(tmp_path):
     assert (root / "ledger.db").read_bytes() == b"keep"
 
 
+def test_running_agent_gets_token_and_url_updated_in_place(tmp_path):
+    src, _ = _download(tmp_path)
+    home, watch, _ = _home(tmp_path, None)
+    root = tmp_path / "root"
+    assert _run(src, root, home).returncode == 0
+    cfg = json.loads((root / "agent.json").read_text())
+    cfg["poll_seconds"] = 9
+    (root / "agent.json").write_text(json.dumps(cfg))
+    before = sorted(p.name for p in (root / "versions").iterdir())
+    (src / "install.json").write_text(json.dumps({"hub_url": "http://new:5560",
+                                                  "token": "tok-NEW"}))
+    (src / "agent-package.zip").unlink()                 # not needed on this path
+    launcher = INSTALL._load_module(AGENT / "launcher.pyw", "gc_launcher_t")
+    held = launcher.acquire_single_instance(str(root))   # "the agent is running"
+    try:
+        r = _run(src, root, home)
+    finally:
+        held.release()
+    assert r.returncode == 0, r.stdout + r.stderr
+    cfg = json.loads((root / "agent.json").read_text())
+    assert cfg["token"] == "tok-NEW" and cfg["hub_url"] == "http://new:5560"
+    assert cfg["poll_seconds"] == 9 and cfg["watch_dir"] == str(watch)
+    assert sorted(p.name for p in (root / "versions").iterdir()) == before
+    assert "running" in r.stdout.lower() and "tok-NEW" not in r.stdout
+
+
+def test_install_json_deleted_only_when_asked(tmp_path):
+    src, _ = _download(tmp_path)
+    home, _, _ = _home(tmp_path, None)
+    assert _run(src, tmp_path / "r1", home).returncode == 0
+    assert (src / "install.json").exists()               # --yes alone keeps it
+    r = _run(src, tmp_path / "r2", home, "--delete-install-json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (src / "install.json").exists()
+
+
 def test_python_version_check():
     assert INSTALL.check_python((3, 8, 10)) is not None
     assert INSTALL.check_python((3, 9, 0)) is None

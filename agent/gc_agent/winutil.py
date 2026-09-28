@@ -26,7 +26,14 @@ def can_open_exclusively(path):
     """True when nothing else has *path* open (Windows: CreateFileW with
     share mode 0 succeeds). ChemStation keeps a CDF open while writing it.
     On POSIX there is no such lock, so this is always True and the
-    stable-seconds rule alone decides."""
+    stable-seconds rule alone decides.
+
+    The probe opens and closes at once, so for that instant it holds the file
+    exclusively: if ChemStation tried to reopen the file in exactly that
+    window its open would fail with a sharing violation. The window is
+    microseconds, happens only for files that have already been stable for
+    stable_seconds (finished runs), and the handle is read-only; the file is
+    then read later with normal sharing."""
     if not _IS_WIN:
         return True
     h = _k32.CreateFileW(str(path), _GENERIC_READ, 0, None, _OPEN_EXISTING,

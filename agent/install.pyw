@@ -22,7 +22,13 @@ Tests / scripted use:
     python install.pyw --dry-run --yes --root <dir> [--source <dir>]
                        [--watch-dir <dir>] [--mirror-path <csv>]
 ``--dry-run`` does everything except the autostart registration and starting
-the launcher; ``--yes`` takes every default and confirms every question.
+the launcher; ``--yes`` takes every default and confirms every question
+(except deleting install.json: ``--delete-install-json``).
+
+When the agent is already running (its launcher holds the single-instance
+lock), only hub_url and token are updated in agent.json, in place; the agent
+reloads them. After a successful run the installer offers to delete
+install.json, which holds the token.
 """
 import argparse
 import importlib.machinery
@@ -163,7 +169,7 @@ def read_install_json(src):
     if not isinstance(url, str) or not url.startswith(("http://", "https://")) \
             or not isinstance(tok, str) or not tok.strip():
         raise InstallError("install.json must hold hub_url and token")
-    return url.rstrip("/"), tok
+    return url.rstrip("/"), tok.strip()
 
 
 def _http_get(url, token):
@@ -290,6 +296,41 @@ def start_launcher(python, root):  # pragma: no cover - exercised by hand
     subprocess.Popen([python, str(Path(root) / "launcher.pyw"), "--root", str(root)], **kw)
 
 
+def update_running(launcher, root, hub_url, token, ui):
+    """The agent is running: change only hub_url and token in agent.json.
+    The agent notices the file changed and reloads it (no restart needed)."""
+    cfg_path = Path(root) / "agent.json"
+    try:
+        raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("not an object")
+    except (OSError, ValueError) as exc:
+        raise InstallError("The GC agent is running but its agent.json cannot be read (%s). "
+                           "Quit it from its tray icon, then run the installer again." % exc)
+    raw["hub_url"], raw["token"] = hub_url, token
+    launcher.atomic_write_text(cfg_path, json.dumps(raw, indent=2, sort_keys=True) + "\n")
+    ui.info("The GC agent is running, so only its hub URL and token were updated in "
+            "agent.json; it picks them up within a few seconds. Nothing else was changed.")
+
+
+def offer_delete_install_json(src, args, ui):
+    """install.json holds this PC's token; it is not needed after installing."""
+    p = Path(src) / "install.json"
+    if not p.exists():
+        return
+    if args.yes:
+        if not args.delete_install_json:
+            return
+    elif not ui.confirm("Delete install.json from the download folder? It holds this PC's "
+                        "agent token and is no longer needed."):
+        return
+    try:
+        p.unlink()
+        ui.info("Deleted %s." % p)
+    except OSError as exc:
+        ui.info("Could not delete %s: %s" % (p, exc))
+
+
 # ── install ──────────────────────────────────────────────────────────────
 def install(args, ui):
     src = Path(args.source)
@@ -302,8 +343,9 @@ def install(args, ui):
     root.mkdir(parents=True, exist_ok=True)
     held = launcher.acquire_single_instance(root)
     if held is None:
-        raise InstallError("The GC agent is running. Quit it from its tray icon, then run the "
-                           "installer again.")
+        update_running(launcher, root, hub_url, token, ui)
+        offer_delete_install_json(src, args, ui)
+        return 0
     work = tempfile.mkdtemp(prefix="gc-agent-install-")
     try:
         data, version, sha = obtain_package(src, hub_url, token)
@@ -369,6 +411,7 @@ def install(args, ui):
         if not args.dry_run:
             start_launcher(python, root)
         ui.info("Installed the GC agent %s in %s." % (name, root))
+        offer_delete_install_json(src, args, ui)
         return 0
     finally:
         if held is not None:
@@ -383,6 +426,8 @@ def main(argv=None, find_spec=importlib.util.find_spec):
     ap.add_argument("--root", default=None)
     ap.add_argument("--source", default=str(Path(__file__).resolve().parent))
     ap.add_argument("--watch-dir", default=None)
+    ap.add_argument("--delete-install-json", action="store_true",
+                    help="with --yes: delete install.json (it holds the token) after success")
     ap.add_argument("--mirror-path", default=None,
                     help="optional results mirror CSV (off by default); an existing file is adopted")
     args = ap.parse_args(argv)

@@ -49,15 +49,16 @@ def run(root):  # pragma: no cover - interactive
     from tkinter import filedialog, messagebox
 
     path = Path(root) / "agent.json"
+    # The root window first: a messagebox before it would create a stray
+    # implicit Tk root (an empty second window).
+    win = tk.Tk()
+    win.title("GC agent settings")
     try:
         raw = config.read_raw(path)
         cur = config.validate(raw)
     except config.ConfigError as exc:
         raw, cur = {}, dict(config.DEFAULTS)
-        messagebox.showwarning("GC agent settings", str(exc))
-
-    win = tk.Tk()
-    win.title("GC agent settings")
+        messagebox.showwarning("GC agent settings", str(exc), parent=win)
     vars_ = {}
     row = 0
 
@@ -99,7 +100,7 @@ def run(root):  # pragma: no cover - interactive
         try:
             new = apply_settings(dict(raw, **{k: cur[k] for k in cur if k not in raw}), form)
         except config.ConfigError as exc:
-            messagebox.showerror("GC agent settings", str(exc))
+            messagebox.showerror("GC agent settings", str(exc), parent=win)
             return
         config.save(path, new)
         win.destroy()
