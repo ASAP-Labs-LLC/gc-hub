@@ -65,7 +65,9 @@ Public API
     genuine_blank(path, lab_id, conf) -> int     safe_stem(lab_id) -> str
     rel_path(path, data_dir) -> str              load_conf() -> dict
     v1_time_forms(raw_stamp, *known) -> list[str]         # every time v1 may have written
-    find_result_only(conn, instrument_id, lab_id, forms) -> dict | None
+    match_result_only(conn, instrument_id, lab_id, forms, injection_dt) -> ResultOnlyMatch
+    find_result_only(conn, instrument_id, lab_id, forms, injection_dt=None) -> dict | None
+    unmapped_method_note(inst, method_name) -> str | None
     attach_cdf_to_result_only(conn, sample_id, *, cdf_sha256, cdf_path, method_name,
         injection_dt, injection_dt_source, source_name, is_blank=0,
         legacy_injection_dt=None, status=None) -> dict   # in write_txn; submit and the 2D importer
@@ -142,8 +144,16 @@ Decisions (where the spec left a choice):
   ``v1_time_forms``) is attached to it in place
   (``attach_cdf_to_result_only``): ``created`` for that sample id, its status
   and v1 revisions kept, **nothing queued** (the record stays v1's until an
-  admin reprocesses it). Two candidates: nothing is attached. A conflict
-  Replace against a result-only sample is refused.
+  admin reprocesses it). **Never** to a candidate whose time is
+  unverifiable (``time_unverifiable=1``) and differs from the file's correct
+  time (``match_result_only``): the file becomes a normal sample, both get a
+  ``review_note`` ("possible match ... time unverifiable") and one
+  notification is raised. A live attach of a file whose method isn't mapped
+  keeps v1's status and revisions and sets a ``review_note``
+  (``UNMAPPED_METHOD_NOTE``). Two attachable candidates: nothing is
+  attached. A conflict against a result-only sample carries
+  ``RESULT_ONLY_CONFLICT_REASON`` in ``conflicts.error`` from creation, and
+  its Replace is refused.
 * Export lines the hub builds from a stored revision (``release_backfill``,
   ``export_to_lims``) carry the sample's ``injection_dt`` in
   ``InjectionDateTime`` (an imported revision keeps v1's string).
@@ -560,20 +570,64 @@ def v1_time_forms(raw_stamp: Optional[str], *known: Optional[str]) -> list:
     return out
 
 
-def find_result_only(conn, instrument_id: str, lab_id: str, forms) -> Optional[dict]:
-    """The imported **result-only** sample (no CDF, ``legacy_unverified=1``) on
-    this instrument with this lab ID whose (CSV) injection time is one of
-    ``forms`` (``v1_time_forms``). ``None`` when there is none, or more than
-    one (ambiguous: nothing is attached)."""
+UNVERIFIABLE_MATCH_NOTE = "possible match with result-only sample {other} — time unverifiable"
+UNVERIFIABLE_MATCH_NOTE_RO = ("possible match with sample {other} (a CDF received later) — "
+                              "time unverifiable")
+UNMAPPED_METHOD_NOTE = "CDF method {name} not mapped for this instrument"
+RESULT_ONLY_CONFLICT_REASON = ("Replace not possible: existing sample has no CDF (imported "
+                               "result) — Keep existing or map manually")
+
+
+@dataclass(frozen=True)
+class ResultOnlyMatch:
+    """What ``match_result_only`` found for one CDF."""
+    sample: Optional[dict]          # the result-only sample to attach to, or None
+    suspects: tuple = ()            # candidates not attached: unverifiable time != the CDF's
+    ambiguous: bool = False         # several attachable candidates (nothing attached)
+
+
+def match_result_only(conn, instrument_id: str, lab_id: str, forms,
+                      injection_dt: Optional[str]) -> ResultOnlyMatch:
+    """The imported **result-only** samples (no CDF, ``legacy_unverified=1``)
+    on this instrument with this lab ID whose (CSV) injection time is one of
+    ``forms`` (``v1_time_forms``), sorted into: the one to attach to, the
+    **suspects**, and whether it is ambiguous.
+
+    **Rule (shared by ``submit`` and the importer):** a candidate whose time
+    is unverifiable (``time_unverifiable=1``: v1 could have misparsed it from
+    another stamp) and differs from the CDF's correct ``injection_dt`` is
+    never attached; it is a suspect (it may be another injection whose own
+    CDF is lost). Exactly one remaining candidate is attached; several are
+    ambiguous (nothing attached)."""
     forms = [f for f in dict.fromkeys(forms) if f]
     if not forms:
-        return None
+        return ResultOnlyMatch(None)
     marks = ", ".join("?" for _ in forms)
-    rows = conn.execute(
+    rows = [dict(r) for r in conn.execute(
         f"SELECT * FROM samples WHERE instrument_id=? AND lab_id=? AND cdf_sha256 IS NULL "
         f"AND legacy_unverified=1 AND injection_dt IN ({marks}) ORDER BY id",
-        [instrument_id, lab_id, *forms]).fetchall()
-    return dict(rows[0]) if len(rows) == 1 else None
+        [instrument_id, lab_id, *forms])]
+    suspects = tuple(r for r in rows
+                     if r["time_unverifiable"] and r["injection_dt"] != injection_dt)
+    ok = [r for r in rows if r not in suspects]
+    if len(ok) == 1:
+        return ResultOnlyMatch(ok[0], suspects)
+    return ResultOnlyMatch(None, suspects, ambiguous=len(ok) > 1)
+
+
+def find_result_only(conn, instrument_id: str, lab_id: str, forms,
+                     injection_dt: Optional[str] = None) -> Optional[dict]:
+    """``match_result_only(...).sample``."""
+    return match_result_only(conn, instrument_id, lab_id, forms, injection_dt).sample
+
+
+def unmapped_method_note(inst: dict, method_name: Optional[str]) -> Optional[str]:
+    """``UNMAPPED_METHOD_NOTE`` when ``method_name`` has no hub method on this
+    instrument (``None`` when it is mapped)."""
+    name = methods.normalise_method_name(method_name)
+    if name and instruments.method_map(inst).get(name) is not None:
+        return None
+    return UNMAPPED_METHOD_NOTE.format(name=name or "(none)")
 
 
 def attach_cdf_to_result_only(conn, sample_id: int, *, cdf_sha256: str, cdf_path: str,
@@ -711,6 +765,7 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
     tmp.write_bytes(body)
     final: Optional[Path] = None
     flagged: list = []
+    suspects: tuple = ()
     try:
         problem = cdf_problem(tmp)
         if problem is not None:
@@ -740,8 +795,10 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
                 known = existing_result(sha, instrument_id, conn)
                 if known is not None:
                     return known
-                ro = find_result_only(conn, instrument_id, lab_id,
-                                      v1_time_forms(raw_stamp, injection_dt, legacy))
+                ro_match = match_result_only(conn, instrument_id, lab_id,
+                                             v1_time_forms(raw_stamp, injection_dt, legacy),
+                                             injection_dt)
+                ro = ro_match.sample
                 if ro is not None:
                     # the CDF of an imported result-only sample: attach it in
                     # place; v1's revisions stay current, nothing is queued
@@ -752,6 +809,9 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
                         method_name=method_name, injection_dt=injection_dt,
                         injection_dt_source=dt_source, source_name=source_name,
                         is_blank=is_blank)
+                    note = unmapped_method_note(inst, method_name)
+                    if note:        # v1's revisions and status stay; say why it looks odd
+                        store.samples.update(ro["id"], review_note=note, db=conn)
                     os.replace(tmp, final)
                     if mtime_ts is not None:
                         os.utime(final, (mtime_ts, mtime_ts))
@@ -767,6 +827,8 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
                     final = cdir / f"{safe_stem(lab_id)}_{sha[:12]}.CDF"
                     cid = store.conflicts.add(instrument_id, lab_id, injection_dt, existing["id"],
                                               sha, rel_path(final, data_dir), db=conn)
+                    if existing["cdf_sha256"] is None:      # an imported result: no Replace
+                        store.conflicts.set_error(cid, RESULT_ONLY_CONFLICT_REASON, db=conn)
                     os.replace(tmp, final)
                     if mtime_ts is not None:
                         os.utime(final, (mtime_ts, mtime_ts))
@@ -784,6 +846,13 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
                 final = month_dir / f"{safe_stem(lab_id)}_{sid}.CDF"
                 store.samples.update(sid, cdf_path=rel_path(final, data_dir), db=conn)
                 store.jobs.enqueue(PROCESS, {"sample_id": sid}, sample_id=sid, db=conn)
+                suspects = ro_match.suspects
+                if suspects:        # never attached (unverifiable time): flag both sides
+                    store.samples.update(sid, review_note="; ".join(
+                        UNVERIFIABLE_MATCH_NOTE.format(other=x["id"]) for x in suspects), db=conn)
+                    for x in suspects:
+                        store.samples.update(x["id"], db=conn,
+                                             review_note=UNVERIFIABLE_MATCH_NOTE_RO.format(other=sid))
                 if is_blank:
                     flagged = _flag_late_blank(conn, inst, sid, injection_dt, method_name)
                 os.replace(tmp, final)
@@ -791,6 +860,13 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
                     os.utime(final, (mtime_ts, mtime_ts))
         log.info("pipeline: received %s %s at %s as sample %s", instrument_id, lab_id,
                  injection_dt, sid)
+        if suspects:
+            _notify(notifier, "warning",
+                    f"{inst.get('name') or instrument_id}: sample {sid} ({lab_id}, injected "
+                    f"{injection_dt}) may be the CDF of imported result-only sample(s) "
+                    f"{', '.join(str(x['id']) for x in suspects)} (v1 time "
+                    f"{', '.join(x['injection_dt'] for x in suspects)}, unverifiable). It was not "
+                    f"attached; both are marked for review.")
         if flagged:
             _notify(notifier, "warning",
                     f"{len(flagged)} final sample(s) on {inst.get('name') or instrument_id} were "

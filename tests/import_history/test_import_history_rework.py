@@ -76,7 +76,10 @@ def test_a_cdf_arriving_later_upgrades_the_result_only_sample_in_place(hub, proc
     assert table_counts(hub)["jobs"] == 0
 
 
-def test_a_cdf_for_a_misparsed_result_only_time_upgrades_it_to_the_correct_time(hub, processed):
+def test_a_cdf_for_a_misparsed_result_only_time_is_not_attached(hub, processed):
+    """Re-review item 1: the result-only time 02:45:00 is unverifiable (it may
+    be another injection whose CDF is lost), so the 00:24:50 CDF that v1 would
+    also have written as 02:45:00 is listed, never attached."""
     csv_path = write_csv(hub.root / "r.csv",
                          [row("40305", TM_V1, source=src("40305_09252026_002450.CDF"))])
     _run(hub, processed, csv_path)
@@ -84,13 +87,12 @@ def test_a_cdf_for_a_misparsed_result_only_time_upgrades_it_to_the_correct_time(
     assert ro["time_unverifiable"] == 1
     sample(processed, "40305", TM)
 
-    _run(hub, processed, csv_path)
+    summary = _run(hub, processed, csv_path)
 
     s = one(hub, "40305")
-    assert s["id"] == ro["id"]
-    assert s["injection_dt"] == _iso(TM) and s["legacy_injection_dt"] == TM_V1
-    assert s["time_corrected"] == 1 and s["time_unverifiable"] == 0
-    assert s["legacy_unverified"] == 0
+    assert s["id"] == ro["id"] and s["cdf_sha256"] is None
+    assert s["legacy_unverified"] == 1 and s["time_unverifiable"] == 1
+    assert summary["counts"]["attach_ambiguous_time"] == 1
 
 
 def test_attaching_also_adds_rows_appended_since(hub, processed):
@@ -126,7 +128,7 @@ def test_no_attach_when_the_stored_rows_are_not_a_prefix_of_the_csv(hub, process
     assert store.conflicts.list(db=hub.db) == []
 
 
-@pytest.mark.parametrize("when,v1_time", [(T, None), (TM, TM_V1)])
+@pytest.mark.parametrize("when,v1_time", [(T, None)])      # misparsed times: never (P13)
 def test_a_live_submit_attaches_to_the_result_only_sample_without_recompute(hub, processed,
                                                                             when, v1_time):
     csv_path = write_csv(hub.root / "r.csv",
