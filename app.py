@@ -2265,17 +2265,24 @@ def _csv_cell(v) -> str:
 def api_table():
     """Every sample's current revision in the results-CSV columns (cells as
     the CSV writes them), oldest injection first; ``sample_ids`` runs
-    parallel to ``rows``."""
+    parallel to ``rows``. ``InjectionDateTime`` is the sample's corrected
+    ``injection_dt``, never the revision's stored cell: an imported v1
+    revision keeps v1's (possibly misparsed) time verbatim as the record.
+    Other cells are shown as stored (numbers from the Worker, v1's exact
+    strings from an import)."""
     _data, db = _hub()
     header = list(distill.CSV_HEADER)
+    inj_col = header.index("InjectionDateTime")
     rows, ids = [], []
     with store.connection(db) as conn:
-        for sid, results in conn.execute(
-                "SELECT s.id, r.results FROM samples s JOIN sample_results r "
+        for sid, injection_dt, results in conn.execute(
+                "SELECT s.id, s.injection_dt, r.results FROM samples s JOIN sample_results r "
                 "ON r.sample_id = s.id AND r.revision = s.current_revision "
                 "ORDER BY s.injection_dt, s.id"):
             vals = _json_col(results, {}) or {}
-            rows.append([_csv_cell(vals.get(c)) for c in header])
+            row = [_csv_cell(vals.get(c)) for c in header]
+            row[inj_col] = _csv_cell(injection_dt)
+            rows.append(row)
             ids.append(sid)
     return jsonify({"columns": header, "rows": rows, "sample_ids": ids})
 

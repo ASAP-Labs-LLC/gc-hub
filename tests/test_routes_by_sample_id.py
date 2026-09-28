@@ -201,6 +201,40 @@ def test_table_is_current_revisions(hub_app):
     assert row[-1] == hub.sample("final")["cdf_path"]
 
 
+def test_table_shows_the_samples_corrected_injection_time(tmp_path):
+    # An imported (v1) revision keeps v1's cells verbatim as the record: its
+    # InjectionDateTime may be the misparsed time (spec, Injection time) and
+    # its numbers are strings. The table shows the sample's corrected
+    # injection_dt and every other cell as stored.
+    import distill
+    import hub_boot
+    import instruments
+    import store
+    h = hub_boot.Hub(tmp_path)
+    store.migrate(h.db)
+    instruments.bootstrap_gc1(h.conf, db=h.db)
+    cells = {c: "" for c in distill.CSV_HEADER}
+    cells.update({"Lab ID": "40305", "InjectionDateTime": "2026-09-25 02:45:00",
+                  "2887 T50": "301.20", "D86 T50": "288.0", "Fit Score": "0.9500"})
+    sid = store.samples.insert_received("gc1", "40305", "2026-09-25 00:24:50", "cdf",
+                                        cdf_sha256=None, cdf_path=None, status="final",
+                                        legacy_injection_dt="2026-09-25 02:45:00",
+                                        time_corrected=1, db=h.db)
+    with store.connection(h.db) as conn, store.write_txn(conn):
+        store.add_revision(conn, sid, json.dumps(cells), reason="import", by="test")
+    with booted(tmp_path) as (port, _proc, _data, _home):
+        code, body = get(port, "/api/table")
+        assert code == 200, body
+        row = body["rows"][body["sample_ids"].index(sid)]
+        col = distill.CSV_HEADER.index
+        assert row[col("InjectionDateTime")] == "2026-09-25 00:24:50"
+        assert row[col("Lab ID")] == "40305"
+        assert row[col("2887 T50")] == "301.20" and row[col("Fit Score")] == "0.9500"
+        # the stored record is untouched
+        rev = json.loads(store.get_revision(sid, db=h.db)["results"])
+        assert rev["InjectionDateTime"] == "2026-09-25 02:45:00"
+
+
 # ── removed routes ──────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("method,path", [
