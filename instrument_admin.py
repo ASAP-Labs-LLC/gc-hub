@@ -37,10 +37,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Any, Optional
 
+import distill
 import instruments
 import methods
 import store
@@ -281,3 +283,204 @@ def adopt_export(instrument_id: str, exporter, *, by: Optional[str]) -> dict:
     except exports.ExportRefused as err:
         raise _refused(err) from None
     return {"adopted": side, "status": export_status(instrument_id, exporter)}
+
+
+# ── calibration (Processing per instrument) ─────────────────────────────────
+
+def _clear_cal_cache() -> None:
+    with distill._CAL_LOCK:
+        distill._CAL_CACHE.clear()
+
+
+def _cal_path(ctx: dict) -> Optional[Path]:
+    return distill.active_calibration_path(ctx, honour_env=False)
+
+
+def calibration_status(instrument_id: str, conf: dict, *, db: store.Db = None,
+                       data_dir=None) -> dict:
+    """``{usable, problem, calibration_cdf, sensitivity, assigned}``: "Calibration
+    usable" means the CDF exists and has at least two usable assignment pairs."""
+    row = get(instrument_id, db=db)
+    ctx = instruments.context(row, conf, data_dir=data_dir)
+    problem = instruments.calibration_problem(ctx)
+    cal = _cal_path(ctx)
+    assigned = 0
+    if cal is not None:
+        amap = distill.parse_assignment_map(ctx.get("calibration_assignments", ""))
+        assigned = len(distill._assignment_pairs(amap, cal))
+    return {"usable": problem is None, "problem": problem,
+            "calibration_cdf": str(cal) if cal is not None else "",
+            "stored_as": row.get("calibration_cdf") or "",
+            "sensitivity": float(row.get("calibration_sensitivity") or 50.0),
+            "assigned": assigned}
+
+
+def calibration_candidates(instrument_id: str, q: Optional[str] = None, limit: int = 50, *,
+                           db: store.Db = None) -> list:
+    """This instrument's received samples with a stored CDF, newest first, to pick
+    a calibration run from (no server paths)."""
+    get(instrument_id, db=db)
+    limit = max(1, min(int(limit), 200))
+    rows = store.samples.search(q=q or None, instrument=instrument_id, limit=limit * 2, db=db)
+    out = []
+    for r in rows:
+        if not r.get("cdf_path"):
+            continue
+        out.append({"sample_id": r["id"], "lab_id": r["lab_id"], "injection_dt": r["injection_dt"],
+                    "status": r["status"], "method_name": r["method_name"],
+                    "source_name": r.get("source_name")})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _int_id(value: Any, what: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise AdminError(f"{what} must be an integer.")
+    try:
+        return int(value)
+    except ValueError:
+        raise AdminError(f"{what} must be an integer.") from None
+
+
+def set_calibration_cdf(instrument_id: str, conf: dict, *, sample_id: Any = None,
+                        path: Any = None, db: store.Db = None, data_dir=None) -> dict:
+    """Set the calibration CDF from one of the instrument's own samples (stored
+    data-relative) or an absolute path to an existing file. A changed CDF
+    clears the saved assignments (they belong to one file). When the result is
+    usable, the instrument's ``awaiting_calibration`` samples are queued."""
+    import pipeline
+    if (sample_id is None) == (path is None):
+        raise AdminError("Give either sample_id (one of this instrument's samples) or path.")
+    with store.connection(db) as conn:
+        row = get(instrument_id, db=conn)
+        if sample_id is not None:
+            sid = _int_id(sample_id, "sample_id")
+            s = store.samples.get(sid, db=conn)
+            if s is None:
+                raise AdminError(f"Sample {sid} not found.", 404)
+            if s["instrument_id"] != instrument_id:
+                other = store.instruments.get(s["instrument_id"], db=conn) or {}
+                raise AdminError(f"Sample {sid} was received from {other.get('name') or s['instrument_id']}, "
+                                 f"not {row['name']}: a calibration must come from the same instrument.")
+            if not s.get("cdf_path"):
+                raise AdminError(f"Sample {sid} has no stored CDF (result-only import).")
+            new = s["cdf_path"]
+        else:
+            if not isinstance(path, str) or not path.strip() or not Path(path.strip()).is_absolute():
+                raise AdminError("path must be an absolute path to a calibration CDF.")
+            if not Path(path.strip()).is_file():
+                raise AdminError(f"No file at {path.strip()}.")
+            new = path.strip()
+        with store.write_txn(conn):
+            fields = {"id": instrument_id, "calibration_cdf": new}
+            if new != (row.get("calibration_cdf") or ""):
+                fields["calibration_assignments"] = None
+            store.instruments.upsert(fields, db=conn)
+            _clear_cal_cache()
+            st = calibration_status(instrument_id, conf, db=conn, data_dir=data_dir)
+            st["queued"] = pipeline.on_calibration_saved(instrument_id, db=conn) if st["usable"] else 0
+    log.warning("instrument %s calibration CDF set to %s", instrument_id, new)
+    return st
+
+
+def clean_assignments(assignments: Any) -> list:
+    """The Calibration page's entries, validated: ``[{rt, carbon}|{rt, ignore}]``;
+    unassigned peaks are dropped. Carbons must increase with retention time."""
+    if not isinstance(assignments, list):
+        raise AdminError("assignments must be a list.")
+    valid = set(distill.N_ALKANE_CARBON)
+    clean: list = []
+    for entry in assignments:
+        if not isinstance(entry, dict) or "rt" not in entry:
+            raise AdminError("Each assignment needs an 'rt'.")
+        rt = entry["rt"]
+        if isinstance(rt, bool) or not isinstance(rt, (int, float)) or not math.isfinite(rt):
+            raise AdminError(f"rt must be a number, not {rt!r}.")
+        if entry.get("ignore"):
+            clean.append({"rt": float(rt), "ignore": True})
+        elif entry.get("carbon") is not None:
+            c = entry["carbon"]
+            if isinstance(c, bool) or not isinstance(c, (int, float)) or int(c) != c or int(c) not in valid:
+                raise AdminError(f"Unknown carbon number: {c!r}.")
+            clean.append({"rt": float(rt), "carbon": int(c)})
+    errors = distill.validate_assignments(clean)
+    if errors:
+        raise AdminError("Assigned carbons must increase with retention time: " + "; ".join(errors))
+    return clean
+
+
+def _sensitivity(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) \
+            or not 0 <= value <= 100:
+        raise AdminError("sensitivity must be a number from 0 to 100.")
+    return float(value)
+
+
+def save_calibration(instrument_id: str, assignments: Any, sensitivity: Any, conf: dict, *,
+                     db: store.Db = None, data_dir=None) -> dict:
+    """Save the peak assignments (and sensitivity) for the instrument's
+    calibration CDF and, in the same transaction, queue its
+    ``awaiting_calibration`` samples (``pipeline.on_calibration_saved``; nothing
+    else is reprocessed)."""
+    import pipeline
+    clean = clean_assignments(assignments)
+    sens = None if sensitivity is None else _sensitivity(sensitivity)
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            row = get(instrument_id, db=conn)
+            cal = _cal_path(instruments.context(row, conf, data_dir=data_dir))
+            if cal is None:
+                raise AdminError(f"{row['name']} has no calibration CDF: choose one first.", 409)
+            fields = {"id": instrument_id, "calibration_assignments": json.dumps(clean) if clean else None}
+            if sens is not None:
+                fields["calibration_sensitivity"] = sens
+            store.instruments.upsert(fields, db=conn)
+            _clear_cal_cache()
+            queued = pipeline.on_calibration_saved(instrument_id, db=conn)
+            st = calibration_status(instrument_id, conf, db=conn, data_dir=data_dir)
+    anchors = distill.anchors_for(distill.parse_assignment_map(
+        distill.upsert_assignments("", cal, clean)), cal) if clean else None
+    log.warning("instrument %s calibration saved (%d entries, %d queued)", instrument_id,
+                len(clean), queued)
+    return dict(st, saved=len(clean), queued=queued,
+                anchors=0 if anchors is None else int(anchors[0].size))
+
+
+def calibration_view(instrument_id: str, conf: dict, sensitivity: Any = None, *,
+                     db: store.Db = None, data_dir=None) -> dict:
+    """The Calibration page's payload for this instrument: the trace, detected
+    peaks (at ``sensitivity``, default the saved one), compounds, the saved
+    assignments and the usable status."""
+    import numpy as np
+    row = get(instrument_id, db=db)
+    ctx = instruments.context(row, conf, data_dir=data_dir)
+    cal = _cal_path(ctx)
+    if cal is None:
+        raise AdminError(f"{row['name']} has no calibration CDF: choose one on the Instruments page.", 409)
+    if not cal.is_file():
+        raise AdminError(f"The calibration file is missing: {cal.name}", 409)
+    if sensitivity is None:
+        sens = float(row.get("calibration_sensitivity") or 50.0)
+    else:
+        try:
+            sens = _sensitivity(float(sensitivity))
+        except (TypeError, ValueError):
+            raise AdminError("sensitivity must be a number from 0 to 100.") from None
+    t, y = distill.gc_xy_from_cdf(cal)
+    peak_times = distill.calibration_peak_times(cal, sens)
+    inten = np.interp(peak_times, t, y).tolist() if peak_times else []
+    amap = distill.parse_assignment_map(ctx.get("calibration_assignments", ""))
+    step = max(1, len(t) // 3000)
+    st = calibration_status(instrument_id, conf, db=db, data_dir=data_dir)
+    return {
+        "instrument": row["id"], "instrument_name": row["name"],
+        "cdf_name": cal.name, "sensitivity": sens,
+        "trace": {"x": t[::step].tolist(), "y": y[::step].tolist()},
+        "peaks": [{"index": i, "rt": round(float(rt), 4), "intensity": round(float(v), 1)}
+                  for i, (rt, v) in enumerate(zip(peak_times, inten))],
+        "compounds": [{"carbon": c, "bp": bp}
+                      for c, bp in zip(distill.N_ALKANE_CARBON, distill.N_ALKANE_BP)],
+        "assignments": amap.get(distill._cal_key(cal), []),
+        "usable": st["usable"], "problem": st["problem"], "assigned": st["assigned"],
+    }
