@@ -1,0 +1,41 @@
+name: Exports (Windows)
+
+# The append-only export tests on Windows, so the msvcrt.locking path and
+# Windows file semantics (sharing, O_EXCL, fstat on an append handle) run for
+# real. ci.yml runs the whole suite on Linux.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
+
+# Nothing here writes to the repo; the checkout drops the token too.
+permissions:
+  contents: read
+
+concurrency:
+  group: exports-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  exports-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Export tests
+        run: python -m pytest tests/exports -q
