@@ -312,17 +312,19 @@ def _cal_key(cdf_path) -> str:
         return str(cdf_path)
 
 
-def active_calibration_path(conf: Dict[str, str]) -> Path | None:
+def active_calibration_path(conf: Dict[str, str], *, honour_env: bool = True) -> Path | None:
     """Return the calibration CDF the distillation math will actually use.
 
-    ``GC_CAL_CDF`` (an env override used for testing/ops) always wins over
-    the saved ``calibration_cdf`` setting. The distillation sites
+    ``GC_CAL_CDF`` (an env override used for testing/ops) wins over the saved
+    ``calibration_cdf`` setting unless ``honour_env`` is False (the hub, where
+    one override would apply to every instrument). The distillation sites
     (``distillation_curve_from_cdf``, ``process_cdf``) and
     ``calibration_ladder`` all resolve the file through this one function, so
     the carbon-range labels shown on a chart always agree with the file the
     math used to build it. Returns ``None`` when nothing is configured.
     """
-    raw = os.environ.get("GC_CAL_CDF") or conf.get("calibration_cdf") or ""
+    env = os.environ.get("GC_CAL_CDF") if honour_env else None
+    raw = env or conf.get("calibration_cdf") or ""
     raw = raw.strip()
     return Path(raw) if raw else None
 
@@ -556,21 +558,36 @@ def upsert_assignments(raw: str, cdf_path, assignments: list) -> str:
     return json.dumps(amap)
 
 
+class AutoCalibrationRefused(ValueError):
+    """The assigned calibration is unusable and auto-detection is off."""
+
+
+def _refuse_auto(cal_cdf, why: str) -> AutoCalibrationRefused:
+    return AutoCalibrationRefused(
+        f"Calibration {Path(cal_cdf).name}: {why}, and auto-detection is off - "
+        "assign the peaks on the Calibration page"
+    )
+
+
 def _calibration_anchor_set(
-    cal_cdf: Path, conf: Dict[str, str], *, use_assignments: bool = True
+    cal_cdf: Path, conf: Dict[str, str], *, use_assignments: bool = True,
+    allow_auto: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, list, str]:
     """Return ``(rt, bp, carbons, source)``: the anchors a calibration is built from.
 
     ``source`` is ``"assignments"`` when ``conf`` holds at least two usable
     peak→carbon assignments for ``cal_cdf`` (the same pairs ``anchors_for``
     uses), else ``"auto"``: peaks auto-detected in the CDF, zipped in order
-    with the reference n-alkane ladder.
+    with the reference n-alkane ladder. With ``allow_auto`` False it raises
+    ``AutoCalibrationRefused`` (a ``ValueError``) instead of auto-detecting.
     """
     if use_assignments:
         try:
             amap = parse_assignment_map(conf.get("calibration_assignments", ""))
             pairs = _assignment_pairs(amap, cal_cdf)
         except Exception as exc:  # noqa: BLE001
+            if not allow_auto:
+                raise _refuse_auto(cal_cdf, f"assignment lookup failed ({exc})") from exc
             LOGGER.warning("Calibration assignment lookup failed: %s", exc)
             pairs = []
         if len(pairs) >= 2:
@@ -578,6 +595,10 @@ def _calibration_anchor_set(
             return (np.array([p[0] for p in pairs], float),
                     np.array([cbp[p[1]] for p in pairs], float),
                     [p[1] for p in pairs], "assignments")
+        if not allow_auto:
+            raise _refuse_auto(cal_cdf, f"{len(pairs)} usable peak assignment(s), need at least 2")
+    if not allow_auto:
+        raise _refuse_auto(cal_cdf, "no assignments used")
 
     t, y = _read_cdf(cal_cdf)
     rt = _detect_nalkane_peaks(t, y)
@@ -593,16 +614,18 @@ def _anchors_info(rt: np.ndarray, carbons: list, source: str) -> dict:
 
 
 def _build_calibration_and_anchors(
-    cal_cdf: Path, conf: Dict[str, str]
+    cal_cdf: Path, conf: Dict[str, str], *, allow_auto: bool = True
 ) -> Tuple[Callable[[np.ndarray], np.ndarray], dict]:
     """``_build_calibration`` plus the anchors it used (``_anchors_info`` shape)."""
-    rt, bp, carbons, source = _calibration_anchor_set(cal_cdf, conf)
+    rt, bp, carbons, source = _calibration_anchor_set(cal_cdf, conf, allow_auto=allow_auto)
     if source == "assignments":
         try:
             cal = build_calibration_from_anchors(rt, bp)
             LOGGER.debug("Calibration from %d manual assignments", rt.size)
             return cal, _anchors_info(rt, carbons, source)
         except Exception as exc:  # noqa: BLE001
+            if not allow_auto:
+                raise _refuse_auto(cal_cdf, f"building from the assignments failed ({exc})") from exc
             # Never let a bad assignment set take down the whole pipeline —
             # fall back to auto-detection (which feeds every sample's distillation).
             LOGGER.warning(
@@ -636,14 +659,24 @@ def _assignment_signature(cal_path: Path, conf: Dict[str, str]) -> str:
 
 
 def _calibration_entry(
-    cal_cdf: Path, conf: Dict[str, str]
+    cal_cdf: Path, conf: Dict[str, str], *, allow_auto: bool = True
 ) -> Tuple[Callable[[np.ndarray], np.ndarray], dict]:
     """Cached ``_build_calibration_and_anchors(cal_cdf, conf)``.
 
     Cached per (resolved path, ``conf``'s assignment signature) and rebuilt
     when the CDF's mtime changes, so two confs never share a function built
-    from the other's assignments.
+    from the other's assignments. With ``allow_auto`` False an auto-detected
+    calibration, cached or not, raises ``AutoCalibrationRefused``.
     """
+    func, info = _calibration_entry_cached(cal_cdf, conf, allow_auto)
+    if not allow_auto and info["source"] != "assignments":
+        raise _refuse_auto(cal_cdf, "the assigned calibration fell back to auto-detection")
+    return func, info
+
+
+def _calibration_entry_cached(
+    cal_cdf: Path, conf: Dict[str, str], allow_auto: bool
+) -> Tuple[Callable[[np.ndarray], np.ndarray], dict]:
     cal_path = Path(cal_cdf)
     try:
         key = str(cal_path.resolve())
@@ -653,12 +686,12 @@ def _calibration_entry(
     try:
         mtime = cal_path.stat().st_mtime
     except Exception:  # noqa: BLE001
-        return _build_calibration_and_anchors(cal_path, conf)
+        return _build_calibration_and_anchors(cal_path, conf, allow_auto=allow_auto)
     with _CAL_LOCK:
         cached = _CAL_CACHE.get((key, sig))
         if cached and cached[0] == mtime:
             return cached[1], cached[2]
-    func, info = _build_calibration_and_anchors(cal_path, conf)
+    func, info = _build_calibration_and_anchors(cal_path, conf, allow_auto=allow_auto)
     with _CAL_LOCK:
         # Entries for an older version of this file can never match again.
         for stale in [k for k, v in _CAL_CACHE.items() if k[0] == key and v[0] != mtime]:
@@ -672,14 +705,15 @@ def _calibration_function(cal_cdf: Path, conf: Dict[str, str]) -> Callable[[np.n
     return _calibration_entry(cal_cdf, conf)[0]
 
 
-def calibration_anchors(cal_cdf: Path, conf: Dict[str, str]) -> dict:
+def calibration_anchors(cal_cdf: Path, conf: Dict[str, str], *, allow_auto: bool = True) -> dict:
     """The anchors the calibration for ``cal_cdf`` under ``conf`` is built from.
 
     Returns ``{"source": "assignments"|"auto", "anchors": [[rt, carbon], ...]}``
     (``rt`` in minutes, sorted), exactly what the distillation math uses,
-    including the auto-detection fallback.
+    including the auto-detection fallback (``AutoCalibrationRefused`` instead
+    when ``allow_auto`` is False).
     """
-    info = _calibration_entry(cal_cdf, conf)[1]
+    info = _calibration_entry(cal_cdf, conf, allow_auto=allow_auto)[1]
     return {"source": info["source"], "anchors": [list(a) for a in info["anchors"]]}
 
 
@@ -1157,14 +1191,19 @@ def _append_csv_row(dest_csv, row_data: list) -> None:
             w.writerow(row_data)
 
 
-def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None,
-            corrections: Dict[str, float] | None = None) -> dict:
+def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None, *,
+            corrections: Dict[str, float] | None = None,
+            honour_env: bool = True, allow_auto: bool = True) -> dict:
     """Run the distillation for one sample; write nothing.
 
     ``conf`` supplies the calibration, the correction file and the best-fit
     settings. ``corrections`` maps D86 cut → value to add (as
     ``load_d86_corrections`` returns); ``None`` loads them from
     ``conf["correction_factors_json"]`` exactly as ``process_cdf`` always has.
+    The defaults are v1's behaviour. The hub passes ``honour_env=False``
+    (``GC_CAL_CDF`` ignored), ``allow_auto=False`` (an unusable assigned
+    calibration raises ``AutoCalibrationRefused``, a ``ValueError``, instead
+    of silently auto-detecting) and explicit ``corrections``.
 
     Returns a dict:
 
@@ -1193,10 +1232,10 @@ def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None
         t, y = _apply_blank_and_clip(t, y, None)
 
     # 2 Calibration
-    cal_cdf = active_calibration_path(conf)
+    cal_cdf = active_calibration_path(conf, honour_env=honour_env)
     if cal_cdf is None or not cal_cdf.is_file():
         raise FileNotFoundError("Calibration CDF not found – set settings['calibration_cdf'] or GC_CAL_CDF")
-    cal_fn, cal_info = _calibration_entry(cal_cdf, conf)
+    cal_fn, cal_info = _calibration_entry(cal_cdf, conf, allow_auto=allow_auto)
     bp_curve = cal_fn(t)
 
     # 3 Cumulative %

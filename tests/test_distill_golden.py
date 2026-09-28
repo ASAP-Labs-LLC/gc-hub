@@ -10,11 +10,13 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -285,6 +287,75 @@ class ComputeTests(_IsolatedSettings):
             distill.process_cdf(cdf)
         self.assertEqual(str(got.exception), str(today.exception))
         self.assertIn("Calibration CDF not found", str(got.exception))
+
+
+class HubModeFlagsTests(_IsolatedSettings):
+    """honour_env / allow_auto / keyword-only corrections: the hub's switches.
+    The defaults keep v1's behaviour (the golden tests cover that)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.inputs = make_golden.build_inputs(self.root)
+        self.cdf, self.blank = make_golden.case_paths(self.inputs, "sample_40304_blank")
+        self.conf = make_golden.case_conf(self.root, self.inputs, "sample_40304_blank")
+        self.env = mock.patch.dict(os.environ, {"GC_CAL_CDF": str(self.root / "env-cal.CDF")})
+
+    def _row(self, result: dict) -> dict:
+        return _csv_strings({k: v for k, v in result["row"].items() if k != "Source File"})
+
+    def test_active_calibration_path_can_ignore_the_env_override(self) -> None:
+        with self.env:
+            self.assertEqual(distill.active_calibration_path(self.conf), self.root / "env-cal.CDF")
+            self.assertEqual(distill.active_calibration_path(self.conf, honour_env=False),
+                             Path(self.conf["calibration_cdf"]))
+        self.assertEqual(distill.active_calibration_path(self.conf, honour_env=False),
+                         Path(self.conf["calibration_cdf"]))
+
+    def test_compute_honours_env_by_default_and_not_when_told(self) -> None:
+        with self.env:
+            with self.assertRaises(FileNotFoundError):
+                distill.compute(self.cdf, self.conf, self.blank)
+            result = distill.compute(self.cdf, self.conf, self.blank, honour_env=False)
+        self.assertEqual(self._row(result), GOLDEN["sample_40304_blank"])
+        self.assertEqual(result["calibration"]["cdf"], self.conf["calibration_cdf"])
+
+    def test_corrections_is_keyword_only(self) -> None:
+        with self.assertRaises(TypeError):
+            distill.compute(self.cdf, self.conf, self.blank, {})
+
+    def test_allow_auto_false_with_assignments_matches_golden(self) -> None:
+        result = distill.compute(self.cdf, self.conf, self.blank, allow_auto=False)
+        self.assertEqual(self._row(result), GOLDEN["sample_40304_blank"])
+        self.assertEqual(result["calibration"]["anchors_source"], "assignments")
+
+    def test_allow_auto_false_without_assignments_raises(self) -> None:
+        conf = dict(self.conf, calibration_assignments="")
+        with mock.patch.object(distill, "_read_cdf", wraps=distill._read_cdf) as reads:
+            with self.assertRaisesRegex(ValueError, "auto-detection is off"):
+                distill.compute(self.cdf, conf, self.blank, allow_auto=False)
+            read_paths = {Path(c.args[0]) for c in reads.call_args_list}
+        self.assertNotIn(Path(conf["calibration_cdf"]), read_paths)
+        with self.assertRaisesRegex(ValueError, "auto-detection is off"):
+            distill.calibration_anchors(self.inputs["cal"], conf, allow_auto=False)
+
+    def test_allow_auto_false_with_one_usable_pair_raises(self) -> None:
+        conf = dict(self.conf, calibration_assignments=distill.upsert_assignments(
+            "", self.inputs["cal"], [{"rt": 0.5, "carbon": 5}, {"rt": 0.8, "ignore": True}]))
+        with self.assertRaisesRegex(ValueError, "auto-detection is off"):
+            distill.compute(self.cdf, conf, self.blank, allow_auto=False)
+
+    def test_allow_auto_false_when_the_assigned_build_fails_raises(self) -> None:
+        with mock.patch.object(distill, "build_calibration_from_anchors",
+                               side_effect=ValueError("boom")):
+            with self.assertRaisesRegex(ValueError, "auto-detection is off"):
+                distill.compute(self.cdf, self.conf, self.blank, allow_auto=False)
+
+    def test_a_cached_auto_calibration_is_not_reused_when_auto_is_off(self) -> None:
+        conf = dict(self.conf, calibration_assignments="")
+        auto = distill.compute(self.cdf, conf, self.blank)          # caches an auto entry
+        self.assertEqual(auto["calibration"]["anchors_source"], "auto")
+        with self.assertRaisesRegex(ValueError, "auto-detection is off"):
+            distill.compute(self.cdf, conf, self.blank, allow_auto=False)
 
 
 if __name__ == "__main__":
