@@ -85,7 +85,7 @@ SPEC_COLUMNS = {
              "created_at", "sample_id", "finished_at"},
     "agents": {"instrument_id", "version", "state", "queue_size", "rejected_count",
                "last_file", "last_error", "host", "agent_time", "last_seen", "results_seq",
-               "pending_command"},
+               "pending_command", "package_sha256"},   # package_sha256: 2B1 carry-over
     "instrument_corrections": {"instrument_id", "cut", "value", "updated_at", "updated_by"},
     "corrections_audit": {"id", "instrument_id", "cut", "old_value", "new_value", "changed_at",
                           "changed_by", "reason"},

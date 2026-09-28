@@ -155,6 +155,8 @@ Conventions and decisions (where the spec left a choice)
   earlier-injected blank arrived after it was processed). No revision is
   touched. ``sample_results.notes`` (JSON, beyond the spec) records how a
   revision was computed, e.g. ``{"blank_rejected": {"sample_id", "reason"}}``.
+* ``agents.package_sha256`` (beyond the spec; 2B1) is the sha256 of the
+  package the agent reports running; ``ingest_api`` owns the ``agents`` rows.
 * ``samples.time_corrected`` is an INTEGER flag (0/1). The spec's comment on
   that line (``'cdf'|'mtime'``) belongs to ``injection_dt_source``.
 * ``samples.id``, ``export_rows.seq`` and ``corrections_audit.id`` are
@@ -357,7 +359,8 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             agent_time TEXT,
             last_seen TEXT,
             results_seq INTEGER,
-            pending_command TEXT)""",
+            pending_command TEXT,
+            package_sha256 TEXT)""",
         """CREATE TABLE instrument_corrections(
             instrument_id TEXT NOT NULL REFERENCES instruments(id),
             cut TEXT NOT NULL,
@@ -423,7 +426,8 @@ REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
         "created_at", "sample_id", "finished_at"}),
     "agents": frozenset({
         "instrument_id", "version", "state", "queue_size", "rejected_count", "last_file",
-        "last_error", "host", "agent_time", "last_seen", "results_seq", "pending_command"}),
+        "last_error", "host", "agent_time", "last_seen", "results_seq", "pending_command",
+        "package_sha256"}),
     "instrument_corrections": frozenset({
         "instrument_id", "cut", "value", "updated_at", "updated_by"}),
     "corrections_audit": frozenset({
