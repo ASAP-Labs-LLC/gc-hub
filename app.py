@@ -171,6 +171,11 @@ app = Flask(__name__, static_folder="static", template_folder="templates")
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB upload limit
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # disable static file caching in dev
 
+import admin_auth  # noqa: E402  (2B1: admin password + /admin/setup)
+import ingest_api  # noqa: E402  (2B1: the agent API, contract §1)
+app.register_blueprint(admin_auth.bp)
+app.register_blueprint(ingest_api.bp)
+
 # ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
@@ -939,6 +944,9 @@ _NON_ACTIVITY_PATHS = {
     "/api/scan/status",
     "/api/reprocess/status",
     "/api/qbench-upload-status",
+    # 2B1: GC-PC agents are machines, never users (ingest_api)
+    "/api/ingest", "/api/agent/heartbeat", "/api/agent/results",
+    "/api/agent/package", "/api/agent/package.zip",
 }
 
 
