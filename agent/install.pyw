@@ -9,14 +9,18 @@ hub). Without ``agent-package.zip`` the package is downloaded from the hub.
 
 Steps: check Python >= 3.9 and that pystray / PIL are importable (no pip);
 unpack the package into ``%LOCALAPPDATA%\\ASAPLabs\\gc-agent\\versions\\<v>\\``;
-copy launcher.pyw; write agent.json (hub_url, token, the recorded pythonw,
-watch_dir and results_mirror_path, both defaulting from the PC's
-~/.gc_viewer_settings.json); adopt an existing mirror file (header check,
-sidecar); register autostart (HKCU Run); start the launcher.
+copy launcher.pyw; write agent.json (hub_url, token, the recorded pythonw and
+watch_dir, which defaults from the PC's ~/.gc_viewer_settings.json); register
+autostart (HKCU Run); start the launcher.
+
+The results mirror is optional and off by default (spec D9b: the hub appends
+to the CSVs LEM tails). The installer never asks for it; only an explicit
+``--mirror-path`` sets it, adopting an existing file (header check, last row
+shown, sidecar). A reinstall keeps a mirror path already in agent.json.
 
 Tests / scripted use:
     python install.pyw --dry-run --yes --root <dir> [--source <dir>]
-                       [--watch-dir <dir>] [--mirror <csv or "">]
+                       [--watch-dir <dir>] [--mirror-path <csv>]
 ``--dry-run`` does everything except the autostart registration and starting
 the launcher; ``--yes`` takes every default and confirms every question.
 """
@@ -109,9 +113,6 @@ class ConsoleUI:
     def ask_dir(self, title, initial):
         return initial
 
-    def ask_file(self, title, initial):
-        return initial
-
     def confirm(self, msg):
         print(msg + " -> yes")
         return True
@@ -137,16 +138,6 @@ class TkUI:  # pragma: no cover - interactive
         if not got:
             raise InstallError("cancelled")
         return os.path.normpath(got)
-
-    def ask_file(self, title, initial):
-        if not self._mb.askyesno("GC agent installer", title + "\n\nMirror results to a CSV on this PC "
-                                 "(the file LEM's station module reads)?\nDefault: %s" % (initial or "(none)")):
-            return ""
-        d, f = (os.path.split(initial) if initial else ("", "distill_results.csv"))
-        got = self._fd.asksaveasfilename(title=title, initialdir=d or None, initialfile=f,
-                                         defaultextension=".csv", confirmoverwrite=False,
-                                         filetypes=[("CSV", "*.csv")])
-        return os.path.normpath(got) if got else ""
 
     def confirm(self, msg):
         return self._mb.askyesno("GC agent installer", msg)
@@ -333,20 +324,20 @@ def install(args, ui):
         python = record_python()
         cfg = dict(existing)
         cfg.update({"hub_url": hub_url, "token": token, "python": python})
-        lw, lo = legacy_defaults()
+        lw, _ = legacy_defaults()
         watch = args.watch_dir if args.watch_dir is not None else (existing.get("watch_dir") or lw)
         cfg["watch_dir"] = ui.ask_dir("Choose the folder where ChemStation writes the .CDF files",
                                       watch)
-        mdef = args.mirror if args.mirror is not None else (
-            existing.get("results_mirror_path") if "results_mirror_path" in existing else lo)
-        mpath = ui.ask_file("Results CSV for LEM", mdef) if args.mirror is None else args.mirror
+        # Off unless asked for explicitly (D9b); a reinstall keeps an earlier choice.
+        mpath = args.mirror_path if args.mirror_path is not None \
+            else (existing.get("results_mirror_path") or "")
         cfg["results_mirror_path"] = mpath or ""
         try:
             cfg = config.validate(cfg)
         except config.ConfigError as exc:
             raise InstallError(str(exc))
 
-        if mpath:
+        if mpath and args.mirror_path is not None:
             if not Path(mpath).parent.is_dir():
                 raise InstallError("the folder for the results CSV does not exist: %s"
                                    % Path(mpath).parent)
@@ -392,7 +383,8 @@ def main(argv=None, find_spec=importlib.util.find_spec):
     ap.add_argument("--root", default=None)
     ap.add_argument("--source", default=str(Path(__file__).resolve().parent))
     ap.add_argument("--watch-dir", default=None)
-    ap.add_argument("--mirror", default=None, help='results CSV path; "" disables the mirror')
+    ap.add_argument("--mirror-path", default=None,
+                    help="optional results mirror CSV (off by default); an existing file is adopted")
     args = ap.parse_args(argv)
     ui = ConsoleUI() if args.yes else TkUI()
     msg = check_python(sys.version_info)

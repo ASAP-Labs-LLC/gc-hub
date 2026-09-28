@@ -51,10 +51,18 @@ heartbeat), `bad_packages.json` (shas the launcher reverted from; the updater sk
    roll-forward); readers of the four contract keys are unaffected.
 6. `results` pages are fetched until `more` is false (max 20 pages per cycle);
    rows whose `header` differs from the literal `CSV_HEADER` stop mirroring with an error.
-7. Test-only env `GC_AGENT_HEARTBEAT_SECONDS` / `GC_AGENT_LOOP_SECONDS` shorten intervals.
+7. Test-only env `GC_AGENT_HEARTBEAT_SECONDS` shortens the heartbeat interval (the loop waits
+   `min(1 s, poll_seconds)`).
 8. Installer download layout proposed to 2B1: `install.pyw`, `launcher.pyw`, `install.json`
    (`{"hub_url","token"}`) and `agent-package.zip` (+ optional `agent-package.json`
    `{"version","sha256"}`). Without the zip the installer downloads it from the hub.
+
+9. **Spec change D9b (mid-lane, from the coordinator):** the hub appends to the share CSVs LEM
+   tails, so the agent's results mirror is optional and **off by default**. `results_mirror_path`
+   defaults to `""`; the installer never asks for it or defaults it from v1's `distill_output`;
+   only an explicit `--mirror-path` sets it (adopting an existing file). A reinstall keeps a path
+   already in agent.json. `adopt-mirror` is a no-op when mirroring is off. The mirror code and
+   its tests stay (done before the change).
 
 ## Tasks (strict TDD: write the test, run it red, implement, run green, commit)
 

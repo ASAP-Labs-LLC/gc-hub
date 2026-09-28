@@ -84,21 +84,37 @@ def test_dry_run_installs_everything_but_autostart(tmp_path):
     assert (root / "current.txt").read_text().strip() == "v9.9.9"
     cfg = json.loads((root / "agent.json").read_text())
     assert cfg["hub_url"] == "http://asapsv1:5560" and cfg["token"] == "tok-123"
-    assert cfg["python"] == sys.executable
-    assert cfg["watch_dir"] == str(watch) and cfg["results_mirror_path"] == str(mirror)
+    exe = Path(sys.executable)
+    if sys.platform == "win32" and exe.with_name("pythonw.exe").exists():
+        exe = exe.with_name("pythonw.exe")            # the launcher runs without a console
+    assert cfg["python"] == str(exe)
+    assert cfg["watch_dir"] == str(watch)
     assert cfg["paused"] is False and cfg["include_subdirs"] is True
-    sc = json.loads((mirror.parent / "distill_results.csv.gchub.json").read_text())
-    assert sc["size"] == mirror.stat().st_size and sc["seq"] == 0
-    assert "A1" in r.stdout                        # the last row was shown
+    # D9b: the mirror is optional and off by default; v1's distill_output is
+    # not offered, and nothing is adopted without an explicit --mirror-path.
+    assert cfg["results_mirror_path"] == ""
+    assert not (mirror.parent / "distill_results.csv.gchub.json").exists()
     assert "dry run" in r.stdout.lower() and "launcher.pyw" in r.stdout
     assert not (root / "launcher.log").exists()    # launcher not started
     assert "tok-123" not in r.stdout
 
 
+def test_explicit_mirror_path_is_adopted(tmp_path):
+    src, _ = _download(tmp_path)
+    home, watch, mirror = _home(tmp_path, _line(*CSV_HEADER) + _line("A1", "2026-09-01 10:00:00"))
+    root = tmp_path / "root"
+    r = _run(src, root, home, "--mirror-path", str(mirror))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads((root / "agent.json").read_text())["results_mirror_path"] == str(mirror)
+    sc = json.loads((mirror.parent / "distill_results.csv.gchub.json").read_text())
+    assert sc["size"] == mirror.stat().st_size and sc["seq"] == 0
+    assert "A1" in r.stdout                        # the last row was shown
+
+
 def test_wrong_mirror_header_stops_without_sidecar(tmp_path):
     src, _ = _download(tmp_path)
     home, watch, mirror = _home(tmp_path, _line("Lab ID", "Something else"))
-    r = _run(src, tmp_path / "root", home)
+    r = _run(src, tmp_path / "root", home, "--mirror-path", str(mirror))
     assert r.returncode != 0
     assert "header" in (r.stdout + r.stderr)
     assert not (mirror.parent / "distill_results.csv.gchub.json").exists()
@@ -107,9 +123,11 @@ def test_wrong_mirror_header_stops_without_sidecar(tmp_path):
 def test_new_mirror_path_needs_no_adoption(tmp_path):
     src, _ = _download(tmp_path)
     home, watch, mirror = _home(tmp_path, None)
-    r = _run(src, tmp_path / "root", home)
+    r = _run(src, tmp_path / "root", home, "--mirror-path", str(mirror))
     assert r.returncode == 0, r.stdout + r.stderr
     assert not mirror.exists()
+    cfg = json.loads((tmp_path / "root" / "agent.json").read_text())
+    assert cfg["results_mirror_path"] == str(mirror)
 
 
 def test_explicit_paths_override_defaults(tmp_path):
@@ -117,7 +135,7 @@ def test_explicit_paths_override_defaults(tmp_path):
     home, watch, mirror = _home(tmp_path, None)
     other = tmp_path / "other"
     other.mkdir()
-    r = _run(src, tmp_path / "root", home, "--watch-dir", str(other), "--mirror", "")
+    r = _run(src, tmp_path / "root", home, "--watch-dir", str(other))
     assert r.returncode == 0, r.stdout + r.stderr
     cfg = json.loads((tmp_path / "root" / "agent.json").read_text())
     assert cfg["watch_dir"] == str(other) and cfg["results_mirror_path"] == ""

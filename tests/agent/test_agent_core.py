@@ -127,7 +127,7 @@ def test_unknown_command_is_ignored(tmp_path, hub, clock):
 
 def test_adopt_mirror_command(tmp_path, hub, clock):
     root = _root(tmp_path, hub)
-    (root / "mirror.csv").write_text(_line(*CSV_HEADER) + _line("OLD", "x"), newline="")
+    (root / "mirror.csv").write_bytes((_line(*CSV_HEADER) + _line("OLD", "x")).encode())
     hub.rows = [{"seq": 1, "line": _line("NEW", "y")}]
     a = _agent(root, clock)
     a.tick()
@@ -252,3 +252,15 @@ def test_tray_actions_queue(tmp_path, hub, clock):
     snap = a.snapshot()
     for k in ("version", "state", "queued", "rejected", "last_sent", "mirror_seq", "hub_url", "log"):
         assert k in snap
+
+
+def test_adopt_mirror_is_a_noop_when_mirroring_is_off(tmp_path, hub, clock):
+    root = _root(tmp_path, hub, results_mirror_path="")
+    hub.rows = [{"seq": 1, "line": _line("NEW", "y")}]
+    hub.commands = ["adopt-mirror"]
+    a = _agent(root, clock)
+    assert a.tick() is None
+    assert a.mirror is None and a.mirror_error is None
+    assert hub.by_path("/api/agent/results") == []     # nothing pulled
+    assert a.ledger.results_seq() == 0
+    assert list(root.glob("*.gchub.json")) == []
