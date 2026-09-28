@@ -82,3 +82,27 @@ checkbox), write a proposal instead.
   the hub.
 - **Extension:** `LemProvider(..., clock=None)` and `FileProvider(..., clock=None)`
   take an optional clock for tests. `changed_since` is a provider method.
+
+## As executed
+
+- **LEM location.** The agent sandbox refused `git worktree add` in the LEM
+  checkout (and any file write outside the gc-hub worktree), so the LEM
+  branch `gc-hub-upstream-corrections` was built in a **clone of LEM `main`
+  in the agent's scratchpad**, with a `format-patch` beside it. Nothing in
+  `~/Projects/lab-equipment-manager` was touched. To bring it in:
+  `git -C ~/Projects/lab-equipment-manager fetch <clone> gc-hub-upstream-corrections:gc-hub-upstream-corrections`
+  (or `git am` the patch).
+- **Task 9 grew by one guard.** `apply_corrections` mirrors 0.0 onto the
+  specs when the flag is on (the factors are still held). Without it a QC
+  verdict on a hub-fed GC would record `raw_value` = the corrected value plus
+  `correction` = the factor, which does not add up (§7.5.1). The dialog
+  re-mirrors when the flag is toggled.
+- **Production facts (read-only, 2026-09-28).** Agilent GC 1 is
+  `bf8e64b59f12`, tails `//asapserver/Labsharedrive/ASAP Lab Results/GC
+  Results/LEVEL 1/distill_results.csv`; Agilent GC 2 is `3afa991a66e9`,
+  `.../LEVEL 1 GC 2/distill_gc2.csv`. Neither has any `lem_correction_factors`
+  row (no double correction today). Their LEM methods are
+  `ASTM D2887/D86 - Distillation in Petroleum Products, IBP` / `10% Recovery`
+  / `50% Recovery` / `90% Recovery` / `FBP`, so the contract's default
+  `* - D86` map is a `config` error against real LEM; each GC needs a custom
+  `correction_map` (or the default changed) before 2C goes live.
