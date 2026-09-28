@@ -139,3 +139,55 @@ stay, the exception carries `exc.import_summary`, and a re-run resumes.
    `processed_cdfs2`), skipped when absent; a real import of the snapshot
    CSV into a temp hub reproduces every v1 line except Source File. Full
    suite. Push, report.
+
+## Review rework (critic, 2026-09-28)
+
+Probes from the critic became `tests/import_history/test_import_history_rework.py`
+(red first). Decisions:
+
+- **C1: a CDF for a result-only sample.** One shared routine,
+  `pipeline.attach_cdf_to_result_only` (with `pipeline.find_result_only` and
+  `pipeline.v1_time_forms`), used by the importer and `pipeline.submit`. A
+  CDF finds the imported result-only sample of the same instrument and lab ID
+  whose CSV time is its correct time or any v1 form, and upgrades it in place
+  (CDF, method name, correct `injection_dt` and source, `legacy_injection_dt`
+  = the CSV time, `time_corrected`, `legacy_unverified=0`,
+  `time_unverifiable=0`). The importer also requires the stored import rows
+  to be a prefix of the CDF's rows (else `attach_refused`), adds the rows
+  appended since, and sets the status by the method rule. A **live submit**
+  keeps the status and revisions and queues **nothing**: the record stays
+  v1's until an admin reprocesses it (the reprocess of a legacy revision uses
+  current corrections and blank, as the spec says). Several candidate
+  result-only samples: nothing is attached. `resolve_conflict_replace`
+  refuses when the existing sample is result-only. Rows whose Source File
+  names an unreadable CDF are not imported (`rows_of_unreadable_cdfs`).
+- **I1.** Hub-written lines (`pipeline._line_for`: release, Export to LIMS;
+  `exports._fresh_lines`) put the sample's `injection_dt` in
+  `InjectionDateTime`, as they already put `cdf_path` in `Source File`.
+  Stored revisions stay verbatim. (`/api/table` is T5's.)
+- **I2.** The 2A1 parity gate runs on a **scratch** data folder, never on
+  production (written into the 2A1 T6 runbook notes). No store change.
+- **I3.** Result-only rows whose CSV time is not `YYYY-MM-DD HH:MM:SS` are
+  held (`noncanonical_time`), not imported. Rows attached to a CDF keep their
+  time (a stamp-less CDF's v1 time has microseconds).
+- **I4.** Stored import revisions must match the CSV rows by values, CSV
+  path and line number (`rows_changed` otherwise); a new row whose line an
+  import revision of another sample holds is `rows_moved`; stored import rows
+  no longer found at their line in the CSV are counted as `rows_vanished`
+  (examples list them). Re-runs must use the same CSV path. Nothing is moved
+  silently.
+- **I5.** Per-sample progress events are buffered and sent after the batch
+  commits; the callback never runs under the write lock. A stop raised from
+  the callback therefore ends the run after the batch it saw.
+- **Minors.** The staged copy keeps a fresh mtime (the original is set after
+  the move), so `sweep_incoming` can't remove it mid-import.
+  `legacy_injection_dt` is the time the (current) row actually holds.
+  Whitespace-only sample names are matched by time to the one orphan CDF with
+  such a name (`whitespace_matched`). `notes.import` carries `csv_sha256` and
+  `run_id`; each real run is recorded in the new `import_runs` table (schema
+  v1, unreleased: id, instrument, started/finished, by, sources, counts,
+  stopped). The CLI's `--data-dir` reads the hub's `settings.json` and
+  `gc.db` read-only; `--compare-dir` reports files present in another
+  instrument's folder (`same_file_elsewhere`, D2). The importer uses public
+  pipeline names only (`existing_result`, `genuine_blank`, `safe_stem`,
+  `rel_path`, `load_conf`; the old private names remain as aliases).
