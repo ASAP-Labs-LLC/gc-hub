@@ -341,3 +341,12 @@ only), `tests/pipeline/`.
   - The runbook checks the GC PC clock skew before setting `live_since`.
 - **2C:** `StoreProvider(read_fn=functools.partial(store.corrections.read, db=db))`
   when the db isn't the default one.
+- **2D (integration re-check):**
+  - For a CDF with no timestamp, the importer stores `injection_dt` rounded
+    down to the whole second, as the hub does. Otherwise conflicts between
+    a live copy and an imported copy of the same sample are missed.
+  - The dry run counts CDFs whose global sample name is whitespace-only.
+    Under the new shared rule those become the file stem, but v1 wrote the
+    spaces to the CSV.
+  - Run `pipeline.cdf_problem` over the whole real share during the dry run
+    and report truncated files.
