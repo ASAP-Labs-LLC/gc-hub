@@ -85,7 +85,10 @@ def test_real_agent_to_final_sample_and_results(tmp_path):
 
     with booted(tmp_path) as (port, _hub_proc, data, _home):
         assert data == hub.data
-        pw = setup_admin(port)
+        pw = setup_admin(port, data)
+        code, _ = admin_post(port, "/api/admin/hub-url",
+                             {"password": pw, "hub_url": f"http://127.0.0.1:{port}"})
+        assert code == 200
         z = _installer(port, pw)
         install = json.loads(z.read("install.json"))
         assert install["hub_url"] == f"http://127.0.0.1:{port}"

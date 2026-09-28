@@ -906,9 +906,13 @@ def _admin_json_body():
     """The JSON body of an admin-gated route, or an error response. These
     routes require ``Content-Type: application/json`` on top of the
     cross-site guard, so no form or text/plain post can reach them."""
+    admin_auth.limit_json_body()     # 64 KiB, before anything reads the body (2B1 review I4)
     if not request.is_json:
         return None, _error("Expected Content-Type: application/json", 415)
-    return request.get_json(silent=True) or {}, None
+    try:
+        return request.get_json(silent=True) or {}, None
+    except admin_auth.RequestEntityTooLarge:
+        return None, _error("The request body is too large.", 413)
 
 
 # ===================================================================== #

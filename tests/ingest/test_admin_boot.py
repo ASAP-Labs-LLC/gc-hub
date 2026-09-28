@@ -61,24 +61,27 @@ def test_setup_gate_installer_and_commands(tmp_path):
         # ── the setup page and API
         page = send(port, "/admin/setup", None, method="GET")
         assert page[0] == 200
-        code, body = admin_post(port, "/api/admin/setup", {"password": PW},
-                                {"Origin": "http://evil.example"})
+        setup_code = (data / "admin-setup-code.txt").read_text(encoding="utf-8").strip()
+        good = {"password": PW, "setup_code": setup_code}
+        code, body = admin_post(port, "/api/admin/setup", good, {"Origin": "http://evil.example"})
         assert code == 403
-        code, body = admin_post(port, "/api/admin/setup", {"password": PW},
-                                {"Sec-Fetch-Site": "cross-site"})
+        code, body = admin_post(port, "/api/admin/setup", good, {"Sec-Fetch-Site": "cross-site"})
         assert code == 403
-        code, _ = send(port, "/api/admin/setup", json.dumps({"password": PW}).encode(),
+        code, _ = send(port, "/api/admin/setup", json.dumps(good).encode(),
                        {"Content-Type": "text/plain"})
         assert code == 415
-        code, body = admin_post(port, "/api/admin/setup", {"password": "short"})
+        code, body = admin_post(port, "/api/admin/setup", {**good, "password": "short"})
         assert code == 400 and "8" in body["error"]
+        code, body = admin_post(port, "/api/admin/setup", {"password": PW})       # no code
+        assert code == 403 and "admin-setup-code.txt" in body["error"]
         assert store.settings_kv.get("admin_password", db=db) is None
-        code, body = admin_post(port, "/api/admin/setup", {"password": PW},
+        code, body = admin_post(port, "/api/admin/setup", good,
                                 {"Origin": f"http://127.0.0.1:{port}",
                                  "Sec-Fetch-Site": "same-origin"})
         assert code == 201, body
         assert store.settings_kv.get("admin_password", db=db).startswith("pbkdf2_sha256$")
-        code, body = admin_post(port, "/api/admin/setup", {"password": "someone-else"})
+        assert not (data / "admin-setup-code.txt").exists()
+        code, body = admin_post(port, "/api/admin/setup", {**good, "password": "someone-else"})
         assert code == 409
 
         # ── the gate now uses it; "admin" is gone
@@ -90,6 +93,13 @@ def test_setup_gate_installer_and_commands(tmp_path):
         # ── installer download: first mint
         code, z = _download(port, {"password": "wrong"})
         assert code == 403
+        # 127.0.0.1 is loopback: no installer until the hub URL is set (I5)
+        code, body = _download(port, {"password": PW})
+        assert code == 409 and body.get("needs_hub_url") is True, body
+        assert store.instruments.get("gc1", db=db)["token_hash"] is None     # nothing minted
+        code, body = admin_post(port, "/api/admin/hub-url",
+                                {"password": PW, "hub_url": f"http://127.0.0.1:{port}"})
+        assert code == 200, body
         code, z = _download(port, {"password": PW})
         assert code == 200, z
         names = set(z.namelist())
@@ -111,6 +121,7 @@ def test_setup_gate_installer_and_commands(tmp_path):
         # a second download must confirm the revocation
         code, body = _download(port, {"password": PW})
         assert code == 409 and body.get("needs_confirm") is True
+        assert body["hub_url"] == f"http://127.0.0.1:{port}"          # for the confirm dialog
         assert heartbeat(port, tok1)[0] == 200                     # still valid
         code, z = _download(port, {"password": PW, "confirm_revoke": True})
         assert code == 200
@@ -124,8 +135,10 @@ def test_setup_gate_installer_and_commands(tmp_path):
         assert code == 404
 
         # hub URL override
-        code, body = admin_post(port, "/api/admin/hub-url", {"password": PW, "hub_url": "ftp://x"})
-        assert code == 400
+        for bad in ("ftp://x", "http://user:pw@asapsv1:5560", "http://asapsv1:5560/gc",
+                    "http://asapsv1:99999", "http://asapsv1:5560?x=1", "http://", 5560):
+            code, body = admin_post(port, "/api/admin/hub-url", {"password": PW, "hub_url": bad})
+            assert code == 400, bad
         code, body = admin_post(port, "/api/admin/hub-url",
                                 {"password": PW, "hub_url": "http://asapsv1:5560/"})
         assert code == 200 and body["hub_url"] == "http://asapsv1:5560"
@@ -175,6 +188,8 @@ def test_setup_page_on_an_empty_data_dir(tmp_path):
     with booted(tmp_path) as (port, _proc, data, _home):
         code, body = send(port, "/admin/setup", None, method="GET")
         assert code == 200
-        code, body = admin_post(port, "/api/admin/setup", {"password": PW})
+        setup_code = (data / "admin-setup-code.txt").read_text(encoding="utf-8").strip()
+        assert setup_code in (data / "app.log").read_text(encoding="utf-8")   # logged at WARNING
+        code, body = admin_post(port, "/api/admin/setup", {"password": PW, "setup_code": setup_code})
         assert code == 201, body
         assert (data / "gc.db").is_file()

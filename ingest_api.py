@@ -47,18 +47,45 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def mint_token(instrument_id: str, *, db=None) -> str:
-    """A new token for ``instrument_id`` (revoking any previous one)."""
+class TokenExists(RuntimeError):
+    """``mint_token(require_no_token=True)`` on an instrument that has a token."""
+
+
+def new_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def mint_token(instrument_id: str, *, db=None, token: Optional[str] = None,
+               require_no_token: bool = False) -> str:
+    """Store ``token`` (default: a new one) as ``instrument_id``'s token,
+    revoking any previous one. With ``require_no_token``, raise
+    ``TokenExists`` instead if the instrument already has one (checked in the
+    same transaction as the write)."""
     db = _db(db)
-    token = secrets.token_urlsafe(32)
+    token = token or new_token()
     with store.connection(db) as conn:
         with store.write_txn(conn):
-            if store.instruments.get(instrument_id, db=conn) is None:
+            row = store.instruments.get(instrument_id, db=conn)
+            if row is None:
                 raise LookupError(f"unknown instrument {instrument_id!r}")
+            if require_no_token and row.get("token_hash"):
+                raise TokenExists(row.get("token_issued_at") or "")
             store.instruments.upsert({"id": instrument_id, "token_hash": token_hash(token),
                                       "token_issued_at": store.now_iso()}, db=conn)
     log.warning("agent token minted for %s (any previous token is revoked)", instrument_id)
     return token
+
+
+def revoke_token(instrument_id: str, *, db=None) -> None:
+    """Remove the instrument's token: its agent is refused (401) until a new
+    installer is downloaded."""
+    with store.connection(_db(db)) as conn:
+        with store.write_txn(conn):
+            if store.instruments.get(instrument_id, db=conn) is None:
+                raise LookupError(f"unknown instrument {instrument_id!r}")
+            store.instruments.upsert({"id": instrument_id, "token_hash": None,
+                                      "token_issued_at": None}, db=conn)
+    log.warning("agent token revoked for %s", instrument_id)
 
 
 def verify_token(token: Any, *, db=None) -> Optional[dict]:
@@ -138,6 +165,7 @@ _HEARTBEAT_FIELDS = {
     "agent_time": str, "results_seq": int,
 }
 _MAX_TEXT = 2000
+MAX_INT = 2 ** 63          # SQLite INTEGER range; counts and seqs are >= 0
 
 
 def _heartbeat_values(body: Any) -> dict:
@@ -152,6 +180,8 @@ def _heartbeat_values(body: Any) -> dict:
             continue
         if typ is int and (isinstance(v, bool) or not isinstance(v, int)):
             raise ValueError(f"{name} must be an integer")
+        if typ is int and not 0 <= v < MAX_INT:
+            raise ValueError(f"{name} must be between 0 and 2**63 - 1")
         if typ is str and not isinstance(v, str):
             raise ValueError(f"{name} must be a string")
         out[name] = v[:_MAX_TEXT] if isinstance(v, str) else v
@@ -163,9 +193,11 @@ def _heartbeat_values(body: Any) -> dict:
     return out
 
 
-def record_heartbeat(instrument_id: str, values: dict, *, db=None) -> Optional[str]:
+def record_heartbeat(instrument_id: str, values: dict, *, db=None,
+                     take_command: bool = True) -> Optional[str]:
     """Upsert the instrument's ``agents`` row from a heartbeat and take its
-    pending command (delivered once: cleared in the same transaction)."""
+    pending command (delivered once: cleared in the same transaction). With
+    ``take_command=False`` (a disabled instrument) the command stays queued."""
     cols = ["version", "package_sha256", "state", "queue_size", "rejected_count", "last_file",
             "last_error", "host", "agent_time", "results_seq"]
     with store.connection(_db(db)) as conn:
@@ -178,7 +210,7 @@ def record_heartbeat(instrument_id: str, values: dict, *, db=None) -> Optional[s
                 [instrument_id, *(values.get(c) for c in cols), store.now_iso()])
             row = conn.execute("SELECT pending_command FROM agents WHERE instrument_id=?",
                                (instrument_id,)).fetchone()
-            command = row["pending_command"] if row else None
+            command = row["pending_command"] if row and take_command else None
             if command is not None:
                 conn.execute("UPDATE agents SET pending_command=NULL WHERE instrument_id=?",
                              (instrument_id,))
@@ -251,8 +283,9 @@ def _err(message: str, status: int):
     return jsonify({"error": message}), status
 
 
-def _authenticate():
-    """``(instrument row, None)`` or ``(None, error response)``."""
+def _authenticate(*, enabled_only: bool = False):
+    """``(instrument row, None)`` or ``(None, error response)``. With
+    ``enabled_only``, a disabled instrument's token gets 403 (the agent holds)."""
     token = bearer_token(request.headers.get("Authorization"))
     if token is None:
         return None, _err("missing agent token (Authorization: Bearer)", 401)
@@ -264,6 +297,8 @@ def _authenticate():
         log.warning("refused agent request %s %s from %s: bad token", request.method,
                     request.path, request.remote_addr)
         return None, _err("invalid agent token", 401)
+    if enabled_only and not inst.get("enabled", 1):
+        return None, _err(f"instrument {inst['id']} is disabled", 403)
     return inst, None
 
 
@@ -282,6 +317,14 @@ def _mtime(raw: Optional[str]):
     if raw is None or not raw.strip():
         return None
     return datetime.strptime(raw.strip(), _AGENT_TIME)     # ValueError -> 400
+
+
+_PATH_RE = re.compile(r"""(?:[A-Za-z]:)?[\\/](?:[^\\/'"\s]+[\\/])*([^\\/'"\s]*)""")
+
+
+def public_message(message: str) -> str:
+    """``message`` with any server path reduced to its base name (M4)."""
+    return _PATH_RE.sub(lambda m: m.group(1) or "", message)
 
 
 def _read_body(limit: int) -> Optional[bytes]:
@@ -358,7 +401,7 @@ def api_ingest():
         return _err(str(exc), 403)
     except pipeline.SubmitRejected as exc:
         log.warning("ingest: %s rejected %s: %s", inst["id"], filename, exc)
-        return _err(str(exc), 400)
+        return _err(public_message(str(exc)), 400)
     if res.outcome == "created":
         return jsonify({"sample_id": res.sample_id, "sha256": res.sha256,
                         "status": res.status}), 201
@@ -394,13 +437,15 @@ def api_agent_heartbeat():
     inst, err = _authenticate()
     if err:
         return err
-    if (request.content_length or 0) > 64 * 1024:
+    admin_auth.limit_json_body()      # 64 KiB, chunked bodies included (a JSON 413)
+    raw = request.get_data(cache=False)
+    if len(raw) >= admin_auth.MAX_JSON_BODY:    # a chunked body stops at the cap
         return _err("the heartbeat is too large", 413)
     try:
-        values = _heartbeat_values(json.loads(request.get_data(cache=False) or b"null"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        return _err(f"bad heartbeat: {exc}", 400)
-    command = record_heartbeat(inst["id"], values)
+        values = _heartbeat_values(json.loads(raw or b"null"))
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        return _err(f"bad heartbeat: {str(exc)[:200]}", 400)
+    command = record_heartbeat(inst["id"], values, take_command=bool(inst.get("enabled", 1)))
     now = datetime.now()
     if values["agent_time"]:
         skew = (datetime.strptime(values["agent_time"], _AGENT_TIME)
@@ -426,12 +471,17 @@ def _int_arg(name: str, default: int) -> int:
     raw = request.args.get(name)
     if raw is None or raw == "":
         return default
-    return int(raw)          # ValueError -> 400
+    if len(raw) > 20:
+        raise ValueError(name)
+    value = int(raw)          # ValueError -> 400
+    if not -MAX_INT <= value < MAX_INT:
+        raise ValueError(name)
+    return value
 
 
 @bp.route("/api/agent/results", methods=["GET"])
 def api_agent_results():
-    inst, err = _authenticate()
+    inst, err = _authenticate(enabled_only=True)
     if err:
         return err
     try:
@@ -460,7 +510,7 @@ def _package_or_error():
 
 @bp.route("/api/agent/package", methods=["GET"])
 def api_agent_package():
-    _inst, err = _authenticate()
+    _inst, err = _authenticate(enabled_only=True)
     if err:
         return err
     pkg, err = _package_or_error()
@@ -471,7 +521,7 @@ def api_agent_package():
 
 @bp.route("/api/agent/package.zip", methods=["GET"])
 def api_agent_package_zip():
-    _inst, err = _authenticate()
+    _inst, err = _authenticate(enabled_only=True)
     if err:
         return err
     pkg, err = _package_or_error()
@@ -493,13 +543,14 @@ def api_agents():
 
 # ── admin: installer download, hub URL, agent commands ──────────────────────
 
-HUB_URL_KEY = "hub_url"
+HUB_URL_KEY = admin_auth.HUB_URL_KEY
 
 
 def _admin_body():
     """``(body, None)`` when the request is JSON and carries the admin
     password; else ``(None, error response)``. (The cross-site guard in
-    app.py already covers these /api/ routes.)"""
+    app.py already covers these /api/ routes.) The body is capped at 64 KiB."""
+    admin_auth.limit_json_body()
     if not request.is_json:
         return None, _err("Expected Content-Type: application/json", 415)
     body = request.get_json(silent=True)
@@ -520,12 +571,32 @@ def configured_hub_url(*, db=None) -> Optional[str]:
 
 
 def _valid_hub_url(url: str) -> bool:
+    """``http(s)://host[:port]`` only: no user info, path, query or fragment."""
     try:
         parts = urllib.parse.urlsplit(url)
+        parts.port      # noqa: B018 - raises ValueError on a bad port
     except ValueError:
         return False
-    return parts.scheme in ("http", "https") and bool(parts.hostname) and not parts.query \
-        and not parts.fragment
+    return (parts.scheme in ("http", "https") and bool(parts.hostname)
+            and "@" not in parts.netloc and parts.path in ("", "/")
+            and not parts.query and not parts.fragment)
+
+
+def derived_hub_url() -> Optional[str]:
+    """The request's own address as the hub URL, or ``None`` when it can't be
+    trusted for an agent on another PC: a loopback address (the admin is on
+    the server itself) or a name that isn't this machine's (a rebinding or a
+    proxy). Then the admin must set the hub URL first (I5)."""
+    name = admin_auth._hostname(request.host)
+    if name is None:
+        return None
+    if admin_auth.is_ip_literal(name):
+        import ipaddress
+        if ipaddress.ip_address(name).is_loopback:
+            return None
+    elif name == "localhost" or not admin_auth.is_machine_name(name):
+        return None
+    return request.host_url.rstrip("/")
 
 
 def installer_zip(hub_url: str, token: str, package: tuple, version: str) -> bytes:
@@ -557,22 +628,49 @@ def api_admin_installer(instrument_id):
     inst = store.instruments.get(instrument_id, db=_db(None))
     if inst is None:
         return _err(f"unknown instrument {instrument_id!r}", 404)
-    if inst.get("token_hash") and body.get("confirm_revoke") is not True:
-        return jsonify({"error": f"{inst.get('name') or instrument_id} already has an agent token "
-                                 f"(issued {inst.get('token_issued_at')}). A new installer revokes "
-                                 f"it: the agent using it stops until it gets the new one.",
-                        "needs_confirm": True}), 409
+    hub_url = configured_hub_url() or derived_hub_url()
+    if hub_url is None:
+        return jsonify({"error": "Set the hub URL first (the address the GC PCs use to reach "
+                                 "this hub, e.g. http://asapsv1:5560): this page was opened as "
+                                 f"{request.host}, which a GC PC can't use.",
+                        "needs_hub_url": True}), 409
+    confirmed = body.get("confirm_revoke") is True
+    needs_confirm = jsonify({
+        "error": f"{inst.get('name') or instrument_id} already has an agent token (issued "
+                 f"{inst.get('token_issued_at')}). A new installer revokes it: the agent using "
+                 f"it stops until it gets the new one.",
+        "needs_confirm": True, "hub_url": hub_url}), 409
+    if inst.get("token_hash") and not confirmed:
+        return needs_confirm
     pkg, err = _package_or_error()          # before minting: a failed build revokes nothing
     if err:
         return err
-    hub_url = configured_hub_url() or request.host_url.rstrip("/")
-    token = mint_token(instrument_id)
+    token = new_token()                     # the zip is built before the hash is stored
     data = installer_zip(hub_url, token, pkg, hub_version())
+    try:
+        mint_token(instrument_id, token=token, require_no_token=not confirmed)
+    except TokenExists:                     # minted by someone else meanwhile
+        return needs_confirm
+    except LookupError:
+        return _err(f"unknown instrument {instrument_id!r}", 404)
     log.warning("agent installer downloaded for %s by %s (hub_url %s)", instrument_id,
                 request.remote_addr, hub_url)
     return Response(data, mimetype="application/zip", headers={
         "Content-Disposition": f'attachment; filename="gc-agent-installer-{instrument_id}.zip"',
-        "Cache-Control": "no-store"})
+        "Cache-Control": "no-store", "X-GC-Hub-URL": hub_url})
+
+
+@bp.route("/api/admin/instruments/<instrument_id>/revoke-token", methods=["POST"])
+def api_admin_revoke_token(instrument_id):
+    """Revoke the instrument's agent token (its agent gets 401 and holds)."""
+    _body, err = _admin_body()
+    if err:
+        return err
+    try:
+        revoke_token(instrument_id)
+    except LookupError as exc:
+        return _err(str(exc), 404)
+    return jsonify({"ok": True})
 
 
 @bp.route("/api/admin/hub-url", methods=["POST"])
