@@ -475,5 +475,120 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(st["rows"], st["rows_attached"] + st["unmatched_rows"] + st["mixed_rows"])
 
 
+def snapshot_tree(root: Path) -> dict:
+    return {str(p): (p.read_bytes(), p.stat().st_mtime_ns)
+            for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+@unittest.skipUnless(HAVE_DEPS, "needs numpy + netCDF4")
+class DryRunTests(_TmpCase):
+    def _fixture(self):
+        proc = self.tmp / "processed_cdf"
+        write_cdf(proc / "AF26_09172026_142942.CDF", sample_name="AF26",
+                  stamp="20260917142942+0000", seed=1)
+        write_cdf(proc / "AF26_copy.cdf", sample_name="AF26",
+                  stamp="20260917142942+0000", seed=1)          # same bytes
+        write_cdf(proc / "sub" / "ORPH.CDF", sample_name="ORPH",
+                  stamp="20240101000000", seed=2)
+        write_cdf(proc / "notime.CDF", sample_name="NT", stamp=None, seed=3,
+                  mtime=datetime(2023, 1, 26, 18, 38, 52).timestamp())
+        (proc / "broken.CDF").write_bytes(b"not a netcdf file")
+        (proc / ".processed_index.json").write_text('{"entries": []}')
+        text = (csv_line(distill.CSV_HEADER)
+                + csv_line(full_row("AF26", "2026-09-17 14:29:42", FOLDER + r"\AF26_09172026_142942.CDF"))
+                + csv_line(full_row("AF26", "2026-09-17 14:29:42", FOLDER + r"\AF26_09172026_142942.CDF", ibp="2"))
+                + csv_line(full_row("NT", "2023-01-26 18:38:52", FOLDER + r"\NT.CDF"))
+                + csv_line(full_row("GONE", "2022-01-01 00:00:00", FOLDER + r"\GONE.CDF"))
+                + csv_line(full_row("THEIRS", "2026-09-17 17:28:12", OTHER + r"\THEIRS.CDF")))
+        results = write_csv_text(self.tmp / "distill_results.csv", text)
+        return proc, results
+
+    def test_end_to_end(self) -> None:
+        proc, results = self._fixture()
+        rep = im.dry_run(proc, results, instrument_folder=FOLDER)
+        st = rep.stats
+        self.assertEqual(st["cdfs"], 4)                 # broken one is an error
+        self.assertEqual(len(st["cdf_errors"]), 1)
+        self.assertIn("broken.CDF", st["cdf_errors"][0][0])
+        self.assertEqual(len(rep.dup_sha), 1)
+        self.assertEqual(len(rep.no_injection_time), 1)
+        self.assertTrue(rep.no_injection_time[0].endswith("notime.CDF"))
+        s = by_key(rep)
+        self.assertEqual(len(s[("AF26", "2026-09-17 14:29:42")].rows), 2)
+        self.assertEqual(s[("ORPH", "2024-01-01 00:00:00")].rows, [])   # found in sub/
+        self.assertEqual(s[("NT", "2023-01-26 18:38:52")].rows[0].lab_id, "NT")
+        self.assertIsNone(s[("GONE", "2022-01-01 00:00:00")].cdf)
+        self.assertEqual([r.lab_id for r in rep.mixed_rows], ["THEIRS"])
+        self.assertEqual(st["dt_source"], {"cdf": 3, "mtime": 1})
+        self.assertEqual(st["csv_issues"], [])
+
+    def test_cdf_only_mode(self) -> None:
+        proc, _ = self._fixture()
+        rep = im.dry_run(proc, None, instrument_folder=FOLDER)
+        self.assertEqual(rep.stats["rows"], 0)
+        self.assertTrue(all(not s.rows for s in rep.samples))
+        self.assertEqual(rep.stats["orphan_cdfs"], 3)
+
+    def test_never_writes_to_the_source(self) -> None:
+        proc, results = self._fixture()
+        before = snapshot_tree(self.tmp)
+        im.dry_run(proc, results, instrument_folder=FOLDER)
+        self.assertEqual(snapshot_tree(self.tmp), before)
+
+    def test_progress_callback(self) -> None:
+        proc, results = self._fixture()
+        seen = []
+        im.dry_run(proc, results, instrument_folder=FOLDER,
+                   on_progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual(seen[-1], (5, 5))
+
+    def test_name_from_filename_is_reported(self) -> None:
+        proc = self.tmp / "p"
+        write_cdf(proc / "NoName_01012026.CDF", sample_name=None, stamp="20260101000000")
+        rep = im.dry_run(proc, None, instrument_folder=FOLDER)
+        self.assertEqual(len(rep.stats["name_from_filename"]), 1)
+        self.assertEqual(rep.samples[0].cdf.lab_id, "NoName_01012026")
+
+    def test_summary_mentions_every_class(self) -> None:
+        proc, results = self._fixture()
+        rep = im.dry_run(proc, results, instrument_folder=FOLDER)
+        text = im.format_summary(rep, examples=3)
+        for needle in ("CDFs", "attached", "orphan", "result-only", "revisions",
+                       "identical bytes", "no injection time", "mixed", "unreadable",
+                       "AF26", "GONE", "THEIRS", "notime.CDF", "broken.CDF"):
+            self.assertIn(needle, text)
+
+    def test_report_serialises_to_json(self) -> None:
+        import json
+        proc, results = self._fixture()
+        rep = im.dry_run(proc, results, instrument_folder=FOLDER)
+        data = json.loads(json.dumps(im.report_to_dict(rep)))
+        self.assertEqual(data["stats"]["cdfs"], 4)
+        self.assertEqual(len(data["samples"]), rep.stats["samples"])
+
+
+class ProcessedIndexTests(_TmpCase):
+    def test_summary(self) -> None:
+        import json
+        entries = [["(Blank)", "2023-01-26 18:38:52"], ["(Blank)", "2023-01-26 18:54:55"],
+                   ["001", "2024-04-10 16:57:21"], ["001 ", "2024-04-10 16:57:21"],
+                   ["Blank", "2026-09-24 15:30:27"], ["cal std", "2026-07-21 12:58:07.123456"],
+                   ["X", "07/21/2026"], ["001", "2024-04-10 16:57:21"]]
+        p = self.tmp / ".processed_index.json"
+        p.write_text(json.dumps({"entries": entries}))
+        s = im.summarize_processed_index(p)
+        self.assertEqual(s["entries"], 8)
+        self.assertEqual(s["exact_duplicates"], 1)
+        self.assertEqual(s["duplicates_after_strip"], 2)
+        self.assertEqual(s["canonical_seconds"], 6)
+        self.assertEqual(s["canonical_microseconds"], 1)
+        self.assertEqual(s["non_canonical"], 1)
+        self.assertEqual(s["date_min"], "2023-01-26 18:38:52")
+        self.assertEqual(s["date_max"], "2026-09-24 15:30:27")
+        self.assertEqual(s["blank_like_names"], {"(Blank)": 2, "Blank": 1})
+        self.assertEqual(s["names_with_outer_whitespace"], 1)
+        self.assertEqual(s["lab_ids_with_several_times"], 1)   # (Blank)
+
+
 if __name__ == "__main__":
     unittest.main()

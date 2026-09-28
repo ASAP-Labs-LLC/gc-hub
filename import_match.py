@@ -20,9 +20,13 @@ from __future__ import annotations
 
 import csv
 import hashlib
-from dataclasses import dataclass
+import json
+import os
+import re
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from netCDF4 import Dataset
 
@@ -355,3 +359,218 @@ def read_cdf_meta(path) -> CdfMeta:
     parsable injection time, v1 used the file's mtime; so does this, with
     ``dt_source='mtime'`` so the caller can report it."""
     return _read_cdf_meta_ex(path)[0]
+
+
+# ── Dry run (read-only) ─────────────────────────────────────────────────────
+def iter_cdf_paths(processed_dir) -> list[Path]:
+    """Every ``*.cdf`` (any case) under ``processed_dir``, sorted, recursive."""
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(Path(processed_dir)):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if name.lower().endswith(".cdf"):
+                found.append(Path(dirpath) / name)
+    return found
+
+
+def dry_run(processed_dir, results_csv, *, instrument_folder: str,
+            on_progress: Callable[[int, int], None] | None = None) -> MatchReport:
+    """Read-only: read every CDF's metadata under ``processed_dir`` (never
+    the chromatogram arrays; sha256 is streamed) and the results CSV, then
+    ``match``. ``results_csv=None`` runs in CDF-only mode.
+
+    Extra ``stats`` keys: ``cdf_errors`` [(path, message)], ``csv_issues``
+    (from ``read_results_csv_ex``), ``name_from_filename`` [paths whose CDF
+    has no sample name], ``dt_source`` {'cdf': n, 'mtime': n}."""
+    paths = iter_cdf_paths(processed_dir)
+    total = len(paths)
+    metas: list[CdfMeta] = []
+    errors: list[tuple[str, str]] = []
+    name_from_filename: list[str] = []
+    for i, p in enumerate(paths, 1):
+        try:
+            meta, name_source = _read_cdf_meta_ex(p)
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            errors.append((str(p), f"{type(exc).__name__}: {exc}"))
+        else:
+            metas.append(meta)
+            if name_source != "cdf":
+                name_from_filename.append(meta.path)
+        if on_progress is not None and (i % 500 == 0 or i == total):
+            on_progress(i, total)
+
+    rows: list[CsvRow] = []
+    csv_issues: list[dict] = []
+    if results_csv:
+        rows, csv_issues = read_results_csv_ex(results_csv)
+
+    report = match(metas, rows, instrument_folder=instrument_folder)
+    dt_source = {"cdf": 0, "mtime": 0}
+    for m in metas:
+        dt_source[m.dt_source] = dt_source.get(m.dt_source, 0) + 1
+    report.stats.update({
+        "processed_dir": str(processed_dir),
+        "results_csv": str(results_csv) if results_csv else None,
+        "instrument_folder": instrument_folder,
+        "files_seen": total,
+        "cdf_errors": errors,
+        "csv_issues": csv_issues,
+        "name_from_filename": name_from_filename,
+        "dt_source": dt_source,
+    })
+    return report
+
+
+def report_to_dict(report: MatchReport) -> dict:
+    """A JSON-ready copy of ``report`` (dataclasses → dicts, tuples → lists)."""
+    return asdict(report)
+
+
+def _row_brief(r: CsvRow) -> str:
+    src = f"  <- {r.source_file}" if r.source_file else ""
+    return f"line {r.line_no}: {r.lab_id!r} @ {r.injection_dt_raw!r}{src}"
+
+
+def format_summary(report: MatchReport, *, examples: int = 5) -> str:
+    """Human summary: counts, then the first ``examples`` of each class."""
+    st = report.stats
+    n = max(0, int(examples))
+    out: list[str] = []
+    add = out.append
+
+    add("History import dry run (read-only)")
+    for label, key in (("Processed folder", "processed_dir"), ("Results CSV", "results_csv"),
+                       ("Instrument folder", "instrument_folder")):
+        if key in st:
+            add(f"  {label}: {st[key] or '(none: CDF-only mode)'}")
+    add("")
+    add("Counts")
+    add(f"  CDFs read:                 {st['cdfs']}"
+        + (f" of {st['files_seen']} files" if "files_seen" in st else ""))
+    dts = st.get("dt_source")
+    if dts:
+        add(f"    injection time from CDF: {dts.get('cdf', 0)}; from file mtime: {dts.get('mtime', 0)}")
+    add(f"  unreadable CDFs:           {len(st.get('cdf_errors', []))}")
+    add(f"  identical bytes (dups):    {st['dup_sha']}")
+    add(f"  same key, different bytes: {len(st['key_collisions'])}")
+    add(f"  no injection time (mtime): {st['no_injection_time']}")
+    add(f"  CSV rows:                  {st['rows']}")
+    add(f"  samples:                   {st['samples']}")
+    add(f"    attached (CDF + rows):   {st['attached_samples']}  ({st['rows_attached']} rows)")
+    add(f"    orphan CDFs (no row):    {st['orphan_cdfs']}")
+    add(f"    result-only (no CDF):    {st['result_only_samples']}")
+    add(f"  extra revisions:           {st['revisions_extra']}")
+    add(f"  unmatched rows:            {st['unmatched_rows']}"
+        f"  (same lab ID on a CDF at another time: {st['unmatched_same_lab_other_time']};"
+        f" Source File in this folder: {st['unmatched_source_in_folder']};"
+        f" no lab ID/time: {st['rows_missing_key']})")
+    add(f"  mixed rows (other folder): {st['mixed_rows']}")
+    add(f"  rows without Source File:  {st['rows_without_source_file']}")
+    if st.get("csv_issues"):
+        kinds: dict[str, int] = {}
+        for i in st["csv_issues"]:
+            kinds[i["kind"]] = kinds.get(i["kind"], 0) + 1
+        add("  CSV layout issues:         "
+            + ", ".join(f"{k} {v}" for k, v in sorted(kinds.items())))
+    if st.get("source_folders"):
+        add("")
+        add("Source File folders in the CSV")
+        for folder, count in list(st["source_folders"].items())[: max(n, 10)]:
+            add(f"  {count:6d}  {folder}")
+
+    def section(title: str, items: list, fmt) -> None:
+        if not items or n == 0:
+            return
+        add("")
+        add(f"{title} (first {min(n, len(items))} of {len(items)})")
+        for item in items[:n]:
+            add("  " + fmt(item))
+
+    add("")
+    add("Examples")
+    section("Unreadable CDFs", st.get("cdf_errors", []), lambda e: f"{e[0]}: {e[1]}")
+    section("Identical bytes (kept, duplicate)", report.dup_sha,
+            lambda d: f"{d[0]}  ==  {d[1]}")
+    section("Same key, different bytes (kept, other)", st["key_collisions"],
+            lambda d: f"{d[0]}  vs  {d[1]}")
+    section("No injection time in the CDF (mtime used)", report.no_injection_time, str)
+    section("CDF with no sample name (file stem used)", st.get("name_from_filename", []), str)
+    section("Attached samples", [s for s in report.samples if s.cdf is not None and s.rows],
+            lambda s: f"{s.cdf.lab_id!r} @ {s.cdf.injection_dt}: {len(s.rows)} row(s)"
+                      f"  [{s.cdf.path}]")
+    section("Samples with revisions", [s for s in report.samples if len(s.rows) > 1],
+            lambda s: f"{s.rows[0].lab_id!r} @ {s.rows[0].injection_dt_raw}: {len(s.rows)} rows,"
+                      f" lines {', '.join(str(r.line_no) for r in s.rows)}")
+    section("Orphan CDFs", [s for s in report.samples if s.cdf is not None and not s.rows],
+            lambda s: f"{s.cdf.lab_id!r} @ {s.cdf.injection_dt} ({s.cdf.dt_source})"
+                      f"  [{s.cdf.path}]")
+    section("Result-only samples / unmatched rows", report.unmatched_rows, _row_brief)
+    section("Mixed rows (Source File outside the instrument folder)", report.mixed_rows,
+            _row_brief)
+    section("CSV layout issues", st.get("csv_issues", []),
+            lambda i: f"line {i['line_no']}: {i['kind']} {i['detail']}".rstrip())
+    return "\n".join(out) + "\n"
+
+
+# ── v1 .processed_index.json (the Looker's set of (sample, str(datetime))) ──
+_CANON_S = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+_CANON_US = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}$")
+
+
+def summarize_processed_index(path, *, examples: int = 10) -> dict:
+    """Profile v1's ``.processed_index.json``: count, date range, duplicates,
+    how many times are canonical (and how many carry microseconds, which only
+    the mtime fallback produces: CDF stamps have whole seconds), blank-like
+    names and names with outer whitespace."""
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    entries = data.get("entries", []) if isinstance(data, dict) else data
+    pairs = [(str(e[0]), str(e[1])) for e in entries
+             if isinstance(e, (list, tuple)) and len(e) == 2]
+
+    exact: dict[tuple[str, str], int] = {}
+    stripped: dict[tuple[str, str], int] = {}
+    times_per_lab: dict[str, set] = {}
+    blank_like: dict[str, int] = {}
+    canon_s = canon_us = padded = empty = 0
+    micro: list[list[str]] = []
+    non_canonical: list[list[str]] = []
+    canon_times: list[str] = []
+    for name, dt in pairs:
+        exact[(name, dt)] = exact.get((name, dt), 0) + 1
+        key = (name.strip(), dt.strip())
+        stripped[key] = stripped.get(key, 0) + 1
+        times_per_lab.setdefault(name.strip(), set()).add(dt.strip())
+        if "blank" in name.lower():
+            blank_like[name] = blank_like.get(name, 0) + 1
+        if name != name.strip():
+            padded += 1
+        if not name.strip():
+            empty += 1
+        if _CANON_S.match(dt):
+            canon_s += 1
+            canon_times.append(dt)
+        elif _CANON_US.match(dt):
+            canon_us += 1
+            canon_times.append(dt[:19])
+            micro.append([name, dt])
+        else:
+            non_canonical.append([name, dt])
+
+    return {
+        "entries": len(pairs),
+        "distinct_lab_ids": len(times_per_lab),
+        "date_min": min(canon_times) if canon_times else None,
+        "date_max": max(canon_times) if canon_times else None,
+        "exact_duplicates": sum(c - 1 for c in exact.values()),
+        "duplicates_after_strip": sum(c - 1 for c in stripped.values()),
+        "canonical_seconds": canon_s,
+        "canonical_microseconds": canon_us,
+        "canonical_microseconds_examples": micro[:examples],
+        "non_canonical": len(non_canonical),
+        "non_canonical_examples": non_canonical[:examples],
+        "blank_like_names": dict(sorted(blank_like.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "names_with_outer_whitespace": padded,
+        "empty_names": empty,
+        "lab_ids_with_several_times": sum(1 for s in times_per_lab.values() if len(s) > 1),
+    }
