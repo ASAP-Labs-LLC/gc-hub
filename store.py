@@ -88,7 +88,7 @@ Exports (the ledger; file writing is exports.py)::
 Jobs (durable queue)::
 
     jobs.enqueue(kind, payload, not_before=None, *, sample_id=None, db) -> int
-    jobs.enqueue_for_status(db, instrument_id, status, *, method_name=None, kind='process') -> int
+    jobs.enqueue_for_status(instrument_id, status, *, method_name=None, kind='process', db) -> int
     jobs.claim_next(now=None, *, kind=None, db) -> dict | None   # atomic; payload decoded
     jobs.complete(job_id, *, db)
     jobs.fail(job_id, error, retry_at=None, *, db)   # retry_at -> queued again, else 'failed'
@@ -126,8 +126,8 @@ Conventions and decisions (where the spec left a choice)
     because that is how the CDF/CSV hold injection times. ``live_since`` and
     the date bounds are normalised to that form (``local_dt``), so string
     comparison with ``injection_dt`` is correct: the ISO ``T`` form would
-    sort after the same moment written with a space. An aware value is
-    converted to this machine's local time first.
+    sort after the same moment written with a space. An aware value (or an
+    offset/``Z`` string) is refused with ``ValueError``.
 * **Statuses are validated in code** (``STATUSES``), with no CHECK
   constraint, so a later release can add one additively; this code reads
   unknown statuses without complaint. ``INJECTION_DT_SOURCES`` is
@@ -136,9 +136,12 @@ Conventions and decisions (where the spec left a choice)
   the caller normalises). ``''`` means the CDF had none; NULL only for
   result-only imports. ``insert_received`` turns ``None`` into ``''`` for a
   CDF-backed sample.
-* **``is_blank``** means a *genuine* blank, decided by the worker at
-  process time (name rule plus ``is_plausible_blank``), not merely a
-  blank-looking name. ``latest_blank`` also requires a stored CDF.
+* **``is_blank``** means a *genuine* blank. It is decided **once, in
+  ``pipeline.submit`` at receive time, from the CDF bytes** (the name rule
+  plus ``is_plausible_blank``), and passed to ``insert_received`` — not at
+  process time — so blank selection never depends on processing order.
+  ``latest_blank`` also requires a stored CDF, and normalises ``at`` with
+  ``local_dt``.
 * **Integrity errors are not wrapped.** ``insert_received`` raises
   ``sqlite3.IntegrityError`` on a duplicate ``cdf_sha256`` (any instrument)
   or a duplicate (instrument, lab ID, injection time). Check and insert
@@ -160,15 +163,17 @@ Conventions and decisions (where the spec left a choice)
 * **Jobs.** States ``queued``, ``running``, ``done``, ``failed``,
   ``superseded`` (no CHECK). Two columns beyond the spec: ``sample_id``
   (nullable) and ``finished_at``. At most one *queued* job per
-  ``(kind, sample_id)`` (partial unique index): enqueuing a duplicate
-  returns the existing job and brings its ``not_before`` forward to the
-  earlier of the two (NULL = now). A running job re-queued while a twin is
+  ``(kind, sample_id)`` (partial unique index): ``enqueue`` of a duplicate
+  returns the existing job, replaces its payload (last intent wins) and
+  keeps the earlier ``not_before`` (NULL = now). ``enqueue_for_status``
+  only brings a queued job forward to now and keeps its payload, since its
+  own payload is the bare ``{"sample_id"}``. A running job re-queued while a twin is
   queued becomes ``superseded``. ``claim_next`` marks a job with an
   undecodable payload ``failed`` and moves on. ``requeue_stale_running``
   treats every ``running`` job as stale: call it only at start-up.
-* **Corrections (D4b).** ``set_all`` upserts every cut given with one
-  timestamp and writes one audit row per *changed* cut (``old_value`` NULL
-  on first insert). The reason is required. Checking for all 11 cuts and
+* **Corrections (D4b).** ``set_all`` writes only the cuts whose value
+  changed, with one timestamp, and one audit row per changed cut
+  (``old_value`` NULL on first insert). The reason is required. Checking for all 11 cuts and
   the ±50 °C limit is ``corrections.py``'s job; the store only refuses
   non-finite numbers.
 * Column names that are SQL keywords (``export_rows."row"``,
@@ -454,20 +459,21 @@ def _ts(value: Union[None, str, datetime]) -> Optional[str]:
 def local_dt(value: Union[str, datetime, date]) -> str:
     """Normalise to the instrument-clock form ``YYYY-MM-DD HH:MM:SS`` (naive local).
 
-    Accepts a ``datetime`` (aware → this machine's local time), a ``date``
-    (midnight) or an ISO string with ``T`` or a space, or a bare date.
+    Accepts a naive ``datetime``, a ``date`` (midnight), or an ISO string with
+    ``T`` or a space, or a bare date. Aware datetimes and strings with an
+    offset or ``Z`` raise ``ValueError``: callers send naive local times.
     """
     if isinstance(value, str):
         text = value.strip()
         if text.endswith(("Z", "z")):
-            text = text[:-1] + "+00:00"
+            raise ValueError(f"{value!r} has a UTC marker; send a naive local time")
         value = datetime.fromisoformat(text)
     if isinstance(value, date) and not isinstance(value, datetime):
         value = datetime(value.year, value.month, value.day)
     if not isinstance(value, datetime):
         raise ValueError(f"not a date/time: {value!r}")
     if value.tzinfo is not None:
-        value = value.astimezone().replace(tzinfo=None)
+        raise ValueError(f"{value!r} is tz-aware; send a naive local time")
     return value.isoformat(sep=" ")
 
 
@@ -865,11 +871,13 @@ class corrections:  # noqa: N801
     @staticmethod
     def set_all(conn: sqlite3.Connection, instrument_id: str, values: dict, *, by: Optional[str],
                 reason: str) -> int:
-        """Upsert every cut in ``values`` with one timestamp; audit each changed cut.
+        """Write each **changed** cut in ``values`` (one timestamp) and audit it.
 
-        Must run inside ``write_txn(conn)``. ``reason`` is required.
-        Non-finite values raise ``ValueError``. Returns how many cuts changed
-        (a first-time cut counts, with ``old_value`` NULL in the audit).
+        Unchanged cuts are not touched (no ``updated_at``/``updated_by``
+        bump, no audit row). Must run inside ``write_txn(conn)``. ``reason``
+        is required. ``None``, non-numeric and non-finite values raise
+        ``ValueError``. Returns how many cuts changed (a first-time cut
+        counts, with ``old_value`` NULL in the audit).
         """
         _require_txn(conn, "corrections.set_all")
         if not isinstance(reason, str) or not reason.strip():
@@ -878,7 +886,12 @@ class corrections:  # noqa: N801
             raise ValueError("no correction values given")
         clean = {}
         for cut, v in values.items():
-            f = float(v)
+            if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+                raise ValueError(f"correction for {cut!r} is not a number: {v!r}")
+            try:
+                f = float(v)
+            except ValueError:
+                raise ValueError(f"correction for {cut!r} is not a number: {v!r}") from None
             if not math.isfinite(f):
                 raise ValueError(f"correction for {cut!r} is not a finite number: {v!r}")
             clean[str(cut)] = f
@@ -887,18 +900,19 @@ class corrections:  # noqa: N801
             "SELECT cut, value FROM instrument_corrections WHERE instrument_id=?", (instrument_id,))}
         changed = 0
         for cut, new in clean.items():
+            prev = old.get(cut)
+            if prev is not None and prev == new:
+                continue  # unchanged: no updated_at/updated_by bump, no audit row
             conn.execute(
                 "INSERT INTO instrument_corrections(instrument_id, cut, value, updated_at, updated_by) "
                 "VALUES (?,?,?,?,?) ON CONFLICT(instrument_id, cut) DO UPDATE SET "
                 "value=excluded.value, updated_at=excluded.updated_at, updated_by=excluded.updated_by",
                 (instrument_id, cut, new, stamp, by))
-            prev = old.get(cut)
-            if prev is None or prev != new:
-                conn.execute(
-                    "INSERT INTO corrections_audit(instrument_id, cut, old_value, new_value, "
-                    "changed_at, changed_by, reason) VALUES (?,?,?,?,?,?,?)",
-                    (instrument_id, cut, prev, new, stamp, by, reason.strip()))
-                changed += 1
+            conn.execute(
+                "INSERT INTO corrections_audit(instrument_id, cut, old_value, new_value, "
+                "changed_at, changed_by, reason) VALUES (?,?,?,?,?,?,?)",
+                (instrument_id, cut, prev, new, stamp, by, reason.strip()))
+            changed += 1
         return changed
 
     @staticmethod
@@ -1055,7 +1069,7 @@ class samples:  # noqa: N801
             return None
         sql = (f"SELECT * FROM samples WHERE instrument_id=? AND is_blank=1 AND injection_dt<=? "
                f"AND cdf_path IS NOT NULL AND method_name IN ({_in(names)})")
-        args: list = [instrument_id, at] + names
+        args: list = [instrument_id, local_dt(at)] + names
         if exclude_sample_id is not None:
             sql += " AND id<>?"
             args.append(exclude_sample_id)
@@ -1230,8 +1244,10 @@ class jobs:  # noqa: N801
         """Queue a job; ``payload`` is JSON-encoded. Returns the job id.
 
         With ``sample_id``, at most one job per ``(kind, sample_id)`` is
-        queued: a duplicate returns the queued job's id and moves its
-        ``not_before`` to the earlier of the two.
+        queued: a duplicate returns the queued job's id, **replaces its
+        payload** (the last request's intent wins, e.g. a reprocess with
+        ``by``/``use_current_blank``) and keeps the **earlier** ``not_before``
+        of the two (NULL = now).
         """
         nb = _ts(not_before)
         body = json.dumps(payload)
@@ -1245,18 +1261,19 @@ class jobs:  # noqa: N801
                 "INSERT INTO jobs(kind, payload, state, attempts, not_before, created_at, sample_id) "
                 "VALUES (?, ?, 'queued', 0, ?, ?, ?) "
                 "ON CONFLICT(kind, sample_id) WHERE state='queued' DO UPDATE SET "
-                f"not_before={_EARLIER_NOT_BEFORE}",
+                f"payload=excluded.payload, not_before={_EARLIER_NOT_BEFORE}",
                 (kind, body, nb, now_iso(), sample_id))
             return int(conn.execute("SELECT id FROM jobs WHERE kind=? AND sample_id=? AND state='queued'",
                                     (kind, sample_id)).fetchone()[0])
 
     @staticmethod
-    def enqueue_for_status(db: Db, instrument_id: str, status: str, *,
-                           method_name: Optional[str] = None, kind: str = "process") -> int:
+    def enqueue_for_status(instrument_id: str, status: str, *, method_name: Optional[str] = None,
+                           kind: str = "process", db: Db = None) -> int:
         """Queue ``kind`` (payload ``{"sample_id": id}``, due now) for every sample of
         this instrument in ``status`` (and ``method_name``, if given), in one
-        statement. Samples that already have a queued job keep it, brought
-        forward to now. Returns the number of samples now queued."""
+        statement. Samples that already have a queued job keep it (and its
+        payload), brought forward to now. Returns the number of samples now
+        queued."""
         _check_status(status)
         sql = ("INSERT INTO jobs(kind, payload, state, attempts, not_before, created_at, sample_id) "
                "SELECT ?, json_object('sample_id', id), 'queued', 0, NULL, ?, id FROM samples "

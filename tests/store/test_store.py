@@ -387,6 +387,19 @@ def test_instruments_upsert_get_list(db):
         store.instruments.upsert({"id": "gc1", "correction_map": "{}"}, db=db)  # dropped (D4b)
 
 
+def test_local_dt_refuses_aware_input(db):
+    assert store.local_dt("2026-10-01T08:00:00") == "2026-10-01 08:00:00"
+    assert store.local_dt("2026-10-01") == "2026-10-01 00:00:00"
+    for bad in ("2026-10-01T08:00:00+00:00", "2026-10-01T08:00:00Z",
+                datetime(2026, 10, 1, 8, tzinfo=timezone.utc)):
+        with pytest.raises(ValueError):
+            store.local_dt(bad)
+    with pytest.raises(ValueError):
+        store.instruments.upsert({"id": "gc1", "name": "GC-1", "live_since": "2026-10-01T00:00:00Z"}, db=db)
+    with pytest.raises(ValueError):
+        store.samples.search(date_from="2026-10-01T00:00:00+02:00", db=db)
+
+
 def test_live_since_boundary_day_backfill(db):
     store.instruments.upsert({"id": "gc1", "name": "GC-1", "live_since": "2026-10-01T00:00:00"}, db=db)
     live = store.instruments.get("gc1", db=db)["live_since"]
@@ -689,6 +702,29 @@ def test_enqueue_dedupes_queued_jobs_per_sample(gc1):
     assert j4 != j1  # the first is running, so a new one may queue
 
 
+def test_enqueue_dedupe_last_payload_wins_and_earlier_not_before(gc1):
+    sid = _sample(gc1)
+    j = store.jobs.enqueue("process", {"sample_id": sid}, sample_id=sid,
+                           not_before=T0 + timedelta(minutes=10), db=gc1)
+    store.jobs.enqueue("process", {"sample_id": sid, "by": "ryan", "use_current_blank": True},
+                       sample_id=sid, not_before=T0 + timedelta(minutes=5), db=gc1)
+    store.jobs.enqueue("process", {"sample_id": sid, "by": "amy", "use_current_blank": True},
+                       sample_id=sid, not_before=T0 + timedelta(minutes=20), db=gc1)
+    row = store.jobs.get(j, db=gc1)
+    assert row["payload"] == {"sample_id": sid, "by": "amy", "use_current_blank": True}
+    assert row["not_before"] == (T0 + timedelta(minutes=5)).isoformat(timespec="microseconds")
+    assert len(store.jobs.list(state="queued", db=gc1)) == 1
+
+
+def test_enqueue_for_status_keeps_a_richer_queued_payload(gc1):
+    sid = _sample(gc1, status="pending_corrections")
+    j = store.jobs.enqueue("process", {"sample_id": sid, "by": "ryan"}, sample_id=sid,
+                           not_before=T0 + timedelta(minutes=5), db=gc1)
+    store.jobs.enqueue_for_status("gc1", "pending_corrections", db=gc1)
+    row = store.jobs.get(j, db=gc1)
+    assert row["payload"] == {"sample_id": sid, "by": "ryan"} and row["not_before"] is None
+
+
 def test_enqueue_for_status(gc1):
     a = _sample(gc1, lab_id="A", status="awaiting_calibration")
     b = _sample(gc1, lab_id="B", status="awaiting_calibration")
@@ -700,15 +736,17 @@ def test_enqueue_for_status(gc1):
                        not_before=T0 + timedelta(hours=1), db=gc1)
     with store.connection(gc1) as conn:
         with store.write_txn(conn):
-            n = store.jobs.enqueue_for_status(conn, "gc1", "awaiting_calibration")
+            n = store.jobs.enqueue_for_status("gc1", "awaiting_calibration", db=conn)
     assert n == 2
     queued = store.jobs.list(state="queued", db=gc1)
     assert sorted(j["sample_id"] for j in queued) == [a, b]
     assert all(j["payload"] == {"sample_id": j["sample_id"]} and j["kind"] == "process" for j in queued)
     assert all(j["not_before"] is None for j in queued)
-    assert store.jobs.enqueue_for_status(gc1, "gc1", "awaiting_calibration") == 2  # idempotent
+    assert store.jobs.enqueue_for_status("gc1", "awaiting_calibration", db=gc1) == 2  # idempotent
     assert len(store.jobs.list(state="queued", db=gc1)) == 2
-    assert store.jobs.enqueue_for_status(gc1, "gc1", "other_method", method_name="SIMDISX.M") == 1
+    assert store.jobs.enqueue_for_status("gc1", "other_method", method_name="SIMDISX.M", db=gc1) == 1
+    with pytest.raises(TypeError):
+        store.jobs.enqueue_for_status(gc1, "gc1", "awaiting_calibration")  # db is keyword-only
     assert o1 in {j["sample_id"] for j in store.jobs.list(state="queued", db=gc1)}
 
 
@@ -785,9 +823,19 @@ def test_latest_blank_at_or_before(gc1):
                                       exclude_sample_id=b2, db=gc1)["id"] == b1
     assert store.samples.latest_blank("gc1", "2026-09-02 00:00:00", [], db=gc1) is None
     assert store.samples.latest_blank("gc1", "2026-09-01 11:30:00", ["D7096.M"], db=gc1)["lab_id"] == "blank"
+    # the 'T' form sorts after '2026-09-01 12:00:00' raw; it must still mean 11:30
+    assert store.samples.latest_blank("gc1", "2026-09-01T11:30:00", m, db=gc1)["id"] == b1
     with store.connection(gc1) as conn:
         names = {r[1] for r in conn.execute("PRAGMA index_list(samples)")}
         assert "samples_blanks" in names
+
+
+def test_latest_blank_needs_a_stored_cdf(gc1):
+    b1 = _sample(gc1, lab_id="blank", dt="2026-09-01 08:00:00", is_blank=1)
+    store.samples.insert_received("gc1", "blank", "2026-09-01 09:00:00", "csv", cdf_sha256=None,
+                                  cdf_path=None, method_name="SIMDISB.M", is_blank=1,
+                                  status="final", db=gc1)
+    assert store.samples.latest_blank("gc1", "2026-09-01 10:00:00", ["SIMDISB.M"], db=gc1)["id"] == b1
 
 
 def test_is_gated(gc1):
@@ -815,6 +863,13 @@ def test_find_by_legacy(gc1):
     assert [r["id"] for r in store.samples.find_by_legacy("gc1", "40305", "2026-09-25 00:24:50", db=gc1)] == [fixed]
     assert [r["id"] for r in store.samples.find_by_legacy("gc1", "40306", "2026-09-25 01:00:00", db=gc1)] == [plain]
     assert store.samples.find_by_legacy("gc2", "40305", "2026-09-25 02:45:00", db=gc1) == []
+    # two samples match: one by its correct time (lower id), one by its legacy string
+    by_time = _sample(gc1, lab_id="777", dt="2026-09-26 02:45:00",
+                      legacy_injection_dt="2026-09-26 02:45:01")
+    by_legacy = _sample(gc1, lab_id="777", dt="2026-09-26 00:24:50",
+                        legacy_injection_dt="2026-09-26 02:45:00", time_corrected=1)
+    got = store.samples.find_by_legacy("gc1", "777", "2026-09-26 02:45:00", db=gc1)
+    assert [r["id"] for r in got] == [by_legacy, by_time]
     with store.connection(gc1) as conn:
         cols = [r[2] for r in conn.execute("PRAGMA index_info(samples_legacy)")]
     assert cols == ["instrument_id", "lab_id", "legacy_injection_dt"]
@@ -868,15 +923,39 @@ def test_corrections_set_all_read_audit(gc1):
     assert store.corrections.read("gc2", db=gc1) is None
 
 
+def test_corrections_unchanged_cuts_are_not_touched(gc1):
+    vals = {c: 0.0 for c in CUTS}
+    with store.connection(gc1) as conn:
+        with store.write_txn(conn):
+            store.corrections.set_all(conn, "gc1", vals, by="ryan", reason="seed")
+        before = {r["cut"]: dict(r) for r in conn.execute(
+            "SELECT * FROM instrument_corrections WHERE instrument_id='gc1'")}
+        with store.write_txn(conn):
+            assert store.corrections.set_all(conn, "gc1", vals, by="amy", reason="no-op") == 0
+        with store.write_txn(conn):
+            assert store.corrections.set_all(conn, "gc1", dict(vals, IBP=1.0), by="amy",
+                                             reason="edit") == 1
+        after = {r["cut"]: dict(r) for r in conn.execute(
+            "SELECT * FROM instrument_corrections WHERE instrument_id='gc1'")}
+    for cut in CUTS:
+        if cut == "IBP":
+            assert after[cut]["updated_by"] == "amy" and after[cut]["value"] == 1.0
+        else:
+            assert after[cut] == before[cut]  # no updated_at/updated_by bump
+    got = store.corrections.read("gc1", db=gc1)
+    assert got["updated_by"] == "amy" and got["updated_at"] == after["IBP"]["updated_at"]
+
+
 def test_corrections_rules(gc1):
     with store.connection(gc1) as conn:
         for bad_reason in ("", "   ", None):
             with pytest.raises(ValueError):
                 with store.write_txn(conn):
                     store.corrections.set_all(conn, "gc1", {"IBP": 1.0}, by="r", reason=bad_reason)
-        with pytest.raises(ValueError):
-            with store.write_txn(conn):
-                store.corrections.set_all(conn, "gc1", {"IBP": float("nan")}, by="r", reason="x")
+        for bad in (float("nan"), float("inf"), None, "abc", [1.0]):
+            with pytest.raises(ValueError):
+                with store.write_txn(conn):
+                    store.corrections.set_all(conn, "gc1", {"IBP": bad}, by="r", reason="x")
         with pytest.raises(sqlite3.IntegrityError):
             with store.write_txn(conn):
                 store.corrections.set_all(conn, "nope", {"IBP": 1.0}, by="r", reason="x")
