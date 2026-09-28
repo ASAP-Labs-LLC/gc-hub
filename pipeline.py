@@ -22,8 +22,9 @@ the status machine (spec, "Status machine"):
    ``strict_blank``), then **one** ``write_txn`` writes the revision, the
    export row (only when the gate passes: ``backfill=0`` or released) and
    ``status='final'``, and completes the job. If the sample's file or
-   current revision changed while it was computed, nothing is written and
-   the job is requeued;
+   current revision changed while it was computed, or (for a freshly chosen
+   blank) ``latest_blank`` now gives a different answer, nothing is written
+   and the job is requeued;
 6. any other exception → ``error`` with the message.
 
 **The blank recorded is the blank subtracted.** ``blank_used`` is set only
@@ -50,7 +51,10 @@ Public API
     submit(instrument_id, cdf, mtime=None, source_name=None, *, conf=None,
            data_dir=None, db=None, notifier=None) -> SubmitResult
         # cdf: bytes, or a path (read only; mtime and source_name default to
-        # the file's). Raises UnknownInstrument, SubmitRejected.
+        # the file's). Raises UnknownInstrument, InstrumentDisabled, SubmitRejected.
+        # The 2B1 ingest route maps InstrumentDisabled to 403 (the agent holds
+        # and retries later) and every other SubmitRejected to 400 (the agent
+        # marks the file rejected).
     SubmitResult(outcome, sha256, sample_id, status, conflict_id, instrument_id, message)
         # outcome: 'created' | 'duplicate' | 'cross_instrument' | 'conflict'
     is_blank_name(name) -> bool
@@ -60,7 +64,7 @@ Public API
     on_calibration_saved(instrument_id, *, db=None) -> int      # queues awaiting_calibration
     on_method_mapped(instrument_id, method_name, *, db=None) -> int   # queues other_method
     requeue_on_start(*, db=None) -> dict
-    sweep_incoming(data_dir) -> int                             # start-up only
+    sweep_incoming(data_dir, min_age_seconds=600) -> int       # start-up
 
     Worker(*, db=None, data_dir=None, conf_fn=None, corrections_provider=None,
            format_line=None, notifier=None, poll_seconds=2.0, now_fn=None)
@@ -165,8 +169,13 @@ class UnknownInstrument(LookupError):
 
 
 class SubmitRejected(ValueError):
-    """The hub won't take this file: the instrument is disabled, or the body is
-    not a CDF it can identify (unreadable, or no injection time)."""
+    """The hub won't take this file: the body is not a CDF it can identify
+    (unreadable, or no injection time). The ingest route answers 400."""
+
+
+class InstrumentDisabled(SubmitRejected):
+    """The instrument is disabled. The ingest route answers 403, so the agent
+    holds its queue instead of rejecting the file."""
 
 
 @dataclass(frozen=True)
@@ -269,15 +278,18 @@ def _notify(notifier: Optional[Notifier], level: str, message: str) -> None:
         log.exception("pipeline: notifier failed")
 
 
-def sweep_incoming(data_dir) -> int:
-    """Delete everything left in ``<data>/cdf/.incoming`` (a crash mid-submit).
-    Start-up only, before any submit can run. Returns how many were removed."""
+def sweep_incoming(data_dir, min_age_seconds: float = 600) -> int:
+    """Delete files left in ``<data>/cdf/.incoming`` by a crash mid-submit:
+    only those older than ``min_age_seconds`` (10 minutes), so a submit in
+    flight is never touched. Returns how many were removed."""
+    import time
     incoming = Path(data_dir) / "cdf" / INCOMING_DIR
+    cutoff = time.time() - min_age_seconds
     n = 0
     if incoming.is_dir():
         for p in incoming.iterdir():
             try:
-                if p.is_file():
+                if p.is_file() and p.stat().st_mtime < cutoff:
                     p.unlink()
                     n += 1
             except OSError:
@@ -359,7 +371,7 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
     if inst is None:
         raise UnknownInstrument(f"unknown instrument {instrument_id!r}")
     if not inst.get("enabled", 1):
-        raise SubmitRejected(f"instrument {instrument_id} is disabled")
+        raise InstrumentDisabled(f"instrument {instrument_id} is disabled")
     if isinstance(cdf, (bytes, bytearray, memoryview)):
         body = bytes(cdf)
     else:
@@ -753,6 +765,10 @@ class Worker:
                     methods.names_mapped_to(mm, hub_method), exclude_sample_id=sid, db=self.db)
         except sqlite3.Error as exc:
             raise _Transient(f"store read failed: {exc}") from exc
+        blank_check = None
+        if fresh_blank:
+            blank_check = (methods.names_mapped_to(mm, hub_method),
+                           blank["id"] if blank is not None else None)
         blank_path = self.data_dir / blank["cdf_path"] if blank is not None else None
         if blank_path is not None and not blank_path.is_file():
             raise distill.BlankUnreadable(f"blank sample {blank['id']}'s CDF is missing: {blank_path}")
@@ -812,14 +828,17 @@ class Worker:
         }
         reason = "reprocess" if (reprocess and sample["current_revision"] is not None) else "processed"
         self._write_final(sample, job, results_json=results_json, line=line, reason=reason,
-                          by=payload.get("by"), extra=extra, notes=notes, clear_review=fresh_blank)
+                          by=payload.get("by"), extra=extra, notes=notes, clear_review=fresh_blank,
+                          blank_check=blank_check)
 
     def _write_final(self, sample: dict, job: dict, *, results_json: str, line: str, reason: str,
                      by: Optional[str], extra: dict, notes: Any = None,
-                     clear_review: bool = False) -> int:
+                     clear_review: bool = False, blank_check: Optional[tuple] = None) -> int:
         """One transaction: revision, export row (if gated), status final, job done.
         Raises ``_Stale`` (writing nothing) if the sample's file or current
-        revision changed since ``sample`` was read."""
+        revision changed since ``sample`` was read, or, with ``blank_check``
+        ``(method_names, chosen blank id or None)`` for a freshly chosen blank,
+        if ``latest_blank`` now answers differently (a blank arrived meanwhile)."""
         sid = sample["id"]
         with store.connection(self.db) as conn:
             with store.write_txn(conn):
@@ -827,6 +846,12 @@ class Worker:
                 if (cur is None or cur["cdf_sha256"] != sample["cdf_sha256"]
                         or cur["current_revision"] != sample["current_revision"]):
                     raise _Stale("changed while it was being computed")
+                if blank_check is not None:
+                    names, chosen = blank_check
+                    now = store.samples.latest_blank(cur["instrument_id"], cur["injection_dt"], names,
+                                                     exclude_sample_id=sid, db=conn)
+                    if (now["id"] if now is not None else None) != chosen:
+                        raise _Stale("changed while it was being computed (a newer blank arrived)")
                 rev = store.add_revision(conn, sid, results_json, reason=reason, by=by,
                                          notes=notes, **extra)
                 if not cur["backfill"] or cur["released_at"] is not None:

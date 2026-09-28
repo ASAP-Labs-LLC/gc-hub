@@ -336,8 +336,9 @@ def test_a_sample_changed_during_compute_is_requeued(hub):
 def test_a_disabled_instrument_refuses_submits(hub):
     hub.gc1()
     store.instruments.upsert({"id": "gc1", "enabled": 0}, db=hub.db)
-    with pytest.raises(pipeline.SubmitRejected):
+    with pytest.raises(pipeline.InstrumentDisabled) as got:
         hub.submit(hub.cdf())
+    assert isinstance(got.value, pipeline.SubmitRejected)
 
 
 def test_start_sweeps_incoming_leftovers(hub):
@@ -345,12 +346,71 @@ def test_start_sweeps_incoming_leftovers(hub):
     incoming = hub.data / "cdf" / ".incoming"
     incoming.mkdir(parents=True)
     (incoming / "dead.CDF").write_bytes(b"x")
+    os.utime(incoming / "dead.CDF", (time.time() - 3600, time.time() - 3600))
     w = hub.worker(poll_seconds=0.05)
     w.start()
     try:
         assert list(incoming.iterdir()) == []
     finally:
         w.stop()
+
+
+def test_the_sweep_keeps_files_younger_than_10_minutes(hub):
+    incoming = hub.data / "cdf" / ".incoming"
+    incoming.mkdir(parents=True)
+    old, new = incoming / "old.CDF", incoming / "new.CDF"
+    old.write_bytes(b"x")
+    new.write_bytes(b"y")
+    os.utime(old, (time.time() - 601, time.time() - 601))
+    os.utime(new, (time.time() - 540, time.time() - 540))
+    assert pipeline.sweep_incoming(hub.data) == 1
+    assert [p.name for p in incoming.iterdir()] == ["new.CDF"]
+
+
+def test_a_blank_arriving_during_compute_requeues(hub):
+    hub.gc1()
+    b0 = hub.submit(hub.cdf("blank", injected=datetime(2026, 9, 25, 7, 0, 0))).sample_id
+    _run(hub)
+    sid = hub.submit(hub.cdf(injected=datetime(2026, 9, 25, 10, 0, 0))).sample_id
+    real = distill.compute
+    late = []
+
+    def compute(*a, **kw):
+        out = real(*a, **kw)
+        if not late:
+            late.append(hub.submit(hub.cdf("blank", injected=datetime(2026, 9, 25, 9, 0, 0),
+                                           name="Blank2")).sample_id)
+        return out
+
+    with mock.patch.object(distill, "compute", compute):
+        w = hub.worker()
+        while True:        # run until the sample's first job has been handled
+            job = store.jobs.claim_next(db=hub.db)
+            if job["sample_id"] == sid:
+                w._handle(job)
+                break
+            w._handle(job)
+    s = hub.sample(sid)
+    assert s["current_revision"] is None
+    assert store.list_revisions(sid, db=hub.db) == []
+    job = [j for j in store.jobs.list(state="queued", db=hub.db) if j["sample_id"] == sid][0]
+    assert "changed" in job["last_error"]
+    _run(hub)
+    assert _rev(hub, sid)["blank_used"] == late[0]
+    assert b0
+
+
+def test_a_kept_blank_is_not_rechecked(hub):
+    hub.gc1()
+    b0 = hub.submit(hub.cdf("blank", injected=datetime(2026, 9, 25, 7, 0, 0))).sample_id
+    sid = hub.submit(hub.cdf(injected=datetime(2026, 9, 25, 10, 0, 0))).sample_id
+    _run(hub)
+    hub.submit(hub.cdf("blank", injected=datetime(2026, 9, 25, 9, 0, 0), name="Blank2"))
+    _run(hub)
+    pipeline.request_reprocess(sid, by="ryan", db=hub.db)
+    _run(hub)
+    assert _rev(hub, sid)["revision"] == 2
+    assert _rev(hub, sid)["blank_used"] == b0
 
 
 def test_one_worker_per_process(hub):
@@ -401,6 +461,7 @@ def test_instruments_startup_bootstraps_requeues_and_starts(hub):
     incoming = hub.data / "cdf" / ".incoming"
     incoming.mkdir(parents=True)
     (incoming / "dead.CDF").write_bytes(b"x")
+    os.utime(incoming / "dead.CDF", (time.time() - 3600, time.time() - 3600))
     w = instruments.startup(hub.conf, notes, db=hub.db, data_dir=hub.data,
                             conf_fn=lambda: hub.conf, poll_seconds=0.05)
     try:
