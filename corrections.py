@@ -118,3 +118,129 @@ def parse_correction_map(raw) -> Dict[str, str]:
         seen[cut] = name
         out[name] = cut
     return out
+
+
+# ── shared helpers ───────────────────────────────────────────────────────────
+
+Clock = Callable[[], datetime]
+
+
+def _iso(dt: datetime) -> str:
+    return dt.isoformat(timespec="seconds")
+
+
+def _finite_float(value) -> Optional[float]:
+    """A real, finite number, or None. Booleans are not numbers here."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def values_differ(a: dict, b: dict) -> bool:
+    """True if two cut->value maps would correct any result differently."""
+    a, b = dict(a or {}), dict(b or {})
+    if set(a) != set(b):
+        return True
+    for cut in a:
+        x, y = _finite_float(a[cut]), _finite_float(b[cut])
+        if x is None or y is None or abs(x - y) > 1e-9:
+            return True
+    return False
+
+
+# ── the phase-1 file (2A1) ───────────────────────────────────────────────────
+
+FILE_SECTION = "Agilent GC"
+FILE_INSTRUMENT_ID = "gc1"
+
+
+class FileProvider:
+    """Phase-1 ``correction_factors_json``: ``{"Agilent GC": {test_name:
+    {"correction_value": x}, ...}, ...}``. Serves only instrument ``gc1``.
+
+    Stricter than ``distill.load_d86_corrections`` in exactly the ways that
+    function hid a failure as "no correction":
+
+    - missing file, unparseable JSON, a missing or non-object section, or a
+      section with **no** mapped test -> ``config``;
+    - a mapped test whose ``correction_value`` is not a finite number ->
+      ``config`` (phase 1 dropped the whole file for this);
+    - any other OS error (share offline, permissions) -> ``unreachable``.
+
+    Kept from phase 1: a mapped cut the file does not list is uncorrected, so
+    it is recorded as an explicit 0.0.
+    """
+
+    def __init__(self, json_path: str, *, clock: Optional[Clock] = None) -> None:
+        self.json_path = str(json_path)
+        self._clock = clock or datetime.now
+        self._latest: Dict[str, Corrections] = {}
+
+    def get(self, instrument: dict) -> Corrections:
+        inst_id = str((instrument or {}).get("id") or "")
+        if inst_id != FILE_INSTRUMENT_ID:
+            raise _config(f"The corrections file serves only instrument "
+                          f"{FILE_INSTRUMENT_ID!r}, not {inst_id!r}; set up LEM "
+                          f"corrections for it.")
+        mapping = parse_correction_map((instrument or {}).get("correction_map"))
+        fetched_at = _iso(self._clock())
+        section = self._read_section()
+        values: Dict[str, float] = {}
+        found = 0
+        for test_name, cut in mapping.items():
+            if test_name not in section:
+                values[cut] = 0.0
+                continue
+            entry = section[test_name]
+            number = (_finite_float(entry.get("correction_value"))
+                      if isinstance(entry, dict) else None)
+            if number is None:
+                raise _config(f"The corrections file's {test_name!r} entry has no "
+                              f"usable correction_value ({entry!r}).")
+            values[cut] = number
+            found += 1
+        if not found:
+            raise _config(f"The {FILE_SECTION!r} section of {self.json_path} lists "
+                          f"none of the mapped tests ({', '.join(mapping)}); this "
+                          f"is not the corrections file.")
+        result = Corrections(source="file", fetched_at=fetched_at,
+                             values=_in_cut_order(values))
+        self._latest[inst_id] = result
+        return result
+
+    def refresh(self, instrument: dict) -> Corrections:
+        return self.get(instrument)
+
+    def changed_since(self, instrument_id: str, used: Corrections) -> bool:
+        latest = self._latest.get(str(instrument_id))
+        return latest is not None and values_differ(latest.values, used.values)
+
+    def _read_section(self) -> dict:
+        try:
+            with open(self.json_path, encoding="utf-8") as fh:
+                text = fh.read()
+        except FileNotFoundError:
+            raise _config(f"The corrections file {self.json_path} does not exist.") from None
+        except OSError as exc:
+            raise _unreachable(f"The corrections file {self.json_path} could not be "
+                               f"read: {exc}.") from None
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            raise _config(f"The corrections file {self.json_path} is not valid "
+                          f"JSON: {exc}.") from None
+        if not isinstance(data, dict):
+            raise _config(f"The corrections file {self.json_path} is not a JSON object.")
+        section = data.get(FILE_SECTION)
+        if not isinstance(section, dict):
+            raise _config(f"The corrections file {self.json_path} has no "
+                          f"{FILE_SECTION!r} section.")
+        return section
+
+
+def _in_cut_order(values: Dict[str, float]) -> Dict[str, float]:
+    return {cut: values[cut] for cut in D86_CUTS if cut in values}
