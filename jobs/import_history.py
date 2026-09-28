@@ -96,7 +96,12 @@ A second run over the same inputs writes nothing. Per sample:
   place through ``pipeline.attach_cdf_to_result_only`` (shared with
   ``pipeline.submit``), adding the rows appended since, when its stored
   rows are a prefix of the CDF's rows (``attached_to_result_only``; else
-  ``attach_refused``);
+  ``attach_refused``). Never when that sample's time is unverifiable and
+  differs from the CDF's correct time (the shared rule of
+  ``pipeline.match_result_only``): listed as ``attach_ambiguous_time``,
+  nothing written;
+* a conflict held against a result-only sample carries
+  ``pipeline.RESULT_ONLY_CONFLICT_REASON`` in ``conflicts.error``;
 * a result-only key already held (or a CDF sample whose correct or legacy
   time is that CSV time) is not duplicated (``key_taken``);
 * conflicts are found by sha;
@@ -136,6 +141,7 @@ API
                    progress=None, dry_run=False, conf=None, by="import",
                    batch_size=500, examples=20, compare_dirs=()) -> dict
     format_summary(summary, *, examples=5) -> str
+    last_run(instrument_id, *, db=None) -> dict | None   # the latest run, its CSV path
 
 ``results_csv=None`` imports the CDFs alone (all orphans). ``conf`` is the
 global settings (only ``blank_max_intensity_pa`` is read; default
@@ -154,7 +160,9 @@ truncation check); ``{"phase": "import", "done", "total", "outcome",
 ``{"phase": "done", "summary"}``.
 
 The summary is JSON-ready: ``instrument``, ``processed_dir``,
-``results_csv``, ``csv_sha256``, ``run_id``, ``aliases``, ``dry_run``, ``store_checked``,
+``results_csv``, ``csv_sha256``, ``run_id``, ``previous_csv`` (the last run's CSV),
+``warnings`` (e.g. a different CSV path than last time), ``aliases``, ``dry_run``,
+``store_checked``,
 ``started_at``, ``seconds``, ``counts`` (see ``COUNT_KEYS``),
 ``method_names`` (histogram of the CDFs kept), ``method_names_per_folder``,
 ``v1_misparse``, ``matcher`` (selected matcher stats), ``examples`` (up to
@@ -204,6 +212,7 @@ COUNT_KEYS = (
     "whitespace_only_names", "whitespace_matched", "name_from_filename",
     "attached_to_result_only", "attach_refused", "rows_moved", "rows_vanished",
     "noncanonical_time", "rows_of_unreadable_cdfs", "same_file_elsewhere",
+    "attach_ambiguous_time",
 )
 
 
@@ -397,7 +406,13 @@ def _classify(conn, ctx: _Ctx, item: _Item) -> tuple:
         elif existing is not None:
             return "conflict", {"sample_id": existing["id"]}
         else:
-            ro = pipeline.find_result_only(conn, inst_id, item.lab_id, _cdf_forms(item))
+            m = pipeline.match_result_only(conn, inst_id, item.lab_id, _cdf_forms(item),
+                                           item.injection_dt)
+            ro = m.sample
+            if ro is None and m.suspects:
+                # never attached: its time is unverifiable and differs (the shared rule)
+                return "attach_ambiguous_time", {"sample_id": m.suspects[0]["id"],
+                                                 "result_only_time": m.suspects[0]["injection_dt"]}
         if ro is not None:
             if item.collision_with is not None:
                 return "collisions_unresolved", {"kept": item.collision_with,
@@ -524,6 +539,9 @@ def _hold_conflict(conn, ctx: _Ctx, item: _Item, existing_id: int, placed: list)
              / item.injection_dt[5:7] / f"{pipeline.safe_stem(item.lab_id)}_{c.sha256[:12]}.CDF")
     cid = store.conflicts.add(ctx.inst_id, item.lab_id, item.injection_dt, existing_id, c.sha256,
                               pipeline.rel_path(final, ctx.data_dir), db=conn)
+    existing = store.samples.get(existing_id, db=conn)
+    if existing is not None and existing["cdf_sha256"] is None:
+        store.conflicts.set_error(cid, pipeline.RESULT_ONLY_CONFLICT_REASON, db=conn)
     _place(item, final, placed)
     return cid
 
@@ -537,7 +555,7 @@ def _new_summary(instrument_id, processed_dir, results_csv, aliases, dry_run) ->
         "run_id": None, "aliases": list(aliases), "dry_run": bool(dry_run),
         "store_checked": False, "started_at": store.now_iso(),
         "counts": {k: 0 for k in COUNT_KEYS}, "method_names": {}, "method_names_per_folder": {},
-        "v1_misparse": {}, "matcher": {}, "examples": {},
+        "v1_misparse": {}, "matcher": {}, "examples": {}, "previous_csv": None, "warnings": [],
     }
 
 
@@ -607,6 +625,15 @@ def import_history(instrument_id: str, processed_dir, results_csv, *, instrument
     summary["csv_sha256"] = csv_sha
     ctx = _Ctx(inst_id=instrument_id, csv_name=str(results_csv) if results_csv else "",
                csv_sha256=csv_sha, by=by, data_dir=data_dir, conf=conf or {})
+    if db is not None:
+        prev = last_run(instrument_id, db=db)
+        if prev is not None and prev.get("results_csv"):
+            summary["previous_csv"] = prev["results_csv"]
+            if ctx.csv_name and prev["results_csv"] != ctx.csv_name:
+                summary["warnings"].append(
+                    f"a different CSV than the last run ({prev['results_csv']}): rows are "
+                    f"matched to stored revisions by CSV path and line number, so rows already "
+                    f"imported from the other path are reported, not added again")
     if not dry_run:
         ctx.run_id = store.import_runs.start(instrument_id, by=by, sources={
             "processed_dir": str(root), "results_csv": ctx.csv_name or None,
@@ -1053,6 +1080,7 @@ _SECTIONS = (
         ("conflicts_existing", "conflicts already held"),
         ("key_collisions", "key collisions in the folder (the other file is a conflict)"),
         ("collisions_unresolved", "key collisions whose kept file was not imported"),
+        ("attach_ambiguous_time", "not attached: result-only time unverifiable and different"),
         ("cross_instrument", "cross-instrument (file held by another instrument)"),
         ("truncated", "truncated or empty CDFs (recopy, then re-run)"),
         ("failed", "failed"),
@@ -1101,6 +1129,8 @@ def format_summary(summary: dict, *, examples: int = 5) -> str:
         add("  Store: not checked (an empty store and the default method map were assumed)")
     add(f"  Started {summary['started_at']}"
         + (f", took {summary['seconds']:.1f} s" if "seconds" in summary else ""))
+    for w in summary.get("warnings") or ():
+        add(f"  WARNING: {w}")
     if summary.get("stopped"):
         add(f"  STOPPED PARTWAY: {summary['stopped']} (committed batches stay; re-run to resume)")
     for heading, keys in _SECTIONS:
@@ -1135,3 +1165,28 @@ def format_summary(summary: dict, *, examples: int = 5) -> str:
             for e in entries[:n]:
                 add("  " + _example_text(e))
     return "\n".join(out) + "\n"
+
+
+def last_run(instrument_id: str, *, db: store.Db = None) -> Optional[dict]:
+    """The latest real import run of ``instrument_id`` (``None`` if none):
+    ``{run_id, started_at, finished_at, by, stopped, processed_dir,
+    results_csv, csv_sha256, aliases, counts}``. The admin page defaults its
+    CSV path to ``results_csv`` and warns when another path is chosen (the
+    delta rules compare line numbers per CSV path)."""
+    runs = store.import_runs.list(instrument_id, db=db)
+    if not runs:
+        return None
+    r = runs[0]
+    try:
+        sources = json.loads(r["sources"] or "{}") or {}
+    except ValueError:
+        sources = {}
+    try:
+        counts = json.loads(r["counts"] or "{}") or {}
+    except ValueError:
+        counts = {}
+    return {"run_id": r["id"], "started_at": r["started_at"], "finished_at": r["finished_at"],
+            "by": r["by"], "stopped": r["stopped"],
+            "processed_dir": sources.get("processed_dir"),
+            "results_csv": sources.get("results_csv"), "csv_sha256": sources.get("csv_sha256"),
+            "aliases": sources.get("aliases", []), "counts": counts}
