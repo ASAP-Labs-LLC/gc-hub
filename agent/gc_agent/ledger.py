@@ -9,9 +9,16 @@ a new version and is queued again; identical bytes already sent are never
 uploaded twice (see ``sent_with_sha``).
 
 Every known key is also held in memory, so a poll with no changes does no SQL.
+The in-memory set changes only after a transaction commits.
+
+Schema versions (``PRAGMA user_version``): 0/1 = the first layout (no
+``pkey``; primary key on the raw path), 2 = current. Opening an older file
+migrates it in one transaction; a newer one is used as is (changes are
+additive).
 """
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import threading
@@ -19,10 +26,12 @@ from collections import namedtuple
 
 from . import util
 
+log = logging.getLogger("gc_agent.ledger")
+
 Entry = namedtuple("Entry", "path size mtime_ns sha256 state reason sample_id updated_at")
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS files (
+_FILES_TABLE = """
+CREATE TABLE IF NOT EXISTS %s (
     pkey       TEXT    NOT NULL,
     path       TEXT    NOT NULL,
     size       INTEGER NOT NULL,
@@ -35,11 +44,14 @@ CREATE TABLE IF NOT EXISTS files (
     updated_at TEXT,
     PRIMARY KEY (pkey, size, mtime_ns)
 );
+"""
+_SCHEMA = (_FILES_TABLE % "files") + """
 CREATE INDEX IF NOT EXISTS files_state ON files (state, mtime_ns);
 CREATE INDEX IF NOT EXISTS files_sha ON files (sha256);
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 """
 
+SCHEMA_VERSION = 2
 _COLS = "path, size, mtime_ns, sha256, state, reason, sample_id, updated_at"
 _WHERE_KEY = "pkey=? AND size=? AND mtime_ns=?"
 
@@ -58,9 +70,36 @@ class Ledger:
         self.path = str(path)
         self._lock = threading.RLock()
         self._db = sqlite3.connect(self.path, timeout=10, check_same_thread=False)
-        with self._lock, self._db:
-            self._db.executescript(_SCHEMA)
+        with self._lock:
+            self._migrate()
         self._known = set(self._db.execute("SELECT pkey, size, mtime_ns FROM files").fetchall())
+
+    def _migrate(self):
+        db = self._db
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        cols = [r[1] for r in db.execute("PRAGMA table_info(files)")]
+        if cols and "pkey" not in cols:
+            log.info("migrating ledger.db from schema %d to %d", version, SCHEMA_VERSION)
+            db.create_function("gc_norm", 1, norm)
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute(_FILES_TABLE % "files_v2")
+                db.execute(
+                    "INSERT OR IGNORE INTO files_v2 (pkey, path, size, mtime_ns, sha256, state,"
+                    " reason, sample_id, first_seen, updated_at)"
+                    " SELECT gc_norm(path), path, size, mtime_ns, sha256, state, reason,"
+                    " sample_id, first_seen, updated_at FROM files")
+                db.execute("DROP TABLE files")
+                db.execute("ALTER TABLE files_v2 RENAME TO files")
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        with db:
+            db.executescript(_SCHEMA)
+        if version < SCHEMA_VERSION:
+            db.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
+            db.commit()
 
     def close(self):
         with self._lock:
@@ -93,35 +132,44 @@ class Ledger:
         if not items:
             return
         now = util.local_iso()
-        with self._lock, self._db:
-            for path, size, mtime_ns, sha in items:
-                k = _k((path, size, mtime_ns))
-                self._db.execute(
-                    "INSERT OR IGNORE INTO files (pkey, path, size, mtime_ns, sha256, state,"
-                    " first_seen, updated_at) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)",
-                    (k[0], path, size, mtime_ns, sha, now, now))
-                stale = self._db.execute(
-                    "SELECT pkey, size, mtime_ns FROM files WHERE pkey=? AND state='queued'"
-                    " AND NOT (size=? AND mtime_ns=?)", k).fetchall()
-                for s in stale:
-                    self._db.execute("DELETE FROM files WHERE " + _WHERE_KEY, s)
-                    self._known.discard(tuple(s))
-                self._known.add(k)
+        added, dropped = [], []
+        with self._lock:
+            with self._db:
+                for path, size, mtime_ns, sha in items:
+                    k = _k((path, size, mtime_ns))
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO files (pkey, path, size, mtime_ns, sha256, state,"
+                        " first_seen, updated_at) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)",
+                        (k[0], path, size, mtime_ns, sha, now, now))
+                    stale = self._db.execute(
+                        "SELECT pkey, size, mtime_ns FROM files WHERE pkey=? AND state='queued'"
+                        " AND NOT (size=? AND mtime_ns=?)", k).fetchall()
+                    for s in stale:
+                        self._db.execute("DELETE FROM files WHERE " + _WHERE_KEY, s)
+                        dropped.append(tuple(s))
+                    added.append(k)
+            # committed: only now does the in-memory set follow
+            for s in dropped:
+                self._known.discard(s)
+            self._known.update(added)
 
     def drop_queued_for_path(self, path, keep):
         k = _k(keep)
-        with self._lock, self._db:
-            stale = self._db.execute(
-                "SELECT pkey, size, mtime_ns FROM files WHERE pkey=? AND state='queued'"
-                " AND NOT (size=? AND mtime_ns=?)", (norm(path), k[1], k[2])).fetchall()
+        with self._lock:
+            with self._db:
+                stale = self._db.execute(
+                    "SELECT pkey, size, mtime_ns FROM files WHERE pkey=? AND state='queued'"
+                    " AND NOT (size=? AND mtime_ns=?)", (norm(path), k[1], k[2])).fetchall()
+                for s in stale:
+                    self._db.execute("DELETE FROM files WHERE " + _WHERE_KEY, s)
             for s in stale:
-                self._db.execute("DELETE FROM files WHERE " + _WHERE_KEY, s)
                 self._known.discard(tuple(s))
 
     def forget(self, key):
         k = _k(key)
-        self._exec("DELETE FROM files WHERE " + _WHERE_KEY, k)
-        self._known.discard(k)
+        with self._lock:
+            self._exec("DELETE FROM files WHERE " + _WHERE_KEY, k)
+            self._known.discard(k)
 
     def next_queued(self):
         return self._one("SELECT %s FROM files WHERE state='queued'"
