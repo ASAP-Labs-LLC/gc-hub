@@ -942,12 +942,29 @@ def processed_cdf_filename(lab_id: str, inj_dt: datetime, suffix: str = ".CDF") 
     return f"{safe}{suffix.upper()}"
 
 
+# ANDI/AIA compact stamp: 14 digits plus an optional zone we discard (``Z``
+# or ``±HH[:]MM``). Matched FIRST: see ``parse_injection_datetime``.
+_ANDI_COMPACT = re.compile(r"^(\d{14})(?:Z|\s*[+-]\d{2}:?\d{2})?$")
+# ISO is tried only for text that starts with a date written with separators.
+_ISO_DATE_PREFIX = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}")
+_OTHER_DT_FORMATS = ("%d-%b-%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S")
+
+
 def parse_injection_datetime(raw: str) -> datetime | None:
     """Parse an injection timestamp from the many formats GC files use.
 
     Agilent/Thermo ANDI (.CDF) files store ``injection_date_time_stamp`` as a
     compact ``YYYYMMDDHHMMSS`` string, often with a trailing ``±ZZZZ`` zone;
     others use ISO, ``DD-Mon-YYYY HH:MM:SS`` or US ``MM/DD/YYYY HH:MM:SS``.
+
+    The compact form is matched explicitly **before** any ISO attempt, and
+    ISO is tried only when the text starts with a ``-``/``/``-separated
+    date. (v1 tried ``datetime.fromisoformat`` first; on Python >= 3.11 that
+    accepts ``20260925002450+0000`` and misreads it as 02:45:00, taking the
+    9th character as the date/time separator. ``v1_parse_injection_datetime``
+    keeps v1's answer for matching old CSV rows.) This is the same parse as
+    ``import_match._correct_parse``, so the hub and the history importer
+    agree on every sample's injection time.
 
     Returns a *naive* ``datetime`` (any zone offset is dropped — all runs from
     one instrument share a zone, so wall-clock time keeps ordering correct and
@@ -960,21 +977,21 @@ def parse_injection_datetime(raw: str) -> datetime | None:
     if not text:
         return None
 
-    # ISO (handles both " " and "T" separators, and offsets like +05:00).
-    try:
-        return datetime.fromisoformat(text).replace(tzinfo=None)
-    except ValueError:
-        pass
-
-    # ANDI/AIA compact: 14 digits, optional ±ZZZZ / ±ZZ:ZZ zone we discard.
-    m = re.match(r"^(\d{14})(?:\s*[+-]\d{2}:?\d{2})?$", text)
+    m = _ANDI_COMPACT.match(text)
     if m:
         try:
             return datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
         except ValueError:
+            return None
+
+    # ISO (" " or "T" separator, optional offset), only with date separators.
+    if _ISO_DATE_PREFIX.match(text):
+        try:
+            return datetime.fromisoformat(text.replace("/", "-")).replace(tzinfo=None)
+        except ValueError:
             pass
 
-    for fmt in ("%d-%b-%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+    for fmt in _OTHER_DT_FORMATS:
         try:
             return datetime.strptime(text, fmt)
         except ValueError:
@@ -982,8 +999,28 @@ def parse_injection_datetime(raw: str) -> datetime | None:
     return None
 
 
-def cdf_metadata(path: Path) -> Tuple[str, datetime]:
-    """Return (sample_name, injection_datetime)."""
+def v1_parse_injection_datetime(raw: str) -> datetime | None:
+    """What v1 (phase 1, ``fromisoformat`` first) parsed ``raw`` as on Python
+    3.11-3.13, the interpreters the share copies ran: bug for bug, and the
+    same answer on any interpreter. Used only to compute
+    ``samples.legacy_injection_dt`` (the string v1 wrote to the CSV). Delegates
+    to ``import_match._v1_parse(raw, 'py311_313')``, the one emulation of it.
+    """
+    import import_match  # deferred: import_match imports distill
+    return import_match._v1_parse(raw or "", "py311_313")
+
+
+def normalise_method_name(raw) -> str:
+    """ChemStation method name as the hub compares it: trimmed, any directory
+    part stripped (``\\`` or ``/``), upper-cased; ``''`` if absent."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    return re.split(r"[\\/]", text)[-1].strip().upper()
+
+
+def _cdf_names(path: Path) -> Tuple[str, str, str]:
+    """``(sample_name or '', raw injection stamp, raw detection_method_name)``."""
     with _NETCDF_LOCK:
         with Dataset(path) as ds:
             vars_lc = {n.lower(): n for n in ds.variables}
@@ -997,16 +1034,43 @@ def cdf_metadata(path: Path) -> Tuple[str, datetime]:
                     return str(getattr(ds, attrs_lc[k]))
                 return ""
 
-            sample = _get("sample_name") or path.stem or "Unknown"
+            sample = _get("sample_name")
             raw_date = (
                 _get("injection_date_time_stamp")
                 or _get("injection_date")
                 or _get("injection_time")
             )
-    inj_dt = parse_injection_datetime(raw_date)
-    if inj_dt is None:
-        inj_dt = datetime.fromtimestamp(path.stat().st_mtime)
+            method = _get("detection_method_name")
+    return sample, raw_date, method
+
+
+def cdf_metadata(path: Path) -> Tuple[str, datetime]:
+    """Return (sample_name, injection_datetime)."""
+    sample, inj_dt, _source, _method, _raw = cdf_identity(path)
     return sample, inj_dt
+
+
+def cdf_identity(path: Path, *, mtime: datetime | None = None
+                 ) -> Tuple[str, datetime, str, str, str]:
+    """``(sample, injection_dt, dt_source, method_name, raw_stamp)`` for a CDF.
+
+    ``sample`` is the ``sample_name`` (the file stem if absent);
+    ``injection_dt`` a naive ``datetime`` from ``parse_injection_datetime``,
+    with ``dt_source`` ``'cdf'``, or, when the stamp is missing or
+    unparseable, ``mtime`` (the sender's file time; the file's own mtime when
+    not given) with ``dt_source`` ``'mtime'``. ``method_name`` is the
+    ``detection_method_name`` normalised (``normalise_method_name``; ``''``
+    if absent). ``raw_stamp`` is the stamp text as read.
+    """
+    path = Path(path)
+    sample, raw_date, method = _cdf_names(path)
+    sample = sample or path.stem or "Unknown"
+    inj_dt = parse_injection_datetime(raw_date)
+    source = "cdf"
+    if inj_dt is None:
+        source = "mtime"
+        inj_dt = mtime if mtime is not None else datetime.fromtimestamp(path.stat().st_mtime)
+    return sample, inj_dt, source, normalise_method_name(method), raw_date
 
 
 def gc_trace_from_cdf(path: Path) -> Scatter:
