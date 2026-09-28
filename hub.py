@@ -307,7 +307,8 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
             if on_final is not None:
                 on_final(sample_id)
 
-        # 2A2's instruments.corrections_provider when present, else the hub's own.
+        # 2A2's instruments.corrections_provider (hub corrections; gc1's file
+        # only until seeded, which the line above just did), else the hub's own.
         provider_for = getattr(instruments, "corrections_provider", None) or corrections_provider
         worker_kw.setdefault("corrections_provider", provider_for(db))
         worker = instruments.startup(app_conf, notifier, db=db, data_dir=data, conf_fn=conf_fn,

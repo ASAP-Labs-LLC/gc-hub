@@ -183,6 +183,8 @@ import ingest_api  # noqa: E402  (2B1: the agent API, contract §1)
 import hub_admin  # noqa: E402  (2A1 T5: folder-loader job, export admin)
 app.register_blueprint(admin_auth.bp)
 app.register_blueprint(ingest_api.bp)
+import instruments_api  # noqa: E402  (2A2: the Instruments page)
+app.register_blueprint(instruments_api.bp)
 app.register_blueprint(hub_admin.bp)
 
 # ---------------------------------------------------------------------------
@@ -467,8 +469,8 @@ def _error(msg: str, status: int = 400) -> tuple:
 #  The hub store: samples are addressed by sample_id (phase 2, 2A1 T4)
 # ===================================================================== #
 # Routes read the store in GC_DATA_DIR/gc.db. They never create or migrate
-# it: instruments.startup() does, once, at start-up (T5 wires it into
-# _init_app). Until it exists every store route answers 503.
+# it: hub.start() does, once, at start-up (_init_app, on a background
+# thread). Until it exists every store route answers 503.
 
 class HubUnavailable(RuntimeError):
     """The hub store (or the gc1 instrument row) doesn't exist yet → 503."""

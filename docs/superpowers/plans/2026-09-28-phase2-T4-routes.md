@@ -114,6 +114,30 @@ are exactly as written in the decorator (module constants resolved).
 | `/api/admin/exports/<instrument_id>/new-path` | POST | new | T5 `hub_admin`: `{password, path}` (absolute `.csv` in an existing folder) |
 | `/api/admin/exports/<instrument_id>/write-fresh` | POST | new | T5 `hub_admin`: `{password, path}` → `{status, rows}`; 409 `exists`/`in-use` |
 | `/admin/hub` | GET | new | T5 `hub_admin`: the admin page (load folder, exports) |
+| `/instruments` | GET | new | 2A2 `instruments_api` blueprint: the Instruments page |
+| `/api/instruments` | GET | new | 2A2 `instruments_api` blueprint: every instrument + summary (open read) |
+| `/api/instruments/<iid>` | GET | new | 2A2 `instruments_api` blueprint: one instrument with corrections/methods/export (open read) |
+| `/api/admin/instruments` | POST | new | 2A2 `instruments_api` blueprint: admin: create |
+| `/api/admin/instruments/<iid>` | POST | new | 2A2 `instruments_api` blueprint: admin: edit name/enabled/method/live_since/lem_machine_uid |
+| `/api/admin/instruments/<iid>/export-path` | POST | new | 2A2 `instruments_api` blueprint: admin: HubExporter.new_path |
+| `/api/admin/instruments/<iid>/export-adopt` | POST | new | 2A2 `instruments_api` blueprint: admin: HubExporter.adopt |
+| `/api/instruments/<iid>/calibration` | GET | new | 2A2 `instruments_api` blueprint: the Calibration page payload for the instrument |
+| `/api/instruments/<iid>/calibration-candidates` | GET | new | 2A2 `instruments_api` blueprint: the instrument's own samples (open read) |
+| `/api/admin/instruments/<iid>/calibration-cdf` | POST | new | 2A2 `instruments_api` blueprint: admin: calibration CDF from a sample or path |
+| `/api/admin/instruments/<iid>/calibration` | POST | new | 2A2 `instruments_api` blueprint: admin: assignments + sensitivity → on_calibration_saved |
+| `/api/instruments/<iid>/corrections` | GET | new | 2A2 `instruments_api` blueprint: values, source, audit (open read) |
+| `/api/admin/instruments/<iid>/corrections` | POST | new | 2A2 `instruments_api` blueprint: admin: the corrections editor (D4b) |
+| `/api/admin/instruments/<iid>/corrections/seed` | POST | new | 2A2 `instruments_api` blueprint: admin: gc1 once from the phase-1 file |
+| `/api/instruments/<iid>/methods` | GET | new | 2A2 `instruments_api` blueprint: methods seen (open read) |
+| `/api/admin/instruments/<iid>/methods` | POST | new | 2A2 `instruments_api` blueprint: admin: map/unmap → on_method_mapped |
+| `/api/admin/instruments/<iid>/review-method` | POST | new | 2A2 `instruments_api` blueprint: admin: review_method → other_method |
+| `/api/instruments/<iid>/backfill` | GET | new | 2A2 `instruments_api` blueprint: backfill samples (open read) |
+| `/api/admin/instruments/<iid>/backfill/release` | POST | new | 2A2 `instruments_api` blueprint: admin: pipeline.release_backfill per id |
+| `/api/conflicts` | GET | new | 2A2 `instruments_api` blueprint: conflicts with both files' identity (open read) |
+| `/api/admin/conflicts/<cid>/keep` | POST | new | 2A2 `instruments_api` blueprint: admin: keep existing |
+| `/api/admin/conflicts/<cid>/replace` | POST | new | 2A2 `instruments_api` blueprint: admin: pipeline.resolve_conflict_replace |
+| `/api/standards` | GET | new | 2A2 `instruments_api` blueprint: D12 standards, `for_instrument` picker order (open read) |
+| `/api/admin/standards/<sid>/instrument` | POST | new | 2A2 `instruments_api` blueprint: admin: tag a standard |
 | `/healthz` | GET | unchanged | |
 | `/` | GET | unchanged | |
 | `/calibration` | GET | unchanged | |

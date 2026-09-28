@@ -307,6 +307,14 @@ only), `tests/pipeline/`.
   `unexplained` is produced when a number is altered.
 
 **Runbook notes for T6 (as built, after two review rounds):**
+- **The parity gate runs on a SCRATCH data folder, never on production**
+  (decision I2 of the 2D review, 2026-09-28). The folder load computes and
+  stores hub results for history; loaded into production they would collide
+  with the 2D history import (which stores v1's numbers verbatim) and every
+  sample would already exist. Run it with `--data-dir` pointing at a
+  throw-away copy (e.g. `C:\ASAPApps\gc\parity-scratch`), with the same
+  `settings.json`, calibration and corrections as production. Delete the
+  scratch folder afterwards. The production history comes from the 2D import.
 - **Load, then check exactly what was loaded.** Run
   `python tools/load_folder.py --data-dir <data> --json gc1 <robocopy> > load.json`.
   The summary's `sample_ids` (created or duplicate) is the parity scope:

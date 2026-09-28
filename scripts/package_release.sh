@@ -112,7 +112,7 @@ for f in app.py requirements.txt VERSION templates/index.html templates/calibrat
          import_match.py instruments.py admin_auth.py ingest_api.py notifications.py \
          methods/__init__.py methods/d2887.py jobs/__init__.py jobs/load_folder.py \
          tools/load_folder.py tools/parity_report.py tools/import_dry_run.py \
-         agent/build_package.py agent/agent_main.py agent/requirements-agent.txt \
+         agent/build_package.py agent/requirements-agent.txt \
          agent/launcher.pyw agent/install.pyw agent/gc_agent/__init__.py; do
   if [ ! -e "$STAGE/$f" ]; then echo "MISSING from package: $f" >&2; missing=1; fi
 done

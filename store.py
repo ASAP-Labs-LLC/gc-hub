@@ -103,6 +103,9 @@ Small tables::
 
     sample_cache.get(sample_id, *, db) / sample_cache.put(sample_id, *, db, **fields)
     settings_kv.get(key, default=None, *, db) / .set(key, value, *, db) / .delete(key, *, db)
+    import_runs.start(instrument_id, *, by, sources, db) -> int      # 2D history import runs
+    import_runs.finish(run_id, counts, *, stopped=None, db)
+    import_runs.list(instrument_id=None, *, db) -> list[dict]       # newest first
     conflicts.add(instrument_id, lab_id, injection_dt, existing_sample_id, cdf_sha256,
                   cdf_path, *, received_at=None, db) -> int
     conflicts.list(instrument_id=None, unresolved_only=True, *, db) -> list[dict]
@@ -166,6 +169,10 @@ Conventions and decisions (where the spec left a choice)
   conflict Replace leaves a trail; ``blank_cdf_sha256``/``blank_cdf_path``
   the blank file it subtracted (a blank sample's file can be replaced). ``conflicts.error`` (beyond the spec) is
   the last failed Replace attempt's message, cleared when it is resolved.
+* ``import_runs`` (beyond the spec; 2D) records each real history-import
+  run: instrument, who, when, sources (``processed_dir``, ``results_csv``,
+  ``csv_sha256``, aliases) and the summary counts, ``stopped`` if it ended
+  early.
 * ``samples.time_corrected`` is an INTEGER flag (0/1). The spec's comment on
   that line (``'cdf'|'mtime'``) belongs to ``injection_dt_source``.
 * ``samples.id``, ``export_rows.seq`` and ``corrections_audit.id`` are
@@ -411,6 +418,15 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         """CREATE TABLE settings_kv(
             key TEXT PRIMARY KEY,
             value TEXT)""",
+        """CREATE TABLE import_runs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            instrument_id TEXT NOT NULL REFERENCES instruments(id),
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            "by" TEXT,
+            sources TEXT,
+            counts TEXT,
+            stopped TEXT)""",
     ),
 )
 SCHEMA_VERSION = len(MIGRATIONS)
@@ -457,6 +473,9 @@ REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
         "sample_id", "rules_fingerprint", "flags", "bestfit_fingerprint", "best_fit",
         "fit_score"}),
     "settings_kv": frozenset({"key", "value"}),
+    "import_runs": frozenset({
+        "id", "instrument_id", "started_at", "finished_at", "by", "sources", "counts",
+        "stopped"}),
 }
 
 
@@ -1526,6 +1545,34 @@ class sample_cache:  # noqa: N801
             if cols:
                 conn.execute(f"UPDATE sample_cache SET {', '.join(f'{c}=?' for c in cols)} WHERE sample_id=?",
                              [_enc(fields[c]) for c in cols] + [sample_id])
+
+
+class import_runs:  # noqa: N801
+    """One row per real (not dry) history import run (plan 2D): who, when, the
+    sources (``{processed_dir, results_csv, csv_sha256, aliases}``) and the
+    summary counts; ``stopped`` says why a run ended early."""
+
+    @staticmethod
+    def start(instrument_id: str, *, by: Optional[str], sources: Any, db: Db = None) -> int:
+        with _writing(db) as conn:
+            cur = conn.execute(
+                'INSERT INTO import_runs(instrument_id, started_at, "by", sources) VALUES (?,?,?,?)',
+                (instrument_id, now_iso(), by, _enc(sources)))
+            return int(cur.lastrowid)
+
+    @staticmethod
+    def finish(run_id: int, counts: Any, *, stopped: Optional[str] = None, db: Db = None) -> None:
+        with _writing(db) as conn:
+            conn.execute("UPDATE import_runs SET finished_at=?, counts=?, stopped=? WHERE id=?",
+                         (now_iso(), _enc(counts), stopped, run_id))
+
+    @staticmethod
+    def list(instrument_id: Optional[str] = None, *, db: Db = None) -> list:
+        sql, args = "SELECT * FROM import_runs", []
+        if instrument_id is not None:
+            sql, args = sql + " WHERE instrument_id=?", [instrument_id]
+        with connection(db) as conn:
+            return _rows(conn.execute(sql + " ORDER BY id DESC", args))
 
 
 class settings_kv:  # noqa: N801
