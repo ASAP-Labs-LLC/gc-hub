@@ -62,6 +62,7 @@ Public API
     export_to_lims(sample_id, *, by, db=None, data_dir=None, format_line=None) -> {revision, seq}
     release_backfill(sample_id, *, by, db=None, data_dir=None, format_line=None) -> seq
     resolve_conflict_replace(conflict_id, *, by, conf=None, db=None, data_dir=None) -> job id
+    revision_blank_path(sample_id, revision=None, *, db=None, data_dir=None) -> Path | None
     request_reprocess(sample_id, *, by=None, use_current_blank=False,
                       use_current_corrections=False, db=None) -> int (job id)
     on_calibration_saved(instrument_id, *, db=None) -> int      # queues awaiting_calibration
@@ -133,6 +134,34 @@ Decisions (where the spec left a choice):
 * The export gate is ``store.samples.is_gated`` (one definition, ``GATE_SQL``).
 * A re-sent file that was once held as a conflict (resolved or not) answers
   ``conflict`` with that conflict's id and creates nothing.
+* **Conflict Replace** (``resolve_conflict_replace``) only queues a job; the
+  conflict stays unresolved and the sample untouched until the Worker has
+  computed the held file (its method name and blank decision, the current
+  blank and corrections). Then one transaction re-checks that the conflict
+  is unresolved and the sample's file unchanged (else requeue), swaps the
+  sample's sha/path/method name/``is_blank``, adds the ``replace`` revision
+  (and export row, if gated) and marks the conflict ``replaced``. A failure
+  writes nothing to the sample: ``conflicts.error`` records it, the job
+  fails (a transient one is retried), and the admin can ask again or Keep
+  existing. Only one Replace per sample may be pending; a reprocess request
+  meanwhile returns the Replace job. Every revision records the CDF that
+  produced it (``sample_results.cdf_sha256``/``cdf_path``).
+* **Blank provenance.** Each revision records the blank *file* it
+  subtracted (``blank_cdf_sha256``/``blank_cdf_path``) as well as the blank
+  sample. A reprocess that keeps the recorded blank (D5) subtracts that
+  recorded file (old CDFs stay on disk, D7), never the blank sample's
+  current one; a missing recorded file is ``BlankUnreadable``. A freshly
+  chosen blank whose file changes during the compute makes the write stale.
+  A Replace of a sample that final results used as their blank, or that
+  makes it a genuine blank (late-blank rule), marks those results with a
+  ``review_note`` (not reprocessed) and sends one notification.
+* A re-sent file that produced an earlier revision of a sample (the file a
+  Replace swapped out) answers ``duplicate`` for that sample (or
+  ``cross_instrument``) and creates nothing: it is not a new conflict. This
+  check runs before the conflict check, so a file that was once a conflict,
+  became the sample's file and was itself replaced also answers
+  ``duplicate``. A swapped-out file that never produced a revision (the
+  sample had none yet) is not recognised and becomes a new conflict.
 * A reprocess (``request_reprocess``) keeps the recorded blank and
   corrections (D5) unless asked for current ones, or the revision is
   legacy (``reason='import'`` or corrections ``source='legacy'``). A
@@ -176,6 +205,8 @@ TRANSIENT_RETRY = timedelta(seconds=60)
 STUCK_ATTEMPTS = 10
 INCOMING_DIR = ".incoming"
 LATE_BLANK_NOTE = "earlier-injected blank arrived after processing (blank sample {blank_id})"
+BLANK_REPLACED_NOTE = ("the CDF of blank sample {blank_id} was replaced after this result used it "
+                       "(conflict {conflict_id}); the result still subtracts the previous file")
 
 # A genuine blank's name: "Blank", "blank2", "Blank - 1", "(Blank)", "[b] Blank2".
 _BLANK_NAME = re.compile(
@@ -435,6 +466,17 @@ def sweep_incoming(data_dir, min_age_seconds: float = 600) -> int:
 
 # ── submit ──────────────────────────────────────────────────────────────────
 
+def _genuine_blank(path: Path, lab_id: str, conf: dict) -> int:
+    """``is_blank`` for a CDF: a blank name and a plausible blank signal."""
+    if not is_blank_name(lab_id):
+        return 0
+    try:
+        limit = float(conf.get("blank_max_intensity_pa", distill.BLANK_MAX_INTENSITY_PA))
+    except (TypeError, ValueError):
+        limit = distill.BLANK_MAX_INTENSITY_PA
+    return int(distill.is_plausible_blank(path, limit))
+
+
 def _existing_result(sha: str, instrument_id: str, db) -> Optional[SubmitResult]:
     s = store.samples.find_by_sha(sha, db=db)
     if s is not None:
@@ -444,6 +486,21 @@ def _existing_result(sha: str, instrument_id: str, db) -> Optional[SubmitResult]
         return SubmitResult("cross_instrument", sha, s["id"], s["status"],
                             instrument_id=s["instrument_id"],
                             message=f"this file is already held by instrument {s['instrument_id']}")
+    with store.connection(db) as conn:
+        past = conn.execute(
+            "SELECT s.id, s.instrument_id, s.status FROM sample_results r JOIN samples s "
+            "ON s.id=r.sample_id WHERE r.cdf_sha256=? ORDER BY r.sample_id DESC LIMIT 1",
+            (sha,)).fetchone()
+    if past is not None:        # the file a conflict Replace swapped out
+        if past["instrument_id"] == instrument_id:
+            return SubmitResult("duplicate", sha, past["id"], past["status"],
+                                instrument_id=instrument_id,
+                                message=f"already received; replaced on sample {past['id']} "
+                                        f"by a conflict Replace")
+        return SubmitResult("cross_instrument", sha, past["id"], past["status"],
+                            instrument_id=past["instrument_id"],
+                            message=f"this file was held by instrument {past['instrument_id']} "
+                                    f"(since replaced)")
     c = store.conflicts.find_by_sha(sha, unresolved_only=False, db=db)
     if c is not None:
         if c["instrument_id"] == instrument_id:
@@ -455,7 +512,7 @@ def _existing_result(sha: str, instrument_id: str, db) -> Optional[SubmitResult]
 
 
 def _flag_late_blank(conn, inst: dict, blank_id: int, blank_dt: str, method_name: str) -> list:
-    """Mark the final samples a newly received genuine blank would have served
+    """Mark the final samples a new genuine blank would have served
     (see the module docstring); return their ids. Runs inside ``write_txn``."""
     mm = instruments.method_map(inst)
     hub_method = mm.get(method_name)
@@ -483,6 +540,26 @@ def _flag_late_blank(conn, inst: dict, blank_id: int, blank_dt: str, method_name
     for sid in flagged:
         store.samples.update(sid, review_note=note, db=conn)
     return flagged
+
+
+def _flag_blank_replaced(conn, cur: dict, src: dict) -> list:
+    """A conflict Replace is swapping sample ``cur``'s CDF for ``src``'s (inside
+    ``write_txn``): mark the final samples whose current result used it as
+    their blank, and, if it has just become a genuine blank, the ones it
+    would have served (``_flag_late_blank``). Returns their ids."""
+    sid = cur["id"]
+    users = [r["id"] for r in conn.execute(
+        "SELECT s.id FROM samples s JOIN sample_results r ON r.sample_id=s.id "
+        "AND r.revision=s.current_revision WHERE s.status='final' AND r.blank_used=? "
+        "AND s.id<>? ORDER BY s.injection_dt", (sid, sid))]
+    note = BLANK_REPLACED_NOTE.format(blank_id=sid, conflict_id=src["conflict_id"])
+    for uid in users:
+        store.samples.update(uid, review_note=note, db=conn)
+    late: list = []
+    if src["is_blank"] and not cur["is_blank"]:
+        inst = store.instruments.get(cur["instrument_id"], db=conn)
+        late = _flag_late_blank(conn, inst, sid, cur["injection_dt"], src["method_name"])
+    return users + [x for x in late if x not in users]
 
 
 def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.PathLike],
@@ -551,13 +628,7 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
         else:   # v1 fell back to the file time
             legacy = raw_mtime.isoformat(sep=" ") if raw_mtime is not None else injection_dt
         conf = conf if conf is not None else _load_conf()
-        is_blank = 0
-        if is_blank_name(lab_id):
-            try:
-                limit = float(conf.get("blank_max_intensity_pa", distill.BLANK_MAX_INTENSITY_PA))
-            except (TypeError, ValueError):
-                limit = distill.BLANK_MAX_INTENSITY_PA
-            is_blank = int(distill.is_plausible_blank(tmp, limit))
+        is_blank = _genuine_blank(tmp, lab_id, conf)
         backfill = int(store.is_backfill(inst.get("live_since"), injection_dt))
         month_dir = data_dir / "cdf" / instrument_id / f"{inj.year:04d}" / f"{inj.month:02d}"
 
@@ -627,12 +698,33 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
 
 def request_reprocess(sample_id: int, *, by: Optional[str] = None, use_current_blank: bool = False,
                       use_current_corrections: bool = False, db: store.Db = None) -> int:
-    """Queue a reprocess of one sample (last request wins while it is queued)."""
-    return store.jobs.enqueue(PROCESS, {
-        "sample_id": sample_id, "reason": "reprocess", "by": by,
-        "use_current_blank": bool(use_current_blank),
-        "use_current_corrections": bool(use_current_corrections),
-    }, sample_id=sample_id, db=db)
+    """Queue a reprocess of one sample (last request wins while it is queued).
+    A conflict Replace queued or running for the sample already recomputes it
+    with the current blank and corrections: its job id is returned and it is
+    left as it is."""
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            rj = _replace_job(conn, sample_id)
+            if rj is not None:
+                return rj["id"]
+            return store.jobs.enqueue(PROCESS, {
+                "sample_id": sample_id, "reason": "reprocess", "by": by,
+                "use_current_blank": bool(use_current_blank),
+                "use_current_corrections": bool(use_current_corrections),
+            }, sample_id=sample_id, db=conn)
+
+
+def _replace_job(conn, sample_id: int) -> Optional[dict]:
+    """The queued or running conflict-Replace job for a sample, with its payload."""
+    for r in conn.execute("SELECT id, payload FROM jobs WHERE kind=? AND sample_id=? "
+                          "AND state IN ('queued', 'running') ORDER BY id", (PROCESS, sample_id)):
+        try:
+            payload = json.loads(r["payload"] or "null")
+        except ValueError:
+            continue
+        if isinstance(payload, dict) and payload.get("reason") == "replace":
+            return {"id": r["id"], "payload": payload}
+    return None
 
 
 def on_calibration_saved(instrument_id: str, *, db: store.Db = None) -> int:
@@ -822,7 +914,10 @@ class Worker:
         if sample is None:
             store.jobs.fail(job["id"], f"sample {sid} does not exist", db=self.db)
             return
-        reprocess = payload.get("reason") in ("reprocess", "replace")
+        if payload.get("reason") == "replace":
+            self._handle_replace(job, sample, payload)
+            return
+        reprocess = payload.get("reason") == "reprocess"
         was_final = sample["status"] == "final"
         if was_final and not reprocess:
             store.jobs.complete(job["id"], db=self.db)
@@ -853,14 +948,81 @@ class Worker:
             store.samples.set_status(sid, "error", error=message, db=self.db)
             store.jobs.fail(job["id"], message, db=self.db)
 
+    def _handle_replace(self, job: dict, sample: dict, payload: dict) -> None:
+        """A conflict Replace: compute from the held file; on success
+        ``_write_final`` swaps the sample's CDF, adds the ``replace`` revision
+        and resolves the conflict in one transaction. On failure nothing is
+        written to the sample: the error goes on the conflict and the job
+        fails (a transient failure is retried)."""
+        cid = payload.get("conflict_id")
+        try:
+            c = store.conflicts.get(cid, db=self.db) if cid is not None else None
+        except sqlite3.Error as exc:
+            self._retry(job, sample, f"store read failed: {exc}")
+            return
+        if c is None or c["resolved"] is not None or c["existing_sample_id"] != sample["id"]:
+            log.info("pipeline: replace job %s: conflict %s is gone or resolved; nothing to do",
+                     job["id"], cid)
+            store.jobs.complete(job["id"], db=self.db)
+            self._requeue_own(sample)
+            return
+        try:
+            held = self.data_dir / c["cdf_path"]
+            if not held.is_file():
+                raise FileNotFoundError(f"the held CDF is missing: {held}")
+            _name, _dt, _src, method_name, _raw = distill.cdf_identity(held)
+            src = {"conflict_id": c["id"], "cdf_sha256": c["cdf_sha256"],
+                   "cdf_path": c["cdf_path"], "method_name": method_name,
+                   "is_blank": _genuine_blank(held, sample["lab_id"], self.conf_fn())}
+            self._process(job, sample, dict(payload, use_current_blank=True,
+                                            use_current_corrections=True), True, src=src)
+            return
+        except _Stale as exc:
+            log.info("pipeline: replace for sample %s %s; requeued", sample["id"], exc)
+            store.jobs.fail(job["id"], str(exc), self.now_fn(), db=self.db)
+            return
+        except _Transient as exc:
+            message = str(exc)
+            self._note_conflict(cid, message)
+            self._retry(job, sample, message)
+            return
+        except _Hold as hold:
+            message = f"{hold.status}: {hold.message}" if hold.message else hold.status
+        except Exception as exc:  # noqa: BLE001
+            message = f"{type(exc).__name__}: {exc}"
+        log.warning("pipeline: replace of sample %s from conflict %s failed; sample left as it "
+                    "was: %s", sample["id"], cid, message)
+        self._note_conflict(cid, message)
+        store.jobs.fail(job["id"], message, db=self.db)
+        self._requeue_own(sample)
+
+    def _note_conflict(self, cid: int, message: str) -> None:
+        try:
+            store.conflicts.set_error(cid, f"replace failed: {message}", db=self.db)
+        except (sqlite3.Error, ValueError):
+            log.exception("pipeline: could not record the error on conflict %s", cid)
+
+    def _requeue_own(self, sample: dict) -> None:
+        """A Replace job took the place of the sample's own queued job (one per
+        sample): when it ends without a result, give an unprocessed sample its
+        job back."""
+        if sample["status"] in ("received", "pending_corrections"):
+            store.jobs.enqueue(PROCESS, {"sample_id": sample["id"]}, sample_id=sample["id"],
+                               db=self.db)
+
     def _fail_reprocess(self, job: dict, sample: dict, message: str) -> None:
         log.warning("pipeline: reprocess of sample %s failed, left final at revision %s: %s",
                     sample["id"], sample["current_revision"], message)
         store.samples.update(sample["id"], error=f"last reprocess failed: {message}", db=self.db)
         store.jobs.fail(job["id"], message, db=self.db)
 
-    def _process(self, job: dict, sample: dict, payload: dict, reprocess: bool) -> None:
+    def _process(self, job: dict, sample: dict, payload: dict, reprocess: bool,
+                 src: Optional[dict] = None) -> None:
+        """Compute and write one sample. ``src`` (a conflict Replace) is the held
+        file to compute from instead of the sample's: ``conflict_id``,
+        ``cdf_sha256``, ``cdf_path``, ``method_name`` and ``is_blank``."""
         sid = sample["id"]
+        rel = src["cdf_path"] if src is not None else sample["cdf_path"]
         try:
             inst = store.instruments.get(sample["instrument_id"], db=self.db)
             prev = store.get_revision(sid, db=self.db) if reprocess else None
@@ -868,7 +1030,8 @@ class Worker:
             raise _Transient(f"store read failed: {exc}") from exc
 
         # 1 method
-        name = methods.normalise_method_name(sample.get("method_name"))
+        name = methods.normalise_method_name(src["method_name"] if src is not None
+                                             else sample.get("method_name"))
         if not name:
             raise _Hold("review_method")
         mm = instruments.method_map(inst)
@@ -890,7 +1053,8 @@ class Worker:
 
         # 3 blank (never for a blank-named sample, genuine or not: v1)
         legacy = _legacy_revision(prev)
-        blank_named = bool(sample["is_blank"]) or is_blank_name(sample["lab_id"])
+        blank_named = (bool(src["is_blank"] if src is not None else sample["is_blank"])
+                       or is_blank_name(sample["lab_id"]))
         keep_blank = (not blank_named and reprocess and prev is not None and not legacy
                       and not payload.get("use_current_blank"))
         fresh_blank = not blank_named and not keep_blank
@@ -898,8 +1062,13 @@ class Worker:
             if blank_named:
                 blank = None
             elif keep_blank:
-                blank = (store.samples.get(prev["blank_used"], db=self.db)
-                         if prev["blank_used"] is not None else None)
+                blank = None
+                if prev["blank_used"] is not None:
+                    if prev.get("blank_cdf_path"):     # the file it subtracted, not the current one
+                        blank = {"id": prev["blank_used"], "cdf_sha256": prev["blank_cdf_sha256"],
+                                 "cdf_path": prev["blank_cdf_path"]}
+                    else:                              # recorded before blank files were
+                        blank = store.samples.get(prev["blank_used"], db=self.db)
             else:
                 blank = store.samples.latest_blank(
                     sample["instrument_id"], sample["injection_dt"],
@@ -909,7 +1078,8 @@ class Worker:
         blank_check = None
         if fresh_blank:
             blank_check = (methods.names_mapped_to(mm, hub_method),
-                           blank["id"] if blank is not None else None)
+                           blank["id"] if blank is not None else None,
+                           blank["cdf_sha256"] if blank is not None else None)
         blank_path = self.data_dir / blank["cdf_path"] if blank is not None else None
         if blank_path is not None and not blank_path.is_file():
             raise distill.BlankUnreadable(f"blank sample {blank['id']}'s CDF is missing: {blank_path}")
@@ -930,7 +1100,7 @@ class Worker:
                 raise _Transient(f"corrections read failed: {exc}") from exc
 
         # 5 compute (outside the transaction)
-        cdf_path = self.data_dir / sample["cdf_path"]
+        cdf_path = self.data_dir / rel
         notes = None
         try:
             try:
@@ -951,9 +1121,9 @@ class Worker:
         if not distill._cdf_names(cdf_path)[0].strip():
             row["Lab ID"] = sample["lab_id"]           # v1 used the sender's file name
         row["InjectionDateTime"] = sample["injection_dt"]
-        row["Source File"] = sample["cdf_path"]
+        row["Source File"] = rel
         results_json = json.dumps(row)
-        line = self.format_line(results_json, sample["cdf_path"])
+        line = self.format_line(results_json, rel)
         score = row.get("Fit Score")
         cal = result["calibration"]
         applied = blank is not None and bool(result.get("blank_applied"))
@@ -962,12 +1132,14 @@ class Worker:
             "calibration_used": {"cdf": cal["cdf"], "sensitivity": float(ctx["calibration_sensitivity"]),
                                  "anchors_source": cal["anchors_source"], "anchors": cal["anchors"]},
             "blank_used": blank["id"] if applied else None,
+            "blank_cdf_sha256": blank["cdf_sha256"] if applied else None,
+            "blank_cdf_path": blank["cdf_path"] if applied else None,
             "corrections_used": {"source": corr.source, "updated_at": corr.updated_at,
                                  "updated_by": corr.updated_by, "values": dict(corr.values)},
             "best_fit": row.get("Best Fit") or None,
             "fit_score": float(score) if score not in (None, "") else None,
         }
-        if sample["current_revision"] is not None and payload.get("reason") == "replace":
+        if src is not None:
             reason = "replace"
         elif sample["current_revision"] is not None and reprocess:
             reason = "reprocess"
@@ -977,17 +1149,23 @@ class Worker:
             reason = "processed"
         self._write_final(sample, job, results_json=results_json, line=line, reason=reason,
                           by=payload.get("by"), extra=extra, notes=notes, clear_review=fresh_blank,
-                          blank_check=blank_check)
+                          blank_check=blank_check, src=src)
 
     def _write_final(self, sample: dict, job: dict, *, results_json: str, line: str, reason: str,
                      by: Optional[str], extra: dict, notes: Any = None,
-                     clear_review: bool = False, blank_check: Optional[tuple] = None) -> int:
+                     clear_review: bool = False, blank_check: Optional[tuple] = None,
+                     src: Optional[dict] = None) -> int:
         """One transaction: revision, export row (if gated), status final, job done.
         Raises ``_Stale`` (writing nothing) if the sample's file or current
         revision changed since ``sample`` was read, or, with ``blank_check``
         ``(method_names, chosen blank id or None)`` for a freshly chosen blank,
-        if ``latest_blank`` now answers differently (a blank arrived meanwhile)."""
+        if ``latest_blank`` now answers differently (a blank arrived meanwhile).
+        With ``src`` (a conflict Replace) the same transaction first swaps the
+        sample's sha, path, method name and ``is_blank`` to the held file's and
+        afterwards marks the conflict ``replaced``; ``_Stale`` if the conflict
+        was resolved meanwhile."""
         sid = sample["id"]
+        flagged: list = []
         with store.connection(self.db) as conn:
             with store.write_txn(conn):
                 cur = store.samples.get(sid, db=conn)
@@ -995,11 +1173,20 @@ class Worker:
                         or cur["current_revision"] != sample["current_revision"]):
                     raise _Stale("changed while it was being computed")
                 if blank_check is not None:
-                    names, chosen = blank_check
+                    names, chosen, chosen_sha = blank_check
                     now = store.samples.latest_blank(cur["instrument_id"], cur["injection_dt"], names,
                                                      exclude_sample_id=sid, db=conn)
-                    if (now["id"] if now is not None else None) != chosen:
-                        raise _Stale("changed while it was being computed (a newer blank arrived)")
+                    if ((now["id"] if now is not None else None) != chosen
+                            or (now["cdf_sha256"] if now is not None else None) != chosen_sha):
+                        raise _Stale("changed while it was being computed (the blank changed)")
+                if src is not None:
+                    c = store.conflicts.get(src["conflict_id"], db=conn)
+                    if c is None or c["resolved"] is not None or c["cdf_sha256"] != src["cdf_sha256"]:
+                        raise _Stale("changed while it was being computed (the conflict was resolved)")
+                    store.samples.update(sid, cdf_sha256=src["cdf_sha256"], cdf_path=src["cdf_path"],
+                                         method_name=src["method_name"], is_blank=src["is_blank"],
+                                         db=conn)
+                    flagged = _flag_blank_replaced(conn, cur, src)
                 rev = store.add_revision(conn, sid, results_json, reason=reason, by=by,
                                          notes=notes, **extra)
                 store.samples.set_status(sid, "final", db=conn)
@@ -1007,16 +1194,37 @@ class Worker:
                     store.export_rows.append_pending(conn, cur["instrument_id"], sid, rev, line)
                 if clear_review and cur.get("review_note"):
                     store.samples.update(sid, review_note=None, db=conn)
+                if src is not None:
+                    store.conflicts.resolve(src["conflict_id"], "replaced", by=by or "", db=conn)
                 store.jobs.complete(job["id"], db=conn)
         self._stuck.discard(sample["instrument_id"])
         log.info("pipeline: sample %s final at revision %s", sid, rev)
+        if flagged:
+            _notify(self.notifier, "warning",
+                    f"The CDF of sample {sid} ({cur['lab_id']}, injected {cur['injection_dt']}) "
+                    f"was replaced and changed the blank for {len(flagged)} final sample(s) "
+                    f"on {cur['instrument_id']}. They are marked for review and were not "
+                    f"reprocessed.")
         return rev
 
 
 # ── admin actions (one transaction each) ────────────────────────────────────
 
-_COPIED = ("d86_uncorrected", "calibration_used", "blank_used", "corrections_used", "best_fit",
-           "fit_score", "flags", "notes")
+_COPIED = ("d86_uncorrected", "calibration_used", "blank_used", "blank_cdf_sha256",
+           "blank_cdf_path", "corrections_used", "best_fit", "fit_score", "flags", "notes")
+
+
+def revision_blank_path(sample_id: int, revision: Optional[int] = None, *, db: store.Db = None,
+                        data_dir=None) -> Optional[Path]:
+    """The blank file a revision subtracted (``None`` = the current revision):
+    the recorded ``blank_cdf_path`` under the data folder, never the blank
+    sample's current file (it may have been replaced since). ``None`` if the
+    revision doesn't exist, subtracted no blank, or predates the record."""
+    data_dir = _data_dir(data_dir)
+    rev = store.get_revision(sample_id, revision, db=_db(db, data_dir))
+    if rev is None or rev.get("blank_used") is None or not rev.get("blank_cdf_path"):
+        return None
+    return data_dir / rev["blank_cdf_path"]
 
 
 def _line_for(sample: dict, rev: dict, format_line) -> str:
@@ -1080,38 +1288,37 @@ def release_backfill(sample_id: int, *, by: Optional[str], db: store.Db = None, 
 
 def resolve_conflict_replace(conflict_id: int, *, by: Optional[str], conf: Optional[dict] = None,
                              db: store.Db = None, data_dir=None) -> int:
-    """Resolve a conflict by replacing the existing sample's CDF with the held one:
-    the conflict is marked ``replaced``; the sample takes the held file's sha,
-    path, method name and blank decision; and a ``process`` job (reason
-    ``replace``, current blank and corrections) is queued, all in one
-    transaction. The old file stays on disk (D7). Returns the job id.
-    ``ValueError`` if the conflict is missing or already resolved."""
+    """Ask for a conflict to be resolved by replacing the existing sample's CDF
+    with the held one. This only queues a ``process`` job (payload ``reason``
+    ``replace``, ``conflict_id``, ``by``); the conflict stays unresolved and
+    the sample untouched until the Worker has computed the held file (current
+    blank and corrections) and, in one transaction, swapped the sample's file,
+    added the ``replace`` revision and marked the conflict ``replaced``. If
+    that fails the error is recorded on the conflict (``conflicts.error``) and
+    the admin can ask again or keep the existing file. The old file stays on
+    disk (D7). Returns the job id (the same job if this conflict's Replace is
+    already queued). ``ValueError`` if the conflict is missing or resolved, or
+    another conflict's Replace for the same sample is queued or running.
+    ``conf`` is unused (the Worker reads the settings)."""
     data_dir = _data_dir(data_dir)
     db = _db(db, data_dir)
-    c = next((x for x in store.conflicts.list(unresolved_only=False, db=db) if x["id"] == conflict_id),
-             None)
-    if c is None or c["resolved"] is not None:
-        raise ValueError(f"conflict {conflict_id} is missing or already resolved")
-    held = data_dir / c["cdf_path"]
-    _sample, _dt, _src, method_name, _raw = distill.cdf_identity(held)
-    conf = conf if conf is not None else _load_conf()
-    is_blank = 0
-    if is_blank_name(c["lab_id"]):
-        try:
-            limit = float(conf.get("blank_max_intensity_pa", distill.BLANK_MAX_INTENSITY_PA))
-        except (TypeError, ValueError):
-            limit = distill.BLANK_MAX_INTENSITY_PA
-        is_blank = int(distill.is_plausible_blank(held, limit))
     with store.connection(db) as conn:
         with store.write_txn(conn):
-            store.conflicts.resolve(conflict_id, "replaced", by=by or "", db=conn)
+            c = store.conflicts.get(conflict_id, db=conn)
+            if c is None or c["resolved"] is not None:
+                raise ValueError(f"conflict {conflict_id} is missing or already resolved")
             sid = c["existing_sample_id"]
-            store.samples.update(sid, cdf_sha256=c["cdf_sha256"], cdf_path=c["cdf_path"],
-                                 method_name=method_name, is_blank=is_blank, db=conn)
+            if sid is None or store.samples.get(sid, db=conn) is None:
+                raise ValueError(f"conflict {conflict_id} has no existing sample to replace")
+            rj = _replace_job(conn, sid)
+            if rj is not None:
+                if rj["payload"].get("conflict_id") == conflict_id:
+                    return rj["id"]
+                raise ValueError(f"sample {sid} already has a Replace pending (conflict "
+                                 f"{rj['payload'].get('conflict_id')})")
             job = store.jobs.enqueue(PROCESS, {
-                "sample_id": sid, "reason": "replace", "by": by,
-                "use_current_blank": True, "use_current_corrections": True,
+                "sample_id": sid, "reason": "replace", "conflict_id": conflict_id, "by": by,
             }, sample_id=sid, db=conn)
-    log.info("pipeline: conflict %s resolved by %s: sample %s now holds %s", conflict_id, by,
-             c["existing_sample_id"], c["cdf_path"])
+    log.info("pipeline: replace of sample %s from conflict %s requested by %s (job %s)", sid,
+             conflict_id, by, job)
     return job
