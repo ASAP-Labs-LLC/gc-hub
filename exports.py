@@ -56,11 +56,28 @@ The sidecar and the refusal rules
 ``<file>.gchub.json`` is written atomically (temp file, fsync, replace) after
 each append::
 
-    {"instrument", "size", "sha256", "seq", "tail_len", "tail_sha256", "mtime_ns",
-     "updated_at", ["new_file"], ["adopted_at", "adopted_by"]}
+    {"instrument", "db_id", "size", "sha256", "seq", "last_line_sha256",
+     "last_line_end", "tail_len", "tail_sha256", "mtime_ns", "updated_at",
+     ["new_file"], ["adopted_at", "adopted_by"]}
 
 ``size``/``sha256`` describe the whole file as the hub last left it; ``seq``
 is the last ledger row known to be in it; ``instrument`` is whose file it is.
+
+**The ledger link.** ``seq`` alone would be trusted blindly after the hub
+database is restored from a backup: new rows reuse seqs the sidecar already
+covers and would be marked appended without ever being written. So the
+sidecar also records ``db_id`` (a random id created once in ``settings_kv``
+as ``exports_db_id``), ``last_line_sha256`` (the sha256 of the ledger line
+at ``seq``, or null when ``seq`` names no row of this instrument) and
+``last_line_end`` (the byte offset where that line ends in the file, or null
+when it is not in the file, e.g. after ``write_fresh`` or an adopt that took
+``seq`` from the ledger). Before any pending row at or below ``seq`` is
+marked done, the ``db_id`` must match, the ledger row at ``seq`` must hash to
+``last_line_sha256`` and, when ``last_line_end`` is set, the file must hold
+that line ending there; with no ``last_line_sha256`` no pending row may sit
+at or below ``seq``. Otherwise ``ledger-mismatch`` ("the hub database doesn't
+match this export file — was it restored from a backup?"). ``adopt`` applies
+the same test before keeping an old sidecar's ``seq``.
 ``flush`` refuses (``ExportRefused``) when:
 
 * ``no-sidecar``: the file exists, is not empty and has no sidecar (a v1 file
@@ -72,7 +89,12 @@ is the last ledger row known to be in it; ``instrument`` is whose file it is.
 * ``grown``: it is larger, and the extra bytes are not the start of what the
   hub was about to append (see recovery below);
 * ``changed``: the recorded region's hash no longer matches;
+* ``ledger-mismatch``: the sidecar's ``db_id``/last line don't match the
+  ledger (see above);
 * ``sidecar-unreadable``, and ``bad-line``.
+
+A not-found from the sidecar read or the stat is read once more before it is
+believed (a flapping share).
 
 A flush with nothing pending still checks the file (cheaply) when it or its
 sidecar exists, and only a check that passes clears a refusal.
@@ -80,8 +102,8 @@ sidecar exists, and only a check that passes clears a refusal.
 ``adopt`` refuses ``missing``, ``foreign-sidecar``, ``header-mismatch``
 (naming a UTF-8 BOM if Excel re-saved the file), ``no-trailing-newline`` (v1's
 last line cut off mid-record would have the hub's first row glued onto it)
-and ``permission`` (writing the sidecar needs create/rename/delete rights in
-the folder). It keeps the old sidecar's ``seq`` only if that sidecar is this
+``permission`` (``FOLDER_RIGHTS_TEXT``) and ``busy`` (admin calls wait at
+most ``ADMIN_LOCK_WAIT_SECONDS`` for the export lock instead of stalling). It keeps the old sidecar's ``seq`` only if that sidecar is this
 instrument's, its size is at most the current size and the file's first
 ``size`` bytes still hash to its ``sha256``; otherwise ``seq`` is the last
 row the ledger has marked appended. ``new_path`` and ``write_fresh`` refuse
@@ -96,9 +118,11 @@ slow and holds the file open while LEM and Excel want it. So:
   ``verify_full`` hash the whole recorded region and compare it with
   ``sha256``. The exporter keeps that ``hashlib`` state in memory; ``tick``
   calls ``verify_full`` at most once per ``FULL_VERIFY_SECONDS`` (24 h);
-* otherwise each flush checks ``size``, ``mtime_ns`` and the sha256 of the
-  last ``tail_len`` bytes (``TAIL_BYTES``, 64 KiB) only. A changed mtime at
-  the recorded size escalates to a full hash;
+* otherwise each flush checks ``size``, the mtime this process last saw
+  and the sha256 of the last ``tail_len`` bytes (``TAIL_BYTES``, 64 KiB)
+  only. A changed mtime at the recorded size escalates to a full hash. A
+  failed daily check is retried after ``FULL_VERIFY_RETRY_SECONDS``, not on
+  every tick;
 * each append extends the in-memory hash with the bytes it wrote, so the
   sidecar's ``sha256`` is always the true whole-file hash without re-reading.
 
@@ -125,7 +149,13 @@ with ``O_EXCL`` (``new_file: true``, size 0) and the CSV with
 was wrong; the state is re-read (a few times, then the flush reports an
 error and the rows stay pending). ``"ab"`` is used only when the sidecar
 records content, or the file was seen and confirmed empty or holding the
-start of this very append.
+start of this very append; and even then the opened handle's size
+(``os.fstat``) must equal the verified offset, or it is closed unwritten and
+the state re-read (an append that sneaked in between the check and the open).
+
+**Writes** go through an unbuffered handle, at most ``WRITE_CHUNK_BYTES``
+(64 KiB) per call, split on row boundaries, looping on short writes, with one
+fsync at the end.
 
 **Exclusion.** Within a process a per-instrument lock serialises flushes.
 Across processes (two hubs, or a hub and a stray tool) ``<file>.gchub.lock``
@@ -134,6 +164,11 @@ on Windows, an SMB byte-range lock on a share; released by the OS when the
 process dies, so there is no stale lock to take over) around verify →
 append → sidecar → mark. A lock not obtained within ``LOCK_WAIT_SECONDS`` is
 an ``ExportLocked`` error, retried next time.
+
+**Share paths are supported only on the Windows hub** (SMB-enforced
+``msvcrt`` byte-range locks). A mount that ignores locks is unsupported:
+``flock`` on a POSIX SMB/NFS mount may be local-only, and then nothing stops
+two hosts appending at once.
 
 **Locks by others.** A ``PermissionError`` opening the CSV (Excel, antivirus,
 a backup) is retried ``APPEND_OPEN_ATTEMPTS`` times in the call, then
@@ -164,8 +199,8 @@ LEM's ``tail_new_text`` opens the file with plain ``open(path, "rb")``
 (Windows share mode read+write, so it never blocks the hub's appends), reads
 to EOF and advances ``last_position`` to EOF, not to the last newline. A
 partial append that is later completed can therefore be read as two broken
-lines; the hub writes each batch with a single ``write`` call to keep that
-window small. A shrink sends LEM back to offset 0 (it re-reads everything),
+lines; the hub keeps that window small (row-aligned chunks, fsync at the end)
+but cannot close it. A shrink sends LEM back to offset 0 (it re-reads everything),
 which is one more reason the hub never truncates. LEM splits each line on the
 delimiter without CSV quoting, so a header line in the middle of the file
 would reach its parser as a print with Lab ID ``"Lab ID"``: the hub writes
@@ -186,6 +221,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -207,6 +243,15 @@ FULL_VERIFY_SECONDS = 24 * 3600
 LOCK_WAIT_SECONDS = 30.0
 APPEND_OPEN_ATTEMPTS = 3
 APPEND_OPEN_BACKOFF_SECONDS = 0.2
+ADMIN_LOCK_WAIT_SECONDS = 2.0
+FULL_VERIFY_RETRY_SECONDS = 3600
+WRITE_CHUNK_BYTES = 64 * 1024
+DB_ID_KEY = "exports_db_id"
+FOLDER_RIGHTS_TEXT = ("the hub needs create/rename/delete rights in the folder (for the "
+                      "sidecar, its temp file and the lock file)")
+LEDGER_MISMATCH_TEXT = ("the hub database doesn't match this export file — was it restored "
+                        "from a backup? Adopt the file (the hub appends after it) or choose "
+                        "a new path")
 REEVALUATE_ATTEMPTS = 3
 _CHUNK = 1024 * 1024
 _EMPTY_SHA = hashlib.sha256(b"").hexdigest()
@@ -294,13 +339,48 @@ def lock_path(csv_path: PathLike) -> Path:
 
 
 def _open_append(path: Path):
-    """Open an existing (confirmed) file for appending (``O_APPEND``)."""
-    return open(path, "ab")
+    """Open an existing (confirmed) file for appending (``O_APPEND``, unbuffered)."""
+    return open(path, "ab", buffering=0)
 
 
 def _open_new(path: Path):
-    """Create *path*; ``FileExistsError`` if anything is already there."""
-    return open(path, "xb")
+    """Create *path* (unbuffered); ``FileExistsError`` if anything is already there."""
+    return open(path, "xb", buffering=0)
+
+
+def _chunks(pieces: list, skip: int) -> Iterator[bytes]:
+    """*pieces* (header and rows) minus the first *skip* bytes, joined into
+    writes of at most ``WRITE_CHUNK_BYTES`` that end on a row boundary (a
+    single longer row is written on its own)."""
+    buf: list = []
+    n = 0
+    for p in pieces:
+        if skip:
+            if skip >= len(p):
+                skip -= len(p)
+                continue
+            p, skip = p[skip:], 0
+        if n and n + len(p) > WRITE_CHUNK_BYTES:
+            yield b"".join(buf)
+            buf, n = [], 0
+        buf.append(p)
+        n += len(p)
+    if buf:
+        yield b"".join(buf)
+
+
+def _write_all(fh, chunks) -> None:
+    """Write every chunk, continuing short writes; one fsync at the end."""
+    for chunk in chunks:
+        view = memoryview(chunk)
+        off = 0
+        while off < len(view):
+            n = fh.write(view[off:])
+            if not n:
+                raise OSError(errno.EIO, "short write made no progress")
+            off += n
+    fh.flush()
+    os.fsync(fh.fileno())
 
 
 def _hash_prefix(path: Path, nbytes: int) -> "hashlib._Hash":
@@ -453,6 +533,21 @@ def _file_lock(csv_path: PathLike, wait: Optional[float] = None) -> Iterator[Non
         fh.close()
 
 
+@contextlib.contextmanager
+def _admin_lock(csv_path: Path) -> Iterator[None]:
+    """The export lock for an admin call: a short wait, then ``busy``."""
+    lock = _file_lock(csv_path, ADMIN_LOCK_WAIT_SECONDS)
+    try:
+        lock.__enter__()
+    except ExportLocked as exc:
+        raise ExportRefused("busy", csv_path, "another process holds the export lock; "
+                            "try again in a moment") from exc
+    try:
+        yield
+    finally:
+        lock.__exit__(None, None, None)
+
+
 # ── the exporter ────────────────────────────────────────────────────────────
 
 _LOCKS_GUARD = threading.Lock()
@@ -470,6 +565,7 @@ class _Verified:
     size: int
     hasher: Any
     tail: bytes
+    mtime_ns: Optional[int] = None
 
 
 _TRANSIENT = (OSError, sqlite3.OperationalError)
@@ -488,6 +584,7 @@ class HubExporter:
         self._sleep = retry_sleep
         self._verified: dict[str, _Verified] = {}
         self._last_full: dict[str, float] = {}
+        self._full_attempt: dict[str, float] = {}
         self._refused: dict[str, ExportRefused] = {}
         self._last_error: dict[str, Optional[str]] = {}
         self._pending_since: dict[str, float] = {}
@@ -579,6 +676,50 @@ class HubExporter:
             "last_error": self._last_error.get(instrument),
         }
 
+    # ── the ledger link ──
+
+    def _db_id(self) -> str:
+        """This database's export id (created once, in ``settings_kv``)."""
+        value = store.settings_kv.get(DB_ID_KEY, db=self.db)
+        if value:
+            return value
+        with store.connection(self.db) as conn, store.write_txn(conn):
+            value = store.settings_kv.get(DB_ID_KEY, db=conn)
+            if not value:
+                value = uuid.uuid4().hex
+                store.settings_kv.set(DB_ID_KEY, value, db=conn)
+        return value
+
+    def _ledger_line(self, instrument: str, seq: int) -> Optional[str]:
+        with store.connection(self.db) as conn:
+            r = conn.execute('SELECT "row" FROM export_rows WHERE seq=? AND instrument_id=?',
+                             (int(seq), instrument)).fetchone()
+        return r[0] if r else None
+
+    def _link(self, instrument: str, seq: int, end: Optional[int]) -> dict:
+        line = self._ledger_line(instrument, seq) if seq else None
+        return {"db_id": self._db_id(),
+                "last_line_sha256": (hashlib.sha256(line.encode("utf-8")).hexdigest()
+                                     if line is not None else None),
+                "last_line_end": end if line is not None else None}
+
+    def _link_ok(self, instrument: str, path: Path, side: dict, rows: list) -> bool:
+        """Whether the sidecar's ``seq`` is vouched for by this ledger."""
+        if side.get("db_id") != self._db_id():
+            return False
+        sha = side.get("last_line_sha256")
+        if not sha:
+            return not any(r["seq"] <= side["seq"] for r in rows)
+        line = self._ledger_line(instrument, side["seq"])
+        if line is None or hashlib.sha256(line.encode("utf-8")).hexdigest() != sha:
+            return False
+        end = side.get("last_line_end")
+        if end is not None:
+            b = line.encode("utf-8")
+            if end > side["size"] or end < len(b) or _read_range(path, end - len(b), len(b)) != b:
+                return False
+        return True
+
     # ── verification ──
 
     @staticmethod
@@ -600,7 +741,7 @@ class HubExporter:
                  and cached.hasher.hexdigest() == side["sha256"]
                  and isinstance(side.get("tail_sha256"), str)
                  and isinstance(side.get("tail_len"), int)
-                 and (size != rec or side.get("mtime_ns") == (st.st_mtime_ns if st else None)))
+                 and (size != rec or cached.mtime_ns == (st.st_mtime_ns if st else None)))
         want_tail = min(rec, max(self.tail_bytes, int(side.get("tail_len") or 0)))
         tail = _read_range(path, rec - want_tail, want_tail) if rec else b""
         if cheap:
@@ -609,7 +750,7 @@ class HubExporter:
                 self._verified.pop(key, None)
                 raise ExportRefused("changed", path, "the end of the file is not what the hub "
                                     "last wrote; it was edited by someone else")
-            return _Verified(rec, cached.hasher, tail)
+            return _Verified(rec, cached.hasher, tail, cached.mtime_ns)
         hasher = _hash_prefix(path, rec) if rec else hashlib.sha256()
         if rec:
             self._last_full[key] = self._clock()
@@ -617,7 +758,7 @@ class HubExporter:
             self._verified.pop(key, None)
             raise ExportRefused("changed", path, f"the first {rec} bytes no longer match the "
                                 "sidecar's sha256; the file was edited by someone else")
-        v = _Verified(rec, hasher, tail)
+        v = _Verified(rec, hasher, tail, st.st_mtime_ns if (st and size == rec) else None)
         self._verified[key] = v
         return v
 
@@ -635,13 +776,23 @@ class HubExporter:
                     side = _read_sidecar(path) or side
                     st = _stat(path)
                     self._check_size(path, side, st)
-                    self._verified.pop(str(path), None)
-                    v = self._verify(path, side, st)
+                    rec = side["size"]
+                    # Hash afresh; an I/O failure leaves the cached state alone.
+                    hasher = _hash_prefix(path, rec) if rec else hashlib.sha256()
+                    if hasher.hexdigest() != side["sha256"]:
+                        self._verified.pop(str(path), None)
+                        raise ExportRefused("changed", path, f"the first {rec} bytes no longer "
+                                            "match the sidecar's sha256; the file was edited "
+                                            "by someone else")
+                    n = min(rec, self.tail_bytes)
+                    self._verified[str(path)] = _Verified(
+                        rec, hasher, _read_range(path, rec - n, n),
+                        st.st_mtime_ns if (st and st.st_size == rec) else None)
             except ExportRefused as err:
                 self._record_refusal(instrument, err)
                 raise
             self._last_full[str(path)] = self._clock()
-            return {"size": v.size, "sha256": v.hasher.hexdigest()}
+            return {"size": rec, "sha256": hasher.hexdigest()}
 
     @staticmethod
     def _check_size(path: Path, side: dict, st: Optional[os.stat_result]) -> None:
@@ -710,6 +861,9 @@ class HubExporter:
                                     f"{len(CSV_HEADER)}-field CSV record ending in CRLF")
         side = _read_sidecar(path)
         st = _stat(path)
+        if side is None or st is None:     # a not-found is read once more (a flapping share)
+            side = _read_sidecar(path)
+            st = _stat(path)
         if side is not None:
             self._check_owner(path, side, instrument)
         else:
@@ -724,6 +878,7 @@ class HubExporter:
             # not-found can't lead to writing over someone's sidecar.
             side = {"instrument": instrument, "size": 0, "sha256": _EMPTY_SHA,
                     "seq": rows[0]["seq"] - 1, "new_file": True,
+                    "db_id": self._db_id(), "last_line_sha256": None, "last_line_end": None,
                     **_tail_fields(b"", None), "updated_at": store.now_iso()}
             try:
                 _create_sidecar(path, side)
@@ -735,14 +890,17 @@ class HubExporter:
         rec = side["size"]
         size = st.st_size if st else 0
         v = self._verify(path, side, st)
+        if not self._link_ok(instrument, path, side, rows):
+            raise ExportRefused("ledger-mismatch", path, LEDGER_MISMATCH_TEXT)
 
         done = [r["seq"] for r in rows if r["seq"] <= side["seq"]]
         todo = [r for r in rows if r["seq"] > side["seq"]]
         if done:  # in the file per the sidecar, not yet marked (a crash in between)
             store.export_rows.mark_hub_appended(done, db=self.db)
-        planned = b"".join(r["line"].encode("utf-8") for r in todo)
-        if planned and rec == 0:
-            planned = header_line().encode("utf-8") + planned
+        pieces = [r["line"].encode("utf-8") for r in todo]
+        if pieces and rec == 0:
+            pieces.insert(0, header_line().encode("utf-8"))
+        planned = b"".join(pieces)
         extra = size - rec
         if extra:
             ours = extra <= len(planned) and _read_range(path, rec, extra) == planned[:extra]
@@ -756,14 +914,13 @@ class HubExporter:
         if not todo:
             return FlushResult(0, 0, None, path)
 
-        rest = planned[extra:]
         if st is None:
             try:
-                self._write_new(path, rest)
+                self._write_new(path, _chunks(pieces, extra))
             except FileExistsError:
                 raise _Reevaluate() from None
-        elif rest:
-            self._append(path, rest)
+        elif extra < len(planned):
+            self._append(path, _chunks(pieces, extra), expected_size=size)
         new_size = rec + len(planned)
         st2 = _stat(path)
         if st2 is None or st2.st_size != new_size:
@@ -777,7 +934,7 @@ class HubExporter:
         hasher.update(planned)
         tail = (v.tail + planned)[-self.tail_bytes:]
         new_side = {"instrument": instrument, "size": new_size, "sha256": hasher.hexdigest(),
-                    "seq": todo[-1]["seq"],
+                    "seq": todo[-1]["seq"], **self._link(instrument, todo[-1]["seq"], new_size),
                     **_tail_fields(tail, st2.st_mtime_ns if st2 else None),
                     "updated_at": store.now_iso()}
         for k in ("adopted_at", "adopted_by"):
@@ -788,18 +945,18 @@ class HubExporter:
         except BaseException:
             self._verified.pop(str(path), None)
             raise
-        self._verified[str(path)] = _Verified(new_size, hasher, tail)
+        self._verified[str(path)] = _Verified(
+            new_size, hasher, tail,
+            st2.st_mtime_ns if (st2 and st2.st_size == new_size) else None)
         store.export_rows.mark_hub_appended([r["seq"] for r in todo], db=self.db)
         return FlushResult(len(todo), 0, None, path)
 
     @staticmethod
-    def _write_new(path: Path, data: bytes) -> None:
+    def _write_new(path: Path, chunks) -> None:
         with _open_new(path) as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
+            _write_all(fh, chunks)
 
-    def _append(self, path: Path, data: bytes) -> None:
+    def _append(self, path: Path, chunks, *, expected_size: int) -> None:
         for attempt in range(APPEND_OPEN_ATTEMPTS):
             try:
                 fh = _open_append(path)
@@ -809,9 +966,11 @@ class HubExporter:
                     raise
                 self._sleep(APPEND_OPEN_BACKOFF_SECONDS * (attempt + 1))
         with fh:
-            fh.write(data)       # one write per batch: LEM reads to EOF, not to the last newline
-            fh.flush()
-            os.fsync(fh.fileno())
+            if os.fstat(fh.fileno()).st_size != expected_size:
+                # Someone appended between the check and this open: write
+                # nothing and look again.
+                raise _Reevaluate()
+            _write_all(fh, chunks)
 
     # ── admin actions ──
 
@@ -832,11 +991,10 @@ class HubExporter:
             if _stat(path) is None:
                 raise ExportRefused("missing", path, "there is no file to adopt")
             try:
-                with _file_lock(path):
+                with _admin_lock(path):
                     side = self._adopt(instrument, path, by)
             except PermissionError as exc:
-                raise ExportRefused("permission", path, "the hub needs create/rename/delete "
-                                    f"rights in the folder to keep the sidecar ({exc})") from exc
+                raise ExportRefused("permission", path, f"{FOLDER_RIGHTS_TEXT} ({exc})") from exc
             self._clear_refusal(instrument)
             return side
 
@@ -858,15 +1016,21 @@ class HubExporter:
             old = None
         if old is not None and "instrument" in old and old["instrument"] != instrument:
             self._check_owner(path, old, instrument)
-        seq = self._max_appended_seq(instrument)
+        seq, end = self._max_appended_seq(instrument), None
         if old is not None and old.get("instrument") == instrument and old["size"] <= size:
             hasher = _hash_prefix(path, old["size"]) if old["size"] else hashlib.sha256()
-            if hasher.hexdigest() == old["sha256"]:
-                # The old record still describes this file: keep its seq, and
-                # count the hub's own complete rows written after it (an
-                # append whose sidecar update failed), so adopt never makes
-                # the hub write them twice.
-                seq = max(seq, old["seq"], self._own_rows_after(instrument, path, old, size))
+            pend = store.export_rows.pending_hub_appends(instrument, db=self.db)
+            if (hasher.hexdigest() == old["sha256"]
+                    and self._link_ok(instrument, path, old, pend)):
+                # The old record still describes this file and this ledger:
+                # keep its seq, and count the hub's own complete rows written
+                # after it (an append whose sidecar update failed), so adopt
+                # never makes the hub write them twice.
+                if old["seq"] >= seq:
+                    seq, end = old["seq"], old.get("last_line_end")
+                own_seq, own_end = self._own_rows_after(instrument, path, old, size)
+                if own_seq > seq:
+                    seq, end = own_seq, own_end
             _hash_extend(path, hasher, old["size"], size)
         else:
             hasher = _hash_prefix(path, size) if size else hashlib.sha256()
@@ -874,22 +1038,23 @@ class HubExporter:
         tail = _read_range(path, size - n, n)
         stamp = store.now_iso()
         side = {"instrument": instrument, "size": size, "sha256": hasher.hexdigest(),
-                "seq": seq, **_tail_fields(tail, st.st_mtime_ns), "updated_at": stamp,
+                "seq": seq, **self._link(instrument, seq, end),
+                **_tail_fields(tail, st.st_mtime_ns), "updated_at": stamp,
                 "adopted_at": stamp, "adopted_by": by}
         _write_sidecar(path, side)
-        self._verified[str(path)] = _Verified(size, hasher, tail)
+        self._verified[str(path)] = _Verified(size, hasher, tail, st.st_mtime_ns)
         self._last_full[str(path)] = self._clock()
         LOGGER.info("exports: %s adopted %s at %d bytes (seq %d) by %s",
                     instrument, path, size, seq, by)
         return side
 
-    def _own_rows_after(self, instrument: str, path: Path, old: dict, size: int) -> int:
-        """The seq of the last pending row that sits, whole and in order,
-        right after the old sidecar's size (0 if none)."""
+    def _own_rows_after(self, instrument: str, path: Path, old: dict, size: int) -> tuple:
+        """``(seq, end offset)`` of the last pending row that sits, whole and in
+        order, right after the old sidecar's size (``(0, None)`` if none)."""
         rows = [r for r in store.export_rows.pending_hub_appends(instrument, db=self.db)
                 if r["seq"] > old["seq"]]
         if not rows or size <= old["size"]:
-            return 0
+            return 0, None
         expect = b"".join(r["line"].encode("utf-8") for r in rows)
         pos = 0
         if old["size"] == 0:
@@ -897,15 +1062,15 @@ class HubExporter:
             pos = len(header_line().encode("utf-8"))
         extra = _read_range(path, old["size"], min(size - old["size"], len(expect)))
         if old["size"] == 0 and extra[:pos] != expect[:pos]:
-            return 0
-        last = 0
+            return 0, None
+        last, end = 0, None
         for r in rows:
             line = r["line"].encode("utf-8")
             if extra[pos:pos + len(line)] != line:
                 break
             pos += len(line)
-            last = r["seq"]
-        return last
+            last, end = r["seq"], old["size"] + pos
+        return last, end
 
     @staticmethod
     def _check_header(path: Path, head: bytes) -> None:
@@ -971,10 +1136,11 @@ class HubExporter:
             if path.exists() or sidecar_path(path).exists():
                 raise ExportRefused("exists", path, "write fresh only creates a new file")
             lines, max_seq = self._fresh_lines(instrument)
-            data = header_line().encode("utf-8") + "".join(lines).encode("utf-8")
-            with _file_lock(path):
+            pieces = [header_line().encode("utf-8")] + [ln.encode("utf-8") for ln in lines]
+            data = b"".join(pieces)
+            with _admin_lock(path):
                 try:
-                    self._write_new(path, data)
+                    self._write_new(path, _chunks(pieces, 0))
                     stamp = store.now_iso()
                     st = path.stat()
                     hasher = hashlib.sha256(data)
@@ -982,12 +1148,13 @@ class HubExporter:
                     _create_sidecar(path, {
                         "instrument": instrument, "size": len(data),
                         "sha256": hasher.hexdigest(), "seq": max_seq,
+                        **self._link(instrument, max_seq, None),
                         **_tail_fields(tail, st.st_mtime_ns), "updated_at": stamp,
                         "adopted_at": stamp, "adopted_by": by})
                 except FileExistsError as exc:
                     raise ExportRefused("exists", path,
                                         "write fresh only creates a new file") from exc
-                self._verified[str(path)] = _Verified(len(data), hasher, tail)
+                self._verified[str(path)] = _Verified(len(data), hasher, tail, st.st_mtime_ns)
             # Switch first: a crash before the marking below leaves the rows
             # pending with seq <= the sidecar's, which the next flush marks.
             self.new_path(instrument, path)
@@ -1008,8 +1175,12 @@ class HubExporter:
         for inst in store.instruments.list(db=self.db):
             iid = inst["id"]
             try:
-                last = self._last_full.get(str(self.export_path(iid)))
-                if last is not None and now - last >= FULL_VERIFY_SECONDS:
+                key = str(self.export_path(iid))
+                last = self._last_full.get(key)
+                if (last is not None and now - last >= FULL_VERIFY_SECONDS
+                        and now - self._full_attempt.get(key, float("-inf"))
+                        >= FULL_VERIFY_RETRY_SECONDS):
+                    self._full_attempt[key] = now     # a failure waits, not every tick
                     self.verify_full(iid)
                 r = self.flush(iid)
                 out[iid] = {"appended": r.appended, "pending": r.pending, "error": r.error,
