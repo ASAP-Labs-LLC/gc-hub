@@ -99,12 +99,21 @@ rsync -a --prune-empty-dirs \
 # with the tag it staged; a stale value makes a good swap look like a failure.
 printf '%s\n' "$TAG" > "$STAGE/VERSION"
 
-# Positive control: what the updater and the app need at runtime.
+# Positive control: what the updater and the hub need at runtime (v2: hub
+# mode only), the admin CLI tools run on the server, and the agent sources the
+# hub builds its agent package and installers from.
 # (tests/test_release_package.py also checks every locally imported module.)
 missing=0
-for f in app.py requirements.txt VERSION templates/index.html static \
+for f in app.py requirements.txt VERSION templates/index.html templates/calibration.html \
+         templates/admin_setup.html templates/hub_admin.html static \
          paths.py version.py instance.py settings.py distill.py \
-         supervisor.py restart_update.py restart_policy.py; do
+         supervisor.py restart_update.py restart_policy.py \
+         hub.py hub_admin.py store.py pipeline.py exports.py corrections.py \
+         import_match.py instruments.py admin_auth.py ingest_api.py notifications.py \
+         methods/__init__.py methods/d2887.py jobs/__init__.py jobs/load_folder.py \
+         tools/load_folder.py tools/parity_report.py tools/import_dry_run.py \
+         agent/build_package.py agent/agent_main.py agent/requirements-agent.txt \
+         agent/launcher.pyw agent/install.pyw agent/gc_agent/__init__.py; do
   if [ ! -e "$STAGE/$f" ]; then echo "MISSING from package: $f" >&2; missing=1; fi
 done
 [ "$missing" -eq 0 ] || { echo "refusing to package" >&2; exit 1; }

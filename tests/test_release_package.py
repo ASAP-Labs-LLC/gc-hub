@@ -84,7 +84,16 @@ STALE_VERSION = "v9.9.9-stale"
 
 
 def _local_modules(root: Path) -> set:
-    return {p.stem for p in root.glob("*.py")}
+    """Top-level modules and packages (folders with ``__init__.py``) of *root*."""
+    return ({p.stem for p in root.glob("*.py")}
+            | {p.parent.name for p in root.glob("*/__init__.py")})
+
+
+def _module_files(root: Path, name: str) -> list:
+    """The source files of local module/package *name* under *root*."""
+    if (root / name / "__init__.py").is_file():
+        return sorted((root / name).rglob("*.py"))
+    return [root / f"{name}.py"]
 
 
 def _imports_of(path: Path, local: set) -> set:
@@ -101,20 +110,35 @@ def _imports_of(path: Path, local: set) -> set:
     return found
 
 
-def runtime_closure(root: Path) -> set:
-    """Every local module reachable by import from app.py."""
+def _closure(root: Path, entry_points) -> set:
+    """Every file of *root* reachable by import from *entry_points*, as
+    paths relative to *root* (the entry points included)."""
     local = _local_modules(root)
-    todo = [root / "app.py"]
-    seen_files, mods = set(), set()
+    todo = list(entry_points)
+    seen = set()
     while todo:
         f = todo.pop()
-        if f in seen_files:
+        if f in seen or not f.is_file():
             continue
-        seen_files.add(f)
+        seen.add(f)
         for m in _imports_of(f, local):
-            mods.add(m)
-            todo.append(root / f"{m}.py")
-    return mods
+            todo.extend(_module_files(root, m))
+    return {f.relative_to(root).as_posix() for f in seen}
+
+
+def runtime_closure(root: Path) -> set:
+    """Every local module/package reachable by import from the import roots:
+    the hub (app.py), its CLI tools (tools/*.py, run on the server) and the
+    agent the hub packages (agent/*.py[w], resolved within agent/)."""
+    files = _closure(root, [root / "app.py"])
+    tools = root / "tools"
+    for tool in sorted(tools.glob("*.py")):
+        files |= _closure(root, [tool])
+        files.add(tool.relative_to(root).as_posix())
+    agent = root / "agent"
+    files |= {f"agent/{rel}" for rel in _closure(agent, sorted(agent.glob("*.py"))
+                                                    + sorted(agent.glob("*.pyw")))}
+    return files
 
 
 def _copy_repo(dest: Path) -> None:
@@ -172,8 +196,12 @@ class PackageTests(unittest.TestCase):
 
     def test_required_files_present(self):
         rel = self._rel()
-        for must in ("app.py", "requirements.txt", "VERSION",
+        for must in ("app.py", "requirements.txt", "VERSION", "hub.py", "hub_admin.py",
+                     "store.py", "pipeline.py", "exports.py", "methods/d2887.py",
+                     "jobs/load_folder.py", "tools/parity_report.py", "agent/agent_main.py",
+                     "agent/gc_agent/core.py", "agent/requirements-agent.txt",
                      "templates/index.html", "templates/calibration.html",
+                     "templates/hub_admin.html", "static/js/hub_admin.js",
                      "static/js/app.js", "static/css/style.css", "static/css/badge.css"):
             self.assertIn(must, rel)
 
@@ -183,12 +211,21 @@ class PackageTests(unittest.TestCase):
 
     def test_every_runtime_module_ships(self):
         closure = runtime_closure(self.src)
-        # Sanity: the closure really covers the app (guards a broken parser).
-        self.assertTrue({"paths", "version", "supervisor", "restart_update",
-                         "distill", "qbench_client"} <= closure, closure)
+        # Sanity: the closure really covers the hub, its tools and the agent
+        # (guards a broken parser).
+        self.assertTrue({"paths.py", "version.py", "supervisor.py", "restart_update.py",
+                         "distill.py", "qbench_client.py", "hub.py", "hub_admin.py",
+                         "store.py", "pipeline.py", "exports.py", "methods/d2887.py",
+                         "jobs/load_folder.py", "import_match.py", "tools/parity_report.py",
+                         "agent/agent_main.py", "agent/gc_agent/core.py"} <= closure, closure)
         rel = self._rel()
-        missing = sorted(m for m in closure if f"{m}.py" not in rel)
+        missing = sorted(m for m in closure if m not in rel)
         self.assertEqual(missing, [])
+
+    def test_the_v1_legacy_files_are_gone(self):
+        rel = self._rel()
+        for gone in ("run.pyw", "looker.py", "library_view.py"):
+            self.assertNotIn(gone, rel)
 
     def test_every_tracked_static_and_template_file_ships(self):
         rel = self._rel()
@@ -274,7 +311,7 @@ class PackageCliTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             with zipfile.ZipFile(Path(t, "gc-hub-v0.0.0-real.zip")) as zf:
                 rel = {n.split("/", 1)[1] for n in zf.namelist() if "/" in n}
-            missing = sorted(m for m in runtime_closure(ROOT) if f"{m}.py" not in rel)
+            missing = sorted(m for m in runtime_closure(ROOT) if m not in rel)
             self.assertEqual(missing, [])
 
 
@@ -334,7 +371,7 @@ class PackageGitCheckoutTests(unittest.TestCase):
         rel = self._rel()
         for must in ("app.py", "requirements.txt", "VERSION", "templates/index.html"):
             self.assertIn(must, rel)
-        missing = sorted(m for m in runtime_closure(self.src) if f"{m}.py" not in rel)
+        missing = sorted(m for m in runtime_closure(self.src) if m not in rel)
         self.assertEqual(missing, [])
 
 
@@ -420,6 +457,25 @@ class RequirementsPinnedTests(unittest.TestCase):
         for dep in ("werkzeug", "jinja2", "click", "itsdangerous", "cftime", "urllib3",
                     "certifi", "reportlab", "tzdata"):
             self.assertIn(dep, names)
+
+    def test_the_hub_neither_pins_nor_imports_the_tray_packages(self):
+        # v2: run.pyw is gone; only the agent has a tray (it declares its
+        # own deps in agent/requirements-agent.txt). Pillow stays, pinned as
+        # reportlab/xhtml2pdf's dependency.
+        names = {_norm(n) for n, _v, _m in _requirements()}
+        self.assertFalse(names & {"pystray", "watchdog", "pyobjc-core", "python-xlib"}, names)
+        self.assertIn("pillow", names)
+        for rel in sorted(runtime_closure(ROOT)):
+            if rel.startswith("agent/"):
+                continue
+            tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                mods = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                        else [node.module] if isinstance(node, ast.ImportFrom) and node.module
+                        else [])
+                for m in mods:
+                    self.assertNotIn(m.split(".")[0], {"pystray", "PIL", "watchdog"},
+                                     f"{rel} imports {m}")
 
     def test_platform_only_packages_carry_markers(self):
         marks = {_norm(n): m for n, _v, m in _requirements()}
