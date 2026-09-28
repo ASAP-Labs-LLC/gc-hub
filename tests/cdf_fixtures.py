@@ -72,13 +72,13 @@ def _axis():
     return np.arange(0, RUN_MIN, DT_MIN)
 
 
-def calibration_cdf(path, injected=datetime(2026, 9, 16, 9, 0, 0)):
+def calibration_cdf(path, injected=datetime(2026, 9, 16, 9, 0, 0), method_name=None):
     t = _axis()
     y = gaussian(t, 0.30, 50000, 0.01)                   # CS2 solvent
     for i, c in enumerate(ladder_times()):
         y += gaussian(t, c, 8000 - 150 * i, 0.012)       # C5.. ladder
     y += gaussian(t, 1.13, 900, 0.01)                    # impurity
-    return write_cdf(path, t, y, "CAL 9.16", injected)
+    return write_cdf(path, t, y, "CAL 9.16", injected, method_name=method_name)
 
 
 # Injection times are chosen so their compact stamps parse correctly: on
@@ -87,16 +87,17 @@ def calibration_cdf(path, injected=datetime(2026, 9, 16, 9, 0, 0)):
 # separator, so a stamp like ``20260925002300+0000`` (00:23) is misread as
 # 02:30 instead of falling through to the compact-format branch. Hours whose
 # second digit is 3 or more make the ISO attempt fail and avoid that.
-def sample_cdf(path, name="40304", injected=datetime(2026, 9, 25, 14, 23, 0), shift=0.0):
+def sample_cdf(path, name="40304", injected=datetime(2026, 9, 25, 14, 23, 0), shift=0.0,
+               method_name=None):
     t = _axis()
     y = (gaussian(t, 0.30, 50000, 0.01)
          + gaussian(t, 3.2 + shift, 1200, 0.9)
          + gaussian(t, 4.6 + shift, 600, 0.6))
     y += 40 + 5 * t                                      # bleed ramp
-    return write_cdf(path, t, y, name, injected)
+    return write_cdf(path, t, y, name, injected, method_name=method_name)
 
 
-def blank_cdf(path, injected=datetime(2026, 9, 24, 15, 30, 27), name="Blank"):
+def blank_cdf(path, injected=datetime(2026, 9, 24, 15, 30, 27), name="Blank", method_name=None):
     t = _axis()
     y = gaussian(t, 0.30, 50000, 0.01) + 40 + 5 * t
-    return write_cdf(path, t, y, name, injected)
+    return write_cdf(path, t, y, name, injected, method_name=method_name)
