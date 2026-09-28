@@ -39,6 +39,7 @@ import json
 import logging
 import math
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -55,6 +56,8 @@ UID_MAX = 128
 SKEW_WARN_SECONDS = 120
 EDITABLE = frozenset({"name", "enabled", "method", "live_since", "lem_machine_uid"})
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+# Strict: date, one space or T, HH:MM and optional :SS. No zone, no fraction.
+_LIVE_SINCE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$")
 
 LIVE_SINCE_NOTE = ("live_since applies to samples received from now on: samples already received "
                    "keep their backfill flag (release them on the Backfill screen).")
@@ -127,8 +130,9 @@ def _method(value: Any) -> str:
 def _live_since(value: Any) -> Optional[str]:
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
-    if not isinstance(value, str):
-        raise AdminError("live_since must be a local date and time, e.g. 2026-10-01 08:00.")
+    if not isinstance(value, str) or not _LIVE_SINCE_RE.match(value.strip()):
+        raise AdminError("live_since must be the GC's local date and time as YYYY-MM-DD HH:MM[:SS], "
+                         "e.g. 2026-10-01 08:00, with no time zone.")
     try:
         return store.local_dt(value)
     except ValueError:
@@ -189,12 +193,37 @@ def update(instrument_id: Any, fields: Any, *, db: store.Db = None) -> tuple:
         raise AdminError("Nothing to change.")
     with store.connection(db) as conn:
         with store.write_txn(conn):
-            get(instrument_id, db=conn)
+            old = get(instrument_id, db=conn)
             row = store.instruments.upsert(dict(clean, id=instrument_id), db=conn)
     log.warning("instrument %s updated: %s", instrument_id, sorted(clean))
-    warnings = live_since_warnings(instrument_id, db=db) if "live_since" in clean and \
-        clean["live_since"] is not None else []
+    warnings: list = []
+    if "live_since" in clean:
+        warnings = live_since_change_warnings(old.get("live_since"), clean["live_since"])
+        if clean["live_since"] is not None:
+            warnings += live_since_warnings(instrument_id, db=db)
     return public_row(row), warnings
+
+
+def live_since_change_warnings(old: Optional[str], new: Optional[str],
+                               now: Optional[datetime] = None) -> list:
+    """Review I1: a change that stops or delays a live instrument's exports.
+    Clearing ``live_since`` makes everything received from now on backfill;
+    moving it later, or into the future, holds back injections before it."""
+    out = []
+    if new is None:
+        if old:
+            out.append("live_since was cleared: everything this instrument sends from now on is "
+                       "backfill, which stops its automatic exports (to LEM) until live_since is "
+                       "set again.")
+        return out
+    if old and store.local_dt(new) > store.local_dt(old):
+        out.append(f"live_since moved later (from {old} to {new}): samples injected before "
+                   f"{new} that arrive from now on are backfill and are not exported until released.")
+    stamp = store.local_dt((now or datetime.now()).replace(microsecond=0))
+    if store.local_dt(new) > stamp:
+        out.append(f"live_since {new} is in the future: nothing this instrument sends is exported "
+                   f"automatically until then.")
+    return out
 
 
 # ── the agent's clock ───────────────────────────────────────────────────────

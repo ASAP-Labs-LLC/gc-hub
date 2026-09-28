@@ -54,6 +54,16 @@ module.exports = (t) => {
     t.eq(L.liveSinceInput('2026-10-01 08:00:00'), '2026-10-01T08:00:00');
     t.eq(L.liveSinceInput(null), '');
 
+    // ── review I1: confirm clearing live_since, moving it later, or into the future
+    const nowL = '2026-09-28 12:00:00';
+    t.eq(L.liveSinceConfirm('2026-01-01 00:00:00', '', nowL).includes('stops'), true);
+    t.eq(L.liveSinceConfirm(null, '', nowL), null);
+    t.eq(L.liveSinceConfirm('2026-01-01 00:00:00', '2026-02-01 00:00:00', nowL).includes('later'), true);
+    t.eq(L.liveSinceConfirm('2026-02-01 00:00:00', '2026-01-01 00:00:00', nowL), null);
+    t.eq(L.liveSinceConfirm(null, '2026-10-01 00:00:00', nowL).includes('future'), true);
+    t.eq(L.liveSinceConfirm('2026-01-01 00:00:00', '2026-01-01 00:00:00', nowL), null);
+    t.eq(L.localNow(new Date(2026, 8, 28, 7, 5, 9)), '2026-09-28 07:05:09');
+
     // ── installer download outcomes
     t.eq(L.installerOutcome(200, null).kind, 'download');
     const c = L.installerOutcome(409, { needs_confirm: true, error: 'has a token', hub_url: 'http://sv1:5560' });

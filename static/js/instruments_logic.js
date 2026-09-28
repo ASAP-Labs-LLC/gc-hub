@@ -74,6 +74,29 @@
         return String(stored).replace(' ', 'T');
     }
 
+    const pad = (n) => String(n).padStart(2, '0');
+    function localNow(d) {
+        const x = d || new Date();
+        return x.getFullYear() + '-' + pad(x.getMonth() + 1) + '-' + pad(x.getDate()) + ' ' +
+            pad(x.getHours()) + ':' + pad(x.getMinutes()) + ':' + pad(x.getSeconds());
+    }
+
+    // Review I1: the confirmation to ask before a live_since change that stops
+    // or delays exports (both values in the store's 'YYYY-MM-DD HH:MM:SS' form,
+    // which compares as text); null when no confirmation is needed.
+    function liveSinceConfirm(oldValue, newValue, nowLocal) {
+        const old = oldValue || '';
+        const neu = newValue || '';
+        if (!neu) {
+            return old ? 'Clearing live_since makes everything this instrument sends from now on backfill: ' +
+                'it stops its automatic exports (to LEM) until live_since is set again. Clear it?' : null;
+        }
+        const parts = [];
+        if (old && neu > old) parts.push('Moving live_since later (from ' + old + ' to ' + neu + ') holds back samples injected before ' + neu + ' as backfill.');
+        if (neu > (nowLocal || localNow())) parts.push(neu + ' is in the future: nothing is exported automatically until then.');
+        return parts.length ? parts.join(' ') + ' Save anyway?' : null;
+    }
+
     // POST /api/admin/instruments/<id>/installer answer -> what the page does.
     function installerOutcome(status, body) {
         if (status === 200) return { kind: 'download', message: '' };
@@ -138,7 +161,7 @@
 
     const api = {
         SKEW_WARN_SECONDS, formatSkew, skewWarning, agentHealth, parseCorrections,
-        liveSinceValue, liveSinceInput, installerOutcome, methodRows, orderStandards,
+        liveSinceValue, liveSinceInput, liveSinceConfirm, localNow, installerOutcome, methodRows, orderStandards,
         releaseSummary, calibrationBadge,
     };
     root.InstrumentsLogic = api;

@@ -121,3 +121,40 @@ def test_public_row_never_has_the_token_hash(hub):
     row = ia.public_row(store.instruments.get("gc1", db=hub.db))
     assert "token_hash" not in row and row["has_token"] is True
     assert all("token_hash" not in r for r in ia.list_instruments(db=hub.db))
+
+
+# ── review I1: clearing live_since or moving it later stops exports ────────
+
+def test_clearing_live_since_warns_that_exports_stop(hub):
+    hub.gc1(live_since=datetime(2020, 1, 1))
+    _row, warnings = ia.update("gc1", {"live_since": ""}, db=hub.db)
+    assert any("stops" in w and "export" in w for w in warnings), warnings
+
+
+def test_clearing_an_unset_live_since_says_nothing(hub):
+    ia.create({"id": "gc2", "name": "GC-2"}, db=hub.db)
+    _row, warnings = ia.update("gc2", {"live_since": None}, db=hub.db)
+    assert warnings == []
+
+
+def test_moving_live_since_later_warns(hub):
+    hub.gc1(live_since=datetime(2020, 1, 1))
+    _row, warnings = ia.update("gc1", {"live_since": "2021-01-01 00:00"}, db=hub.db)
+    assert any("later" in w for w in warnings), warnings
+    _row, warnings = ia.update("gc1", {"live_since": "2020-06-01 00:00"}, db=hub.db)   # earlier
+    assert not any("later" in w for w in warnings), warnings
+
+
+def test_future_live_since_warns(hub):
+    hub.gc1(live_since=datetime(2020, 1, 1))
+    future = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d %H:%M")
+    _row, warnings = ia.update("gc1", {"live_since": future}, db=hub.db)
+    assert any("in the future" in w for w in warnings), warnings
+
+
+@pytest.mark.parametrize("bad", ["2026-10-01", "2026-10-01 08", "2026-10-01 08:00:00.5",
+                                 "2026-10-01  08:00", "20261001 0800", "2026-10-01 08:00x"])
+def test_live_since_format_is_strict(hub, bad):
+    hub.gc1()
+    with pytest.raises(ia.AdminError):
+        ia.update("gc1", {"live_since": bad}, db=hub.db)

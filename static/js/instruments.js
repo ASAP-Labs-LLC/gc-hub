@@ -154,7 +154,11 @@
             if (ls.error) { flash(ls.error, 'err'); return; }
             const payload = { name: name.value, enabled: enabled.checked, method: method.value,
                               lem_machine_uid: uid.value };
-            if (ls.value !== (inst.live_since || '')) payload.live_since = ls.value;
+            if (ls.value !== (inst.live_since || '')) {
+                const ask = L.liveSinceConfirm(inst.live_since, ls.value, L.localNow());
+                if (ask && !confirm(ask)) return;
+                payload.live_since = ls.value;
+            }
             const r = await adminPost('/api/admin/instruments/' + enc(inst.id), payload);
             if (!r || r.status !== 200) return;
             await afterChange('Saved.', (r.body.warnings || []).length ? 'warn' : 'ok');
