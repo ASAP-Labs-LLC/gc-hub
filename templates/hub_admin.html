@@ -29,7 +29,7 @@
     button.warn{background:var(--warn);color:#0d1117}
     table{width:100%;border-collapse:collapse;font-size:13px}
     th,td{text-align:left;border-bottom:1px solid var(--line);padding:5px 6px;vertical-align:top}
-    .err{color:var(--danger)} .ok{color:var(--green)} .muted{color:var(--muted)}
+    .err{color:var(--danger)} .ok{color:var(--green)} .muted{color:var(--muted)} .warn{color:var(--warn)}
     pre{white-space:pre-wrap;background:var(--bg);border:1px solid var(--line);border-radius:6px;
       padding:8px;font-size:12px;max-height:240px;overflow:auto}
   </style>
@@ -56,6 +56,27 @@
     <input id="lf-folder" class="wide" type="text" placeholder="Folder on the server, absolute path">
     <button id="btn-load">Start</button>
     <div id="job"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Import v1 history</h2>
+    <p>Import one instrument's v1 processed CDFs and results CSV (read-only on both). Every
+      imported sample is backfill and is never exported automatically. A dry run only classifies;
+      the real import runs as a job like the loader above (one job at a time), resumable, and
+      can be stopped between batches.</p>
+    <label for="ih-inst">Instrument</label><select id="ih-inst" class="inst-select"></select>
+    <button id="btn-ih-last">Load last run</button>
+    <div id="ih-last"></div>
+    <input id="ih-processed" class="wide" type="text"
+      placeholder="Processed CDF folder on the server, absolute path">
+    <input id="ih-csv" class="wide" type="text"
+      placeholder="Results CSV on the server, absolute path (blank: CDFs only)">
+    <input id="ih-aliases" class="wide" type="text"
+      placeholder="Folder aliases the CSV's Source File names (comma-separated)">
+    <button id="btn-ih-dryrun">Dry run</button>
+    <button id="btn-ih-start" class="warn">Start real import</button>
+    <button id="btn-ih-stop" class="warn">Stop</button>
+    <div id="ih-result"></div>
   </div>
 
   <div class="panel">
