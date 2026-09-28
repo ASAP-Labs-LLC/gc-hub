@@ -38,9 +38,10 @@ the legacy tests of it, `_NON_ACTIVITY_PATHS` tidy-up (2B1 edits it; the stale
 ## Route-fate table
 
 `tests/test_route_fates.py` parses this table and asserts that the set of
-`(path, methods)` app.py registers (AST) equals every row whose fate is not
-`removed`, and that no `removed` path is registered. Paths are exactly as
-written in `@app.route`.
+`(path, methods)` the app registers (AST: `@app.route`/`add_url_rule` in
+app.py plus the routes of every Blueprint app.py registers) equals every row
+whose fate is not `removed`, and that no `removed` path is registered. Paths
+are exactly as written in the decorator (module constants resolved).
 
 <!-- route-fates:begin -->
 | Route | Methods | Fate | Request → response |
@@ -93,6 +94,19 @@ written in `@app.route`.
 | `/api/qbench-api-credentials` | GET, POST | unchanged | |
 | `/api/browse` | POST | unchanged | |
 | `/api/open-folder` | GET | unchanged | |
+| `/admin/setup` | GET | new | 2B1 `admin_auth` blueprint; unchanged by T4 |
+| `/api/admin/setup` | POST | new | 2B1 `admin_auth` blueprint; unchanged by T4 |
+| `/api/admin/password` | POST | new | 2B1 `admin_auth` blueprint; unchanged by T4 |
+| `/api/ingest` | POST | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
+| `/api/agent/heartbeat` | POST | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
+| `/api/agent/results` | GET | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
+| `/api/agent/package` | GET | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
+| `/api/agent/package.zip` | GET | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
+| `/api/agents` | GET | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
+| `/api/admin/instruments/<instrument_id>/installer` | POST | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
+| `/api/admin/instruments/<instrument_id>/revoke-token` | POST | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
+| `/api/admin/instruments/<instrument_id>/agent-command` | POST | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
+| `/api/admin/hub-url` | POST | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
 | `/healthz` | GET | unchanged | |
 | `/` | GET | unchanged | |
 | `/calibration` | GET | unchanged | |

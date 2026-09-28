@@ -1,11 +1,16 @@
-"""Every route app.py registers has a fate in the T4 plan, and vice versa.
+"""Every route the app registers has a fate in the T4 plan, and vice versa.
 
 The route-fate table in ``docs/superpowers/plans/2026-09-28-phase2-T4-routes.md``
 (between the ``route-fates`` markers) is the single list: this test derives
-the registered ``(path, methods)`` from app.py by AST (never ``import app``)
-and asserts it equals every row whose fate is not ``removed``, and that no
-``removed`` path is registered. So no route can be forgotten, added without
-a fate, or come back after removal.
+the registered ``(path, methods)`` by AST (never ``import app``) and asserts
+it equals every row whose fate is not ``removed``, and that no ``removed``
+path is registered. So no route can be forgotten, added without a fate, or
+come back after removal.
+
+"Registered" covers ``@app.route`` and ``app.add_url_rule`` in app.py, and
+every Blueprint app.py registers (``app.register_blueprint(mod.bp)``):
+``@bp.route`` / ``bp.add_url_rule`` in that module, with module-level string
+constants (e.g. ``SETUP_PATH``) resolved.
 """
 from __future__ import annotations
 
@@ -19,23 +24,78 @@ PLAN = ROOT / "docs" / "superpowers" / "plans" / "2026-09-28-phase2-T4-routes.md
 FATES = {"migrated", "unchanged", "removed", "new"}
 
 
-def registered_routes() -> dict[str, frozenset]:
-    """``{path: methods}`` for every ``@app.route`` in app.py (GET by default)."""
-    tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
+def _constants(tree: ast.Module) -> dict:
+    """Module-level ``NAME = "string"`` assignments."""
+    out = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+            out[node.targets[0].id] = node.value.value
+    return out
+
+
+def _path_of(expr, consts: dict):
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+        return expr.value
+    if isinstance(expr, ast.Name) and expr.id in consts:
+        return consts[expr.id]
+    raise AssertionError(f"route path is not a literal or a module constant: {ast.dump(expr)}")
+
+
+def _methods(call: ast.Call) -> set:
+    for kw in call.keywords:
+        if kw.arg == "methods":
+            return {e.value for e in kw.value.elts}
+    return {"GET"}
+
+
+def _routes_in(tree: ast.Module, owners: set) -> dict:
+    """``{path: methods}`` for ``@<owner>.route(...)`` decorators and
+    ``<owner>.add_url_rule(...)`` calls, ``owner`` in ``owners``."""
+    consts = _constants(tree)
     out: dict[str, set] = {}
+
+    def is_owner(func) -> bool:
+        return (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                and func.value.id in owners)
+
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for dec in node.decorator_list:
-            if (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)
-                    and dec.func.attr == "route" and isinstance(dec.func.value, ast.Name)
-                    and dec.func.value.id == "app" and dec.args
-                    and isinstance(dec.args[0], ast.Constant)):
-                methods = {"GET"}
-                for kw in dec.keywords:
-                    if kw.arg == "methods":
-                        methods = {e.value for e in kw.value.elts}
-                out.setdefault(dec.args[0].value, set()).update(methods)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for dec in node.decorator_list:
+                if (isinstance(dec, ast.Call) and is_owner(dec.func) and dec.func.attr == "route"
+                        and dec.args):
+                    out.setdefault(_path_of(dec.args[0], consts), set()).update(_methods(dec))
+        elif (isinstance(node, ast.Call) and is_owner(node.func)
+              and node.func.attr == "add_url_rule" and node.args):
+            out.setdefault(_path_of(node.args[0], consts), set()).update(_methods(node))
+    return out
+
+
+def _blueprint_names(tree: ast.Module) -> set:
+    names = set()
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                and getattr(node.value.func, "id", getattr(node.value.func, "attr", None)) == "Blueprint"):
+            names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+    return names
+
+
+def registered_routes() -> dict[str, frozenset]:
+    """``{path: methods}`` for every route the app registers."""
+    app_tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
+    out = _routes_in(app_tree, {"app"})
+    for node in ast.walk(app_tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "register_blueprint" and node.args
+                and isinstance(node.args[0], ast.Attribute)
+                and isinstance(node.args[0].value, ast.Name)):
+            module = node.args[0].value.id
+            tree = ast.parse((ROOT / f"{module}.py").read_text(encoding="utf-8"))
+            bps = _blueprint_names(tree)
+            assert node.args[0].attr in bps, f"{module}.{node.args[0].attr} is not a Blueprint"
+            for path, methods in _routes_in(tree, bps).items():
+                out.setdefault(path, set()).update(methods)
     return {p: frozenset(m) for p, m in out.items()}
 
 
@@ -67,6 +127,11 @@ class RouteFateTests(unittest.TestCase):
     def test_registered_routes_equal_the_table(self):
         live = {(p, m) for p, m, fate in plan_table() if fate != "removed"}
         self.assertEqual(set(registered_routes().items()), live)
+
+    def test_blueprint_routes_are_seen(self):
+        registered = registered_routes()
+        for path in ("/api/ingest", "/api/agent/heartbeat", "/api/admin/setup"):
+            self.assertIn(path, registered)
 
     def test_removed_routes_are_not_registered(self):
         registered = registered_routes()
