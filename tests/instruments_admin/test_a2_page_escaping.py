@@ -37,6 +37,20 @@ def test_template_has_no_inline_script_and_loads_both_files():
     assert 'id="app-version"' in html                                # the version badge
 
 
+def test_review_minors_in_the_page():
+    """Stale answers for another instrument are dropped; the hub-URL box is
+    found by id; the methods card offers every hub method."""
+    src = PAGE_JS.read_text(encoding="utf-8")
+    html = TEMPLATE.read_text(encoding="utf-8")
+    assert "querySelectorAll('details.add')[" not in src
+    assert 'id="hub-url-box"' in html and "hub-url-box" in src
+    for fn in ("loadBackfill", "loadConflicts", "select"):
+        body = src.split(f"async function {fn}(", 1)[1].split("\n    }\n", 1)[0]
+        assert "stale(" in body, fn
+    methods = src.split("function methodsCard(", 1)[1].split("\n    }\n", 1)[0]
+    assert "STATE.hubMethods.map" in methods
+
+
 def test_calibration_page_escapes_interpolated_errors():
     src = CAL.read_text(encoding="utf-8")
     assert "${e.message}" not in src

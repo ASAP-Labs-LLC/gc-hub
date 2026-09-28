@@ -9,6 +9,12 @@
 
     let STATE = { list: [], hubUrl: null, commands: [], hubMethods: [], selected: null, detail: null };
 
+    // Every instrument switch bumps the generation; an answer that arrives for
+    // an earlier one (a slow request after a click on another instrument) is
+    // dropped instead of being drawn into the wrong instrument's page.
+    let GENERATION = 0;
+    const stale = (gen) => gen !== GENERATION;
+
     // ── DOM helpers (text only) ────────────────────────────────────────────
     function h(tag, props, ...children) {
         const el = document.createElement(tag);
@@ -109,9 +115,11 @@
     }
 
     async function select(id) {
+        const gen = ++GENERATION;
         STATE.selected = id;
         renderList();
         const { status, body } = await getJSON('/api/instruments/' + enc(id));
+        if (stale(gen)) return;
         if (status !== 200) { flash((body && body.error) || 'Could not load ' + id, 'err'); return; }
         STATE.detail = body;
         renderDetail();
@@ -238,7 +246,7 @@
             if (confirm(out.message)) await installer(id, true);
         } else if (out.kind === 'needs_hub_url') {
             flash(out.message + ' Set it under "Hub URL for installers" (left).', 'err');
-            document.querySelectorAll('details.add')[1].open = true;
+            $('hub-url-box').open = true;
         } else {
             flash(out.message, 'err');
         }
@@ -383,12 +391,18 @@
             const r = await adminPost('/api/admin/instruments/' + enc(inst.id) + '/review-method', {});
             if (r && r.status === 200) await afterChange(r.body.marked + ' sample(s) marked other method.');
         }
-        const hubMethod = STATE.hubMethods[0] || inst.method;
+        // The admin chooses which hub method a name maps to (default: the instrument's).
+        function mapControl(r) {
+            const pick = h('select', {}, ...STATE.hubMethods.map(x => h('option', { value: x, text: x })));
+            if (STATE.hubMethods.includes(inst.method)) pick.value = inst.method;
+            return h('span', {}, pick, ' ',
+                h('button', { className: 'btn', text: 'Map', onclick: () => map(r.name, pick.value) }));
+        }
         const body = h('tbody', {}, ...rows.map(r => h('tr', {},
             h('td', { className: 'mono', text: r.label }), h('td', { text: r.count }),
             h('td', { text: txt(r.first_seen) }), h('td', { text: txt(r.last_seen) }),
             h('td', { text: r.mapped_to || (r.action === 'review' ? 'held for review' : 'not processed') }),
-            h('td', {}, r.action === 'map' ? h('button', { className: 'btn', text: 'Map to ' + hubMethod, onclick: () => map(r.name, hubMethod) })
+            h('td', {}, r.action === 'map' ? mapControl(r)
                 : r.action === 'unmap' ? h('button', { className: 'btn', text: 'Unmap', onclick: () => map(r.name, null) })
                 : (m.review_count ? h('button', { className: 'btn', text: 'Mark ' + m.review_count + ' as other method', onclick: markOther }) : null)))));
         return card('Methods seen',
@@ -435,8 +449,10 @@
     async function loadBackfill() {
         const e = backfillEls;
         if (!e) return;
+        const gen = GENERATION;
         const params = new URLSearchParams({ q: e.q.value, status: e.status.value, released: e.released.value, limit: '500' });
         const { status, body } = await getJSON('/api/instruments/' + enc(e.inst.id) + '/backfill?' + params);
+        if (stale(gen) || e !== backfillEls) return;
         e.tbody.replaceChildren();
         if (status !== 200) { flash((body && body.error) || 'Could not load backfill', 'err'); return; }
         e.total.textContent = body.total + ' sample(s)' + (body.total > body.samples.length ? ', first ' + body.samples.length + ' shown' : '');
@@ -460,7 +476,10 @@
 
     async function loadConflicts() {
         const inst = STATE.detail.instrument;
+        const gen = GENERATION;
+        const target = conflictsBody;
         const { status, body } = await getJSON('/api/conflicts?instrument=' + enc(inst.id));
+        if (stale(gen) || target !== conflictsBody) return;
         conflictsBody.replaceChildren();
         if (status !== 200) { conflictsBody.appendChild(h('p', { className: 'errline', text: (body && body.error) || 'Could not load conflicts' })); return; }
         if (!body.conflicts.length) { conflictsBody.appendChild(h('p', { className: 'muted', text: 'No open conflicts.' })); return; }
@@ -501,7 +520,9 @@
     }
 
     async function loadStandards() {
+        const gen = GENERATION;
         const { status, body } = await getJSON('/api/standards');
+        if (stale(gen)) return;
         standardsBody.replaceChildren();
         if (status !== 200) return;
         for (const s of body.standards) {
