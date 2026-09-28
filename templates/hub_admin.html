@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hub admin</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=1">
+  <style>
+    :root{
+      --bg:#0d1117; --panel:#161b22; --line:#30363d;
+      --txt:#e6edf3; --muted:#7d8590; --accent:#388bfd; --green:#3fb950; --danger:#f85149;
+      --warn:#d29922;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;min-height:100%;background:var(--bg);color:var(--txt);
+      font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    a{color:var(--accent)}
+    main{max-width:880px;margin:32px auto;padding:0 16px}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:18px;
+      margin-bottom:18px}
+    h1{font-size:18px;margin:0 0 12px} h2{font-size:15px;margin:0 0 8px}
+    p{color:var(--muted);margin:0 0 10px}
+    label{font-size:12px;color:var(--muted);margin-right:6px}
+    input[type=text],input[type=password],select{background:var(--bg);color:var(--txt);
+      border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
+    input.wide{width:100%;margin:4px 0 8px}
+    button{background:var(--accent);border:0;color:#fff;border-radius:6px;padding:6px 12px;
+      font:inherit;cursor:pointer;margin:4px 4px 4px 0}
+    button.warn{background:var(--warn);color:#0d1117}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{text-align:left;border-bottom:1px solid var(--line);padding:5px 6px;vertical-align:top}
+    .err{color:var(--danger)} .ok{color:var(--green)} .muted{color:var(--muted)}
+    pre{white-space:pre-wrap;background:var(--bg);border:1px solid var(--line);border-radius:6px;
+      padding:8px;font-size:12px;max-height:240px;overflow:auto}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Hub admin</h1>
+  <div class="panel">
+    <label for="pw">Admin password</label>
+    <input id="pw" type="password" autocomplete="current-password">
+    <button id="btn-refresh">Refresh</button>
+    <span id="msg" role="status"></span>
+    <p style="margin-top:8px">Every action below needs the admin password (set once at
+      <a href="/admin/setup">/admin/setup</a>). <a href="/">Back to the app</a></p>
+  </div>
+
+  <div class="panel">
+    <h2>Load CDFs from a folder</h2>
+    <p>One-shot and read-only on the folder: every <code>*.CDF</code> under it is submitted in
+      injection-time order and processed by the hub. Re-running resumes (duplicates are skipped).
+      Backfill samples are never exported until released.</p>
+    <label for="lf-inst">Instrument</label><select id="lf-inst"></select>
+    <label><input id="lf-backfill" type="checkbox"> force backfill</label>
+    <input id="lf-folder" class="wide" type="text" placeholder="Folder on the server, absolute path">
+    <button id="btn-load">Start</button>
+    <div id="job"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Exports</h2>
+    <p>Each instrument's results CSV (append-only; LEM tails it). A refused file is never
+      written until it is adopted or the export is moved to another path. Never point LEM at
+      a freshly written file without setting its tail offset to the end.</p>
+    <table>
+      <thead><tr><th>Instrument</th><th>Path</th><th>Pending</th><th>State</th><th></th></tr></thead>
+      <tbody id="exports"></tbody>
+    </table>
+  </div>
+</main>
+<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=1"></script>
+
+<!-- Which build is running, bottom-right. Same string /healthz reports. -->
+<div id="app-version" aria-hidden="true">{{ app_version }}</div>
+</body>
+</html>

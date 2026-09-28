@@ -180,8 +180,10 @@ app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # disable static file caching in de
 
 import admin_auth  # noqa: E402  (2B1: admin password + /admin/setup)
 import ingest_api  # noqa: E402  (2B1: the agent API, contract §1)
+import hub_admin  # noqa: E402  (2A1 T5: folder-loader job, export admin)
 app.register_blueprint(admin_auth.bp)
 app.register_blueprint(ingest_api.bp)
+app.register_blueprint(hub_admin.bp)
 
 # ---------------------------------------------------------------------------
 # Global state

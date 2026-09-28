@@ -107,6 +107,13 @@ are exactly as written in the decorator (module constants resolved).
 | `/api/admin/instruments/<instrument_id>/revoke-token` | POST | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
 | `/api/admin/instruments/<instrument_id>/agent-command` | POST | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
 | `/api/admin/hub-url` | POST | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
+| `/api/admin/load-folder` | POST | new | T5 `hub_admin` blueprint: `{password, instrument, folder, backfill?}` → 202 `{job}` (the T6 loader in a background thread; the hub Worker processes what it submits); 400 bad folder, 404 unknown instrument, 409 a job is running |
+| `/api/admin/jobs/status` | POST | new | T5 `hub_admin`: `{password}` → `{job}` (current or last admin job: state, progress, counts, recent files, summary) |
+| `/api/admin/exports` | POST | new | T5 `hub_admin`: `{password}` → `{instruments:[HubExporter.status]}`; 503 until the exporter runs |
+| `/api/admin/exports/<instrument_id>/adopt` | POST | new | T5 `hub_admin`: adopt the export file; 409 `{error, reason}` on a refusal, 404 unknown instrument |
+| `/api/admin/exports/<instrument_id>/new-path` | POST | new | T5 `hub_admin`: `{password, path}` (absolute `.csv` in an existing folder) |
+| `/api/admin/exports/<instrument_id>/write-fresh` | POST | new | T5 `hub_admin`: `{password, path}` → `{status, rows}`; 409 `exists`/`in-use` |
+| `/admin/hub` | GET | new | T5 `hub_admin`: the admin page (load folder, exports) |
 | `/healthz` | GET | unchanged | |
 | `/` | GET | unchanged | |
 | `/calibration` | GET | unchanged | |
