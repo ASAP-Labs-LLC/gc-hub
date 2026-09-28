@@ -39,6 +39,8 @@ the whole second (``submit``'s rule), so ties are judged on stored times.
     load_folder(instrument_id, folder, *, backfill, progress=None, db=None,
                 data_dir=None, conf=None) -> dict
     process_lock(data_dir)     # context manager: <data>/PROCESS_LOCK, O_EXCL; ProcessLocked if held
+    copy_instrument(instrument_id, source_data_dir, *, data_dir, db=None) -> dict
+                               # a production instrument into a SCRATCH store (parity runs)
 
 ``progress(event)`` receives dicts, for the admin page's SSE stream:
 ``{"phase": "scan", "total"}`` once; ``{"phase": "identify", "done",
@@ -67,8 +69,11 @@ folder's files map to (created or duplicate): the parity report's scope.
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import logging
 import os
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -89,6 +94,147 @@ _FAR_FUTURE = datetime.max
 
 class ProcessLocked(RuntimeError):
     """Another loader holds ``<data>/PROCESS_LOCK``."""
+
+
+class CopyInstrumentError(RuntimeError):
+    """``copy_instrument`` refused: nothing was changed in the target store."""
+
+
+# What copy_instrument takes from the production row. Never the export path
+# (it may be the share CSV LEM tails), the agent token or the LEM uid.
+COPIED_COLUMNS = ("name", "method", "live_since", "calibration_cdf", "calibration_assignments",
+                  "calibration_sensitivity", "method_map")
+COPY_REASON = "copied from {src} for a parity run (tools/load_folder.py --copy-instrument-from)"
+CALIBRATION_DIR = "calibration"
+
+
+def _sha(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _copy_file(src: Path, dest: Path) -> bool:
+    """Copy ``src`` to ``dest`` (with its times) unless ``dest`` already holds the
+    same bytes. Refuses to replace a different file. True when copied."""
+    if dest.exists():
+        if _sha(dest) == _sha(src):
+            return False
+        raise CopyInstrumentError(f"{dest} already exists with different content; use a fresh "
+                                  f"scratch folder")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    return True
+
+
+def copy_instrument(instrument_id: str, source_data_dir, *, data_dir, db: store.Db = None) -> dict:
+    """Copy one instrument's configuration from a production data folder into a
+    **scratch** store, so a parity run computes with production's calibration,
+    method map and corrections (decision I2: the parity gate never runs on
+    production). The source is only read: its ``gc.db`` is opened read-only
+    and files are copied out of it.
+
+    * The instrument row is created (e.g. GC-2, which a scratch store lacks)
+      or updated with ``COPIED_COLUMNS`` and ``enabled=1``. The export path,
+      the agent token and the LEM uid are never copied.
+    * The calibration CDF is copied into the scratch folder: a data-relative
+      path to the same relative path, an absolute one to
+      ``calibration/<instrument>/<name>``; the assignments are stored as a
+      plain list for the copy.
+    * The instrument's hub correction factors are written with
+      ``store.corrections.set_all`` (audited, reason ``COPY_REASON``). None in
+      production leaves the scratch instrument without (gc1 is then seeded
+      from ``settings.json``'s phase-1 file, as the hub does).
+    * ``settings.json`` is copied when the scratch folder has none, and the
+      comparison standards (``gc_comparison_standards/*.cdf``: the Best Fit
+      columns depend on them) that it lacks.
+    * The instrument's ``awaiting_calibration`` and ``pending_corrections``
+      samples are queued in the same transaction.
+
+    ``CopyInstrumentError`` (nothing changed) when the source has no store or
+    no such instrument, its calibration CDF is missing, or a file the copy
+    needs already exists with other content. Returns a summary dict."""
+    src = Path(source_data_dir)
+    data_dir = Path(data_dir)
+    db = db if db is not None else data_dir / store.DB_FILENAME
+    src_db = src / store.DB_FILENAME
+    if src.resolve() == data_dir.resolve():
+        raise CopyInstrumentError("the source and the target are the same data folder")
+    if not src_db.is_file():
+        raise CopyInstrumentError(f"no hub store at {src_db}")
+    conn = store.open_db(src_db, readonly=True)
+    try:
+        row = store.instruments.get(instrument_id, db=conn)
+        if row is None:
+            raise CopyInstrumentError(f"{src_db} has no instrument {instrument_id!r}")
+        corr = store.corrections.read(instrument_id, db=conn)
+    finally:
+        conn.close()
+
+    import instruments
+    fields = {c: row.get(c) for c in COPIED_COLUMNS}
+    cal_src = instruments._calibration_path(row.get("calibration_cdf"), src)
+    cal_dest_rel = None
+    if cal_src is not None:
+        if not cal_src.is_file():
+            raise CopyInstrumentError(f"{instrument_id}'s calibration CDF is not found: {cal_src}")
+        raw = str(row.get("calibration_cdf") or "").strip()
+        if not Path(raw).is_absolute():
+            cal_dest_rel = Path(raw)
+        else:
+            try:
+                cal_dest_rel = cal_src.resolve().relative_to(src.resolve())
+            except ValueError:
+                cal_dest_rel = Path(CALIBRATION_DIR) / instrument_id / cal_src.name
+        entries = instruments._entries(row.get("calibration_assignments"), cal_src)
+        fields["calibration_cdf"] = str(cal_dest_rel)
+        fields["calibration_assignments"] = json.dumps(entries) if entries else None
+    else:
+        fields["calibration_cdf"] = None
+        fields["calibration_assignments"] = None
+    if not fields.get("name"):
+        fields["name"] = instrument_id
+    fields["enabled"] = 1
+
+    settings_src = src / "settings.json"
+    std_src = src / "gc_comparison_standards"
+    standards = sorted(p for p in std_src.iterdir()
+                       if p.is_file() and p.suffix.lower() == ".cdf") if std_src.is_dir() else []
+    # Refuse before changing anything.
+    if cal_dest_rel is not None and (data_dir / cal_dest_rel).exists() \
+            and _sha(data_dir / cal_dest_rel) != _sha(cal_src):
+        raise CopyInstrumentError(f"{data_dir / cal_dest_rel} already exists with different "
+                                  f"content; use a fresh scratch folder")
+
+    out = {"instrument": instrument_id, "source": str(src), "created": False,
+           "calibration_cdf": fields["calibration_cdf"],
+           "calibration_assignments": len(json.loads(fields["calibration_assignments"] or "[]")),
+           "corrections": len(corr["values"]) if corr else 0, "settings_copied": False,
+           "standards_copied": 0, "queued": 0}
+    if cal_dest_rel is not None:
+        _copy_file(cal_src, data_dir / cal_dest_rel)
+    if settings_src.is_file() and not (data_dir / "settings.json").exists():
+        shutil.copy2(settings_src, data_dir / "settings.json")
+        out["settings_copied"] = True
+    for p in standards:
+        dest = data_dir / "gc_comparison_standards" / p.name
+        if not dest.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(p, dest)
+            out["standards_copied"] += 1
+    with store.connection(db) as tconn:
+        with store.write_txn(tconn):
+            out["created"] = store.instruments.get(instrument_id, db=tconn) is None
+            store.instruments.upsert(dict(fields, id=instrument_id), db=tconn)
+            if corr:
+                store.corrections.set_all(tconn, instrument_id, corr["values"], by="load_folder",
+                                          reason=COPY_REASON.format(src=src))
+            for status in ("awaiting_calibration", "pending_corrections"):
+                out["queued"] += store.jobs.enqueue_for_status(instrument_id, status, db=tconn)
+    log.info("load_folder: copied %s from %s: %s", instrument_id, src, out)
+    return out
 
 
 @contextlib.contextmanager
