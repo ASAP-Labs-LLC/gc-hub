@@ -26,7 +26,8 @@ From Ryan:
 | D2 | `GC2025.1/processed_cdf` (port 5560) is **GC-1**. Everything in `processed_cdfs2` is **GC-2**, including rows from June to September 2026 that predate the 5570 instance; Ryan confirmed on 2026-09-28 that the second GC existed before its instance did. |
 | D2b | **Non-conforming chromatograms** (e.g. D7096 gasoline runs on a D2887 instrument) are detected by the CDF's ChemStation method name (`detection_method_name`) and **stored but not processed** (status `other_method`). See "Method detection". |
 | D3 | The agent has a **tray icon** (status, restart, pause, log). The Instruments page mirrors it. The agent **self-updates from the hub** on start, on restart and hourly. |
-| D4 | Corrections come **from LEM, per instrument** (one `machine_uid` per GC). **The hub applies them** and records the values used. LEM's station module must not also apply them to GC results. |
+| D4 | **Superseded 2026-09-28 by D4b.** ~~Corrections come from LEM, per instrument~~ (one `machine_uid` per GC). **The hub applies them** and records the values used. LEM's station module must not also apply them to GC results. |
+| D4b | **Correction factors live in the hub, per instrument** (Ryan, 2026-09-28): "I'd rather the GC parser have it, then it's all localized and LEM is just sending it via LabStation." They are edited on the Instruments page (admin), with a change history. The hub applies them and records the values used per sample. LEM holds **no** GC factors and needs no change; the LEM `corrections_applied_upstream` branch is shelved. GC-1 is seeded once from the old JSON file. Other instruments must have all 11 cuts entered explicitly (zeros allowed) before processing; until then their samples are `pending_corrections`. **Operational rule:** never enter GC factors in LEM, because LEM would apply them a second time. |
 | D5 | Reprocessing keeps a sample's recorded corrections, and now also its blank, unless the operator explicitly asks for current ones. |
 | D6 | **SQLite** is the source of truth. CSV files are exports. |
 | D7 | Raw CDFs are kept forever on ASAPSV1. |
@@ -55,7 +56,7 @@ is MAJOR" rule decides the version numbers.
 | **2A0** | `distill` refactor: calibration functions take `conf` explicitly; `compute()` returns a row without writing any CSV; golden tests. No behaviour change. | MINOR |
 | **2A1** | Store, pipeline and revisions; `pipeline.submit()` plus the admin job **Load CDFs from a folder** (one-shot, read-only on the source, never watching); append-only export; route migration to sample IDs; flags and best-fit moved into the store; legacy removal; the "at or before" blank rule. One implicit instrument `gc1`, with corrections from the legacy JSON file (`source:"file"`). **Acceptance gate on ASAPSV1: a parity report.** Load a robocopied sample of the GC-1 processed folder and compare each hub result with v1's CSV row for the same (lab ID, injection time). Every difference must be explained by the release notes (blank rule, auto-detect off, stricter file corrections). | MAJOR |
 | **2A2** | Instruments: per-instrument calibration, sensitivity and blank; the Instruments page; instrument filter and search; standards tagged by instrument (existing standards migrate to `gc1`); instrument shown in reports. | MAJOR |
-| **2C** | LEM corrections provider (replaces `source:"file"`), cache, notifications. The LEM repo change goes on its own branch and is tagged only with Ryan's say-so. | MAJOR |
+| **2C** | Hub-owned corrections (D4b): `instrument_corrections` + audit tables, `StoreProvider`, gc1 seeding from the JSON file, Instruments-page editor. Replaces `source:"file"`. | MAJOR |
 | **2B1** | Admin password; ingest, heartbeat, results-pull and package API; agent tokens; `live_since`; backfill release; conflicts screen. Tested with a fake agent. | MAJOR |
 | **2D** | History import as an admin job inside the hub, reusing 2A1's folder loader and matcher. A read-only dry-run spike against the real share (or the snapshot while off-network) runs **early in 2A1**, before the schema is frozen. | MINOR |
 | **2B2** | The agent: launcher/supervisor, tray, ledger, send, results mirror, self-update, installer; cutover runbook. | MINOR |
@@ -510,45 +511,35 @@ a test checks the list against the routes the app actually registers.
   refuses older versions). CI runs the agent tests on 3.9 and 3.14 on Linux
   and on Windows.
 
-### LEM corrections (2C)
+### Corrections (2C, hub-owned, per D4b)
 
-- **Rules (matching LEM's own):** a 200 JSON response is authoritative.
-  The machine counts as **known** if `methods` is non-empty. For each
-  mapped test name:
-  - listed in `corrections`: use its value;
-  - in `methods` but not in `corrections`: record **0.0 explicitly**
-    (LEM's rule is that a missing correction is zero);
-  - in neither: a configuration error. The sample goes
-    `pending_corrections` and the Instruments page shows red.
-- **Units** must be `°C`, `C` or empty. Anything else is a configuration
-  error.
-- **Unreachable.** A non-JSON 200 (e.g. a sign-in page), a timeout, a
-  connection error or a 5xx all count as unreachable.
-- **Default map** covers all **11 cuts** from today's
-  `_D86_CORRECTION_TEST_MAP`: IBP, 5, 10, 20, 30, 50, 70, 80, 90, 95 and
-  FBP, using the current LEM test-name strings. It is editable on the
-  Instruments page.
-- **`LEM_URL`** is a global setting defaulting to LEM's local address on
-  ASAPSV1, to be verified at deploy. The fetch timeout is 5 s.
-- **Cache.** One entry per instrument, refreshed at most every 5 minutes or
-  when someone presses "Refresh from LEM".
-  - If LEM is unreachable and the cache is **≤ 24 h** old, use it and
-    record `source:"cache"`. Otherwise the sample goes
-    `pending_corrections`.
-  - When a fresh fetch **differs** from the values a sample used, those
-    samples are flagged "corrections changed since processing" and a
-    notification is raised.
-  - The rule is: **corrections are those in force at processing time.**
-    Sample detail and the analysis report show the source; the customer
-    PDF doesn't.
-- **LEM repo change** (its own branch, tagged only with Ryan's say-so, per
-  ASK-CLAUDE.md): a per-machine flag `corrections_applied_upstream`,
-  honoured in `apply_row_corrections`, with tests. The cutover runbook
-  turns it on **at the moment** the station's source switches to the
-  hub-fed mirror.
-- **VERIFY now (read-only):** whether Agilent GC 1 has non-zero
-  `lem_correction_factors`. If it does, today's results are already
-  corrected twice. Report that immediately; don't wait for cutover.
+- **Tables:**
+  - `instrument_corrections(instrument_id, cut, value REAL, updated_at, updated_by, PRIMARY KEY(instrument_id, cut))`,
+    one row per D86 cut. The 11 cuts are IBP, 5, 10, 20, 30, 50, 70, 80,
+    90, 95 and FBP.
+  - `corrections_audit(id, instrument_id, cut, old_value, new_value, changed_at, changed_by, reason)`,
+    append-only.
+- **Provider.** `corrections.StoreProvider` reads the table. An instrument
+  with no rows, or a partial set, raises `CorrectionsUnavailable(config)`,
+  and the sample goes `pending_corrections` until someone enters the values.
+  Nothing is ever silently 0.
+- **Seeding.** On first start, `gc1` is seeded from the old JSON file
+  (`FileProvider`, strict rules: missing cut → explicit 0.0; missing
+  file or section → error). The audit records it with reason
+  `seeded from correction_factors.json`. After that the file is never read
+  again.
+- **Editor.** The Instruments page has an editor for all 11 cuts. It is
+  admin-gated, and a reason is required. Validation: finite numbers, and
+  |value| ≤ 50 °C (a named constant). Saving writes the table and the audit
+  in one transaction, then queues **only** that instrument's
+  `pending_corrections` samples.
+- **Recording.** `corrections_used = {source:'hub', updated_at, values}`.
+  Sample detail and the analysis report show it; the customer PDF doesn't.
+  Samples whose values differ from the current ones show "corrections
+  changed since processing" (missing cut = 0.0 when comparing). D5 holds:
+  reprocessing keeps the recorded values unless someone asks for current
+  ones.
+- **LEM** is out of the corrections path entirely.
 
 ### History import (2D; its spike is part of 2A1)
 

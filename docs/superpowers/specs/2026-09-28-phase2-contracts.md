@@ -88,58 +88,34 @@ into the hub is Lane A's job after 2A1.
 - **Launcher exit codes:** 0 = quit, 3 = restart (re-read `current.txt`),
   anything else = crash.
 
-## §2 Corrections provider (Lane C builds it; the Lane A pipeline calls it)
+## §2 Corrections (REWRITTEN 2026-09-28 for D4b: hub-owned; Lane C builds it, the Lane A pipeline calls it)
 
 ```python
 # corrections.py
 D86_CUTS = ["IBP","5%","10%","20%","30%","50%","70%","80%","90%","95%","FBP"]
-# AMENDED 2026-09-28 (Lane C review): two maps. The LEM default is the five real LEM method names
-# ("ASTM D2887/D86 - Distillation in Petroleum Products, IBP" / ", 10% Recovery" / ", 50% Recovery"
-# / ", 90% Recovery" / ", FBP" -> IBP/10%/50%/90%/FBP). The fixed 11-name map below is
-# PHASE1_FILE_MAP, used ONLY by FileProvider. `values` holds mapped cuts only, and a missing cut counts
-# as 0.0 in comparisons. The cache is keyed by (lem_machine_uid, map_key). 401/403 count as unreachable.
-PHASE1_FILE_MAP = {  # phase-1 JSON test_name -> D86 cut (mirrors distill._D86_CORRECTION_TEST_MAP)
-  "IBP - D86":"IBP","5% - D86":"5%","10% - D86":"10%","20% - D86":"20%","30% - D86":"30%",
-  "50% - D86":"50%","70% - D86":"70%","80% - D86":"80%","90% - D86":"90%","95% - D86":"95%",
-  "FBP - D86":"FBP"}
+PHASE1_FILE_MAP = {...}              # phase-1 JSON test_name -> cut; used only to seed gc1
+MAX_ABS_CORRECTION_C = 50.0
 
 @dataclass(frozen=True)
 class Corrections:
-    source: str            # 'lem' | 'cache' | 'file'
-    fetched_at: str        # ISO, when the values were fetched from their source
-    values: dict           # cut -> float, for EVERY cut in the map (explicit 0.0 allowed)
+    source: str        # 'hub' | 'file' | 'legacy'
+    updated_at: str    # when these values were last changed
+    values: dict       # cut -> float, all 11 D86_CUTS (explicit 0.0 allowed)
 
-class CorrectionsUnavailable(Exception):  # sample -> pending_corrections
-    reason: str            # human message; also used for notifications
-    kind: str              # 'unreachable' | 'config'   (config = unknown machine / unmapped test / bad units)
+class CorrectionsUnavailable(Exception):   # sample -> pending_corrections
+    reason: str; kind: str                 # kind == 'config'
 
-class CorrectionsProvider(Protocol):
-    def get(self, instrument: dict) -> Corrections: ...          # raises CorrectionsUnavailable
-    def refresh(self, instrument: dict) -> Corrections: ...      # bypasses the 5-min freshness window
+class StoreProvider:
+    def __init__(self, read_fn): ...       # read_fn(instrument_id) -> {values, updated_at, updated_by} | None
+    def get(self, instrument: dict) -> Corrections: ...   # raises CorrectionsUnavailable on none/partial
 
-class FileProvider:  # 2A1: phase-1 JSON, section "Agilent GC"; raises on missing file/section; serves only instrument id 'gc1'
-    def __init__(self, json_path: str): ...
-class LemProvider:   # 2C
-    def __init__(self, lem_url: str, cache_store, *, timeout=5.0, fresh_seconds=300, max_cache_age=86400, http_get=None): ...
+def seed_from_file(json_path) -> dict: ...                 # 11-cut values for seeding gc1
+def validate_values(values: dict) -> list[str]: ...        # editor validation
+def values_differ(a: dict, b: dict) -> bool: ...           # missing cut counts as 0.0
 ```
 
-- **`instrument` dict:** `id`, `lem_machine_uid`, and `correction_map`
-  (a JSON string or `None`, meaning use the default).
-- **`cache_store`:** an object with `load(instrument_id) -> dict|None` and
-  `save(instrument_id, values: dict, methods: list, fetched_at: str)`.
-  - Lane C ships an in-memory implementation for tests.
-  - Lane A implements the SQLite one over the `corrections_cache` table.
-- **`http_get`:** an injectable `(url, timeout) -> (status:int, content_type:str, body:bytes)`
-  for tests. The default uses `requests`.
-- **LEM rules:** exactly the spec's §"LEM corrections (2C)": a 200 JSON
-  response is authoritative; the machine is known if `methods` is
-  non-empty; in methods but not in corrections → 0.0; in neither →
-  `config`; units must be `°C`, `C` or empty; a non-JSON 200, a timeout or
-  a 5xx → `unreachable`, which falls back to a cache ≤ 24 h old with
-  `source='cache'`.
-- **Change detection:**
-  `changed_since(instrument_id, used: Corrections) -> bool` compares
-  against the latest fetch.
+The store (Lane A) owns the `instrument_corrections` and `corrections_audit`
+tables and supplies `read_fn`.
 
 ## §3 History import matcher (Lane D builds it; the Lane A importer job calls it)
 
