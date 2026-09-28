@@ -532,3 +532,10 @@ def test_changed_since_cache_and_lem_with_equal_values_is_false(lem, store, cloc
     fetched = p.get(GC1)
     used = C.Corrections("cache", "2026-09-27T10:00:00", dict(fetched.values))
     assert p.changed_since("gc1", used) is False
+
+
+@pytest.mark.parametrize("url", ["", "  ", None])
+def test_no_lem_url_is_config_and_asks_nobody(lem, store, clock, url):
+    p = C.LemProvider(url, store, http_get=lem, clock=clock)
+    raises(p, "config")
+    assert lem.calls == []
