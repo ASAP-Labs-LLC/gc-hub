@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Any, Optional
 
 import instruments
@@ -237,3 +238,46 @@ def live_since_warnings(instrument_id: str, *, db: store.Db = None) -> list:
         if w:
             warnings.append(w)
     return warnings
+
+
+# ── export path (D9b) ───────────────────────────────────────────────────────
+
+def _refused(err) -> AdminError:
+    """``exports.ExportRefused`` as a 409 carrying its reason code and detail."""
+    return AdminError(f"Refused ({err.reason}): {err.detail}", 409, reason=err.reason,
+                      detail=err.detail, path=str(err.path))
+
+
+def export_status(instrument_id: str, exporter) -> dict:
+    """The exporter's status for the instrument, plus whether a path is configured."""
+    row = get(instrument_id, db=exporter.db)
+    st = dict(exporter.status(instrument_id))
+    st["configured"] = bool((row.get("export_path") or "").strip())
+    return st
+
+
+def set_export_path(instrument_id: str, path: Any, exporter) -> dict:
+    """Point the instrument's export at ``path`` (absolute). A file already
+    there must then be adopted before the hub appends to it."""
+    import exports
+    get(instrument_id, db=exporter.db)
+    if not isinstance(path, str) or not path.strip() or not Path(path.strip()).is_absolute():
+        raise AdminError("The export path must be an absolute path to a CSV file, e.g. "
+                         r"\\asapserver\Labsharedrive\...\distill_results.csv.")
+    try:
+        exporter.new_path(instrument_id, path.strip())
+    except exports.ExportRefused as err:
+        raise _refused(err) from None
+    log.warning("instrument %s export path set to %s", instrument_id, path.strip())
+    return export_status(instrument_id, exporter)
+
+
+def adopt_export(instrument_id: str, exporter, *, by: Optional[str]) -> dict:
+    """Adopt the export file as it is now (a v1 file LEM already tails)."""
+    import exports
+    get(instrument_id, db=exporter.db)
+    try:
+        side = exporter.adopt(instrument_id, by=by)
+    except exports.ExportRefused as err:
+        raise _refused(err) from None
+    return {"adopted": side, "status": export_status(instrument_id, exporter)}
