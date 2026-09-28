@@ -216,6 +216,55 @@ counts.
 The app starts without credentials (the health check runs with none). Only
 QBench lookups and uploads fail until they are entered.
 
+## Admin password (v2, 2B1)
+
+There is no default admin password. Until one is set, every admin action
+(Set as Default, QBench API credentials, agent installers, and so on) is
+refused with a message pointing to `/admin/setup`.
+
+1. On ASAPSV1, open `C:\ASAPApps\gc\data\admin-setup-code.txt`. The same
+   one-time code is in `C:\ASAPApps\gc\data\app.log`, in a WARNING line that
+   starts "No admin password is set. Admin setup code: ...".
+2. In a browser, open `http://asapsv1:5560/admin/setup` (the hub's own name
+   or IP address; setup is refused under any other host name). Enter the code
+   and the new password (at least 8 characters). The code file is deleted
+   once the password is set.
+
+**Forgotten password (reset).** Stop nothing; on ASAPSV1 run, from the
+current release folder with its venv's Python:
+
+```
+python -c "import store; store.settings_kv.delete('admin_password', db=r'C:\ASAPApps\gc\data\gc.db')"
+```
+
+Then open `/admin/setup` (or restart the app): a **new** setup code is
+written to `admin-setup-code.txt` and logged in `app.log`. Follow the steps
+above. Agent tokens are not affected by a reset.
+
+Wrong passwords are throttled per address (after 5 in a row, a growing
+wait) and hub-wide (30 in 10 minutes); a restart clears the counters. The
+hub-wide limit never applies on the server itself: if someone on the LAN has
+exhausted it, RDP to ASAPSV1 and use `http://localhost:5560`.
+
+**Protect the data folder.** On Windows the setup code file's 0600 mode is
+ignored; the folder's ACL is what protects it. `C:\ASAPApps\gc\data` must be
+on a **local disk** of ASAPSV1 (never a network share), readable only by
+Administrators and the account the updater runs the app as. It holds the
+setup code, `app.log` (which also contains the code while no password is
+set), the store with the admin hash and agent-token hashes, and every CDF.
+Check with `icacls C:\ASAPApps\gc\data` and remove `Users` / `Everyone`
+entries if present.
+
+**Legacy mode has no admin.** The share copies (no `GC_DATA_DIR`) have no
+store to keep a password in, so every admin action there is refused. Change
+their settings on a hub, or by editing the settings file by hand.
+
+**Agent installers need the hub URL.** Before the first "Download
+installer", set the address the GC PCs use to reach the hub
+(`POST /api/admin/hub-url {password, hub_url: "http://asapsv1:5560"}`, the
+Instruments page from 2A2). A download from `localhost` or `127.0.0.1` on the
+server itself is refused until it is set.
+
 ## Updating the share copies (legacy, until phase 2)
 
 The GC PCs keep running their copies from `\\ASAPServer\Labsharedrive` with
