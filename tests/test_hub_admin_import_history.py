@@ -185,6 +185,8 @@ def test_last_run_defaults_the_form_and_warns_on_a_different_csv(admin_hub, tmp_
     assert last["aliases"] == ALIASES
     assert last["results_csv"] and Path(last["results_csv"]).is_file()
     assert last["processed_dir"] and Path(last["processed_dir"]).is_dir()
+    # the run records the admin who started it, like other admin actions
+    assert last["by"] == "admin@127.0.0.1", last
 
     # a different CSV path than last time is not refused, only warned about
     other_csv = Path(last["results_csv"]).with_name("other.csv")

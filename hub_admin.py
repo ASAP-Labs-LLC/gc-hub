@@ -321,12 +321,14 @@ def api_admin_import_history_start():
     if err:
         return err
     inst, processed_dir, results_csv, aliases, batch_size = params
+    by = f"admin@{_who()}"      # recorded on the run and its revisions (captured here:
+                                # the job runs outside the request)
 
     def run(progress):
         from jobs.import_history import import_history
         return import_history(inst, processed_dir, results_csv, instrument_folder_aliases=aliases,
                               db=_db(), data_dir=paths.require_data_dir(), progress=progress,
-                              dry_run=False, batch_size=batch_size)
+                              dry_run=False, batch_size=batch_size, by=by)
 
     try:
         job = JOBS.start("import-history", run, {

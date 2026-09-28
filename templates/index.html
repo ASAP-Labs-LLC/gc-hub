@@ -4,12 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GC Viewer &amp; Distillation Parser</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
 
   <!-- Plotly.js CDN -->
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 
   <!-- App stylesheet (cache-bust) -->
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=37">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=38">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=1">
 
   <!-- Inline critical layout styles (structural only; visual polish lives in style.css) -->
@@ -295,6 +296,9 @@
       </div>
     </div>
 
+    <select id="instrument-filter" title="Show one instrument's samples (remembered in this browser)" style="flex-shrink:0; margin:0 6px 0 0; font-size:11px; padding:2px 4px; background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:6px;">
+      <option value="">All instruments</option>
+    </select>
     <input type="text" class="search-input" id="universal-search" placeholder="Search samples..." style="width:220px; min-width:150px; flex-shrink:0; margin:0; margin-bottom:0; font-size:11px; padding:3px 8px;">
     <span id="search-count" style="font-size:10px; color:#7d8590; margin-left:6px; white-space:nowrap;"></span>
 
@@ -367,6 +371,7 @@
         <div class="panel accent-blue">
           <div class="panel-header">
             <span class="dash-quadrant-header">Chromatogram</span>
+            <span class="dash-sample-meta" id="dash-sample-meta"></span>
           </div>
           <div class="panel-body" style="padding:0;">
             <div id="dash-chrom-plot" class="plot-container"></div>
@@ -899,6 +904,13 @@
         (e.g. <code>34562 to 34569</code>, <code>34562-34569</code>, <code>34562:34569</code>).
         Matching samples are shown below before you re-process.
       </p>
+      <label for="reprocess-instrument" style="display:flex; align-items:center; gap:6px; font-size:12px; margin-bottom:6px;">
+        Instrument
+        <select id="reprocess-instrument" style="font-size:12px; padding:2px 4px; background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:6px;">
+          <option value="">Choose…</option>
+        </select>
+        <span style="color:#7d8590;">(lab IDs are resolved on this instrument)</span>
+      </label>
       <textarea id="reprocess-ids" rows="4" style="width:100%;" placeholder="e.g. 34562&#10;34570, 34571&#10;34580 to 34590"></textarea>
 
       <div id="reprocess-preview" style="margin-top:10px; font-size:12px;">
@@ -1062,11 +1074,11 @@
      ================================================================== -->
 <script src="{{ url_for('static', filename='js/selection.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/report_payload.js') }}?v=2"></script>
-<script src="{{ url_for('static', filename='js/samples.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/samples.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=46"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=47"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

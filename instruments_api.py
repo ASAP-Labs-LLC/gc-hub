@@ -380,8 +380,21 @@ def api_backfill_release(iid):
     body, err = _admin()
     if err:
         return err
-    return jsonify({"results": ia.release(iid, body.get("sample_ids"), by=_by(), db=_db(),
-                                          data_dir=_data())})
+    results = ia.release(iid, body.get("sample_ids"), by=_by(), db=_db(), data_dir=_data())
+    if any(r.get("ok") for r in results):
+        _wake_exports()         # export rows were written outside the Worker: flush now
+    return jsonify({"results": results})
+
+
+def _wake_exports() -> None:
+    """Ask the running hub's exporter for a pass now (not after its interval)."""
+    try:
+        import hub
+        rt = hub.running()
+        if rt is not None:
+            rt.wake_exports()
+    except Exception:  # noqa: BLE001 - the rows are written; the next tick flushes them
+        log.exception("could not wake the exporter")
 
 
 # ── conflicts ───────────────────────────────────────────────────────────────

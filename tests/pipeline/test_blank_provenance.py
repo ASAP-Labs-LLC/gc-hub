@@ -165,6 +165,9 @@ def test_replacing_a_used_blank_flags_its_users_and_notifies_once(hub):
         assert hub.sample(s)["current_revision"] == 1                   # not reprocessed
     assert len(heard) == 1 and heard[0][0] == "warning"
     assert "2" in heard[0][1]
+    # the notification names the affected lab IDs
+    for s in (sid, other):
+        assert hub.sample(s)["lab_id"] in heard[0][1], heard
 
 
 def test_a_replace_that_makes_a_sample_a_genuine_blank_flags_late_blank(hub):

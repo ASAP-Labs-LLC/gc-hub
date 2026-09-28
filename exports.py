@@ -35,8 +35,10 @@ Public API
 
 ``notifier(level, message)`` has the signature of
 ``notifications.NotificationStore.add``; it is called once when an export is
-refused (``error``, until a verified flush, adopt or new path clears it) and
-once when an instrument's rows have been pending for more than
+refused (``error``, until a verified flush, adopt or new path clears it;
+``info`` "adopt it next" instead when the refusal is ``no-sidecar`` on the
+existing file ``new_path`` just switched to, the "New path, then Adopt"
+step) and once when an instrument's rows have been pending for more than
 ``PENDING_ALERT_SECONDS`` (``warning``, until the backlog clears).
 
 Frozen row bytes
@@ -626,6 +628,10 @@ class HubExporter:
         self._last_full: dict[str, float] = {}
         self._full_attempt: dict[str, float] = {}
         self._refused: dict[str, ExportRefused] = {}
+        # instrument -> the existing, sidecar-less file New path just pointed
+        # it at: its no-sidecar refusal is the expected "Adopt it next" step
+        # (an info, not an error) until Adopt, another path or a clean flush.
+        self._adopt_next: dict[str, Path] = {}
         self._last_error: dict[str, Optional[str]] = {}
         self._pending_since: dict[str, float] = {}
         self._alerted: set[str] = set()
@@ -676,12 +682,21 @@ class HubExporter:
     def _record_refusal(self, instrument: str, err: ExportRefused) -> None:
         prev = self._refused.get(instrument)
         self._refused[instrument] = err
-        if prev is None or (prev.reason, prev.path) != (err.reason, err.path):
-            self._notify("error", f"GC export for {instrument} refused: {err}. "
-                                  "Admin > Exports: Adopt the file or choose a new path.")
+        if prev is not None and (prev.reason, prev.path) == (err.reason, err.path):
+            return
+        awaiting = self._adopt_next.get(instrument)
+        if (err.reason == "no-sidecar" and awaiting is not None
+                and _same_file_path(err.path, awaiting)):
+            self._notify("info", f"GC export for {instrument} now points at {err.path}, which "
+                                 "already has content: Adopt it next (Admin > Exports) so the "
+                                 "hub appends after it. Nothing is written to it until then.")
+            return
+        self._notify("error", f"GC export for {instrument} refused: {err}. "
+                              "Admin > Exports: Adopt the file or choose a new path.")
 
     def _clear_refusal(self, instrument: str) -> None:
         self._refused.pop(instrument, None)
+        self._adopt_next.pop(instrument, None)
 
     def _pending_count(self, instrument: str) -> int:
         try:
@@ -1163,6 +1178,8 @@ class HubExporter:
             self._check_free(instrument, path)
             store.instruments.upsert({"id": instrument, "export_path": str(path)}, db=self.db)
             self._clear_refusal(instrument)
+            if _stat(path) is not None and not sidecar_path(path).exists():
+                self._adopt_next[instrument] = path      # "New path, then Adopt"
             LOGGER.info("exports: %s now exports to %s", instrument, path)
             return path
 

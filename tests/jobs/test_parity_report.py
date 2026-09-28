@@ -215,6 +215,21 @@ def test_no_unexplained_difference_passes(hub):
     assert rep["exit_code"] == 0
 
 
+def test_d2887_names_passed_to_accept_are_not_listed_as_accepted(hub):
+    """--accept-excluded-method SIMDISB.M can't accept a D2887 name, so the
+    verdict line must not say it was accepted (v2.0.0 RC)."""
+    rep = Scenario(hub, alter=False).report(
+        accept_excluded_methods=["D7096.M", "SIMDISB.M", "simdistb.m"])
+    s = rep["summary"]
+    assert s["accepted_methods"] == ["D7096.M"]
+    line = s["verdict_line"]
+    accepted_part = line.split("accepted excluded methods:", 1)[1].split(";", 1)[0]
+    assert "D7096.M" in accepted_part
+    assert "SIMDISB.M" not in accepted_part and "SIMDISTB.M" not in accepted_part
+    assert "SIMDISB.M" in line and "SIMDISTB.M" in line      # ...but it says they were ignored
+    assert s["accept_ignored_d2887"] == ["SIMDISB.M", "SIMDISTB.M"]
+
+
 def test_a_blank_rows_own_numbers_are_never_put_down_to_the_blank_rule(hub):
     sc = Scenario(hub, alter=False)
     b1 = sc.rows[1]
