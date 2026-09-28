@@ -127,6 +127,18 @@ only), `tests/pipeline/`.
     injection time) key, stores the file at
     `data/cdf/<inst>/<YYYY>/<MM>/<lab>_<id>.CDF` (temp file, then
     replace), inserts `received`, and enqueues `process`.
+  - **Store review notes for T2:**
+    - `is_blank` is decided **in `submit`**, from the CDF bytes (name
+      rule plus `is_plausible_blank`), so blank choice never depends on
+      processing order.
+    - Pass `db=conn` everywhere inside `write_txn`. Opening a new
+      connection there raises.
+    - Do the corrections read and `compute` **before** opening the
+      transaction.
+    - The `gc1` bootstrap must set `live_since`. `is_backfill(None, …)`
+      is True, so without it nothing would ever export.
+    - Reprocess requests enqueue with their own payload (last intent
+      wins on dedupe).
   - `Worker` is one thread. It claims jobs and handles them with this
     status machine:
     1. method unmapped → `other_method`; missing → `review_method`;
