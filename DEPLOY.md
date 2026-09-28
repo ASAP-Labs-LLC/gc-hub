@@ -242,7 +242,18 @@ written to `admin-setup-code.txt` and logged in `app.log`. Follow the steps
 above. Agent tokens are not affected by a reset.
 
 Wrong passwords are throttled per address (after 5 in a row, a growing
-wait) and hub-wide (30 in 10 minutes); a restart clears the counters.
+wait) and hub-wide (30 in 10 minutes); a restart clears the counters. The
+hub-wide limit never applies on the server itself: if someone on the LAN has
+exhausted it, RDP to ASAPSV1 and use `http://localhost:5560`.
+
+**Protect the data folder.** On Windows the setup code file's 0600 mode is
+ignored; the folder's ACL is what protects it. `C:\ASAPApps\gc\data` must be
+on a **local disk** of ASAPSV1 (never a network share), readable only by
+Administrators and the account the updater runs the app as. It holds the
+setup code, `app.log` (which also contains the code while no password is
+set), the store with the admin hash and agent-token hashes, and every CDF.
+Check with `icacls C:\ASAPApps\gc\data` and remove `Users` / `Everyone`
+entries if present.
 
 **Legacy mode has no admin.** The share copies (no `GC_DATA_DIR`) have no
 store to keep a password in, so every admin action there is refused. Change
