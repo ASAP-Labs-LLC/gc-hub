@@ -187,7 +187,7 @@ class AwaitSwitchTests(unittest.TestCase):
 # ── Boot tests: the real app.py under the updater's environment ───────────
 
 def _bootstrap(tag=None, min_uptime=0):
-    """Launch app.py as __main__ the way run.pyw's runpy bootstrap does, with
+    """Launch app.py as __main__ through runpy, with
     two test-only overrides applied to the modules first:
 
     * ``version.APP_VERSION = tag`` — a checkout has no VERSION file, so it
@@ -287,18 +287,6 @@ class RestartRouteTests(unittest.TestCase):
                     (data / n).exists()
                     for n in ("switch-requested", "switch-accepted", "switch-refused")),
                     timeout=10))
-
-    def test_leftover_csv_temp_files_are_swept_at_boot(self):
-        with tempfile.TemporaryDirectory() as t:
-            data = Path(t, "data")
-            data.mkdir()
-            stale = data / ".distill_results.csv.k2j3h4.tmp"
-            stale.write_text("half a row", encoding="utf-8")
-            keep = data / "notes.tmp"
-            keep.write_text("not ours", encoding="utf-8")
-            with booted(Path(t)) as (port, proc, data, home):
-                self.assertTrue(wait_for(lambda: not stale.exists(), timeout=10))
-                self.assertTrue(keep.exists())
 
     def test_plain_restart_under_the_updater_exits_without_respawning(self):
         with tempfile.TemporaryDirectory() as t:

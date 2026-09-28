@@ -1,19 +1,13 @@
-r"""settings.py (Web version)
-~~~~~~~~~~~~~
-Persistent path/config helper — web-compatible (no PyQt dependencies).
+r"""settings.py
+~~~~~~~~~~~
+The hub's global settings: one JSON file, ``GC_DATA_DIR/settings.json``
+(``paths.settings_file()``), with every path default under ``GC_DATA_DIR``
+(see ``paths.py``). Per-instrument configuration (calibration, corrections,
+export path) lives in the store's ``instruments`` rows, not here.
 
-Where the JSON lives, and what the path/dir *values* inside it default to,
-both come from ``paths.py`` and split into two modes:
-
-* **legacy** (``GC_DATA_DIR`` unset — a copy still running from the share):
-  unchanged from before this module existed —
-      • Windows  →  %USERPROFILE%\.gc_viewer_settings[-port].json
-      • macOS/*nix →  ~/.gc_viewer_settings[-port].json
-  with ``processed_cdf_dir``/``distill_output``/``export_folder`` defaulting
-  cwd-relative and ``watch_dir`` defaulting to cwd itself.
-* **deployed** (``GC_DATA_DIR`` set by the ASAPSV1 updater): one file at
-  ``GC_DATA_DIR/settings.json``, and every path default lives under
-  ``GC_DATA_DIR`` too — see ``paths.py`` for the full table.
+Importable without ``GC_DATA_DIR`` (tools and tests): ``CONFIG_PATH`` is then
+``None`` (``load_settings`` returns the defaults, ``save_settings`` refuses)
+and the path defaults are empty. The app itself never runs that way.
 """
 from __future__ import annotations
 
@@ -24,33 +18,42 @@ import stat
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
-import instance
 import paths
 
 LOGGER = logging.getLogger("settings")
 
-# Derived from GC_PORT (legacy) or GC_DATA_DIR (deployed) at import time so
-# several instances can run side by side. Stays a module-level Path (not a
-# call) so tests can redirect it.
-CONFIG_PATH: Path = paths.settings_file()
+
+def _under_data(fn) -> str:
+    """``str(fn())`` (a ``paths`` default), or ``""`` without GC_DATA_DIR."""
+    try:
+        return str(fn())
+    except paths.DataDirMissing:
+        return ""
+
+
+# Resolved from GC_DATA_DIR at import time. Stays a module-level attribute
+# (not a call) so tests can redirect it; None without GC_DATA_DIR.
+CONFIG_PATH: Optional[Path] = paths.settings_file() if paths.data_dir() is not None else None
 
 # ---------------------------------------------------------------------------
 # Default values — update here when adding new settings keys
 # ---------------------------------------------------------------------------
 DEFAULTS: Dict[str, str] = {
-    "watch_dir": paths.default_watch_dir(),
-    "processed_cdf_dir": str(paths.default_processed_dir()),
-    "distill_output": str(paths.default_results_csv()),
+    # v1 keys, still read by distill.process_cdf (the golden reference); the
+    # hub neither watches a folder nor writes this CSV.
+    "watch_dir": "",
+    "processed_cdf_dir": _under_data(paths.default_processed_dir),
+    "distill_output": _under_data(paths.default_results_csv),
     "calibration_cdf": "",
     "calibration_assignments": "",
     "calibration_sensitivity": "50",
     "theme_css": "",
     "series_colors": "",
     "calibration_labels": "",
-    "blank_cache_file": str(paths.default_processed_dir() / ".blank_cache.json"),
-    "export_folder": str(paths.default_export_dir()),
+    "blank_cache_file": "",
+    "export_folder": _under_data(paths.default_export_dir),
     # Read-only, unused: no route or template reads this key back (grepped —
     # nothing else in the repo references "splash_image_file"). Left
     # cwd-relative by design rather than routed through paths.py: cwd is
@@ -59,7 +62,7 @@ DEFAULTS: Dict[str, str] = {
     # ever wired up to something that actually reads it.
     "splash_image_file": str(Path.cwd() / "splash.png"),
     "export_graph_qss": "",
-    "comparison_defaults_dir": str(paths.standards_dir()),
+    "comparison_defaults_dir": _under_data(paths.standards_dir),
     "comparison_export_template": "",
     "correction_factors_json": "//asapserver/Labsharedrive/ASAP Lab Results/EQM_Correction Factor/correction_factors.json",
     "analysis_quantile": "0.20",
@@ -90,62 +93,13 @@ DEFAULTS: Dict[str, str] = {
     "bestfit_mix_min_frac": "0.10",
 }
 
-# Settings that MUST differ between concurrently running instances. A new
-# instance inherits everything else from the primary (port 5560) config, but
-# these fall back to DEFAULTS so the operator is forced to choose them —
-# two instances sharing distill_output would both append to one results CSV,
-# and a shared export_folder mixes two workstations' reports together.
-PER_INSTANCE_KEYS = (
-    "watch_dir",
-    "processed_cdf_dir",
-    "distill_output",
-    "export_folder",
-)
-
-
 # ---------------------------------------------------------------------------
 # I/O helpers
 # ---------------------------------------------------------------------------
 
-def _seed_new_instance() -> None:
-    """First run on a non-default port: copy the primary instance's config,
-    minus the per-instance paths. No-op in every other case.
-    """
-    if paths.data_dir() is not None:
-        # Deployed mode has one settings file per data dir, not per port —
-        # there is nothing to seed from.
-        return
-    if instance.active_port() == instance.DEFAULT_PORT:
-        return
-    if CONFIG_PATH.exists():
-        return
-
-    primary = instance.settings_path(instance.DEFAULT_PORT)
-    if primary == CONFIG_PATH or not primary.exists():
-        return
-
-    try:
-        data = json.loads(primary.read_text(encoding="utf-8"))
-    except Exception as exc:
-        LOGGER.warning("Could not seed instance settings from %s: %s", primary, exc)
-        return
-    if not isinstance(data, dict):
-        return
-
-    for key in PER_INSTANCE_KEYS:
-        data.pop(key, None)
-
-    try:
-        CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        LOGGER.info("Seeded new instance settings at %s from %s", CONFIG_PATH, primary)
-    except Exception as exc:
-        LOGGER.warning("Could not write seeded settings to %s: %s", CONFIG_PATH, exc)
-
-
 def load_settings() -> Dict[str, str]:
-    _seed_new_instance()   # no-op unless this is a fresh non-default port
     conf = DEFAULTS.copy()
-    if CONFIG_PATH.exists():
+    if CONFIG_PATH is not None and CONFIG_PATH.exists():
         try:
             with CONFIG_PATH.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -153,15 +107,17 @@ def load_settings() -> Dict[str, str]:
         except Exception as exc:
             LOGGER.warning("Settings read failed, using defaults: %s", exc)
 
-    proc = Path(conf.get("processed_cdf_dir", paths.default_processed_dir()))
-    conf["blank_cache_file"] = str(proc / ".blank_cache.json")
-    conf.setdefault("export_folder", str(paths.default_export_dir()))
+    proc = str(conf.get("processed_cdf_dir") or "").strip()
+    conf["blank_cache_file"] = str(Path(proc) / ".blank_cache.json") if proc else ""
+    conf.setdefault("export_folder", DEFAULTS["export_folder"])
     conf.setdefault("splash_image_file", str(Path.cwd() / "splash.png"))  # unused; see DEFAULTS comment above
 
     # Manage comparison standards directory
     comp_dir_str = (conf.get("comparison_defaults_dir") or "").strip()
     if not comp_dir_str:
         comp_dir_str = DEFAULTS["comparison_defaults_dir"]
+    if not comp_dir_str:        # no GC_DATA_DIR and none configured: nothing to create
+        return conf
     comp_dir = Path(comp_dir_str).expanduser()
     try:
         comp_dir.mkdir(parents=True, exist_ok=True)
@@ -197,10 +153,13 @@ def save_settings(conf: Dict[str, str]) -> None:
     settings file untouched (it holds the operator's calibration assignments)
     and removes the temp file. Errors are logged, never raised."""
     tmp = None
+    if CONFIG_PATH is None:
+        LOGGER.error("Settings save failed: %s", paths.MISSING_TEXT)
+        return
     try:
         directory = str(CONFIG_PATH.parent)
         # Named after the file, so a leftover from a hard kill is recognisable
-        # next to it (legacy mode keeps settings in the home folder).
+        # next to it.
         fd, tmp = tempfile.mkstemp(prefix=f".{CONFIG_PATH.name}.", suffix=".tmp",
                                    dir=directory)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:

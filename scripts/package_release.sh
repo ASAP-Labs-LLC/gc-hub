@@ -102,8 +102,8 @@ printf '%s\n' "$TAG" > "$STAGE/VERSION"
 # Positive control: what the updater and the app need at runtime.
 # (tests/test_release_package.py also checks every locally imported module.)
 missing=0
-for f in app.py run.pyw requirements.txt VERSION templates/index.html static \
-         paths.py version.py instance.py settings.py distill.py looker.py \
+for f in app.py requirements.txt VERSION templates/index.html static \
+         paths.py version.py instance.py settings.py distill.py \
          supervisor.py restart_update.py restart_policy.py; do
   if [ ! -e "$STAGE/$f" ]; then echo "MISSING from package: $f" >&2; missing=1; fi
 done

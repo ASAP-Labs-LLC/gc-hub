@@ -20,10 +20,10 @@ import paths
 
 LOGGER = logging.getLogger(__name__)
 
-# Legacy: lives next to the user settings file (home dir), independent of
-# watch/processed paths. Deployed (GC_DATA_DIR set): under the data dir, so
-# it moves with the rest of the app's state. See paths.notifications_file().
-DEFAULT_PATH = paths.notifications_file()
+# Under the data dir, so it moves with the rest of the hub's state
+# (paths.notifications_file()); None when imported without GC_DATA_DIR.
+DEFAULT_PATH: Optional[Path] = (paths.notifications_file() if paths.data_dir() is not None
+                                else None)
 
 _VALID_LEVELS = {"info", "success", "warning", "error"}
 
@@ -31,7 +31,10 @@ _VALID_LEVELS = {"info", "success", "warning", "error"}
 class NotificationStore:
     """File-backed list of notifications, newest first."""
 
-    def __init__(self, path: Path | str = DEFAULT_PATH) -> None:
+    def __init__(self, path: Path | str | None = None) -> None:
+        path = DEFAULT_PATH if path is None else path
+        if path is None:
+            raise paths.DataDirMissing()
         self._path = Path(path)
         self._lock = threading.Lock()
         self._items: list[dict] = self._load()

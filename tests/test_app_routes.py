@@ -150,7 +150,7 @@ def _app_run_call() -> ast.Call:
 class PortBindingTests(unittest.TestCase):
     """The port must be resolvable per instance, never hardcoded.
 
-    AST-only: importing app.py starts the Looker and auto-restart threads.
+    AST-only: importing app.py starts the hub and auto-restart threads.
     """
 
     def test_app_run_has_no_hardcoded_port(self) -> None:
@@ -196,19 +196,15 @@ class DeployedModeFallbackTests(unittest.TestCase):
     In deployed mode ``cwd`` is the updater's immutable release folder, so a
     bare relative literal like ``conf.get("distill_output", "distill_results.csv")``
     would resolve inside it. These ``conf.get(key, ...)`` fallbacks are
-    mostly defensive (``conf`` usually comes from
-    ``settings_mod.load_settings()``, which always sets every ``DEFAULTS``
-    key) but at least one — ``looker.rebuild_database`` when
-    ``load_settings()`` raises — is genuinely reachable. All of them must
-    route through ``paths.py`` rather than a hardcoded literal.
+    defensive (``conf`` usually comes from ``settings_mod.load_settings()``,
+    which always sets every ``DEFAULTS`` key). All of them must route
+    through ``paths.py`` rather than a hardcoded literal.
 
-    AST-only: importing app.py starts the Looker and auto-restart threads;
-    distill.py/looker.py are cheap enough to parse the same way for
-    consistency and so a stray CRLF re-save never breaks this guard.
+    AST-only: importing app.py starts the hub's background threads.
     """
 
     # Every module with a ``conf.get(<state key>, ...)`` fallback.
-    STATE_PATH_MODULES = ("app.py", "distill.py", "looker.py")
+    STATE_PATH_MODULES = ("app.py", "distill.py")
 
     # Settings keys whose value is a filesystem location that must live
     # under GC_DATA_DIR when deployed (see paths.py).
@@ -272,29 +268,6 @@ class DeployedModeFallbackTests(unittest.TestCase):
                     "release folder when GC_DATA_DIR is set; route it through paths.py",
                 )
         self.assertGreater(checked, 0, "no conf.get(...) calls found for tracked state keys")
-
-    def test_dir_cache_path_uses_paths_module(self) -> None:
-        """``_DIR_CACHE_PATH`` must be assigned from ``paths.dir_cache_file()``.
-
-        Checked via the assignment's call target (module + attribute name)
-        rather than an exact source-text match, so reformatting the line
-        doesn't make this test a no-op.
-        """
-        tree = self._tree("app.py")
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Assign)
-                    and len(node.targets) == 1
-                    and isinstance(node.targets[0], ast.Name)
-                    and node.targets[0].id == "_DIR_CACHE_PATH"):
-                continue
-            value = node.value
-            self.assertIsInstance(value, ast.Call, "_DIR_CACHE_PATH must be assigned a call result")
-            self.assertIsInstance(value.func, ast.Attribute)
-            self.assertEqual(value.func.attr, "dir_cache_file")
-            self.assertIsInstance(value.func.value, ast.Name)
-            self.assertEqual(value.func.value.id, "paths")
-            return
-        self.fail("_DIR_CACHE_PATH assignment not found in app.py")
 
 
 if __name__ == "__main__":

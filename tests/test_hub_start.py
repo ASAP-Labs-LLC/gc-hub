@@ -217,3 +217,17 @@ def test_booted_hub_processes_and_exports_with_no_worker_in_the_test(tmp_path):
         assert out.read_bytes() == (exports.header_line() + ledger[0]["line"]).encode()
         code, body = get(port, "/api/files")
         assert code == 200 and body["samples"][0]["status"] == "final"
+
+
+def test_app_refuses_to_start_without_gc_data_dir(tmp_path):
+    env = dict(os.environ, PORT=str(free_port()), HOME=str(tmp_path), USERPROFILE=str(tmp_path))
+    env.pop("GC_DATA_DIR", None)
+    try:
+        r = subprocess.run([sys.executable, "app.py", "--no-tray"], cwd=ROOT, env=env,
+                           capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("app.py started without GC_DATA_DIR")
+    assert r.returncode != 0
+    out = r.stdout + r.stderr
+    assert "GC_DATA_DIR" in out and "DEPLOY.md" in out
+    assert list(tmp_path.iterdir()) == []       # nothing written to HOME either

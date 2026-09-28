@@ -59,7 +59,6 @@ class StartupTests(unittest.TestCase):
                 self.assertEqual(code, 200)
                 self.assertEqual(body["status"], "ok")
                 self.assertTrue((data / "app.log").is_file())
-                self.assertTrue((data / "processed_cdf").is_dir())
                 self.assertTrue((data / "exports").is_dir())
             leaked = [str(p.relative_to(home)) for p in home.rglob("*")]
             self.assertEqual(leaked, [], f"state leaked into HOME: {leaked}")
@@ -87,15 +86,6 @@ class StartupTests(unittest.TestCase):
             r = _run_with_flag(flag)
             self.assertNotEqual(r.returncode, 0, flag)
             self.assertIn(flag, r.stderr + r.stdout)
-
-    def test_runpy_bootstrap_like_run_pyw_is_not_rejected(self):
-        # run.pyw launches ``python -c "...runpy.run_path(app.py, run_name='__main__')"``,
-        # so sys.argv is ['-c'] — the argv check must let that through.
-        boot = ("import sys, runpy; sys.path.insert(0, %r); "
-                "runpy.run_path(%r, run_name='__main__')" % (str(ROOT), str(ROOT / "app.py")))
-        with tempfile.TemporaryDirectory() as t:
-            with booted(Path(t), cmd=[sys.executable, "-c", boot]) as (port, proc, data, home):
-                self.assertEqual(get(port, "/healthz")[0], 200)
 
     def test_empty_data_dir_starts_the_hub_and_never_scans(self):
         # Phase 2: there is no watcher. An empty data folder gets a store and

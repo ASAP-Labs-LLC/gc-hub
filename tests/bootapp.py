@@ -165,8 +165,8 @@ def booted(tmp: Path, *, args=("--no-tray",), cmd=None, extra_env=None, wait=60.
     """Launch app.py and yield ``(port, proc, data_dir, home_dir)`` once
     ``/healthz`` answers 200. The process is stopped on exit.
 
-    ``cmd`` overrides the whole command line (e.g. a runpy bootstrap like
-    ``run.pyw`` uses); by default it is ``python app.py *args``. A lost race
+    ``cmd`` overrides the whole command line; by default it is
+    ``python app.py *args``. A lost race
     for the probed port is retried once on a fresh port.
     """
     try:

@@ -102,9 +102,9 @@ def _imports_of(path: Path, local: set) -> set:
 
 
 def runtime_closure(root: Path) -> set:
-    """Every local module reachable by import from app.py and run.pyw."""
+    """Every local module reachable by import from app.py."""
     local = _local_modules(root)
-    todo = [root / "app.py", root / "run.pyw"]
+    todo = [root / "app.py"]
     seen_files, mods = set(), set()
     while todo:
         f = todo.pop()
@@ -172,7 +172,7 @@ class PackageTests(unittest.TestCase):
 
     def test_required_files_present(self):
         rel = self._rel()
-        for must in ("app.py", "requirements.txt", "VERSION", "run.pyw",
+        for must in ("app.py", "requirements.txt", "VERSION",
                      "templates/index.html", "templates/calibration.html",
                      "static/js/app.js", "static/css/style.css", "static/css/badge.css"):
             self.assertIn(must, rel)
