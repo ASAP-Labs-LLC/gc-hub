@@ -585,7 +585,10 @@ def _apply_one(conn, inst_id, item: _Item, data_dir: Path, *, csv_name, by, plac
                 info["sample_id"] = _insert(conn, inst_id, item, data_dir, csv_name=csv_name,
                                             by=by, placed=placed)
             elif outcome == "delta":
-                raise NotImplementedError("delta")
+                existing = store.samples.get(info["sample_id"], db=conn)
+                _add_revisions(conn, existing["id"], info["add"], csv_name=csv_name, by=by)
+                if existing["status"] == "raw_only":        # an imported orphan gained rows
+                    store.samples.set_status(existing["id"], item.status, db=conn)
             elif outcome == "conflict":
                 if item.staged is None:
                     raise RuntimeError("the file was not staged")
@@ -628,12 +631,18 @@ def _record(rec: _Recorder, item: _Item, outcome: str, info: dict) -> None:
         if item.status in ("other_method", "review_method"):
             rec.example(item.status, dict(brief, method_name=item.method_name))
         return
+    if outcome == "delta":
+        rec.add("delta_revisions", len(info["add"]))
+        rec.add("revisions", len(info["add"]))
+        rec.example("delta", dict(brief, sample_id=info["sample_id"],
+                                  added=[r.line_no for r in info["add"]]))
     key = _OUTCOME_KEYS.get(outcome, outcome)
     rec.add(key)
     if item.collision_with is not None:
         brief["kept"] = item.collision_with
     rec.example(key, dict(brief, **{k: v for k, v in info.items() if k != "add"}))
-    rec.add("rows_not_imported", len(item.rows))
+    if outcome not in ("delta", "already_imported"):
+        rec.add("rows_not_imported", len(item.rows))
 
 
 def _report_matcher(summary: dict, rec: _Recorder, report) -> None:
