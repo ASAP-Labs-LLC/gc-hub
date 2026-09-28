@@ -61,7 +61,8 @@ def _format_index(summary: dict, path: Path) -> str:
     for key in ("entries", "distinct_lab_ids", "date_min", "date_max", "exact_duplicates",
                 "duplicates_after_strip", "canonical_seconds", "canonical_microseconds",
                 "non_canonical", "names_with_outer_whitespace", "empty_names",
-                "lab_ids_with_several_times"):
+                "lab_ids_with_several_times", "misparse_signature",
+                "misparse_signature_rate"):
         lines.append(f"  {key + ':':30s}{summary[key]}")
     lines.append(f"  {'blank_like_names:':30s}{summary['blank_like_names']}")
     if summary["canonical_microseconds_examples"]:

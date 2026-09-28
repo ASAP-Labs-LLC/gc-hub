@@ -22,14 +22,16 @@ already match by metadata; they never attach a row on their own.
 from __future__ import annotations
 
 import csv
+import functools
 import hashlib
 import io
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -38,6 +40,7 @@ from netCDF4 import Dataset
 import distill
 
 _HASH_CHUNK = 1 << 20
+_CANON_SECONDS = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
 
 @dataclass(frozen=True)
@@ -70,29 +73,78 @@ def _v1_strings(c: CdfMeta) -> tuple:
 
 # ── Injection time parsing ─────────────────────────────────────────────────
 # v1 (distill.parse_injection_datetime as of phase 1) tried fromisoformat
-# FIRST. On Python >= 3.11 fromisoformat accepts some compact ANDI stamps
-# ("20260925002450+0000") and misreads them: 02:45:00 instead of 00:24:50.
-# The hub (2A1) fixes distill; the import still has to reproduce the bug to
-# find v1's CSV rows, so a bug-for-bug copy is pinned here.
+# FIRST. From Python 3.11, fromisoformat accepts a compact ANDI stamp with
+# an attached zone ("20260925002450+0000") and misreads it. The hub (2A1)
+# fixes distill; the import has to reproduce the bug to find v1's CSV rows.
+#
+# The misread is EMULATED here, not delegated to the running interpreter, so
+# the matcher gives the same answer on any Python. The rules were derived by
+# brute force over all 86,400 HHMMSS values (dates 2026-09-25, 2026-09-30,
+# 2026-12-31; zones +0000, Z, -0500, +05:30 and none) on CPython 3.12.13 and
+# 3.14.7, with 3.9.25 as the pre-3.11 control:
+#
+#   stamp = YYYYMMDD a HH MM b ZONE    (a, b single digits; ZONE attached)
+#   * no zone: fromisoformat fails on every version (v1 falls back to its
+#     compact regex, i.e. the correct time);
+#   * 3.11-3.13 ("py311_313"): YYYY-MM-DD HH:MM:00 when HH <= 23 and
+#     MM <= 59 (a is taken as the date/time separator, b is ignored);
+#     otherwise it fails and v1 falls back to the correct time;
+#   * 3.14 ("py314"): the same, plus HH == 24 and MM == 00 gives the NEXT
+#     day at 00:00:00 (stamps a2400b with a in 0-2);
+#   * < 3.11: fails; v1 wrote the correct time.
+#   ZONE forms emulated: Z, +HH, +HHMM, +HH:MM, +HHMMSS, +HH:MM:SS (either
+#   sign), total offset < 24 h. Other text is not emulated: it goes to the
+#   running interpreter's fromisoformat, which for the forms v1 saw (ISO with
+#   '-' separators) behaves the same on 3.11-3.14.
+V1_FAMILIES = ("py311_313", "py314")
 _V1_COMPACT = re.compile(r"^(\d{14})(?:\s*[+-]\d{2}:?\d{2})?$")
+_ISO_COMPACT_ZONED = re.compile(
+    r"^(\d{8})(\d{6})(Z|([+-])(\d{2})(?::?(\d{2})(?::?(\d{2}))?)?)$")
 _CORRECT_COMPACT = re.compile(r"^(\d{14})(?:Z|\s*[+-]\d{2}:?\d{2})?$")
 _ISO_DATE = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}")
 _OTHER_FORMATS = ("%d-%b-%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S")
 
 
-def _v1_parse(raw: str) -> datetime | None:
-    """Bug-for-bug copy of v1's ``distill.parse_injection_datetime``. Do not
-    fix: it must return what v1 returned, on the running Python (>= 3.11 is
-    what the hub runs, and what reproduces v1's CSV)."""
+def _emulated_fromisoformat(m: re.Match, family: str) -> datetime | None:
+    """What fromisoformat returned for a compact zoned stamp (see above)."""
+    if m.group(3) != "Z":
+        offset = int(m.group(5)) * 3600 + int(m.group(6) or 0) * 60 + int(m.group(7) or 0)
+        if offset >= 86400:
+            return None
+    try:
+        day = datetime.strptime(m.group(1), "%Y%m%d")
+    except ValueError:
+        return None
+    t = m.group(2)
+    hh, mm = int(t[1:3]), int(t[3:5])
+    if hh <= 23 and mm <= 59:
+        return day.replace(hour=hh, minute=mm)
+    if family == "py314" and hh == 24 and mm == 0:
+        return day + timedelta(days=1)
+    return None
+
+
+def _v1_parse(raw: str, family: str = "py311_313") -> datetime | None:
+    """v1's ``parse_injection_datetime`` as it behaved on ``family``
+    (``V1_FAMILIES``), independent of the running interpreter for compact
+    stamps. Bug-for-bug: do not fix."""
+    if family not in V1_FAMILIES:
+        raise ValueError(f"unknown v1 family {family!r}")
     if not raw:
         return None
     text = raw.strip()
     if not text:
         return None
-    try:
-        return datetime.fromisoformat(text).replace(tzinfo=None)
-    except ValueError:
-        pass
+    m = _ISO_COMPACT_ZONED.match(text)
+    if m:
+        got = _emulated_fromisoformat(m, family)
+        if got is not None:
+            return got
+    elif not re.fullmatch(r"\d{14}", text):
+        try:
+            return datetime.fromisoformat(text).replace(tzinfo=None)
+        except ValueError:
+            pass
     m = _V1_COMPACT.match(text)
     if m:
         try:
@@ -111,7 +163,13 @@ def _correct_parse(raw: str) -> datetime | None:
     """The fixed parse: the ANDI compact stamp (``YYYYMMDDHHMMSS`` with an
     optional ``Z`` or ``±HH[:]MM`` zone, dropped) is matched explicitly
     before anything else; ISO is tried only when the text has ``-`` or ``/``
-    date separators. Naive wall-clock result, or None."""
+    date separators. Naive wall-clock result, or None.
+
+    Not supported (None, so the caller falls back to the file mtime): a
+    compact date without a time (``YYYYMMDD``), compact stamps with other
+    zone forms (``+HH``, ``+HHMMSS``, fractional offsets), ISO basic format
+    (``YYYYMMDDTHHMMSS``), two-digit years, and any format not listed in
+    ``_OTHER_FORMATS``."""
     if not raw:
         return None
     text = raw.strip()
@@ -134,6 +192,39 @@ def _correct_parse(raw: str) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+@functools.lru_cache(maxsize=1)
+def _misparse_outputs() -> frozenset:
+    """Every (day offset, "HH:MM:SS") a v1 family produces from a compact
+    stamp when that differs from the stamp's correct time. The rules depend
+    on the date only through the 3.14 roll-over (offset 1), so one pass over
+    the 86,400 times of a reference day covers every date."""
+    ref = "20260115"
+    base = datetime.strptime(ref, "%Y%m%d")
+    out = set()
+    for h in range(24):
+        for m in range(60):
+            for s in range(60):
+                stamp = f"{ref}{h:02d}{m:02d}{s:02d}+0000"
+                correct = _correct_parse(stamp)
+                for fam in V1_FAMILIES:
+                    got = _v1_parse(stamp, fam)
+                    if got is not None and got != correct:
+                        out.add(((got.date() - base.date()).days, got.strftime("%H:%M:%S")))
+    return frozenset(out)
+
+
+def time_unverifiable(dt: str) -> bool:
+    """True when the canonical CSV time ``dt`` is one v1 could have written
+    for a stamp with a DIFFERENT correct time (so, without the CDF, the true
+    injection time can't be known). Per date the set is the same (every
+    whole-minute time of the day), computed once from the emulation."""
+    if not _CANON_SECONDS.match(dt or ""):
+        return False
+    outputs = _misparse_outputs()
+    tod = dt[11:]
+    return (0, tod) in outputs or (1, tod) in outputs
 
 
 def _method_basename(raw: str) -> str:
@@ -196,10 +287,14 @@ def _read_cdf_meta_ex(path) -> tuple[CdfMeta, str]:
     correct = _correct_parse(raw_date)
     dt_source = "cdf" if correct is not None else "mtime"
     injection_dt = correct.isoformat(sep=" ") if correct is not None else _mtime()
-    v1 = _v1_parse(raw_date)
-    legacy = v1.isoformat(sep=" ") if v1 is not None else _mtime()
-    # (>= 3.11 form, < 3.11 form); the < 3.11 form is the correct parse.
-    forms = tuple(dict.fromkeys((legacy, injection_dt)))
+    v1_forms = []
+    for fam in V1_FAMILIES:
+        v1 = _v1_parse(raw_date, fam)
+        v1_forms.append(v1.isoformat(sep=" ") if v1 is not None else _mtime())
+    # legacy = the 3.11-3.13 form (what the share copies wrote, as far as we
+    # know); candidates = {3.11-3.13, 3.14, correct (= what < 3.11 wrote)}.
+    legacy = v1_forms[0]
+    forms = tuple(dict.fromkeys((*v1_forms, injection_dt)))
     meta = CdfMeta(path=str(path), sha256=_sha256_file(p), lab_id=name,
                    injection_dt=injection_dt, dt_source=dt_source,
                    method_name=_method_basename(method), legacy_injection_dt=legacy,
@@ -221,13 +316,13 @@ def _is_header(cells: list[str]) -> bool:
     return bool(cells) and cells[0].strip() == "Lab ID"
 
 
-def _decode_csv(data: bytes) -> tuple[str, str]:
-    """(text, encoding): strict UTF-8 (BOM dropped) first, else the whole
-    file as cp1252 (undefined bytes become U+FFFD and flag their rows)."""
-    try:
-        return data.decode("utf-8-sig"), "utf-8"
-    except UnicodeDecodeError:
-        return data.decode("cp1252", errors="replace"), "cp1252"
+_SURROGATE = re.compile("[\udc80-\udcff]")
+
+
+def _redecode_cp1252(cell: str) -> str:
+    """A cell decoded with surrogateescape: back to its bytes, then cp1252
+    (bytes undefined in cp1252 become U+FFFD)."""
+    return cell.encode("utf-8", "surrogateescape").decode("cp1252", errors="replace")
 
 
 def read_results_csv_ex(path) -> tuple[list[CsvRow], list[dict]]:
@@ -249,9 +344,9 @@ def read_results_csv_ex(path) -> tuple[list[CsvRow], list[dict]]:
       unmigrated file);
     * short records are padded with ``""``, extra cells are ignored; both are
       reported (``short-row``/``long-row``) and ``match`` holds those rows;
-    * the file is decoded as strict UTF-8, else as cp1252 (reported as
-      ``{"line_no": 0, "kind": "encoding", "detail": "cp1252"}``); a row with
-      undecodable bytes is reported as ``decode-error``;
+    * each record is decoded as strict UTF-8, else that record alone as
+      cp1252 (reported as ``{"line_no": n, "kind": "encoding", "detail":
+      "cp1252"}``); a row with bytes undefined in both is ``decode-error``;
     * blank and all-empty records are skipped; a BOM is ignored;
     * a file that starts without a header is read with ``CSV_HEADER``.
     """
@@ -265,15 +360,17 @@ def read_results_csv_ex(path) -> tuple[list[CsvRow], list[dict]]:
         issues.append({"line_no": line_no, "kind": kind, "detail": detail})
 
     with open(path, "rb") as fh:
-        text, encoding = _decode_csv(fh.read())
-    if encoding != "utf-8":
-        _issue(0, "encoding", encoding)
+        text = fh.read().decode("utf-8", errors="surrogateescape")
     reader = csv.reader(io.StringIO(text, newline=""))
     for cells in reader:
         line_no = prev_end + 1
         prev_end = reader.line_num
+        if any(_SURROGATE.search(c) for c in cells):
+            # not valid UTF-8: this record (only) is read as cp1252
+            cells = [_redecode_cp1252(c) for c in cells]
+            _issue(line_no, "encoding", "cp1252")
         if cells:
-            cells[0] = cells[0].lstrip("﻿")
+            cells[0] = cells[0].lstrip("\ufeff")
         if not any(c.strip() for c in cells):
             continue
         if _is_header(cells):
@@ -293,8 +390,8 @@ def read_results_csv_ex(path) -> tuple[list[CsvRow], list[dict]]:
             continue
         if not seen_header and not rows:
             _issue(line_no, "no-header", "read with the current CSV_HEADER")
-        if any("�" in c for c in cells):
-            _issue(line_no, "decode-error", f"undecodable bytes ({encoding})")
+        if any("\ufffd" in c for c in cells):
+            _issue(line_no, "decode-error", "bytes undefined in UTF-8 and cp1252")
 
         cols = current
         if len(cells) != len(current):
@@ -334,22 +431,27 @@ class MatchedSample:
     cdf: CdfMeta | None         # None = result-only (legacy_unverified)
     rows: list[CsvRow]          # CSV order; last = current revision; [] = orphan CDF
     # The sample's identity as the store gets it (derived, not passed):
-    lab_id: str = field(init=False)        # CDF sample name verbatim, or the CSV's lab ID
-    injection_dt: str = field(init=False)  # CDF: the CORRECT time; result-only: the CSV string
-    dt_source: str = field(init=False)     # 'cdf' | 'mtime' | 'csv' (result-only)
+    lab_id: str = field(init=False)          # normalise_lab_id(...): the identity form
+    lab_id_display: str = field(init=False)  # CDF sample name / CSV "Lab ID", verbatim
+    injection_dt: str = field(init=False)    # CDF: the CORRECT time; result-only: the CSV string
+    dt_source: str = field(init=False)       # 'cdf' | 'mtime' | 'csv' (result-only)
+    # result-only only: the CSV time is one v1 could have misparsed from a
+    # different stamp, so the true injection time is unknown
+    time_unverifiable: bool = field(init=False)
 
     def __post_init__(self) -> None:
+        self.time_unverifiable = False
         if self.cdf is not None:
-            self.lab_id = self.cdf.lab_id
+            self.lab_id_display = self.cdf.lab_id
             self.injection_dt = self.cdf.injection_dt
             self.dt_source = self.cdf.dt_source
-        elif self.rows:
-            self.lab_id = self.rows[0].lab_id
-            self.injection_dt = self.rows[0].injection_dt_raw
-            self.dt_source = "csv"
         else:
-            self.lab_id = self.injection_dt = ""
+            first = self.rows[0] if self.rows else None
+            self.lab_id_display = first.values.get("Lab ID", first.lab_id) if first else ""
+            self.injection_dt = first.injection_dt_raw if first else ""
             self.dt_source = "csv"
+            self.time_unverifiable = time_unverifiable(self.injection_dt)
+        self.lab_id = normalise_lab_id(self.lab_id_display)
 
 
 @dataclass
@@ -360,8 +462,11 @@ class MatchReport:
     no_injection_time: list[str]    # kept CDFs whose correct time needed the mtime fallback
     mixed_rows: list[CsvRow]        # rows whose Source File is outside instrument_folder
     stats: dict
-    # (kept, other): two CDFs with one identity, or one CSV key matching both
+    # (kept, other): two CDFs with one identity (lab ID + correct time); the
+    # store keeps `kept` and records `other` as a conflict
     key_collisions: list[tuple[CdfMeta, CdfMeta]] = field(default_factory=list)
+    # (row, chosen, other candidates): one CSV key matching several CDFs
+    ambiguous_rows: list[tuple[CsvRow, CdfMeta, list[CdfMeta]]] = field(default_factory=list)
     # rows with a layout problem (short/long record, undecodable): never attached
     held_rows: list[CsvRow] = field(default_factory=list)
 
@@ -401,16 +506,25 @@ def _folder_aliases(instrument_folder) -> list[str]:
 def _in_folder(source: str, aliases: list[str]) -> bool:
     """True when ``source`` lies in one of the aliases. A full path alias
     matches as a prefix; a bare folder name (no separator, no drive) matches
-    the file's immediate parent folder name."""
+    any DIRECTORY component of the path (never the file name itself), so
+    ``processed_cdfs2`` also covers ``...\\processed_cdfs2\\sub\\x.CDF``."""
     s = _norm_path(source)
-    parent = s.rsplit("\\", 1)[0] if "\\" in s else ""
+    dirs = s.split("\\")[:-1]
     for a in aliases:
         if "\\" in a or ":" in a:
             if s.startswith(a + "\\"):
                 return True
-        elif parent.rsplit("\\", 1)[-1] == a:
+        elif a in dirs:
             return True
     return False
+
+
+def _family_forms(c: CdfMeta) -> dict:
+    """The string each v1 family wrote for ``c`` ('correct' = < 3.11)."""
+    py311 = c.legacy_injection_dt or c.injection_dt
+    p314 = _v1_parse(c.raw_stamp, "py314") if c.raw_stamp else None
+    return {"correct": c.injection_dt, "py311_313": py311,
+            "py314": p314.isoformat(sep=" ") if p314 is not None else py311}
 
 
 def _identity(c: CdfMeta) -> tuple[str, str]:
@@ -561,6 +675,7 @@ def match(cdfs, rows, *, instrument_folder, csv_issues=None) -> MatchReport:
             index.setdefault((lab, s), []).append(c)
     attached: dict[int, list[CsvRow]] = {}  # id(CdfMeta) -> rows
     result_only: list[tuple[tuple[str, str], list[CsvRow]]] = []
+    ambiguous_rows: list[tuple[CsvRow, CdfMeta, list[CdfMeta]]] = []
     for key, grp in groups.items():
         cands = index.get(key, [])
         if not cands:
@@ -568,10 +683,8 @@ def match(cdfs, rows, *, instrument_folder, csv_issues=None) -> MatchReport:
             continue
         chosen = preferred(cands, basenames.get(key, set()))
         if len(cands) > 1:
-            collided_keys.add(key)
-            for c in cands:
-                if c is not chosen and (chosen, c) not in key_collisions:
-                    key_collisions.append((chosen, c))
+            others = [c for c in cands if c is not chosen]
+            ambiguous_rows.extend((r, chosen, others) for r in grp)
         attached.setdefault(id(chosen), []).extend(grp)
     collided_rows = sorted(r.line_no for key, grp in groups.items()
                            if key in collided_keys for r in grp)
@@ -579,6 +692,7 @@ def match(cdfs, rows, *, instrument_folder, csv_issues=None) -> MatchReport:
     # 5. Samples.
     samples: list[MatchedSample] = []
     n_attached = orphans = rows_attached = revisions_extra = via_v1 = 0
+    family_matches = {"correct": 0, "py311_313": 0, "py314": 0}
     for c in kept_cdfs:
         grp = sorted(attached.get(id(c), []), key=lambda r: r.line_no)
         samples.append(MatchedSample(cdf=c, rows=grp))
@@ -587,12 +701,22 @@ def match(cdfs, rows, *, instrument_folder, csv_issues=None) -> MatchReport:
             rows_attached += len(grp)
             revisions_extra += len(grp) - 1
             via_v1 += sum(1 for r in grp if r.injection_dt_raw != c.injection_dt)
+            forms = _family_forms(c)
+            for r in grp:
+                for fam, form in forms.items():
+                    if r.injection_dt_raw == form:
+                        family_matches[fam] += 1
         else:
             orphans += 1
 
-    cdfs_by_lab: dict[str, list[CdfMeta]] = {}
+    # Each CDF's candidate times, parsed once (near-miss search).
+    cdfs_by_lab: dict[str, list[tuple[CdfMeta, str, datetime]]] = {}
     for c in kept_cdfs:
-        cdfs_by_lab.setdefault(normalise_lab_id(c.lab_id), []).append(c)
+        entry = cdfs_by_lab.setdefault(normalise_lab_id(c.lab_id), [])
+        for s in _v1_strings(c):
+            cdt = _parse_canonical(s)
+            if cdt is not None:
+                entry.append((c, s, cdt))
     unmatched_rows: list[CsvRow] = []
     same_lab_other_time = 0
     near: list[dict] = []
@@ -607,17 +731,11 @@ def match(cdfs, rows, *, instrument_folder, csv_issues=None) -> MatchReport:
         if row_dt is None:
             continue
         hit = None
-        for c in others:
-            for s in _v1_strings(c):
-                cdt = _parse_canonical(s)
-                if cdt is None:
-                    continue
-                delta = int(round(abs((cdt - row_dt).total_seconds())))
-                if (0 < delta <= _NEAR_SECONDS
-                        or (delta % 3600 == 0 and 0 < delta <= _NEAR_MAX_HOURS * 3600)):
-                    hit = (c, s, delta)
-                    break
-            if hit:
+        for c, s, cdt in others:
+            delta = int(round(abs((cdt - row_dt).total_seconds())))
+            if (0 < delta <= _NEAR_SECONDS
+                    or (delta % 3600 == 0 and 0 < delta <= _NEAR_MAX_HOURS * 3600)):
+                hit = (c, s, delta)
                 break
         if hit:
             for r in grp:
@@ -643,6 +761,7 @@ def match(cdfs, rows, *, instrument_folder, csv_issues=None) -> MatchReport:
         "dup_sha": len(dup_sha),
         "key_collisions": len(key_collisions),
         "collided_rows": collided_rows,
+        "ambiguous_rows": len(ambiguous_rows),
         "no_injection_time": len(no_injection_time),
         "v1_misparsed_cdfs": len(misparsed),
         "v1_misparsed_examples": [[c.path, c.raw_stamp, c.legacy_injection_dt, c.injection_dt]
@@ -653,8 +772,11 @@ def match(cdfs, rows, *, instrument_folder, csv_issues=None) -> MatchReport:
         "attached_samples": n_attached,
         "orphan_cdfs": orphans,
         "result_only_samples": len(result_only),
+        "result_only_time_unverifiable": sum(1 for s in samples if s.time_unverifiable),
         "rows_attached": rows_attached,
         "rows_matched_via_v1_form": via_v1,
+        "v1_family_matches": family_matches,
+        "python_version": sys.version.split()[0],
         "revisions_extra": revisions_extra,
         "unmatched_rows": len(unmatched_rows),
         "rows_missing_key": len(keyless),
@@ -675,7 +797,8 @@ def match(cdfs, rows, *, instrument_folder, csv_issues=None) -> MatchReport:
     }
     return MatchReport(samples=samples, unmatched_rows=unmatched_rows, dup_sha=dup_sha,
                        no_injection_time=no_injection_time, mixed_rows=mixed, stats=stats,
-                       key_collisions=key_collisions, held_rows=held)
+                       key_collisions=key_collisions, ambiguous_rows=ambiguous_rows,
+                       held_rows=held)
 
 
 def read_cdf_meta(path) -> CdfMeta:
@@ -700,7 +823,7 @@ def iter_cdf_paths(processed_dir) -> list[Path]:
     return found
 
 
-def dry_run(processed_dir, results_csv, *, instrument_folder,
+def dry_run(processed_dir, results_csv=None, *, instrument_folder,
             on_progress: Callable[[int, int], None] | None = None) -> MatchReport:
     """Read-only: read every CDF's metadata under ``processed_dir`` (never
     the chromatogram arrays; sha256 is streamed) and the results CSV, then
@@ -742,8 +865,8 @@ def dry_run(processed_dir, results_csv, *, instrument_folder,
     csv_encoding = None
     if results_csv:
         rows, csv_issues = read_results_csv_ex(results_csv)
-        csv_encoding = next((i["detail"] for i in csv_issues if i["kind"] == "encoding"),
-                            "utf-8")
+        n1252 = sum(1 for i in csv_issues if i["kind"] == "encoding")
+        csv_encoding = f"utf-8 ({n1252} records cp1252)" if n1252 else "utf-8"
 
     report = match(metas, rows, instrument_folder=instrument_folder, csv_issues=csv_issues)
     dt_source = {"cdf": 0, "mtime": 0}
@@ -809,6 +932,9 @@ def format_summary(report: MatchReport, *, examples: int = 5) -> str:
         add(f"  Local time zone: {'/'.join(tz.get('tzname', []))} "
             f"(UTC offset {tz.get('utc_offset_seconds', 0) / 3600:+.1f} h; "
             "mtime fallbacks use it)")
+    if st.get("python_version"):
+        add(f"  Python {st['python_version']} (v1's time misparse is emulated for both "
+            "families, whatever this interpreter is)")
 
     if st.get("mixed_warning"):
         add("")
@@ -832,11 +958,17 @@ def format_summary(report: MatchReport, *, examples: int = 5) -> str:
     add(f"  no injection time (mtime): {st['no_injection_time']}")
     add(f"  v1 misparsed time (CDFs):  {st['v1_misparsed_cdfs']}"
         f"  (rows matched only through v1's misparsed form: {st['rows_matched_via_v1_form']})")
+    fams = st.get("v1_family_matches", {})
+    add("  rows matched per v1 family: "
+        + ", ".join(f"{k} {v}" for k, v in fams.items()) + "  (a row can fit several)")
+    add(f"  ambiguous rows:            {st.get('ambiguous_rows', 0)}"
+        "  (one CSV key fits several CDFs)")
     add(f"  CSV rows:                  {st['rows']}")
     add(f"  samples:                   {st['samples']}")
     add(f"    attached (CDF + rows):   {st['attached_samples']}  ({st['rows_attached']} rows)")
     add(f"    orphan CDFs (no row):    {st['orphan_cdfs']}")
-    add(f"    result-only (no CDF):    {st['result_only_samples']}")
+    add(f"    result-only (no CDF):    {st['result_only_samples']}"
+        f"  (time unverifiable: {st.get('result_only_time_unverifiable', 0)})")
     add(f"  extra revisions:           {st['revisions_extra']}")
     add(f"  unmatched rows:            {st['unmatched_rows']}"
         f"  (same lab ID on a CDF at another time: {st['unmatched_same_lab_other_time']};"
@@ -887,21 +1019,28 @@ def format_summary(report: MatchReport, *, examples: int = 5) -> str:
             lambda d: f"{d[0]}  ==  {d[1]}")
     section("Same key, different bytes (kept, other)", report.key_collisions,
             lambda d: f"{d[0].path}  vs  {d[1].path}")
+    section("Ambiguous rows (row, chosen CDF, other candidates)", report.ambiguous_rows,
+            lambda a: f"line {a[0].line_no}: {a[0].lab_id!r} @ {a[0].injection_dt_raw} -> "
+                      f"{a[1].path}; also {', '.join(c.path for c in a[2])}")
     section("No injection time in the CDF (mtime used)", report.no_injection_time, str)
     section("v1 misparsed injection time (path, stamp, v1 wrote, correct)",
             st.get("v1_misparsed_examples", []),
             lambda e: f"{e[0]}: {e[1]!r} -> v1 {e[2]}, correct {e[3]}")
     section("CDF with no sample name (file stem used)", st.get("name_from_filename", []), str)
     section("Attached samples", [s for s in report.samples if s.cdf is not None and s.rows],
-            lambda s: f"{s.lab_id!r} @ {s.injection_dt}: {len(s.rows)} row(s)"
+            lambda s: f"{s.lab_id_display!r} @ {s.injection_dt}: {len(s.rows)} row(s)"
                       f"  [{s.cdf.path}]")
     section("Samples with revisions", [s for s in report.samples if len(s.rows) > 1],
-            lambda s: f"{s.lab_id!r} @ {s.injection_dt}: {len(s.rows)} rows,"
+            lambda s: f"{s.lab_id_display!r} @ {s.injection_dt}: {len(s.rows)} rows,"
                       f" lines {', '.join(str(r.line_no) for r in s.rows)}")
     section("Orphan CDFs", [s for s in report.samples if s.cdf is not None and not s.rows],
-            lambda s: f"{s.lab_id!r} @ {s.injection_dt} ({s.dt_source}; "
+            lambda s: f"{s.lab_id_display!r} @ {s.injection_dt} ({s.dt_source}; "
                       f"{_method_label(s.cdf.method_name)})  [{s.cdf.path}]")
     section("Result-only samples / unmatched rows", report.unmatched_rows, _row_brief)
+    section("Result-only samples whose time v1 may have misparsed (time unverifiable)",
+            [x for x in report.samples if x.time_unverifiable],
+            lambda x: f"{x.lab_id_display!r} @ {x.injection_dt}, lines "
+                      f"{', '.join(str(r.line_no) for r in x.rows)}")
     section("Near misses (row, CDF)", st["near_misses"]["examples"],
             lambda e: f"line {e['line_no']}: {e['lab_id']!r} CSV {e['csv_dt']} vs CDF "
                       f"{e['cdf_dt']} ({e['delta_seconds']} s)  [{e['cdf_path']}]")
@@ -935,7 +1074,7 @@ def summarize_processed_index(path, *, examples: int = 10) -> dict:
     stripped: dict[tuple[str, str], int] = {}
     times_per_lab: dict[str, set] = {}
     blank_like: dict[str, int] = {}
-    canon_s = canon_us = padded = empty = 0
+    canon_s = canon_us = padded = empty = signature = 0
     micro: list[list[str]] = []
     non_canonical: list[list[str]] = []
     canon_times: list[str] = []
@@ -953,6 +1092,8 @@ def summarize_processed_index(path, *, examples: int = 10) -> dict:
         if _CANON_S.match(dt):
             canon_s += 1
             canon_times.append(dt)
+            if time_unverifiable(dt):
+                signature += 1
         elif _CANON_US.match(dt):
             canon_us += 1
             canon_times.append(dt[:19])
@@ -976,4 +1117,8 @@ def summarize_processed_index(path, *, examples: int = 10) -> dict:
         "names_with_outer_whitespace": padded,
         "empty_names": empty,
         "lab_ids_with_several_times": sum(1 for s in times_per_lab.values() if len(s) > 1),
+        # times v1 could have misparsed from a different stamp (see
+        # time_unverifiable); a true time lands here by chance ~577/86,400
+        "misparse_signature": signature,
+        "misparse_signature_rate": round(signature / len(pairs), 4) if pairs else 0.0,
     }

@@ -165,17 +165,78 @@ UNAFFECTED_CASES = [
 ]
 
 
-@unittest.skipUnless(HAVE_DEPS and sys.version_info >= (3, 11),
-                     "needs numpy + netCDF4, and the Python >= 3.11 fromisoformat")
+# Python 3.14 also reads hour "24" + minute "00" as the next day's midnight.
+# (stamp, v1 on 3.11-3.13, v1 on 3.14, correct)
+PY314_CASES = [
+    ("20260924024005+0000", "2026-09-24 02:40:05", "2026-09-25 00:00:00", "2026-09-24 02:40:05"),
+    ("20261231124003Z", None, "2027-01-01 00:00:00", "2026-12-31 12:40:03"),  # v1 regex has no Z: mtime
+    ("20260930224009-0500", "2026-09-30 22:40:09", "2026-10-01 00:00:00", "2026-09-30 22:40:09"),
+]
+
+
+def _iso(d):
+    return None if d is None else d.isoformat(sep=" ")
+
+
+def _real_v1(raw):
+    """v1's parse exactly as shipped, on the RUNNING interpreter."""
+    import re as _re
+    text = raw.strip()
+    try:
+        return datetime.fromisoformat(text).replace(tzinfo=None)
+    except ValueError:
+        pass
+    m = _re.match(r"^(\d{14})(?:\s*[+-]\d{2}:?\d{2})?$", text)
+    if m:
+        try:
+            return datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
+        except ValueError:
+            pass
+    return None
+
+
+def _running_family():
+    if sys.version_info >= (3, 14):
+        return "py314"
+    if sys.version_info >= (3, 11):
+        return "py311_313"
+    return "correct"
+
+
+@unittest.skipUnless(HAVE_DEPS, "needs numpy + netCDF4")
 class InjectionTimeParseTests(unittest.TestCase):
     def test_v1_parse_is_bug_for_bug(self) -> None:
-        for stamp, legacy, _correct in MISPARSE_CASES:
-            self.assertEqual(im._v1_parse(stamp).isoformat(sep=" "), legacy, stamp)
-        for stamp, good in UNAFFECTED_CASES:
-            self.assertEqual(im._v1_parse(stamp).isoformat(sep=" "), good, stamp)
-        self.assertEqual(im._v1_parse("20260924").isoformat(sep=" "), "2026-09-24 00:00:00")
-        self.assertIsNone(im._v1_parse("20260924153027Z"))    # v1 fell back to mtime
-        self.assertIsNone(im._v1_parse(""))
+        for family in ("py311_313", "py314"):
+            for stamp, legacy, _correct in MISPARSE_CASES:
+                self.assertEqual(_iso(im._v1_parse(stamp, family)), legacy, (family, stamp))
+            for stamp, good in UNAFFECTED_CASES:
+                self.assertEqual(_iso(im._v1_parse(stamp, family)), good, (family, stamp))
+            self.assertIsNone(im._v1_parse("20260924153027Z", family))  # v1 used mtime
+            self.assertIsNone(im._v1_parse("", family))
+        self.assertEqual(im._v1_parse("20260924100000+0000"),          # default family
+                         datetime(2026, 9, 24, 0, 0, 0))
+
+    def test_the_two_families_differ_only_at_hour_24(self) -> None:
+        for stamp, v311, v314, correct in PY314_CASES:
+            self.assertEqual(_iso(im._v1_parse(stamp, "py311_313")), v311, stamp)
+            self.assertEqual(_iso(im._v1_parse(stamp, "py314")), v314, stamp)
+            self.assertEqual(_iso(im._correct_parse(stamp)), correct, stamp)
+
+    def test_emulation_equals_the_running_interpreter_for_every_time_of_day(self) -> None:
+        family = _running_family()
+        for date in ("20260925", "20261231"):
+            for zone in ("+0000", "Z", "", "-0500", "+05:30"):
+                if family == "correct" and zone == "Z":
+                    continue  # < 3.11 v1 rejected 'Z' (mtime); the correct parse accepts it
+                for h in range(24):
+                    for m in range(60):
+                        for sec in range(60):
+                            stamp = f"{date}{h:02d}{m:02d}{sec:02d}{zone}"
+                            want = _real_v1(stamp)
+                            got = (im._correct_parse(stamp) if family == "correct"
+                                   else im._v1_parse(stamp, family))
+                            if got != want:
+                                self.fail(f"{family} {stamp}: emulated {got}, real {want}")
 
     def test_correct_parse(self) -> None:
         for stamp, _legacy, correct in MISPARSE_CASES:
@@ -191,9 +252,15 @@ class InjectionTimeParseTests(unittest.TestCase):
         self.assertIsNone(im._correct_parse(""))
 
 
-@unittest.skipUnless(HAVE_DEPS and sys.version_info >= (3, 11),
-                     "needs numpy + netCDF4, and the Python >= 3.11 fromisoformat")
+@unittest.skipUnless(HAVE_DEPS, "needs numpy + netCDF4")
 class CdfMetaLegacyTimeTests(_TmpCase):
+    def test_py314_form_is_a_candidate(self) -> None:
+        stamp, v311, v314, correct = PY314_CASES[0]
+        meta = im.read_cdf_meta(write_cdf(self.tmp / "h24.CDF", stamp=stamp))
+        self.assertEqual(meta.injection_dt, correct)
+        self.assertEqual(meta.legacy_injection_dt, v311)     # the 3.11-3.13 form
+        self.assertEqual(meta.v1_injection_dts, (v311, v314))  # v311 == correct here
+
     def test_misparsed_stamps_carry_both_forms(self) -> None:
         for i, (stamp, legacy, correct) in enumerate(MISPARSE_CASES):
             meta = im.read_cdf_meta(write_cdf(self.tmp / f"m{i}.CDF", stamp=stamp))
@@ -384,8 +451,19 @@ class ReadResultsCsvTests(_TmpCase):
         p = self.tmp / "w.csv"
         p.write_bytes(text.encode("cp1252"))
         rows, issues = im.read_results_csv_ex(p)
-        self.assertEqual(rows[0].lab_id, "Café – 1")
-        self.assertIn({"line_no": 0, "kind": "encoding", "detail": "cp1252"}, issues)
+        self.assertEqual(rows[0].lab_id, "Caf\u00e9 \u2013 1")
+        self.assertIn({"line_no": 2, "kind": "encoding", "detail": "cp1252"}, issues)
+
+    def test_mixed_encodings_are_decoded_per_record(self) -> None:
+        data = (csv_line(distill.CSV_HEADER).encode()
+                + csv_line(full_row("Caf\u00e9 utf8", "2026-01-01 00:00:01")).encode("utf-8")
+                + csv_line(full_row("Caf\u00e9 1252", "2026-01-01 00:00:02")).encode("cp1252"))
+        p = self.tmp / "mixed.csv"
+        p.write_bytes(data)
+        rows, issues = im.read_results_csv_ex(p)
+        self.assertEqual([r.lab_id for r in rows], ["Caf\u00e9 utf8", "Caf\u00e9 1252"])
+        self.assertEqual([i for i in issues if i["kind"] == "encoding"],
+                         [{"line_no": 3, "kind": "encoding", "detail": "cp1252"}])
 
     def test_utf8_is_not_reported(self) -> None:
         text = csv_line(distill.CSV_HEADER) + csv_line(full_row("Café", "2026-01-01 00:00:01"))
@@ -601,6 +679,19 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(rep.stats["v1_misparsed_cdfs"], 1)
         self.assertEqual(rep.stats["rows_matched_via_v1_form"], 1)
         self.assertEqual(rep.unmatched_rows, [])
+        self.assertEqual(rep.stats["v1_family_matches"],
+                         {"correct": 1, "py311_313": 1, "py314": 1})
+        self.assertEqual(rep.stats["python_version"], sys.version.split()[0])
+
+    def test_family_of_an_hour_24_row(self) -> None:
+        stamp, v311, v314, correct = PY314_CASES[0]
+        c = im.CdfMeta(path="/x/h24.CDF", sha256="aa" * 32, lab_id="H", injection_dt=correct,
+                       dt_source="cdf", legacy_injection_dt=v311, raw_stamp=stamp,
+                       v1_injection_dts=(v311, v314))
+        r = mk_row("H", v314)
+        rep = im.match([c], [r], instrument_folder=FOLDER)
+        self.assertEqual(rep.samples[0].rows, [r])
+        self.assertEqual(rep.stats["v1_family_matches"], {"correct": 0, "py311_313": 0, "py314": 1})
 
     def test_a_row_matching_two_cdfs_is_a_collision(self) -> None:
         # A's misparsed legacy string equals B's correct time.
@@ -611,19 +702,21 @@ class MatchTests(unittest.TestCase):
         s = by_key(rep)
         self.assertEqual(s[("S", "2026-09-24 01:02:03")].rows, [r])   # Source File named a
         self.assertEqual(s[("S", "2026-09-24 10:20:00")].rows, [])
-        self.assertEqual(rep.key_collisions, [(a, b)])
-        self.assertEqual(rep.stats["collided_rows"], [4])
+        self.assertEqual(rep.key_collisions, [])                     # identities differ
+        self.assertEqual(rep.ambiguous_rows, [(r, a, [b])])
+        self.assertEqual(rep.stats["ambiguous_rows"], 1)
+        self.assertEqual(rep.stats["collided_rows"], [])
 
     # ── result-only samples carry the CSV's time ───────────────────────────
     def test_sample_identity_fields(self) -> None:
         c = mk_cdf(" L1 ", "2026-01-01 00:00:00", source="mtime")
-        r = mk_row("L2", "2026-01-02 00:00:00")
+        r = mk_row(" L2 ", "2026-01-02 00:00:00")
         s = by_key(im.match([c], [r], instrument_folder=FOLDER))
         cdf_s, csv_s = s[("L1", "2026-01-01 00:00:00")], s[("L2", "2026-01-02 00:00:00")]
-        self.assertEqual((cdf_s.lab_id, cdf_s.injection_dt, cdf_s.dt_source),
-                         (" L1 ", "2026-01-01 00:00:00", "mtime"))
-        self.assertEqual((csv_s.lab_id, csv_s.injection_dt, csv_s.dt_source),
-                         ("L2", "2026-01-02 00:00:00", "csv"))
+        self.assertEqual((cdf_s.lab_id, cdf_s.lab_id_display, cdf_s.injection_dt, cdf_s.dt_source),
+                         ("L1", " L1 ", "2026-01-01 00:00:00", "mtime"))
+        self.assertEqual((csv_s.lab_id, csv_s.lab_id_display, csv_s.injection_dt, csv_s.dt_source),
+                         ("L2", " L2 ", "2026-01-02 00:00:00", "csv"))
 
     # ── folders ─────────────────────────────────────────────────────────────
     def test_instrument_folder_aliases(self) -> None:
@@ -635,6 +728,10 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(rep.mixed_rows, [other])
         by_name = im.match([], [unc, mapped, other], instrument_folder="processed_cdfs2")
         self.assertEqual(by_name.mixed_rows, [unc, mapped])
+        deeper = mk_row("D", "2026-01-01 00:00:04", source=r"\\srv\PROCESSED_CDFS2\sub\D.CDF")
+        not_file = mk_row("E", "2026-01-01 00:00:05", source=r"\\srv\x\processed_cdfs2")
+        comp = im.match([], [deeper, not_file], instrument_folder="processed_cdfs2")
+        self.assertEqual(comp.mixed_rows, [not_file])   # the file name itself is not a folder
 
     def test_mixed_row_whose_key_matches_a_cdf_here_is_counted(self) -> None:
         c = mk_cdf("A", "2026-01-01 00:00:01")
@@ -812,7 +909,7 @@ class DryRunTests(_FolderFixture):
 
     def test_cdf_only_mode(self) -> None:
         proc, _ = self._fixture()
-        rep = im.dry_run(proc, None, instrument_folder=FOLDER)
+        rep = im.dry_run(proc, instrument_folder=FOLDER)
         self.assertEqual(rep.stats["rows"], 0)
         self.assertTrue(all(not s.rows for s in rep.samples))
         self.assertEqual(rep.stats["orphan_cdfs"], 4)
@@ -854,7 +951,8 @@ class DryRunTests(_FolderFixture):
                        "AF26", "GONE", "THEIRS", "notime.CDF", "broken.CDF",
                        "SIMDISB.M", "SIMDISTB.M", "(absent)", "v1 misparsed", "02:45:00",
                        "held", "SHORT", "near misses", "non-canonical", "time zone",
-                       "sub"):
+                       "sub", "ambiguous", "time unverifiable", "v1 family",
+                       "py311_313", "Python " + sys.version.split()[0]):
             self.assertIn(needle, text)
         self.assertNotIn("WARNING", text)
 
@@ -874,6 +972,47 @@ class DryRunTests(_FolderFixture):
         data = json.loads(json.dumps(im.report_to_dict(rep)))
         self.assertEqual(data["stats"]["cdfs"], 5)
         self.assertEqual(len(data["samples"]), rep.stats["samples"])
+
+
+@unittest.skipUnless(HAVE_DEPS, "needs numpy + netCDF4")
+class UnverifiableTimeTests(unittest.TestCase):
+    def test_times_v1_could_have_misparsed(self) -> None:
+        self.assertTrue(im.time_unverifiable("2026-09-25 02:45:00"))
+        self.assertTrue(im.time_unverifiable("2026-09-25 00:00:00"))
+        self.assertTrue(im.time_unverifiable("2026-01-01 23:50:00"))
+        self.assertFalse(im.time_unverifiable("2026-01-01 23:59:00"))  # needs seconds "9x"
+        self.assertFalse(im.time_unverifiable("2026-09-25 00:24:50"))
+        self.assertFalse(im.time_unverifiable("2026-09-25 02:45:01"))
+        self.assertFalse(im.time_unverifiable("not a time"))
+        self.assertFalse(im.time_unverifiable("2026-09-25 02:45:00.123456"))
+
+    def test_the_set_is_derived_from_the_emulation(self) -> None:
+        # every misparse output is flagged; nothing else is
+        seen = set()
+        for h in range(24):
+            for m in range(60):
+                for sec in range(60):
+                    stamp = f"20260925{h:02d}{m:02d}{sec:02d}+0000"
+                    correct = im._correct_parse(stamp)
+                    for fam in ("py311_313", "py314"):
+                        out = im._v1_parse(stamp, fam)
+                        if out is not None and out != correct:
+                            seen.add(out.isoformat(sep=" "))
+        for s in seen:
+            self.assertTrue(im.time_unverifiable(s), s)
+        self.assertIn("2026-09-26 00:00:00", seen)          # the 3.14 roll-over
+
+    def test_result_only_samples_are_flagged(self) -> None:
+        rows = [mk_row("A", "2026-09-17 14:43:00", line=2), mk_row("B", "2026-09-17 14:43:07", line=3)]
+        rep = im.match([], rows, instrument_folder=FOLDER)
+        flags = {s.lab_id: s.time_unverifiable for s in rep.samples}
+        self.assertEqual(flags, {"A": True, "B": False})
+        self.assertEqual(rep.stats["result_only_time_unverifiable"], 1)
+
+    def test_cdf_backed_samples_are_never_flagged(self) -> None:
+        c = mk_cdf("A", "2026-09-17 14:43:00")
+        rep = im.match([c], [], instrument_folder=FOLDER)
+        self.assertFalse(rep.samples[0].time_unverifiable)
 
 
 class ProcessedIndexTests(_TmpCase):
@@ -897,6 +1036,19 @@ class ProcessedIndexTests(_TmpCase):
         self.assertEqual(s["blank_like_names"], {"(Blank)": 2, "Blank": 1})
         self.assertEqual(s["names_with_outer_whitespace"], 1)
         self.assertEqual(s["lab_ids_with_several_times"], 1)   # (Blank)
+        # misparse signature: whole-minute times v1 could have produced
+        self.assertEqual(s["misparse_signature"], 0)
+        self.assertEqual(s["misparse_signature_rate"], 0.0)
+
+    def test_misparse_signature_rate(self) -> None:
+        import json
+        entries = [["a", "2026-09-25 02:45:00"], ["b", "2026-09-25 02:45:01"],
+                   ["c", "2026-09-25 00:00:00"], ["d", "2026-09-25 13:13:13"]]
+        p = self.tmp / "i.json"
+        p.write_text(json.dumps({"entries": entries}))
+        s = im.summarize_processed_index(p)
+        self.assertEqual(s["misparse_signature"], 2)
+        self.assertEqual(s["misparse_signature_rate"], 0.5)
 
 
 CLI = WEBAPP_DIR / "tools" / "import_dry_run.py"
@@ -924,6 +1076,7 @@ class CliTests(_FolderFixture):
         self.assertIn("History import dry run", res.stdout)
         self.assertIn("orphan", res.stdout)
         self.assertIn("processed index", res.stdout.lower())
+        self.assertIn("misparse_signature_rate", res.stdout)
         data = json.loads(out_json.read_text())
         self.assertEqual(data["report"]["stats"]["cdfs"], 5)
         self.assertEqual(data["processed_index"]["entries"], 1)
