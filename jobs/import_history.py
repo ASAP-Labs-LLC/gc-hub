@@ -212,6 +212,7 @@ class _Item:
     problem: Optional[str] = None     # cdf_problem (not imported)
     is_blank: int = 0
     staged: Optional[Path] = None     # the copy in cdf/.incoming
+    collision_with: Optional[str] = None   # a key collision's `other`: the kept CDF's path
     extra: dict = field(default_factory=dict)
 
     @property
@@ -277,6 +278,8 @@ def _classify(conn, inst_id: str, item: _Item) -> tuple[str, dict]:
     if item.problem is not None:
         return "truncated", {"problem": item.problem}
     if conn is None:
+        if item.collision_with is not None:
+            return "conflict", {"kept": item.collision_with}
         return "new", {}
     c = item.cdf
     if c is not None:
@@ -294,6 +297,8 @@ def _classify(conn, inst_id: str, item: _Item) -> tuple[str, dict]:
         existing = store.samples.find_by_key(inst_id, item.lab_id, item.injection_dt, db=conn)
         if existing is not None:
             return "conflict", {"sample_id": existing["id"]}
+        if item.collision_with is not None:     # the kept CDF was not imported
+            return "collisions_unresolved", {"kept": item.collision_with}
         return "new", {}
     existing = store.samples.find_by_key(inst_id, item.lab_id, item.injection_dt, db=conn)
     if existing is not None and existing["cdf_sha256"] is None:
@@ -368,6 +373,23 @@ def _insert(conn, inst_id: str, item: _Item, data_dir: Path, *, csv_name: str, b
     item.staged = None
     placed.append(final)
     return sid
+
+
+def _hold_conflict(conn, inst_id: str, item: _Item, existing_id: int, data_dir: Path,
+                   placed: list) -> int:
+    """Store ``item``'s CDF as a conflict against sample ``existing_id`` (as
+    ``submit`` does); the file is moved into place last. Returns the id."""
+    c = item.cdf
+    cdir = (data_dir / "cdf" / inst_id / "conflicts" / item.injection_dt[:4]
+            / item.injection_dt[5:7])
+    final = cdir / f"{pipeline._safe_stem(item.lab_id)}_{c.sha256[:12]}.CDF"
+    cid = store.conflicts.add(inst_id, item.lab_id, item.injection_dt, existing_id, c.sha256,
+                              pipeline._rel(final, data_dir), db=conn)
+    cdir.mkdir(parents=True, exist_ok=True)
+    os.replace(item.staged, final)
+    item.staged = None
+    placed.append(final)
+    return cid
 
 
 # ── the job ─────────────────────────────────────────────────────────────────
@@ -469,6 +491,16 @@ def _run(summary, rec, *, inst_id, root, results_csv, aliases, db, data_dir, pro
         if ms.cdf is None and not rows:
             continue
         items.append(_plan(ms, rows, mm))
+    for kept, other in report.key_collisions:
+        it = _plan(import_match.MatchedSample(cdf=other, rows=[]), [], mm)
+        it.collision_with = kept.path
+        items.append(it)
+
+    cdf_items = [it for it in items if it.cdf is not None]
+    for n, it in enumerate(cdf_items, 1):
+        it.problem = pipeline.cdf_problem(it.cdf.path)
+        if n % 500 == 0 or n == len(cdf_items):
+            _emit(progress, {"phase": "check", "done": n, "total": len(cdf_items)})
 
     total = len(items)
     csv_name = str(results_csv) if results_csv else ""
@@ -499,7 +531,8 @@ def _prepare(batch, inst_id, db, data_dir, conf) -> None:
     with store.connection(db) as conn:
         for item in batch:
             outcome, _info = _classify(conn, inst_id, item)
-            if outcome in ("new", "conflict") and item.cdf is not None:
+            # a collision's kept CDF may be inserted earlier in this same batch
+            if outcome in ("new", "conflict", "collisions_unresolved") and item.cdf is not None:
                 try:
                     if outcome == "new":
                         item.is_blank = pipeline._genuine_blank(Path(item.cdf.path), item.lab_id,
@@ -554,11 +587,18 @@ def _apply_one(conn, inst_id, item: _Item, data_dir: Path, *, csv_name, by, plac
             elif outcome == "delta":
                 raise NotImplementedError("delta")
             elif outcome == "conflict":
-                raise NotImplementedError("conflict")
+                if item.staged is None:
+                    raise RuntimeError("the file was not staged")
+                info["conflict_id"] = _hold_conflict(conn, inst_id, item, info["sample_id"],
+                                                     data_dir, placed)
             return outcome, info
     except Exception as exc:  # noqa: BLE001 - recorded per sample, the batch goes on
         log.warning("import_history: %s @ %s failed: %s", item.lab_id, item.injection_dt, exc)
         return "failed", {"error": f"{type(exc).__name__}: {exc}"}
+
+
+_OUTCOME_KEYS = {"conflict": "conflicts", "already_conflict": "conflicts_existing",
+                 "delta": "already_imported"}
 
 
 def _record(rec: _Recorder, item: _Item, outcome: str, info: dict) -> None:
@@ -588,8 +628,11 @@ def _record(rec: _Recorder, item: _Item, outcome: str, info: dict) -> None:
         if item.status in ("other_method", "review_method"):
             rec.example(item.status, dict(brief, method_name=item.method_name))
         return
-    rec.add(outcome)
-    rec.example(outcome, dict(brief, **{k: v for k, v in info.items() if k != "add"}))
+    key = _OUTCOME_KEYS.get(outcome, outcome)
+    rec.add(key)
+    if item.collision_with is not None:
+        brief["kept"] = item.collision_with
+    rec.example(key, dict(brief, **{k: v for k, v in info.items() if k != "add"}))
     rec.add("rows_not_imported", len(item.rows))
 
 
