@@ -235,7 +235,8 @@ by anything. `/healthz` proves the app is alive, never that its boiling points
 are right. The health check runs against an empty data dir (the hub creates a
 store and `gc1` there, with no calibration or corrections), so it exercises
 none of the numerics. For the hub, the v1 parity report (`tools/parity_report.py`,
-the 2A1 plan's T6 runbook) is the check that the numbers are right.
+run as in DEPLOY.md, "Parity check before cutover") is the check that the
+numbers are right.
 
 So if a change could produce a wrong number on a report, test it properly
 first, or publish it without deploying (below).

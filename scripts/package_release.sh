@@ -100,11 +100,14 @@ rsync -a --prune-empty-dirs \
 printf '%s\n' "$TAG" > "$STAGE/VERSION"
 
 # Positive control: what the updater and the hub need at runtime (v2: hub
-# mode only), the admin CLI tools run on the server, and the agent sources the
-# hub builds its agent package and installers from.
+# mode only), the admin CLI tools run on the server, the agent sources the
+# hub builds its agent package and installers from, and the server docs
+# (DEPLOY.md holds the cutover and parity runbooks and points to
+# RELEASING.md; docs/ is not shipped).
 # (tests/test_release_package.py also checks every locally imported module.)
 missing=0
-for f in app.py requirements.txt VERSION templates/index.html templates/calibration.html \
+for f in app.py requirements.txt VERSION DEPLOY.md RELEASING.md \
+         templates/index.html templates/calibration.html \
          templates/admin_setup.html templates/hub_admin.html static \
          paths.py version.py instance.py settings.py distill.py \
          supervisor.py restart_update.py restart_policy.py \
