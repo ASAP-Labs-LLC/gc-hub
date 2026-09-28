@@ -26,7 +26,6 @@ REAL_METHODS = [LONG.format(s) for s in ("10% Recovery", "50% Recovery", "90% Re
 REAL_MAP = {LONG.format("IBP"): "IBP", LONG.format("10% Recovery"): "10%",
             LONG.format("50% Recovery"): "50%", LONG.format("90% Recovery"): "90%",
             LONG.format("FBP"): "FBP"}
-ALL_TESTS = list(C.DEFAULT_CORRECTION_MAP)
 
 
 class FakeLem(BaseHTTPRequestHandler):
@@ -85,31 +84,32 @@ def gc(uid=AGILENT_GC_1, correction_map=None, inst="gc1"):
     return {"id": inst, "lem_machine_uid": uid, "correction_map": correction_map}
 
 
-def test_default_map_with_every_cut(server):
+def test_default_map_with_a_saved_offset(server):
     FakeLem.machines[AGILENT_GC_1] = {
-        "corrections": [{"test_name": "IBP - D86", "correction": -12.08, "units": "°C"}],
-        "methods": ALL_TESTS}
+        "corrections": [{"test_name": LONG.format("IBP"), "correction": -12.08,
+                         "units": "°C"}],
+        "methods": REAL_METHODS}
     got = C.LemProvider(server, C.MemoryCacheStore()).get(gc())
     assert got.source == "lem"
-    assert got.values["IBP"] == -12.08
-    assert len(got.values) == 11 and sum(got.values.values()) == -12.08
+    assert got.values == {"IBP": -12.08, "10%": 0.0, "50%": 0.0, "90%": 0.0, "FBP": 0.0}
     assert FakeLem.seen == [f"/api/machines/{AGILENT_GC_1}/corrections"]
 
 
-def test_todays_real_agilent_answer_with_the_default_map_is_config(server):
+def test_todays_real_agilent_answer_with_the_default_map(server):
     """Exactly what LEM serves for Agilent GC 1 today: no corrections, and the
-    long method names. The '* - D86' default names none of them."""
+    long method names, which are the default map's names."""
+    FakeLem.machines[AGILENT_GC_1] = {"corrections": [], "methods": REAL_METHODS}
+    got = C.LemProvider(server, C.MemoryCacheStore()).get(gc())
+    assert got.values == {"IBP": 0.0, "10%": 0.0, "50%": 0.0, "90%": 0.0, "FBP": 0.0}
+    assert C.DEFAULT_LEM_CORRECTION_MAP == REAL_MAP
+
+
+def test_the_phase1_names_against_real_lem_are_config(server):
     FakeLem.machines[AGILENT_GC_1] = {"corrections": [], "methods": REAL_METHODS}
     with pytest.raises(C.CorrectionsUnavailable) as info:
-        C.LemProvider(server, C.MemoryCacheStore()).get(gc())
+        C.LemProvider(server, C.MemoryCacheStore()).get(
+            gc(correction_map=json.dumps(C.PHASE1_FILE_MAP)))
     assert info.value.kind == "config"
-
-
-def test_todays_real_agilent_answer_with_a_custom_map(server):
-    FakeLem.machines[AGILENT_GC_1] = {"corrections": [], "methods": REAL_METHODS}
-    got = C.LemProvider(server, C.MemoryCacheStore()).get(
-        gc(correction_map=json.dumps(REAL_MAP)))
-    assert got.values == {"IBP": 0.0, "10%": 0.0, "50%": 0.0, "90%": 0.0, "FBP": 0.0}
 
 
 def test_unknown_machine(server):
@@ -126,8 +126,8 @@ def test_a_wrong_lem_url_is_config(server):
 
 def _cached_provider(server, **kw):
     FakeLem.machines[AGILENT_GC_1] = {
-        "corrections": [{"test_name": "FBP - D86", "correction": -5.57, "units": "C"}],
-        "methods": ALL_TESTS}
+        "corrections": [{"test_name": LONG.format("FBP"), "correction": -5.57, "units": "C"}],
+        "methods": REAL_METHODS}
     store = C.MemoryCacheStore()
     first = C.LemProvider(server, store, **kw).get(gc())
     return C.LemProvider(server, store, **kw), first

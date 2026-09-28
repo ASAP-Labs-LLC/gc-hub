@@ -8,17 +8,20 @@ empty result: every way the file can fail is a raise.
 What phase 1 did right is kept: a cut the file does not list is uncorrected
 (0.0, now recorded explicitly). V4 held five Agilent offsets, so the file
 lists five cuts; raising on the other six would hold every sample.
+
+The file's names are fixed (`PHASE1_FILE_MAP`); an instrument's
+`correction_map` is for LEM's names and is ignored here.
 """
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
 import corrections as C
 
 GC1 = {"id": "gc1", "lem_machine_uid": None, "correction_map": None}
-NOW = datetime(2026, 9, 28, 10, 0, 0)
+NOW = datetime(2026, 9, 28, 10, 0, 0, tzinfo=timezone.utc)
 
 
 def _write(tmp_path, data, name="EQM_corrections.json"):
@@ -29,7 +32,7 @@ def _write(tmp_path, data, name="EQM_corrections.json"):
 
 def _full_section(offset=0.0):
     return {test: {"correction_value": offset + i}
-            for i, test in enumerate(C.DEFAULT_CORRECTION_MAP)}
+            for i, test in enumerate(C.PHASE1_FILE_MAP)}
 
 
 def _provider(path):
@@ -47,7 +50,7 @@ def test_all_eleven_cuts_from_the_file(tmp_path):
     path = _write(tmp_path, {"Agilent GC": _full_section()})
     got = _provider(path).get(GC1)
     assert got.source == "file"
-    assert got.fetched_at == "2026-09-28T10:00:00"
+    assert got.fetched_at == "2026-09-28T10:00:00+00:00"
     assert list(got.values) == C.D86_CUTS
     assert got.values == {cut: float(i) for i, cut in enumerate(C.D86_CUTS)}
 
@@ -77,6 +80,13 @@ def test_matches_phase1_for_the_listed_cuts(tmp_path):
     for cut, value in phase1.items():
         assert got[cut] == value
     assert all(got[c] == 0.0 for c in C.D86_CUTS if c not in phase1)
+
+
+def test_the_instruments_correction_map_is_ignored(tmp_path):
+    path = _write(tmp_path, {"Agilent GC": _full_section()})
+    inst = dict(GC1, correction_map=json.dumps({"Initial BP": "IBP"}))
+    assert _provider(path).get(inst).values == _provider(path).get(GC1).values
+    assert _provider(path).get(dict(GC1, correction_map="{broken")).source == "file"
 
 
 def test_only_gc1(tmp_path):
@@ -148,17 +158,6 @@ def test_an_os_error_other_than_missing_is_unreachable(tmp_path):
         os.chmod(path, 0o644)
 
 
-def test_custom_map(tmp_path):
-    path = _write(tmp_path, {"Agilent GC": {"Initial BP": {"correction_value": -2}}})
-    inst = dict(GC1, correction_map=json.dumps({"Initial BP": "IBP"}))
-    assert _provider(path).get(inst).values == {"IBP": -2.0}
-
-
-def test_bad_custom_map_is_config(tmp_path):
-    path = _write(tmp_path, {"Agilent GC": _full_section()})
-    _raises(_provider(path), dict(GC1, correction_map="{"), "config")
-
-
 def test_refresh_reads_the_file_again(tmp_path):
     path = _write(tmp_path, {"Agilent GC": _full_section()})
     p = _provider(path)
@@ -170,9 +169,9 @@ def test_refresh_reads_the_file_again(tmp_path):
 def test_changed_since(tmp_path):
     path = _write(tmp_path, {"Agilent GC": _full_section()})
     p = _provider(path)
-    assert p.changed_since("gc1", C.Corrections("file", "x", {})) is False  # nothing read yet
+    assert p.changed_since(GC1, C.Corrections("file", "x", {"IBP": 9.0})) is False
     used = p.get(GC1)
-    assert p.changed_since("gc1", used) is False
+    assert p.changed_since(GC1, used) is False
     _write(tmp_path, {"Agilent GC": _full_section(offset=0.5)})
     p.refresh(GC1)
-    assert p.changed_since("gc1", used) is True
+    assert p.changed_since(GC1, used) is True
