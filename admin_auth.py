@@ -269,7 +269,7 @@ def check_admin_body(body: Any, *, db=None, client: Optional[str] = None) -> boo
         pass
     res = check(supplied, client, db=db)
     if not res.ok and res.reason != "wrong" and in_request:
-        g.admin_refusal = res.message
+        g.admin_refusal = res
     return res.ok
 
 
@@ -309,9 +309,12 @@ def _cross_site() -> bool:
 @bp.after_app_request
 def _admin_refusal_message(response):
     """Give an admin route's 403 the real reason (not set up / throttled)."""
-    message = g.pop("admin_refusal", None)
-    if message and response.status_code == 403 and response.is_json:
-        response.set_data(jsonify({"error": message, "setup_url": SETUP_PATH}).get_data())
+    refusal = g.pop("admin_refusal", None)
+    if refusal is not None and response.status_code == 403 and response.is_json:
+        body = {"error": refusal.message}
+        if refusal.reason == "not-set":
+            body["setup_url"] = SETUP_PATH
+        response.set_data(jsonify(body).get_data())
     return response
 
 
@@ -325,7 +328,7 @@ def admin_setup_page():
         from version import APP_VERSION
     except Exception:  # noqa: BLE001
         APP_VERSION = "dev"
-    return render_template("admin_setup.html", is_set=done, version=APP_VERSION,
+    return render_template("admin_setup.html", is_set=done, app_version=APP_VERSION,
                            min_length=MIN_LENGTH)
 
 

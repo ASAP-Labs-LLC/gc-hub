@@ -836,18 +836,12 @@ def _error(msg: str, status: int = 400) -> tuple:
     return jsonify({"error": msg}), status
 
 
-# OPEN ITEM (spec: "Open items"): the admin password is a hardcoded "admin".
-# It should become a hashed setting in the data dir; that changes who can do
-# what, so it waits for Ryan's call. Every gated route goes through here.
-_ADMIN_PASSWORD = b"admin"
-
-
 def _check_admin(body) -> bool:
-    """True when the request body carries the admin password (constant-time)."""
-    supplied = (body or {}).get("password") if isinstance(body, dict) else None
-    if not isinstance(supplied, str):
-        return False
-    return hmac.compare_digest(supplied.encode("utf-8"), _ADMIN_PASSWORD)
+    """True when the request body carries the admin password. Every gated
+    route goes through here. ``admin_auth`` (D13) checks the salted PBKDF2
+    hash with hmac.compare_digest and a per-client backoff; until a password
+    is set at /admin/setup, every admin action is refused with that message."""
+    return admin_auth.check_admin_body(body)
 
 
 # ===================================================================== #

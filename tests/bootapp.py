@@ -66,6 +66,18 @@ def send(port, path, data=b"", headers=None, method="POST", timeout=10.0):
         return code, None
 
 
+TEST_ADMIN_PASSWORD = "test-admin-pw"
+
+
+def setup_admin(port, password=TEST_ADMIN_PASSWORD) -> str:
+    """Set the booted app's admin password through the first-use setup API
+    (2B1, D13: there is no default password). Returns it."""
+    code, body = post(port, "/api/admin/setup", {"password": password})
+    if code != 201:
+        raise RuntimeError(f"admin setup failed: {code} {body}")
+    return password
+
+
 def wait_for(predicate, timeout=20.0, interval=0.25) -> bool:
     """Poll ``predicate`` until it is truthy or ``timeout`` elapses."""
     deadline = time.time() + timeout

@@ -487,3 +487,120 @@ def api_agents():
         return jsonify({"agents": agents_status()})
     except admin_auth.NoStore:
         return jsonify({"agents": []})
+
+
+# ── admin: installer download, hub URL, agent commands ──────────────────────
+
+HUB_URL_KEY = "hub_url"
+
+
+def _admin_body():
+    """``(body, None)`` when the request is JSON and carries the admin
+    password; else ``(None, error response)``. (The cross-site guard in
+    app.py already covers these /api/ routes.)"""
+    if not request.is_json:
+        return None, _err("Expected Content-Type: application/json", 415)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return None, _err("Expected a JSON object", 400)
+    try:
+        ok = admin_auth.check_admin_body(body)
+    except Exception:  # noqa: BLE001 - the gate never opens on an error
+        log.exception("admin check failed")
+        ok = False
+    if not ok:
+        return None, _err("Incorrect password", 403)
+    return body, None
+
+
+def configured_hub_url(*, db=None) -> Optional[str]:
+    return store.settings_kv.get(HUB_URL_KEY, db=_db(db)) or None
+
+
+def _valid_hub_url(url: str) -> bool:
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname) and not parts.query \
+        and not parts.fragment
+
+
+def installer_zip(hub_url: str, token: str, package: tuple, version: str) -> bytes:
+    """The "Download installer" zip (contract §1): ``install.pyw``,
+    ``launcher.pyw``, ``install.json`` ``{hub_url, token}``,
+    ``agent-package.zip`` and ``agent-package.json`` ``{version, sha256}``,
+    at the zip root. The only place a token is ever written."""
+    import io
+    import zipfile
+    data, sha = package
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name in ("install.pyw", "launcher.pyw"):
+            z.writestr(name, (AGENT_DIR / name).read_bytes())
+        z.writestr("install.json", json.dumps({"hub_url": hub_url, "token": token}, indent=2))
+        z.writestr("agent-package.zip", data)
+        z.writestr("agent-package.json", json.dumps({"version": version, "sha256": sha}, indent=2))
+    return buf.getvalue()
+
+
+@bp.route("/api/admin/instruments/<instrument_id>/installer", methods=["POST"])
+def api_admin_installer(instrument_id):
+    """Mint a new token for the instrument and return the installer zip. If it
+    already has a token, the request must say ``confirm_revoke: true`` (the old
+    token stops working); otherwise 409 and nothing changes."""
+    body, err = _admin_body()
+    if err:
+        return err
+    inst = store.instruments.get(instrument_id, db=_db(None))
+    if inst is None:
+        return _err(f"unknown instrument {instrument_id!r}", 404)
+    if inst.get("token_hash") and body.get("confirm_revoke") is not True:
+        return jsonify({"error": f"{inst.get('name') or instrument_id} already has an agent token "
+                                 f"(issued {inst.get('token_issued_at')}). A new installer revokes "
+                                 f"it: the agent using it stops until it gets the new one.",
+                        "needs_confirm": True}), 409
+    pkg, err = _package_or_error()          # before minting: a failed build revokes nothing
+    if err:
+        return err
+    hub_url = configured_hub_url() or request.host_url.rstrip("/")
+    token = mint_token(instrument_id)
+    data = installer_zip(hub_url, token, pkg, hub_version())
+    log.warning("agent installer downloaded for %s by %s (hub_url %s)", instrument_id,
+                request.remote_addr, hub_url)
+    return Response(data, mimetype="application/zip", headers={
+        "Content-Disposition": f'attachment; filename="gc-agent-installer-{instrument_id}.zip"',
+        "Cache-Control": "no-store"})
+
+
+@bp.route("/api/admin/hub-url", methods=["POST"])
+def api_admin_hub_url():
+    """Set (or, with an empty value, clear) the hub URL written into installers."""
+    body, err = _admin_body()
+    if err:
+        return err
+    url = body.get("hub_url")
+    if url is None or (isinstance(url, str) and not url.strip()):
+        store.settings_kv.delete(HUB_URL_KEY, db=_db(None))
+        return jsonify({"hub_url": None})
+    if not isinstance(url, str) or not _valid_hub_url(url.strip()):
+        return _err("hub_url must be an http:// or https:// URL, e.g. http://asapsv1:5560", 400)
+    url = url.strip().rstrip("/")
+    store.settings_kv.set(HUB_URL_KEY, url, db=_db(None))
+    return jsonify({"hub_url": url})
+
+
+@bp.route("/api/admin/instruments/<instrument_id>/agent-command", methods=["POST"])
+def api_admin_agent_command(instrument_id):
+    body, err = _admin_body()
+    if err:
+        return err
+    command = body.get("command")
+    if command not in AGENT_COMMANDS:
+        return _err(f"command must be one of {', '.join(AGENT_COMMANDS)}", 400)
+    try:
+        set_agent_command(instrument_id, command)
+    except LookupError as exc:
+        return _err(str(exc), 404)
+    log.info("agent command %r queued for %s", command, instrument_id)
+    return jsonify({"ok": True, "command": command})
