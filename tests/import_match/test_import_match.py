@@ -480,8 +480,7 @@ def snapshot_tree(root: Path) -> dict:
             for p in sorted(root.rglob("*")) if p.is_file()}
 
 
-@unittest.skipUnless(HAVE_DEPS, "needs numpy + netCDF4")
-class DryRunTests(_TmpCase):
+class _FolderFixture(_TmpCase):
     def _fixture(self):
         proc = self.tmp / "processed_cdf"
         write_cdf(proc / "AF26_09172026_142942.CDF", sample_name="AF26",
@@ -503,6 +502,9 @@ class DryRunTests(_TmpCase):
         results = write_csv_text(self.tmp / "distill_results.csv", text)
         return proc, results
 
+
+@unittest.skipUnless(HAVE_DEPS, "needs numpy + netCDF4")
+class DryRunTests(_FolderFixture):
     def test_end_to_end(self) -> None:
         proc, results = self._fixture()
         rep = im.dry_run(proc, results, instrument_folder=FOLDER)
@@ -588,6 +590,60 @@ class ProcessedIndexTests(_TmpCase):
         self.assertEqual(s["blank_like_names"], {"(Blank)": 2, "Blank": 1})
         self.assertEqual(s["names_with_outer_whitespace"], 1)
         self.assertEqual(s["lab_ids_with_several_times"], 1)   # (Blank)
+
+
+CLI = WEBAPP_DIR / "tools" / "import_dry_run.py"
+
+
+@unittest.skipUnless(HAVE_DEPS, "needs numpy + netCDF4")
+class CliTests(_FolderFixture):
+    def _run(self, *args):
+        import subprocess
+        return subprocess.run([sys.executable, str(CLI), *map(str, args)],
+                              capture_output=True, text=True, timeout=120,
+                              cwd=str(self.tmp))
+
+    def test_prints_summary_and_writes_json(self) -> None:
+        import json
+        proc, results = self._fixture()
+        (proc / ".processed_index.json").write_text(
+            json.dumps({"entries": [["(Blank)", "2023-01-26 18:38:52"]]}))
+        before = snapshot_tree(proc)
+        out_json = self.tmp / "out" / "report.json"
+        res = self._run("--processed-dir", proc, "--results-csv", results,
+                        "--instrument-folder", FOLDER, "--json", out_json,
+                        "--examples", "2", "--processed-index", proc / ".processed_index.json")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("History import dry run", res.stdout)
+        self.assertIn("orphan", res.stdout)
+        self.assertIn("processed index", res.stdout.lower())
+        data = json.loads(out_json.read_text())
+        self.assertEqual(data["report"]["stats"]["cdfs"], 4)
+        self.assertEqual(data["processed_index"]["entries"], 1)
+        self.assertEqual(snapshot_tree(proc), before)
+
+    def test_cdf_only_mode(self) -> None:
+        proc, _ = self._fixture()
+        res = self._run("--processed-dir", proc, "--instrument-folder", FOLDER)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("CDF-only", res.stdout)
+
+    def test_missing_folder_exits_2(self) -> None:
+        res = self._run("--processed-dir", self.tmp / "nope", "--instrument-folder", FOLDER)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("nope", res.stderr)
+
+    def test_json_must_not_overwrite_the_sources(self) -> None:
+        proc, results = self._fixture()
+        before = results.read_bytes()
+        res = self._run("--processed-dir", proc, "--results-csv", results,
+                        "--instrument-folder", FOLDER, "--json", results)
+        self.assertEqual(res.returncode, 2)
+        self.assertEqual(results.read_bytes(), before)
+        res2 = self._run("--processed-dir", proc, "--instrument-folder", FOLDER,
+                         "--json", proc / "report.json")
+        self.assertEqual(res2.returncode, 2)
+        self.assertFalse((proc / "report.json").exists())
 
 
 if __name__ == "__main__":
