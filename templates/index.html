@@ -9,7 +9,7 @@
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 
   <!-- App stylesheet (cache-bust) -->
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=36">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=37">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=1">
 
   <!-- Inline critical layout styles (structural only; visual polish lives in style.css) -->
@@ -264,14 +264,11 @@
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3a5 5 0 1 0 4.546 2.914.75.75 0 1 1 1.36-.636A6.5 6.5 0 1 1 8 1.5v2A.75.75 0 0 1 6.75 4L9.25.75A.75.75 0 0 1 10.5 1.5l-2.5 3z"/></svg>
       Refresh
     </button>
-    <button class="tb-btn" id="btn-scan" title="Scan watch folder and parse new CDFs">Scan &amp; Parse</button>
     <button class="tb-btn" id="btn-reprocess" title="Re-process specific Lab IDs">Re-process</button>
-    <button class="tb-btn" id="btn-rebuild-db" title="Rebuild distillation database from scratch">Rebuild DB</button>
 
     <span class="tb-sep"></span>
 
     <button class="tb-btn" id="btn-help" title="Help">Help</button>
-    <button class="tb-btn danger" id="btn-stop" title="Emergency stop current scan">Stop Scan</button>
     <button class="tb-btn" id="btn-restart-server" title="Restart the server process (auto-restarts daily at 3 AM if idle)">Restart Server</button>
 
     <span class="tb-sep"></span>
@@ -764,12 +761,6 @@
   <!-- Persistent status bar -->
   <div id="status-bar">
     <div id="status-scan-info" style="flex:1;">Ready</div>
-    <div id="status-scan-bar-wrap" style="flex:1; max-width:300px; display:none;">
-      <div style="height:6px; background:#21262d; border-radius:3px; overflow:hidden;">
-        <div id="status-scan-bar-fill" style="width:0%; height:100%; background:linear-gradient(90deg,#1f6feb,#58a6ff); border-radius:3px; transition:width .3s;"></div>
-      </div>
-    </div>
-    <div id="status-scan-counts" style="font-size:10px; color:#7d8590;"></div>
   </div>
 
 </div><!-- /app-shell -->
@@ -864,15 +855,6 @@
         <p style="font-size:11px; color:#7d8590; margin-top:4px;">Each parsed sample is compared to every comparison standard (amplitude-normalized, small retention shifts allowed). A score at or above the threshold names the fuel; otherwise a two-component blend is tried (&ldquo;Mix: A + B (80/20)&rdquo;), else the sample is labeled &ldquo;Mix&rdquo;. Results are written to the CSV and shown in sample lists.</p>
       </div>
 
-      <!-- Library maintenance -->
-      <div style="margin-top:12px; border-top:1px solid #21262d; padding-top:10px;">
-        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
-          <span style="font-size:12px; font-weight:600; color:#c9d1d9;">Sample library</span>
-          <button class="btn btn-secondary" id="btn-reindex-times" style="font-size:11px; padding:2px 8px;">Re-derive injection times &amp; reorder</button>
-        </div>
-        <p style="font-size:11px; color:#7d8590; margin:0;">Re-reads each sample's run time from its CDF and re-sorts the library into true chronological (run) order. Runs in the background; results appear in notifications. Does not change distillation results.</p>
-      </div>
-
       <!-- Comparison standards list inside settings -->
       <div style="margin-top:12px; border-top:1px solid #21262d; padding-top:10px;">
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
@@ -909,24 +891,6 @@
       <button class="btn btn-secondary" id="btn-restart" title="Restart the server process" style="margin-right:auto;">Restart</button>
       <button class="btn btn-secondary" data-dismiss="modal">Cancel</button>
       <button class="btn btn-primary" id="btn-settings-save">Save</button>
-    </div>
-  </div>
-</div>
-
-<!-- ── 2. Log Modal ─────────────────────────────────────────────────── -->
-<div class="modal-overlay" id="modal-log">
-  <div class="modal wide">
-    <div class="modal-header">
-      <h2>Scan &amp; Parse Log</h2>
-      <button class="modal-close" data-dismiss="modal">&times;</button>
-    </div>
-    <div class="modal-body">
-      <div class="log-output" id="log-output"></div>
-    </div>
-    <div class="modal-footer">
-      <span class="status-label" id="log-status">Waiting...</span>
-      <button class="btn btn-danger" id="btn-log-stop">Stop</button>
-      <button class="btn btn-secondary" data-dismiss="modal">Close</button>
     </div>
   </div>
 </div>
@@ -1074,7 +1038,7 @@
       <p style="margin-top:8px;"><strong>Distillation Data</strong> (Advanced) &mdash; Browse the full distillation results table. Click column headers to sort. Use the search bar to filter rows.</p>
       <p style="margin-top:8px;"><strong>Distillation Curve</strong> (Advanced) &mdash; Click samples to overlay their distillation curves for visual comparison.</p>
       <p style="margin-top:8px;"><strong>Analysis</strong> &mdash; Select a sample and comparison standards, adjust trend parameters and thresholds, then click <em>Run Analysis</em>. The trend and difference plots show deviations from expected baselines. The deviation report summarizes findings. Use the queue to batch multiple analyses for QBench export.</p>
-      <p style="margin-top:12px;"><strong>Scan &amp; Parse</strong> &mdash; Scans the watch folder for new CDF files, copies them to the processed folder, parses chromatographic data, and calculates D2887/D86 distillation temperatures.</p>
+      <p style="margin-top:12px;"><strong>Sample status</strong> &mdash; New CDFs are processed automatically. A sample that is not finished shows a badge (e.g. <em>Awaiting calibration</em>, <em>Pending corrections</em>, <em>Other method</em>); hover it for the reason. &#9201; marks an injection time corrected from the old parser's misreading. Only final samples can be exported to LIMS or uploaded to QBench.</p>
       <p style="margin-top:8px;"><strong>Corrected D86</strong> &mdash; When checked, applies EQM correction factors from the configured JSON file to D86 distillation values.</p>
       <p style="margin-top:8px;"><strong>Keyboard shortcuts:</strong></p>
       <ul style="margin-left:18px; margin-top:4px;">
@@ -1106,11 +1070,12 @@
      APP SCRIPT
      ================================================================== -->
 <script src="{{ url_for('static', filename='js/selection.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/report_payload.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/report_payload.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/samples.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=44"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=45"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

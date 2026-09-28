@@ -366,6 +366,20 @@ def test_calibration_save_queues_awaiting_calibration(hub_app):
         hub.worker().run_until_idle()
 
 
+def test_index_has_no_scan_controls_and_loads_the_sample_helpers(hub_app):
+    import urllib.request
+    port, _hub, _ = hub_app
+    html = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read().decode()
+    for gone in ('id="btn-scan"', 'id="btn-stop"', 'id="btn-rebuild-db"', 'id="btn-reindex-times"',
+                 'id="modal-log"'):
+        assert gone not in html, gone
+    assert html.index("js/samples.js") < html.index("js/app.js")
+    js = urllib.request.urlopen(f"http://127.0.0.1:{port}/static/js/app.js", timeout=5).read().decode()
+    for gone in ("/api/scan", "/api/rebuild-db", "/api/library/reindex-times", "/api/files/refresh",
+                 "/api/trace?", "/api/distillation-curve?", "sample_path", "pdf_path"):
+        assert gone not in js, gone
+
+
 # ── no store ────────────────────────────────────────────────────────────────
 
 def test_routes_answer_503_without_a_store():

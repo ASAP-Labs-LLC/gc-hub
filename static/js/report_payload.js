@@ -20,7 +20,7 @@
         backend uses its saved defaults. */
     function buildReportItemPayload(item, fallbackOverlays) {
         const payload = {
-            sample_path: item.sample_path,
+            sample_id: item.sample_id,
             standard_name: item.standard_name,
             conclusion: item.conclusion || '',
             bullets: item.bullets || '',
