@@ -50,7 +50,7 @@ def test_the_saved_values_are_returned_as_the_hubs():
     got = p.get(GC2)
     assert p.seen == ["gc2"]
     assert got.source == "hub"
-    assert got.fetched_at == "2026-09-28T10:00:00+00:00"
+    assert got.updated_at == "2026-09-28T10:00:00+00:00"
     assert got.updated_by == "ryan"
     assert list(got.values) == C.D86_CUTS
     assert got.values["IBP"] == -12.08 and got.values["5%"] == 0.0

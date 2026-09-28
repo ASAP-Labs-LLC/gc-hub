@@ -23,7 +23,7 @@ import pytest
 import corrections as C
 
 GC1 = {"id": "gc1", "lem_machine_uid": None, "correction_map": None}
-NOW = datetime(2026, 9, 28, 10, 0, 0, tzinfo=timezone.utc)
+MTIME = datetime(2026, 9, 28, 10, 0, 0, tzinfo=timezone.utc).timestamp()
 
 
 def _write(tmp_path, data, name="EQM_corrections.json"):
@@ -38,7 +38,9 @@ def _full_section(offset=0.0):
 
 
 def _provider(path):
-    return C.FileProvider(path, clock=lambda: NOW)
+    if os.path.exists(path):
+        os.utime(path, (MTIME, MTIME))
+    return C.FileProvider(path)
 
 
 def _raises(provider, instrument, kind):
@@ -52,7 +54,7 @@ def test_all_eleven_cuts_from_the_file(tmp_path):
     path = _write(tmp_path, {"Agilent GC": _full_section()})
     got = _provider(path).get(GC1)
     assert got.source == "file"
-    assert got.fetched_at == "2026-09-28T10:00:00+00:00"
+    assert got.updated_at == "2026-09-28T10:00:00+00:00"   # the file's mtime, in UTC
     assert list(got.values) == C.D86_CUTS
     assert got.values == {cut: float(i) for i, cut in enumerate(C.D86_CUTS)}
 
@@ -189,3 +191,25 @@ def test_seed_from_file_keeps_the_strict_rules(tmp_path, data):
 def test_seed_from_a_missing_file_is_config(tmp_path):
     with pytest.raises(C.CorrectionsUnavailable):
         C.seed_from_file(str(tmp_path / "gone.json"))
+
+
+# ── when the values were set ───────────────────────────────────────────────
+
+def test_updated_at_is_the_files_mtime_not_the_read_time(tmp_path):
+    """The record says since when these values were in force; the moment the
+    hub happened to read them says nothing about that."""
+    path = _write(tmp_path, {"Agilent GC": _full_section()})
+    then = datetime(2026, 3, 1, 8, 30, 15, tzinfo=timezone.utc).timestamp()
+    os.utime(path, (then, then))
+    assert C.FileProvider(path).get(GC1).updated_at == "2026-03-01T08:30:15+00:00"
+
+
+def test_updated_at_is_utc_with_an_offset(tmp_path):
+    got = _provider(_write(tmp_path, {"Agilent GC": _full_section()})).get(GC1)
+    assert datetime.fromisoformat(got.updated_at).utcoffset().total_seconds() == 0
+
+
+def test_the_file_provider_holds_no_clock_or_lock():
+    import inspect
+    assert list(inspect.signature(C.FileProvider).parameters) == ["json_path"]
+    assert not hasattr(C.FileProvider("x.json"), "_lock")

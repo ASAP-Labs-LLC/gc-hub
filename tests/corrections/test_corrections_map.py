@@ -35,11 +35,16 @@ def test_nothing_lem_specific_is_left():
 
 
 def test_corrections_is_frozen():
-    c = C.Corrections(source="hub", fetched_at="2026-09-28T10:00:00+00:00",
+    c = C.Corrections(source="hub", updated_at="2026-09-28T10:00:00+00:00",
                       values={"IBP": 1.0})
     assert c.updated_by == ""
     with pytest.raises(dataclasses.FrozenInstanceError):
         c.source = "file"
+
+
+def test_the_timestamp_field_is_updated_at():
+    names = [f.name for f in dataclasses.fields(C.Corrections)]
+    assert "updated_at" in names and "fetched_at" not in names
 
 
 def test_unavailable_is_config_only():

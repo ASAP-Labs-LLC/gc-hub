@@ -11,13 +11,18 @@ claim about the result, never a default for "not set" or "could not read".
 :class:`CorrectionsUnavailable`, which the pipeline turns into
 ``pending_corrections`` ("Corrections not set for GC-2").
 
+Timestamps: every ``updated_at`` is UTC, ISO 8601 with its offset
+(``2026-09-28T10:00:00+00:00``), so it compares as an instant and no DST
+change can reorder it. The hub's store writes its ``updated_at`` in the same
+convention; ``StoreProvider`` passes it through unchanged.
+
 Stdlib only; importable anywhere.
 """
 from __future__ import annotations
 
 import json
 import math
-import threading
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Protocol
@@ -48,8 +53,8 @@ PHASE1_FILE_MAP: Dict[str, str] = {
 @dataclass(frozen=True)
 class Corrections:
     source: str            # 'hub' | 'file' | 'legacy'
-    fetched_at: str        # ISO with offset. 'hub': when these values were saved
-                           # (the store's updated_at); 'file': when it was read.
+    updated_at: str        # UTC ISO with offset: when these values were set.
+                           # 'hub': the store's updated_at; 'file': the file's mtime.
     values: dict           # cut -> float; 'hub' and 'file' always hold all eleven
     updated_by: str = ""   # 'hub': who saved them
 
@@ -151,7 +156,7 @@ class StoreProvider:
         if not updated_at:
             raise CorrectionsUnavailable(f"The saved corrections for {name} do not say "
                                          f"when they were set.")
-        return Corrections(source="hub", fetched_at=updated_at,
+        return Corrections(source="hub", updated_at=updated_at,
                            values=_in_cut_order(record["values"]),
                            updated_by=str(record.get("updated_by") or ""))
 
@@ -162,8 +167,9 @@ FILE_SECTION = "Agilent GC"
 FILE_INSTRUMENT_ID = "gc1"
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+def _iso_utc(dt: datetime) -> str:
+    """The module's timestamp convention: UTC, ISO 8601, with its offset."""
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 class FileProvider:
@@ -178,19 +184,18 @@ class FileProvider:
     not list is uncorrected, recorded as an explicit 0.0.
     """
 
-    def __init__(self, json_path: str, *, clock: Optional[Callable[[], datetime]] = None) -> None:
+    def __init__(self, json_path: str) -> None:
         self.json_path = str(json_path)
-        self._clock = clock or _utc_now
-        self._lock = threading.Lock()
 
     def get(self, instrument: dict) -> Corrections:
         inst_id = str((instrument or {}).get("id") or "")
         if inst_id != FILE_INSTRUMENT_ID:
             raise CorrectionsUnavailable(f"The corrections file serves only instrument "
                                          f"{FILE_INSTRUMENT_ID!r}, not {inst_id!r}.")
-        with self._lock:
-            fetched_at = self._clock().astimezone(timezone.utc).isoformat(timespec="seconds")
-            section = self._read_section()
+        section, mtime = self._read_section()
+        # When the values were set: the file's modification time, not when the
+        # hub happened to read it.
+        updated_at = _iso_utc(datetime.fromtimestamp(mtime, tz=timezone.utc))
         values: Dict[str, float] = {}
         found = 0
         for test_name, cut in PHASE1_FILE_MAP.items():
@@ -217,11 +222,14 @@ class FileProvider:
         if errors:
             raise CorrectionsUnavailable(f"The corrections file {self.json_path}: "
                                          f"{' '.join(errors)}")
-        return Corrections(source="file", fetched_at=fetched_at, values=_in_cut_order(values))
+        return Corrections(source="file", updated_at=updated_at, values=_in_cut_order(values))
 
-    def _read_section(self) -> dict:
+    def _read_section(self) -> tuple:
+        """``(section, mtime)``: the file's "Agilent GC" object and its mtime
+        (epoch seconds), taken from the same open handle."""
         try:
             with open(self.json_path, encoding="utf-8") as fh:
+                mtime = os.fstat(fh.fileno()).st_mtime
                 text = fh.read()
         except FileNotFoundError:
             raise CorrectionsUnavailable(
@@ -241,7 +249,7 @@ class FileProvider:
         if not isinstance(section, dict):
             raise CorrectionsUnavailable(
                 f"The corrections file {self.json_path} has no {FILE_SECTION!r} section.")
-        return section
+        return section, mtime
 
 
 def seed_from_file(json_path: str) -> Dict[str, float]:
