@@ -655,3 +655,176 @@ def mark_review_other(instrument_id: str, sample_ids: Any = None, *, db: store.D
             n = conn.execute(sql, args).rowcount
     log.warning("instrument %s: %d review_method sample(s) marked other_method", instrument_id, n)
     return n
+
+
+# ── backfill release (D11) ──────────────────────────────────────────────────
+
+RELEASE_MAX = 500
+_SAMPLE_FIELDS = ("lab_id", "injection_dt", "status", "method_name", "source_name", "released_at",
+                  "released_by", "current_revision", "error", "received_at", "is_blank")
+
+
+def _sample_public(s: dict) -> dict:
+    out = {"sample_id": s["id"]}
+    out.update({k: s.get(k) for k in _SAMPLE_FIELDS})
+    return out
+
+
+def _bounded(value: Any, what: str, lo: int, hi: int) -> int:
+    if isinstance(value, bool):
+        raise AdminError(f"{what} must be an integer from {lo} to {hi}.")
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise AdminError(f"{what} must be an integer from {lo} to {hi}.") from None
+    if not lo <= n <= hi:
+        raise AdminError(f"{what} must be an integer from {lo} to {hi}.")
+    return n
+
+
+def backfill_list(instrument_id: str, q: Optional[str] = None, status: Optional[str] = None,
+                  released: Any = None, limit: Any = 100, offset: Any = 0, *,
+                  db: store.Db = None) -> dict:
+    """The instrument's backfill samples, newest injection first:
+    ``{samples, total}``. ``released`` True/False filters on ``released_at``."""
+    get(instrument_id, db=db)
+    limit = _bounded(limit, "limit", 1, 1000)
+    offset = _bounded(offset, "offset", 0, 10 ** 9)
+    if status is not None and status not in store.STATUSES:
+        raise AdminError(f"status must be one of {', '.join(store.STATUSES)}.")
+    if released not in (None, True, False):
+        raise AdminError("released must be true, false or absent.")
+    where = ["instrument_id=?", "backfill=1"]
+    args: list = [instrument_id]
+    if q:
+        pat = "%" + str(q).strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where.append("(lab_id LIKE ? ESCAPE '\\' OR source_name LIKE ? ESCAPE '\\')")
+        args += [pat, pat]
+    if status:
+        where.append("status=?")
+        args.append(status)
+    if released is not None:
+        where.append("released_at IS NOT NULL" if released else "released_at IS NULL")
+    sql_where = " WHERE " + " AND ".join(where)
+    with store.connection(db) as conn:
+        total = conn.execute(f"SELECT COUNT(*) FROM samples{sql_where}", args).fetchone()[0]
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT * FROM samples{sql_where} ORDER BY injection_dt DESC, id DESC LIMIT ? OFFSET ?",
+            args + [limit, offset])]
+    return {"samples": [_sample_public(r) for r in rows], "total": int(total)}
+
+
+def _id_list(sample_ids: Any, what: str = "sample_ids", most: int = RELEASE_MAX) -> list:
+    if not isinstance(sample_ids, list) or not sample_ids or len(sample_ids) > most:
+        raise AdminError(f"{what} must be a list of 1 to {most} sample ids.")
+    out: list = []
+    for v in sample_ids:
+        i = _int_id(v, what)
+        if i not in out:
+            out.append(i)
+    return out
+
+
+def release(instrument_id: str, sample_ids: Any, *, by: Optional[str], db: store.Db = None,
+            data_dir=None) -> list:
+    """Release the selected backfill samples of this instrument, one by one
+    (``pipeline.release_backfill``: sets ``released_at`` and writes the export
+    row). ``[{sample_id, ok, seq | error}]`` in request order."""
+    import pipeline
+    ids = _id_list(sample_ids)
+    inst = get(instrument_id, db=db)
+    out = []
+    for sid in ids:
+        s = store.samples.get(sid, db=db)
+        if s is None:
+            out.append({"sample_id": sid, "ok": False, "error": f"sample {sid} does not exist"})
+            continue
+        if s["instrument_id"] != instrument_id:
+            out.append({"sample_id": sid, "ok": False,
+                        "error": f"sample {sid} is not from {inst['name']}"})
+            continue
+        try:
+            seq = pipeline.release_backfill(sid, by=by, db=db, data_dir=data_dir)
+        except pipeline.NotExportable as exc:
+            out.append({"sample_id": sid, "ok": False, "error": str(exc)})
+            continue
+        out.append({"sample_id": sid, "ok": True, "seq": seq})
+    log.warning("instrument %s: backfill release by %s: %d of %d released", instrument_id, by,
+                sum(1 for r in out if r["ok"]), len(out))
+    return out
+
+
+# ── conflicts ───────────────────────────────────────────────────────────────
+
+def _held(c: dict, data_dir) -> dict:
+    size = None
+    name = Path(c["cdf_path"]).name if c.get("cdf_path") else None
+    if c.get("cdf_path") and data_dir is not None:
+        p = Path(data_dir) / c["cdf_path"]
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = None
+    return {"lab_id": c["lab_id"], "injection_dt": c["injection_dt"], "cdf_sha256": c["cdf_sha256"],
+            "file_name": name, "size": size, "received_at": c["received_at"]}
+
+
+def conflicts_list(instrument_id: Optional[str] = None, include_resolved: bool = False, *,
+                   db: store.Db = None, data_dir=None) -> list:
+    """Conflicts (unresolved unless ``include_resolved``), oldest first, each with
+    the held file's identity, the existing sample's, the last Replace error and
+    whether a Replace is pending."""
+    import pipeline
+    names = {r["id"]: r["name"] for r in store.instruments.list(db=db)}
+    out = []
+    with store.connection(db) as conn:
+        for c in store.conflicts.list(instrument_id, unresolved_only=not include_resolved, db=conn):
+            s = store.samples.get(c["existing_sample_id"], db=conn) if c["existing_sample_id"] else None
+            rj = pipeline._replace_job(conn, s["id"]) if s is not None else None
+            existing = None
+            if s is not None:
+                existing = {"sample_id": s["id"], "lab_id": s["lab_id"],
+                            "injection_dt": s["injection_dt"], "cdf_sha256": s["cdf_sha256"],
+                            "file_name": Path(s["cdf_path"]).name if s.get("cdf_path") else None,
+                            "source_name": s.get("source_name"), "status": s["status"],
+                            "current_revision": s["current_revision"],
+                            "received_at": s["received_at"]}
+            out.append({"id": c["id"], "instrument_id": c["instrument_id"],
+                        "instrument_name": names.get(c["instrument_id"], c["instrument_id"]),
+                        "held": _held(c, data_dir), "existing": existing, "error": c.get("error"),
+                        "resolved": c["resolved"], "resolved_by": c["resolved_by"],
+                        "resolved_at": c["resolved_at"],
+                        "replace_pending": bool(rj and rj["payload"].get("conflict_id") == c["id"])})
+    return out
+
+
+def _conflict(conflict_id: Any, db) -> dict:
+    cid = _int_id(conflict_id, "conflict id")
+    c = store.conflicts.get(cid, db=db)
+    if c is None:
+        raise AdminError(f"Conflict {cid} not found.", 404)
+    if c["resolved"] is not None:
+        raise AdminError(f"Conflict {cid} is already resolved ({c['resolved']}).", 409)
+    return c
+
+
+def keep_existing(conflict_id: Any, *, by: Optional[str], db: store.Db = None) -> None:
+    """Keep the existing sample's file (a pending Replace then does nothing)."""
+    c = _conflict(conflict_id, db)
+    try:
+        store.conflicts.resolve(c["id"], "kept-existing", by=by or "admin", db=db)
+    except ValueError as exc:
+        raise AdminError(str(exc), 409) from None
+    log.warning("conflict %s: kept existing (by %s)", c["id"], by)
+
+
+def replace(conflict_id: Any, *, by: Optional[str], db: store.Db = None, data_dir=None) -> int:
+    """Ask for the held file to replace the existing sample's
+    (``pipeline.resolve_conflict_replace``: queues a job; the worker resolves
+    the conflict). Returns the job id."""
+    import pipeline
+    c = _conflict(conflict_id, db)
+    try:
+        return pipeline.resolve_conflict_replace(c["id"], by=by, db=db, data_dir=data_dir)
+    except ValueError as exc:
+        raise AdminError(str(exc), 409) from None
