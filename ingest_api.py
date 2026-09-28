@@ -166,6 +166,10 @@ _HEARTBEAT_FIELDS = {
 }
 _MAX_TEXT = 2000
 MAX_INT = 2 ** 63          # SQLite INTEGER range; counts and seqs are >= 0
+# Contract §1's heartbeat states. Any other string is stored as "unknown"
+# (not refused): a newer agent with a new state must keep heartbeating.
+AGENT_STATES = ("sending", "idle", "paused", "hub-unreachable", "auth-error", "config-error")
+UNKNOWN_STATE = "unknown"
 
 
 def _heartbeat_values(body: Any) -> dict:
@@ -185,6 +189,8 @@ def _heartbeat_values(body: Any) -> dict:
         if typ is str and not isinstance(v, str):
             raise ValueError(f"{name} must be a string")
         out[name] = v[:_MAX_TEXT] if isinstance(v, str) else v
+    if out["state"] is not None and out["state"] not in AGENT_STATES:
+        out["state"] = UNKNOWN_STATE
     if out["agent_time"] is not None:
         try:
             datetime.strptime(out["agent_time"], _AGENT_TIME)
