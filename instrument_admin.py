@@ -484,3 +484,97 @@ def calibration_view(instrument_id: str, conf: dict, sensitivity: Any = None, *,
         "assignments": amap.get(distill._cal_key(cal), []),
         "usable": st["usable"], "problem": st["problem"], "assigned": st["assigned"],
     }
+
+
+# ── corrections (D4b / 2C) ──────────────────────────────────────────────────
+
+REASON_MAX = 500
+SEED_REASON = "seeded from correction_factors.json"
+
+
+def _reason(reason: Any) -> str:
+    if not isinstance(reason, str) or not reason.strip():
+        raise AdminError("A reason is required to change correction factors.")
+    if len(reason.strip()) > REASON_MAX:
+        raise AdminError(f"The reason must be at most {REASON_MAX} characters.")
+    return reason.strip()
+
+
+def _write_corrections(instrument_id: str, values: dict, reason: str, by: Optional[str],
+                       db: store.Db) -> dict:
+    """``set_all`` and queueing the instrument's ``pending_corrections`` samples,
+    in one transaction."""
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            get(instrument_id, db=conn)
+            changed = store.corrections.set_all(conn, instrument_id, values, by=by, reason=reason)
+            queued = store.jobs.enqueue_for_status(instrument_id, "pending_corrections", db=conn)
+    return {"changed": changed, "queued": queued}
+
+
+def save_corrections(instrument_id: str, values: Any, reason: Any, *, by: Optional[str],
+                     db: store.Db = None) -> dict:
+    """Save all eleven D86 corrections for the instrument (``validate_values``:
+    finite numbers within ±50 °C), with a required reason. The table, its audit
+    and queueing **only** this instrument's ``pending_corrections`` samples are
+    one transaction. ``{changed, queued}``."""
+    import corrections
+    get(instrument_id, db=db)
+    errors = corrections.validate_values(values)
+    if errors:
+        raise AdminError(" ".join(errors), errors=errors)
+    why = _reason(reason)
+    out = _write_corrections(instrument_id, {c: float(values[c]) for c in corrections.D86_CUTS},
+                             why, by, db)
+    log.warning("instrument %s corrections saved by %s (%d changed, %d queued): %s",
+                instrument_id, by, out["changed"], out["queued"], why)
+    return out
+
+
+def corrections_view(instrument_id: str, conf: dict, *, db: store.Db = None,
+                     audit_limit: int = 200) -> dict:
+    """What the editor shows: the cuts, the current values and their source
+    (``hub``; for gc1 before seeding the interim ``file`` values, or the file's
+    error), whether gc1 can still be seeded, and the audit (newest first)."""
+    import corrections
+    row = get(instrument_id, db=db)
+    rec = store.corrections.read(instrument_id, db=db)
+    out = {"cuts": list(corrections.D86_CUTS), "max_abs": corrections.MAX_ABS_CORRECTION_C,
+           "values": None, "source": None, "updated_at": None, "updated_by": None,
+           "complete": False, "can_seed": False, "file_error": None,
+           "audit": store.corrections.audit(instrument_id, audit_limit, db=db)}
+    if rec is not None:
+        out.update(values=rec["values"], source="hub", updated_at=rec["updated_at"],
+                   updated_by=rec["updated_by"],
+                   complete=not corrections.validate_values(rec["values"]))
+    elif row["id"] == instruments.GC1:
+        out["can_seed"] = True
+        try:
+            out.update(values=corrections.seed_from_file(conf.get("correction_factors_json", "") or ""),
+                       source="file", complete=True)
+        except corrections.CorrectionsUnavailable as exc:
+            out["file_error"] = exc.reason
+    return out
+
+
+def seed_gc1(conf: dict, *, by: Optional[str], db: store.Db = None) -> dict:
+    """Seed gc1's hub corrections once from the phase-1 file
+    (``corrections.seed_from_file``, strict), audited as ``SEED_REASON``. 409
+    once gc1 has hub corrections, or if the file is unusable."""
+    import corrections
+    get(instruments.GC1, db=db)
+    if store.corrections.read(instruments.GC1, db=db) is not None:
+        raise AdminError("GC-1 already has hub correction factors; edit them instead.", 409)
+    try:
+        values = corrections.seed_from_file(conf.get("correction_factors_json", "") or "")
+    except corrections.CorrectionsUnavailable as exc:
+        raise AdminError(exc.reason, 409) from None
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            if store.corrections.read(instruments.GC1, db=conn) is not None:
+                raise AdminError("GC-1 already has hub correction factors; edit them instead.", 409)
+            changed = store.corrections.set_all(conn, instruments.GC1, values, by=by,
+                                                reason=SEED_REASON)
+            queued = store.jobs.enqueue_for_status(instruments.GC1, "pending_corrections", db=conn)
+    log.warning("gc1 corrections seeded from %s by %s", conf.get("correction_factors_json"), by)
+    return {"changed": changed, "queued": queued, "values": values}
