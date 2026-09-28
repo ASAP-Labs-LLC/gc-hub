@@ -272,7 +272,20 @@ only), `tests/pipeline/`.
   - the injection-time parse fix;
   - D7096-style runs no longer processed.
 
-### T6 ∥: Folder loader and parity report (after T2 and T3; own module)
+### T6 ∥: Folder loader and parity report
+
+**Pipeline review notes for T6 (must do):**
+- Read each file's time with `distill.cdf_identity` and submit in
+  **injection-time order**, so history blanks never trigger late-blank
+  flags.
+- Pass `notifier=None` and report a summary line instead, including the
+  late-blank `review_note` count.
+- Pass the original file name as `source_name` and the original mtime as
+  `mtime`.
+- Expect `duplicate` and `conflict` outcomes and count them.
+- Never release backfill samples.
+- Call `instruments.startup()` (or `bootstrap_gc1`) first, so gc1 has
+  `live_since` and the default method map. (after T2 and T3; own module)
 
 **Files:** `jobs/load_folder.py`, `tools/parity_report.py`,
 `tests/jobs/`.
