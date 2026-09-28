@@ -77,7 +77,7 @@ ASAPSV1: gc-hub (one process, one URL, updater-managed, plain HTTP :5560 on the 
   ingest → store CDF → durable job queue (in SQLite) → worker (serial)
     → methods.get(instrument.method).compute(cdf, InstrumentContext)
     → sample_results revision → export_rows (append) → UI / SSE
-  LEM client ── GET <LEM_URL>/api/machines/<uid>/corrections
+  corrections: per-instrument table in the hub (D4b); LEM only forwards results
 ```
 
 The transport is plain HTTP on the LAN, like COA and LEM. The token is a
@@ -92,7 +92,7 @@ bearer secret on the LAN (see Security).
 | `methods/` | Registry `get(name)`; `d2887.compute(cdf_path, ctx) -> ComputeResult` wraps `distill.compute` with no numeric change. |
 | `pipeline.py` | Durable job queue (`jobs` table), one worker thread and a status machine. On start it requeues outstanding jobs. |
 | `exports.py` | `export_rows` ledger, per-instrument appends to hub-side CSVs, sidecar safety, `GET /api/agent/results`. |
-| `corrections.py` | The corrections provider interface: `file` (2A1) and `lem` (2C). Cache and notifications. The `file` provider **raises** on a missing or unreadable file or a missing `Agilent GC` section, and the sample goes `pending_corrections`; it never returns `{}` silently. From 2A2 it serves only `gc1`, and other instruments stay `pending_corrections` until 2C. |
+| `corrections.py` | Hub-owned corrections (D4b): `StoreProvider` (reads `instrument_corrections`), `FileProvider` (only seeds gc1, and 2A1's interim source), `validate_values`, `values_differ`. The `file` provider **raises** on a missing or unreadable file or a missing `Agilent GC` section, and the sample goes `pending_corrections`; it never returns `{}` silently. From 2A2 it serves only `gc1`, and other instruments stay `pending_corrections` until 2C. |
 | `ingest_api.py` | `/api/ingest`, `/api/agent/heartbeat`, `/api/agent/results`, `/api/agent/package`. |
 | `admin_auth.py` | Salted admin-password hash, first-use setup, `_check_admin` replacement (2B1). |
 | `jobs/import_history.py` | The history importer, run as an admin job inside the hub (2D). |
@@ -166,7 +166,7 @@ sample_results(                       -- one row per computation (D10)
   d86_uncorrected TEXT,               -- JSON
   calibration_used TEXT,              -- JSON {cdf, sensitivity, anchors:[[rt,carbon],...]}
   blank_used INTEGER,                 -- samples.id
-  corrections_used TEXT,              -- JSON {source:'lem'|'cache'|'file'|'legacy', fetched_at, values:{cut:val}}
+  corrections_used TEXT,              -- JSON {source:'hub'|'file'|'legacy', updated_at, updated_by, values:{cut:val}}
   best_fit TEXT, fit_score REAL, flags TEXT,
   reason TEXT NOT NULL,               -- 'processed'|'reprocess'|'import'|'export-lims'|'corrections-released'|'replace'
   by TEXT, processed_at TEXT NOT NULL,
@@ -195,7 +195,7 @@ corrections_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, instrument_id TEXT, cut 
 standards(id INTEGER PRIMARY KEY, name TEXT, instrument_id TEXT, cdf_path TEXT, added_at TEXT) -- 2A2
 sample_cache(sample_id INTEGER PRIMARY KEY, rules_fingerprint TEXT, flags TEXT,
   bestfit_fingerprint TEXT, best_fit TEXT, fit_score REAL)   -- replaces the JSON caches
-settings_kv(key TEXT PRIMARY KEY, value TEXT)          -- admin hash, LEM_URL, etc.
+settings_kv(key TEXT PRIMARY KEY, value TEXT)          -- admin hash, etc.
 -- Global analysis settings stay in data/settings.json. The nightly backup
 -- copies it next to the VACUUM INTO snapshot. A rollback across v2.0.0 lands
 -- on v1.1.0 in deployed mode, which ignores gc.db. That is safe only because
@@ -593,8 +593,7 @@ a test checks the list against the routes the app actually registers.
 
 Raised for:
 - an agent not seen for 15 minutes;
-- LEM unreachable while samples are waiting on it;
-- corrections changed compared with values samples used;
+- samples waiting for corrections (instrument has no complete set);
 - a conflict received;
 - an export or mirror append failing for more than 10 minutes, or refused
   (sidecar mismatch);
@@ -607,8 +606,9 @@ Raised for:
 1. Confirm ASAPSV1 runs v2.x and port 5560 is open inbound in the Windows
    firewall.
 2. Set the admin password. Create GC-1 and GC-2 on the Instruments page.
-3. Set each instrument's calibration and LEM mapping. Confirm the LEM
-   corrections read green.
+3. Set each instrument's calibration and enter its 11 correction values
+   (GC-1 is seeded from the old JSON file; check it). Confirm that LEM holds
+   **no** GC factors.
 4. Copy the legacy folders locally, then run the import for both
    instruments. Review the summary.
 5. **Per GC PC, in this exact order**, so that no rows flow between steps:
@@ -616,7 +616,6 @@ Raised for:
    2. re-run the import for that instrument (it picks up only the delta;
       otherwise a no-op);
    3. set that instrument's `live_since` to now;
-   4. in LEM, set `corrections_applied_upstream` for that machine;
    5. run `install.pyw` from the Instruments page download, adopt the
       mirror file (that PC's old `distill_output`), and start the agent.
 
@@ -636,8 +635,8 @@ Raised for:
   - the status machine;
   - the per-instrument blank ("at or before");
   - the calibration-usable rule;
-  - corrections rules, covering the 11 cuts, explicit zero, unknown
-    machine, units, non-JSON 200, the cache age and change detection;
+  - corrections: all 11 cuts required, explicit zero, a partial set
+    rejected, the audit trail, `values_differ` (missing cut = 0.0);
   - the admin hash;
   - token mint and revoke;
   - the import matcher.
@@ -650,7 +649,7 @@ Raised for:
   - ingest (valid, duplicate, cross-instrument, conflict, too large, bad
     token);
   - the results pull;
-  - a fake LEM server;
+  - the corrections editor (validation, audit, queueing only `pending_corrections`);
   - admin setup.
 - **End to end:** a hub subprocess plus a real agent subprocess
   (`--no-tray`). A synthetic CDF dropped into the watch folder becomes a
@@ -663,9 +662,8 @@ Raised for:
 
 ## Open items (must be verified on the network)
 
-- The real LEM test names on the GC benches; whether GC-2 exists in LEM;
-  `LEM_URL`; whether Agilent GC 1 has non-zero corrections today
-  (double-correction check).
+- (Resolved 2026-09-28: neither GC has correction factors in LEM; LEM
+  only forwards results. Corrections are hub-owned, per D4b.)
 - Where each GC's LEM station module runs, and which file it tails. D9
   assumes it is the GC PC's `distill_output`.
 - The GC PCs' Python version and its `.pyw` association.

@@ -99,7 +99,8 @@ MAX_ABS_CORRECTION_C = 50.0
 @dataclass(frozen=True)
 class Corrections:
     source: str        # 'hub' | 'file' | 'legacy'
-    updated_at: str    # when these values were last changed
+    updated_at: str    # when these values were last changed (UTC ISO with offset; 'file' = file mtime)
+    updated_by: str = ""
     values: dict       # cut -> float, all 11 D86_CUTS (explicit 0.0 allowed)
 
 class CorrectionsUnavailable(Exception):   # sample -> pending_corrections
@@ -115,7 +116,14 @@ def values_differ(a: dict, b: dict) -> bool: ...           # missing cut counts 
 ```
 
 The store (Lane A) owns the `instrument_corrections` and `corrections_audit`
-tables and supplies `read_fn`.
+tables and supplies `read_fn = store.corrections.read`:
+- returns `None` when the instrument has no rows;
+- otherwise returns `{values: {cut: float}, updated_at: <latest row's, UTC
+  ISO with offset>, updated_by: <that row's>}`.
+
+If `read_fn` raises (a database error), the pipeline leaves the sample as it
+was and retries it; it is never marked `error`. The editor parses form input
+into floats before calling `validate_values`.
 
 ## §3 History import matcher (AMENDED 2026-09-28 after the Lane D review; Lane D builds it, the Lane A importer and parity report call it)
 
