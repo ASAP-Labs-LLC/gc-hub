@@ -235,9 +235,14 @@ class Updater:
         # own, so it is recorded and not downloaded again for 24 h.
         try:
             name = self._install(version, sha, z.body)
-        except UpdateError:
+        except (UpdateError, OSError) as exc:
             failed[sha] = self.clock()
-            _save_failed(self.root, failed)
+            try:
+                _save_failed(self.root, failed)
+            except OSError as exc2:
+                log.error("cannot record the failed package: %s", exc2)
+            if isinstance(exc, OSError):
+                raise UpdateError("cannot install package %s: %s" % (sha[:12], exc))
             raise
         if sha in failed:
             del failed[sha]
