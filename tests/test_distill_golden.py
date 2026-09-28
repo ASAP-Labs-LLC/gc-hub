@@ -29,7 +29,13 @@ import distill  # noqa: E402
 import make_golden  # noqa: E402
 import settings  # noqa: E402
 
-GOLDEN = json.loads((TESTS_DIR / "golden" / "d2887_rows.json").read_text(encoding="utf-8"))
+def _golden(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+GOLDEN = _golden(make_golden.GOLDEN_JSON)
+SNAPSHOT = unittest.skipUnless(make_golden.snapshot_available(),
+                               f"no share snapshot at {make_golden.SNAPSHOT_DIR}")
 
 # The correction values the golden rows were produced with, written out
 # here as well so an edit to make_golden's inputs cannot slip past.
@@ -67,12 +73,25 @@ class ProcessCdfGoldenTests(_IsolatedSettings):
         self.assertEqual(make_golden.D86_CORRECTIONS, PINNED_D86_CORRECTIONS)
         self.assertEqual(sorted(make_golden.CASES), sorted(GOLDEN))
 
-    def test_process_cdf_rows_equal_golden(self) -> None:
-        rows = make_golden.run_all(self.root)
+    def _assert_rows(self, cases: dict, golden: dict) -> None:
+        self.assertEqual(sorted(cases), sorted(golden))
+        rows = make_golden.run_all(self.root, cases)
         self.assertEqual(settings.CONFIG_PATH, self._saved_config)
-        for name, expected in GOLDEN.items():
+        for name, expected in golden.items():
             with self.subTest(case=name):
                 self.assertEqual(rows[name], expected)
+
+    def test_process_cdf_rows_equal_golden(self) -> None:
+        self._assert_rows(make_golden.CASES, GOLDEN)
+
+    def test_bestfit_rows_equal_golden(self) -> None:
+        golden = _golden(make_golden.BESTFIT_JSON)
+        self.assertTrue(all(row["Best Fit"] and row["Fit Score"] for row in golden.values()))
+        self._assert_rows(make_golden.BESTFIT_CASES, golden)
+
+    @SNAPSHOT
+    def test_snapshot_rows_equal_golden(self) -> None:
+        self._assert_rows(make_golden.SNAPSHOT_CASES, _golden(make_golden.SNAPSHOT_JSON))
 
 
 class ConfExplicitCalibrationTests(_IsolatedSettings):
@@ -187,11 +206,10 @@ class ComputeTests(_IsolatedSettings):
         return distill._get_settings()
 
     def _case(self, name: str):
-        sample_key, use_blank, _ = make_golden.CASES[name]
-        return (self.inputs["samples"][sample_key], self.inputs["blank"] if use_blank else None)
+        return make_golden.case_paths(self.inputs, name)
 
-    def test_row_equals_golden(self) -> None:
-        for name, expected in GOLDEN.items():
+    def _assert_compute_rows(self, golden: dict) -> None:
+        for name, expected in golden.items():
             with self.subTest(case=name):
                 cdf, blank = self._case(name)
                 result = distill.compute(cdf, self._loaded_conf(name), blank)
@@ -200,6 +218,16 @@ class ComputeTests(_IsolatedSettings):
                 self.assertEqual(row["Source File"], "")
                 self.assertEqual(_csv_strings({k: v for k, v in row.items() if k != "Source File"}),
                                  expected)
+
+    def test_row_equals_golden(self) -> None:
+        self._assert_compute_rows(GOLDEN)
+
+    def test_bestfit_row_equals_golden(self) -> None:
+        self._assert_compute_rows(_golden(make_golden.BESTFIT_JSON))
+
+    @SNAPSHOT
+    def test_snapshot_row_equals_golden(self) -> None:
+        self._assert_compute_rows(_golden(make_golden.SNAPSHOT_JSON))
 
     def test_result_fields(self) -> None:
         cdf, blank = self._case("sample_40304_blank")
