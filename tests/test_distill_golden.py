@@ -13,6 +13,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 TESTS_DIR = Path(__file__).resolve().parent
 WEBAPP_DIR = TESTS_DIR.parent
 for _p in (WEBAPP_DIR, TESTS_DIR, TESTS_DIR / "golden"):
@@ -67,6 +69,61 @@ class ProcessCdfGoldenTests(_IsolatedSettings):
         for name, expected in GOLDEN.items():
             with self.subTest(case=name):
                 self.assertEqual(rows[name], expected)
+
+
+class ConfExplicitCalibrationTests(_IsolatedSettings):
+    """Calibration functions use the conf they are given, not the global settings."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        import cdf_fixtures as fx
+        self.cal = fx.calibration_cdf(self.root / "cal.CDF")
+        self.sample = fx.sample_cdf(self.root / "40304.CDF")
+        ladder = fx.ladder_times()
+        carbons = distill.N_ALKANE_CARBON
+        base = {"calibration_cdf": str(self.cal)}
+        self.conf_a = dict(base, calibration_assignments=distill.upsert_assignments(
+            "", self.cal, [{"rt": rt, "carbon": c} for rt, c in zip(ladder, carbons[:20])]))
+        # The same peaks, every one assigned one carbon higher.
+        self.conf_b = dict(base, calibration_assignments=distill.upsert_assignments(
+            "", self.cal, [{"rt": rt, "carbon": c} for rt, c in zip(ladder[:19], carbons[1:20])]))
+        self.t = np.linspace(0.5, 6.0, 50)
+
+    def _write_settings(self, conf: dict) -> None:
+        path = self.root / f"settings-{len(list(self.root.glob('settings-*')))}.json"
+        path.write_text(json.dumps(dict(conf, comparison_defaults_dir=str(self.root / "std"))),
+                        encoding="utf-8")
+        settings.CONFIG_PATH = path
+        distill._SETTINGS_CACHE = None
+
+    def test_two_confs_on_one_path_get_their_own_calibration(self) -> None:
+        for first, second in (("a", "b"), ("b", "a")):
+            with self.subTest(order=first + second):
+                _clear_distill_caches()
+                confs = {"a": self.conf_a, "b": self.conf_b}
+                v1 = distill._calibration_function(self.cal, confs[first])(self.t)
+                v2 = distill._calibration_function(self.cal, confs[second])(self.t)
+                self.assertFalse(np.allclose(v1, v2))
+                # Both stay cached: going back returns the first conf's function.
+                again = distill._calibration_function(self.cal, confs[first])(self.t)
+                np.testing.assert_array_equal(again, v1)
+                self.assertEqual(len(distill._CAL_CACHE), 2)
+
+    def test_assignment_signature_reads_the_given_conf(self) -> None:
+        self.assertNotEqual(distill._assignment_signature(self.cal, self.conf_a),
+                            distill._assignment_signature(self.cal, self.conf_b))
+
+    def test_distillation_curve_uses_the_passed_conf(self) -> None:
+        self._write_settings(self.conf_a)
+        pct_a, bp_a = distill.distillation_curve_from_cdf(self.sample)
+        self._write_settings(self.conf_b)
+        pct_b, bp_b = distill.distillation_curve_from_cdf(self.sample)
+        self.assertFalse(np.allclose(bp_a, bp_b))
+
+        # settings.CONFIG_PATH still points at conf_b's calibration.
+        pct, bp = distill.distillation_curve_from_cdf(self.sample, blank_path=None, conf=self.conf_a)
+        np.testing.assert_array_equal(pct, pct_a)
+        np.testing.assert_array_equal(bp, bp_a)
 
 
 if __name__ == "__main__":

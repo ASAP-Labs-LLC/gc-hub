@@ -52,7 +52,10 @@ _SETTINGS_CACHE: Dict[str, str] | None = None
 _SETTINGS_MTIME: float | None = None
 _SETTINGS_LOCK = threading.Lock()
 
-_CAL_CACHE: dict[str, Tuple[float, Callable[[np.ndarray], np.ndarray]]] = {}
+# (resolved calibration path, assignment signature) -> (CDF mtime, function).
+# Keyed by signature too, so confs that share one calibration file but assign
+# its peaks differently each keep their own entry instead of evicting another's.
+_CAL_CACHE: dict[Tuple[str, str], Tuple[float, Callable[[np.ndarray], np.ndarray]]] = {}
 _CAL_LOCK = threading.Lock()
 _NETCDF_LOCK = threading.Lock()
 _CSV_LOCK = threading.Lock()  # guards all reads/writes to distill_results.csv
@@ -552,15 +555,14 @@ def upsert_assignments(raw: str, cdf_path, assignments: list) -> str:
     return json.dumps(amap)
 
 
-def _build_calibration(cal_cdf: Path) -> Callable[[np.ndarray], np.ndarray]:
+def _build_calibration(cal_cdf: Path, conf: Dict[str, str]) -> Callable[[np.ndarray], np.ndarray]:
     """Return a calibration function for a calibration CDF.
 
-    Prefers manual peak→carbon assignments saved in settings
+    Prefers the manual peak→carbon assignments in ``conf``
     (``calibration_assignments``); falls back to sequential auto-detection
     against the reference n-alkane ladder when no usable assignments exist.
     """
     try:
-        conf = _get_settings()
         amap = parse_assignment_map(conf.get("calibration_assignments", ""))
         anchors = anchors_for(amap, cal_cdf)
     except Exception as exc:  # noqa: BLE001
@@ -590,38 +592,46 @@ def _build_calibration(cal_cdf: Path) -> Callable[[np.ndarray], np.ndarray]:
     return build_calibration_from_anchors(rt, bp)
 
 
-def _assignment_signature(cal_path: Path) -> str:
-    """Stable signature of the saved assignments for ``cal_path``.
+def _assignment_signature(cal_path: Path, conf: Dict[str, str]) -> str:
+    """Stable signature of ``conf``'s assignments for ``cal_path``.
 
     Lets the calibration cache refresh when assignments change — the CDF file's
     mtime alone is blind to assignment edits (they live in settings, not the CDF).
     """
     try:
-        conf = _get_settings()
         amap = parse_assignment_map(conf.get("calibration_assignments", ""))
         return json.dumps(amap.get(_cal_key(cal_path)), sort_keys=True)
     except Exception:  # noqa: BLE001
         return ""
 
 
-def _calibration_function(cal_cdf: Path) -> Callable[[np.ndarray], np.ndarray]:
+def _calibration_function(cal_cdf: Path, conf: Dict[str, str]) -> Callable[[np.ndarray], np.ndarray]:
+    """Cached ``_build_calibration(cal_cdf, conf)``.
+
+    Cached per (resolved path, ``conf``'s assignment signature) and rebuilt
+    when the CDF's mtime changes, so two confs never share a function built
+    from the other's assignments.
+    """
     cal_path = Path(cal_cdf)
     try:
         key = str(cal_path.resolve())
     except Exception:  # noqa: BLE001
         key = str(cal_path)
-    sig = _assignment_signature(cal_path)
+    sig = _assignment_signature(cal_path, conf)
     try:
         mtime = cal_path.stat().st_mtime
     except Exception:  # noqa: BLE001
-        return _build_calibration(cal_path)
+        return _build_calibration(cal_path, conf)
     with _CAL_LOCK:
-        cached = _CAL_CACHE.get(key)
-        if cached and cached[0] == mtime and cached[1] == sig:
-            return cached[2]
-    func = _build_calibration(cal_path)
+        cached = _CAL_CACHE.get((key, sig))
+        if cached and cached[0] == mtime:
+            return cached[1]
+    func = _build_calibration(cal_path, conf)
     with _CAL_LOCK:
-        _CAL_CACHE[key] = (mtime, sig, func)
+        # Entries for an older version of this file can never match again.
+        for stale in [k for k, v in _CAL_CACHE.items() if k[0] == key and v[0] != mtime]:
+            del _CAL_CACHE[stale]
+        _CAL_CACHE[(key, sig)] = (mtime, func)
     return func
 
 
@@ -920,9 +930,13 @@ def gc_xy_from_cdf(path: Path) -> Tuple[np.ndarray, np.ndarray]:
     """
     return _read_cdf(path)
 
-def distillation_curve_from_cdf(path: Path, *, blank_path: Path | None = None) -> Tuple[np.ndarray, np.ndarray]:
-    """Return (percent, temperature) arrays for plotting the distillation curve."""
-    conf = _get_settings()
+def distillation_curve_from_cdf(path: Path, *, blank_path: Path | None = None,
+                                conf: Dict[str, str] | None = None) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (percent, temperature) arrays for plotting the distillation curve.
+
+    ``conf`` supplies the calibration; the global settings when omitted.
+    """
+    conf = conf if conf is not None else _get_settings()
     t, y = _read_cdf(path)
     if blank_path is not None:
         try:
@@ -937,7 +951,7 @@ def distillation_curve_from_cdf(path: Path, *, blank_path: Path | None = None) -
     cal_cdf = active_calibration_path(conf)
     if cal_cdf is None or not cal_cdf.is_file():
         raise FileNotFoundError("Calibration CDF not found – set settings['calibration_cdf'] or GC_CAL_CDF")
-    cal_fn = _calibration_function(cal_cdf)
+    cal_fn = _calibration_function(cal_cdf, conf)
     bp_curve = cal_fn(t)
 
     pct_curve = _cumulative_percent(t, y)
@@ -1120,7 +1134,7 @@ def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool =
     cal_cdf = active_calibration_path(conf)
     if cal_cdf is None or not cal_cdf.is_file():
         raise FileNotFoundError("Calibration CDF not found – set settings['calibration_cdf'] or GC_CAL_CDF")
-    cal_fn = _calibration_function(cal_cdf)
+    cal_fn = _calibration_function(cal_cdf, conf)
     bp_curve = cal_fn(t)
 
     # 3 Cumulative %
