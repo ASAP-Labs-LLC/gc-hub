@@ -54,6 +54,9 @@ const state = {
     files: [],              // /api/files samples: {sample_id, uid, lab_id, name, status, ...}
     filesTotal: 0,
     instruments: [],
+    searchResult: null,     // {q, samples, total}: a server search beyond the loaded page
+    listInstrument: null,   // list filters sent with a server search (none in the UI yet)
+    listStatus: null,
     selectedFile: null,
     selectedUids: new Set(),   // multi-selection (shift / ctrl-cmd)
     selectionAnchor: null,     // last plainly-clicked uid (range anchor)
@@ -125,11 +128,7 @@ function formatDateTime(iso) {
     }
 }
 
-function escapeHtml(str) {
-    const el = document.createElement('span');
-    el.textContent = str;
-    return el.innerHTML;
-}
+// escapeHtml comes from samples.js (escapes quotes too, for attribute contexts).
 
 function seriesColor(index) {
     const hue = (index * 137.508) % 360;
@@ -596,10 +595,44 @@ function renderFileList(containerId, files, mode) {
 }
 
 function renderAllFileLists() {
-    renderFileList('dash-file-list', state.files, 'dashboard');
-    renderFileList('chrom-file-list', state.files, 'chrom');
-    renderFileList('dcurve-file-list', state.files, 'dc');
-    renderFileList('analysis-sample-list', state.files, 'analysis');
+    // A server search result replaces the loaded page while its query is in
+    // the search box (the page holds only the newest FILES_PAGE_LIMIT).
+    const q = (document.getElementById('universal-search')?.value || '').trim();
+    const sr = state.searchResult;
+    const useSearch = sr && sr.q === q && q !== '';
+    const files = useSearch ? sr.samples : state.files;
+    renderFileList('dash-file-list', files, 'dashboard');
+    renderFileList('chrom-file-list', files, 'chrom');
+    renderFileList('dcurve-file-list', files, 'dc');
+    renderFileList('analysis-sample-list', files, 'analysis');
+    const countEl = document.getElementById('search-count');
+    if (countEl) {
+        countEl.textContent = useSearch ? countLabel(sr.samples.length, sr.total)
+                                        : countLabel(state.files.length, state.filesTotal);
+    }
+}
+
+/** Search box changed: filter the loaded page at once and, when the server
+    holds more samples than were loaded, ask it (debounced) and show that. */
+let _searchSeq = 0;
+const _serverSearch = debounce(async (q) => {
+    const seq = ++_searchSeq;
+    try {
+        const res = await apiGet(filesUrl({ q, instrument: state.listInstrument,
+                                            status: state.listStatus }, FILES_PAGE_LIMIT));
+        if (seq !== _searchSeq) return;                 // a newer search is under way
+        state.searchResult = { q, samples: res.samples || [], total: res.total || 0 };
+        renderAllFileLists();
+    } catch (e) {
+        console.error('Search failed:', e);
+    }
+}, 300);
+
+function onSearchInput() {
+    const q = (document.getElementById('universal-search')?.value || '').trim();
+    if (state.searchResult && state.searchResult.q !== q) state.searchResult = null;
+    renderAllFileLists();
+    if (needsServerSearch(q, state.filesTotal, state.files.length)) _serverSearch(q);
 }
 
 function toggleEarlySignalFilter() {
@@ -838,7 +871,10 @@ async function loadDashboardData(file) {
         // distillation curve must NOT blank the chromatogram (and vice versa).
         const [traceRes, dcRes] = await Promise.allSettled([
             apiGet(`/api/samples/${file.sample_id}/trace`),
-            apiGet(`/api/samples/${file.sample_id}/distillation-curve`),
+            // A sample with no revision (held) has no curve: don't ask.
+            curveFetchable(file)
+                ? apiGet(`/api/samples/${file.sample_id}/distillation-curve`)
+                : Promise.reject(new Error('no result yet')),
         ]);
 
         // -- Chromatogram plot (renders even if the distillation curve failed) --
@@ -883,11 +919,11 @@ async function loadDashboardData(file) {
 
         // -- Distillation Curve plot (independent of the chromatogram) --
         const holdBadge = statusBadge(file);
-        if (dcRes.status === 'rejected' && holdBadge && !file.current_revision) {
+        if (dcRes.status === 'rejected' && !curveFetchable(file)) {
             // Not processed (held): no result to show — say why instead.
             Plotly.purge(dcDiv);
             populateDashboardTables({}, {}, dcDiv);
-            showNotification(`${file.name}: ${holdBadge.text} — ${holdBadge.title}`, 'info');
+            if (holdBadge) showNotification(`${file.name}: ${holdBadge.text} — ${holdBadge.title}`, 'info');
         } else if (dcRes.status === 'rejected') {
             console.error('Distillation curve load error:', dcRes.reason);
             showNotification('Distillation curve failed: ' + (dcRes.reason?.message || dcRes.reason), 'error');
@@ -1303,6 +1339,11 @@ function renderDistillTable() {
 async function addDCTrace(file) {
     if (state.dcTraces.find(t => t.sample_id === file.sample_id)) {
         showNotification('Curve already on chart', 'info');
+        return;
+    }
+    if (!curveFetchable(file)) {
+        const b = statusBadge(file);
+        showNotification(`${file.name} has no result yet` + (b ? ` (${b.text}: ${b.title})` : ''), 'info');
         return;
     }
     try {
@@ -3996,7 +4037,7 @@ function setupEventListeners() {
     // Universal search input — syncs across all file lists
     const universalSearch = document.getElementById('universal-search');
     if (universalSearch) {
-        universalSearch.addEventListener('input', debounce(() => renderAllFileLists(), 150));
+        universalSearch.addEventListener('input', debounce(onSearchInput, 150));
     }
 
     // Reprocess query — live preview of matching samples

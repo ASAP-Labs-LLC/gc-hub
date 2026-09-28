@@ -297,6 +297,7 @@
     </div>
 
     <input type="text" class="search-input" id="universal-search" placeholder="Search samples..." style="width:220px; min-width:150px; flex-shrink:0; margin:0; margin-bottom:0; font-size:11px; padding:3px 8px;">
+    <span id="search-count" style="font-size:10px; color:#7d8590; margin-left:6px; white-space:nowrap;"></span>
 
     <!-- Persistent upload progress indicator (hidden until an upload starts) -->
     <div id="upload-indicator" style="display:none; margin-left:auto; align-items:center; gap:6px; padding:2px 10px; background:#161b22; border:1px solid #30363d; border-radius:12px; font-size:11px; cursor:pointer; white-space:nowrap;" title="Click to open upload modal">
@@ -1071,11 +1072,11 @@
      ================================================================== -->
 <script src="{{ url_for('static', filename='js/selection.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/report_payload.js') }}?v=2"></script>
-<script src="{{ url_for('static', filename='js/samples.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/samples.js') }}?v=2"></script>
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=45"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=46"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

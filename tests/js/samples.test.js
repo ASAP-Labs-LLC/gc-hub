@@ -49,4 +49,24 @@ module.exports = (t) => {
         'Not exported: 40299 (backfill)');
     t.eq(refusalSummary('Not exported', [{ sample_id: 9, error: 'x' }, { sample_id: 4, error: 'y' }], files),
         'Not exported: #9 (x); 40299 (y)');
+
+    // ── review fixes ───────────────────────────────────────────────────
+    const s = require('../../static/js/samples.js');
+    // search beyond the loaded page only when there is more on the server
+    t.eq(s.needsServerSearch('4030', 12000, 5000), true);
+    t.eq(s.needsServerSearch('  ', 12000, 5000), false);
+    t.eq(s.needsServerSearch('4030', 5000, 5000), false);
+    // the URL carries the search and the list's filters, encoded
+    t.eq(s.filesUrl({ q: 'AB 1&2', instrument: 'gc1', status: ['final', 'error'] }, 5000),
+        '/api/files?limit=5000&q=AB%201%262&instrument=gc1&status=final%2Cerror');
+    t.eq(s.filesUrl({}, 500), '/api/files?limit=500');
+    // "showing N of M"
+    t.eq(s.countLabel(5000, 12000), 'showing 5000 of 12000');
+    t.eq(s.countLabel(40, 40), '');
+    // the curve is fetched only for a sample with a revision
+    t.eq(s.curveFetchable({ current_revision: 2 }), true);
+    t.eq(s.curveFetchable({ current_revision: null }), false);
+    // escapeHtml escapes quotes too (attribute contexts)
+    t.eq(s.escapeHtml(`<a href="x" title='y'>&`), '&lt;a href=&quot;x&quot; title=&#39;y&#39;&gt;&amp;');
+    t.eq(s.escapeHtml(null), '');
 };

@@ -70,7 +70,45 @@
             .map(r => `${label(r.sample_id)} (${r.error})`).join('; ');
     }
 
-    const api = { sampleUid, sampleIdsOf, statusBadge, timeCorrectedTitle, refusalSummary };
+    /** The lists hold the newest page only; search the server when there is
+        more than that and the search box isn't empty. */
+    function needsServerSearch(q, filesTotal, filesLength) {
+        return String(q || '').trim() !== '' && Number(filesTotal) > Number(filesLength);
+    }
+
+    /** /api/files URL for a search: ``q`` plus the list's instrument/status
+        filters (a string or a list). */
+    function filesUrl(filters, limit) {
+        const parts = [`limit=${encodeURIComponent(limit)}`];
+        for (const key of ['q', 'instrument', 'status', 'method']) {
+            let v = (filters || {})[key];
+            if (Array.isArray(v)) v = v.join(',');
+            if (v != null && String(v).trim() !== '') {
+                parts.push(`${key}=${encodeURIComponent(String(v).trim())}`);
+            }
+        }
+        return '/api/files?' + parts.join('&');
+    }
+
+    /** "showing N of M" when the list shows fewer than the server holds. */
+    function countLabel(shown, total) {
+        return Number(total) > Number(shown) ? `showing ${shown} of ${total}` : '';
+    }
+
+    /** Only a sample with a revision has a distillation curve. */
+    function curveFetchable(s) {
+        return !!s && s.current_revision != null;
+    }
+
+    const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+    /** Text → HTML, safe in element and attribute contexts. */
+    function escapeHtml(str) {
+        return String(str == null ? '' : str).replace(/[&<>"']/g, c => HTML_ESCAPES[c]);
+    }
+
+    const api = { sampleUid, sampleIdsOf, statusBadge, timeCorrectedTitle, refusalSummary,
+                  needsServerSearch, filesUrl, countLabel, curveFetchable, escapeHtml };
     Object.assign(root, api);
     if (typeof module !== 'undefined' && module.exports) {
         module.exports = api;
