@@ -553,7 +553,7 @@ def _admin_body():
     admin_auth.limit_json_body()
     if not request.is_json:
         return None, _err("Expected Content-Type: application/json", 415)
-    body = request.get_json(silent=True)
+    body = admin_auth.get_json_object()
     if not isinstance(body, dict):
         return None, _err("Expected a JSON object", 400)
     try:

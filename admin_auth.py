@@ -53,7 +53,10 @@ setup code) is *reserved* under a lock before any hashing:
   ``MAX_BACKOFF_SECONDS``);
 * hub-wide: at most ``GLOBAL_FAILURE_BUDGET`` failures per
   ``GLOBAL_WINDOW_SECONDS`` from all clients together, after which every
-  attempt is refused until the window moves on;
+  attempt is refused until the window moves on, **except from loopback**
+  (the server's own console: RDP to ASAPSV1 and use http://localhost:5560),
+  whose attempts neither spend nor are stopped by the budget, so no LAN host
+  can lock the admin out;
 * CPU: at most ``HASH_CONCURRENCY`` PBKDF2 computations run at once.
 
 **Store.** ``db=None`` means the hub's store (``GC_DATA_DIR/gc.db``), which
@@ -172,8 +175,16 @@ def _db(db):
 _hash_slots = threading.BoundedSemaphore(HASH_CONCURRENCY)
 
 
+def _utf8(text: str) -> Optional[bytes]:
+    """``text`` as UTF-8, or ``None`` if it can't be (unpaired surrogates)."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+
+
 def _validate(password: Any) -> str:
-    if not isinstance(password, str):
+    if not isinstance(password, str) or _utf8(password) is None:
         raise PasswordError("The password must be text.")
     if len(password) < MIN_LENGTH:
         raise PasswordError(f"The password must be at least {MIN_LENGTH} characters.")
@@ -204,7 +215,7 @@ def _encode(password: str) -> str:
 
 def _matches(password: Any, stored: str) -> bool:
     """Constant-time comparison of ``password`` with the stored hash."""
-    if not isinstance(password, str) or len(password) > MAX_LENGTH:
+    if not isinstance(password, str) or len(password) > MAX_LENGTH or _utf8(password) is None:
         return False
     try:
         algo, iters, salt_hex, expected_hex = stored.split("$")
@@ -223,6 +234,16 @@ def _matches(password: Any, stored: str) -> bool:
 # ── throttling ──────────────────────────────────────────────────────────────
 
 _clock = time.monotonic
+
+
+def _is_loopback(client: Optional[str]) -> bool:
+    """A request from the hub machine itself (RDP + http://localhost:5560).
+    Loopback is exempt from the hub-wide budget, so no LAN host can lock the
+    admin out; its per-address backoff still applies."""
+    try:
+        return ipaddress.ip_address((client or "").split("%")[0]).is_loopback
+    except ValueError:
+        return False
 
 
 class _Throttle:
@@ -248,7 +269,8 @@ class _Throttle:
         with self._lock:
             now = _clock()
             self._prune(now)
-            if len(self._global) >= GLOBAL_FAILURE_BUDGET:
+            local = _is_loopback(client)
+            if not local and len(self._global) >= GLOBAL_FAILURE_BUDGET:
                 wait = self._global[0][0] + GLOBAL_WINDOW_SECONDS - now
                 return None, max(wait, 1.0), (f"Too many wrong admin passwords on this hub. "
                                               f"Try again in {int(wait) + 1} s.")
@@ -272,7 +294,8 @@ class _Throttle:
             if st["failures"] >= FREE_ATTEMPTS:
                 st["locked_until"] = now + min(2.0 ** (st["failures"] - FREE_ATTEMPTS),
                                                MAX_BACKOFF_SECONDS)
-            self._global.append((now, ticket["id"]))
+            if not local:     # the server's own console never spends the budget
+                self._global.append((now, ticket["id"]))
             return ticket, 0.0, ""
 
     def finish(self, ticket: dict, outcome: str) -> None:
@@ -465,9 +488,8 @@ def setup(password: Any, setup_code: Any, *, db=None, client: Optional[str] = No
     outcome = "fail"
     try:
         expected = _read_code(path)
-        supplied = setup_code if isinstance(setup_code, str) else ""
-        good = bool(expected) and hmac.compare_digest(supplied.encode("utf-8"),
-                                                      expected.encode("utf-8"))
+        supplied = (_utf8(setup_code) if isinstance(setup_code, str) else None) or b""
+        good = bool(expected) and hmac.compare_digest(supplied, expected.encode("utf-8"))
         if not good:
             log.warning("admin setup refused from %s: wrong setup code", client or "?")
             raise SetupCodeError(WRONG_CODE_MESSAGE)
@@ -588,11 +610,20 @@ def _too_large(exc):
     return exc
 
 
+def get_json_object():
+    """``request.get_json(silent=True)``, with too-deeply nested JSON treated as
+    unparseable (``None``) instead of a ``RecursionError`` (a 500)."""
+    try:
+        return request.get_json(silent=True)
+    except RecursionError:
+        return None
+
+
 def _json_body():
     limit_json_body()
     if not request.is_json:
         return None, (jsonify({"error": "Expected Content-Type: application/json"}), 415)
-    body = request.get_json(silent=True)
+    body = get_json_object()
     if not isinstance(body, dict):
         return None, (jsonify({"error": "Expected a JSON object"}), 400)
     return body, None

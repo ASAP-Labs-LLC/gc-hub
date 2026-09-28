@@ -911,6 +911,8 @@ def _admin_json_body():
         return None, _error("Expected Content-Type: application/json", 415)
     try:
         return request.get_json(silent=True) or {}, None
+    except RecursionError:                       # nested too deep (2B1 re-review G2)
+        return None, _error("The request body is nested too deeply", 400)
     except admin_auth.RequestEntityTooLarge:
         return None, _error("The request body is too large.", 413)
 
