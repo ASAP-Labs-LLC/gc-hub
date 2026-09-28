@@ -377,3 +377,62 @@ def test_windows_ci_workflow_runs_the_export_tests():
     for needle in ("windows-latest", "3.14", "pytest tests/exports -q", "contents: read",
                    "persist-credentials: false", "timeout-minutes: 20"):
         assert needle in wf, needle
+
+
+def test_restore_then_adopt_does_not_write_a_row_twice(exp, db, tmp_path):
+    """The critic's probe: a row pending when the backup was taken is flushed,
+    the backup is restored (the row is pending again) and the file adopted.
+    Its exact line already sits after the last marked row, so it is marked,
+    not written a second time."""
+    backup = tmp_path / "backup.db"
+    add_final(db)
+    exp.flush("gc1")
+    pend = add_final(db, lab_id="PENDATBACKUP")
+    _backup(db, backup)
+    exp.flush("gc1")
+    add_final(db)
+    exp.flush("gc1")
+    _restore(backup, db)
+    assert pending(db) == [pend]
+    new = add_final(db, lab_id="NEWROW")
+    exp2 = exports.HubExporter(db=db, data_dir=tmp_path / "data")
+    exp2.adopt("gc1")
+    exp2.flush("gc1")
+    data = exp2.export_path("gc1").read_bytes()
+    lines = {r["seq"]: r["line"].encode() for r in ledger_lines(db)}
+    assert b"PENDATBACKUP" in lines[pend]
+    assert data.count(lines[pend]) == 1
+    assert data.count(lines[new]) == 1
+    line = lines[new]
+    assert data.endswith(line)
+    assert pending(db) == []
+    exp2.flush("gc1")                                  # and it stays that way
+    assert exp2.export_path("gc1").read_bytes() == data
+
+
+def test_a_pending_line_before_the_last_marked_row_is_still_written(exp, db):
+    """Only lines after the last marked row count as already written: a
+    pending line identical to one further up the file is appended."""
+    a = add_final(db)
+    add_final(db)
+    exp.flush("gc1")
+    first = [r for r in ledger_lines(db) if r["seq"] == a][0]
+    with store.connection(db) as conn, store.write_txn(conn):
+        again = store.export_rows.append_pending(conn, "gc1", first["sample_id"],
+                                                 first["revision"], first["line"])
+    exp.flush("gc1")
+    data = exp.export_path("gc1").read_bytes()
+    assert data.count(first["line"].encode()) == 2
+    assert data.endswith(first["line"].encode())
+    assert again not in pending(db)
+
+
+@pytest.mark.parametrize("chunk", [1, 3, 7, 1024 * 1024])
+def test_rfind_line_end_finds_the_last_whole_line_across_chunks(tmp_path, monkeypatch, chunk):
+    monkeypatch.setattr(exports, "_CHUNK", chunk)
+    f = tmp_path / "f.csv"
+    f.write_bytes(b"h\r\nab\r\nxab\r\nab\r\nzz\r\n")
+    assert exports._rfind_line_end(f, b"ab\r\n", f.stat().st_size) == 16
+    assert exports._rfind_line_end(f, b"ab\r\n", 15) == 7          # the xab copy is not a line
+    assert exports._rfind_line_end(f, b"h\r\n", 20) == 3
+    assert exports._rfind_line_end(f, b"q\r\n", 20) is None

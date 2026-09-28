@@ -67,7 +67,9 @@ is the last ledger row known to be in it; ``instrument`` is whose file it is.
 database is restored from a backup: new rows reuse seqs the sidecar already
 covers and would be marked appended without ever being written. So the
 sidecar also records ``db_id`` (a random id created once in ``settings_kv``
-as ``exports_db_id``), ``last_line_sha256`` (the sha256 of the ledger line
+as ``exports_db_id``; it tells *separate* databases apart, but a restored
+backup carries the same id, so restores are caught by the last line's hash,
+not by it), ``last_line_sha256`` (the sha256 of the ledger line
 at ``seq``, or null when ``seq`` names no row of this instrument) and
 ``last_line_end`` (the byte offset where that line ends in the file, or null
 when it is not in the file, e.g. after ``write_fresh`` or an adopt that took
@@ -77,7 +79,11 @@ marked done, the ``db_id`` must match, the ledger row at ``seq`` must hash to
 that line ending there; with no ``last_line_sha256`` no pending row may sit
 at or below ``seq``. Otherwise ``ledger-mismatch`` ("the hub database doesn't
 match this export file — was it restored from a backup?"). ``adopt`` applies
-the same test before keeping an old sidecar's ``seq``.
+the same test before keeping an old sidecar's ``seq``. A pending row whose
+exact line already sits in the file after the last marked row (a row that was
+pending when the backup was taken, flushed, then pending again after the
+restore and an adopt) is marked appended, not written a second time; a copy
+further up the file doesn't count.
 ``flush`` refuses (``ExportRefused``) when:
 
 * ``no-sidecar``: the file exists, is not empty and has no sidecar (a v1 file
@@ -411,6 +417,29 @@ def _read_range(path: Path, offset: int, length: int) -> bytes:
         return fh.read(length)
 
 
+def _rfind_line_end(path: Path, line: bytes, limit: int) -> Optional[int]:
+    """Offset just past the last whole-line copy of ``line`` in the first
+    ``limit`` bytes of ``path`` (``None`` if there is none); read backwards."""
+    pos = limit
+    carry = b""
+    while pos > 0:
+        start = max(0, pos - _CHUNK)
+        buf = _read_range(path, start, pos - start) + carry
+        i = len(buf)
+        while True:
+            i = buf.rfind(line, 0, i)
+            if i < 0:
+                break
+            before = buf[i - 1:i] if i else _read_range(path, start - 1, 1) if start else b"\n"
+            if before == b"\n":
+                return start + i + len(line)
+            if i == 0:
+                break
+        carry = buf[:len(line)]
+        pos = start
+    return None
+
+
 def _read_sidecar(csv_path: Path) -> Optional[dict]:
     sp = sidecar_path(csv_path)
     try:
@@ -679,7 +708,11 @@ class HubExporter:
     # ── the ledger link ──
 
     def _db_id(self) -> str:
-        """This database's export id (created once, in ``settings_kv``)."""
+        """This database's export id (created once, in ``settings_kv``).
+
+        It distinguishes separate databases only: a backup restored over this
+        one carries the same id. Restores are caught by ``last_line_sha256``.
+        """
         value = store.settings_kv.get(DB_ID_KEY, db=self.db)
         if value:
             return value
@@ -895,6 +928,12 @@ class HubExporter:
 
         done = [r["seq"] for r in rows if r["seq"] <= side["seq"]]
         todo = [r for r in rows if r["seq"] > side["seq"]]
+        if todo:
+            # A restore + adopt can leave a row pending that the file already
+            # holds; its exact line after the last marked row means it's there.
+            there = self._already_after_last(instrument, path, side)
+            done += [r["seq"] for r in todo if r["line"].encode("utf-8") in there]
+            todo = [r for r in todo if r["line"].encode("utf-8") not in there]
         if done:  # in the file per the sidecar, not yet marked (a crash in between)
             store.export_rows.mark_hub_appended(done, db=self.db)
         pieces = [r["line"].encode("utf-8") for r in todo]
@@ -950,6 +989,24 @@ class HubExporter:
             st2.st_mtime_ns if (st2 and st2.st_size == new_size) else None)
         store.export_rows.mark_hub_appended([r["seq"] for r in todo], db=self.db)
         return FlushResult(len(todo), 0, None, path)
+
+    def _already_after_last(self, instrument: str, path: Path, side: dict) -> set:
+        """The lines (bytes, CRLF included) that sit in the recorded region after
+        the sidecar's last marked row: empty in the normal case, where that row
+        ends the region, and when the row can't be found in the file."""
+        rec = side["size"]
+        end = side.get("last_line_end")
+        if end is not None and end >= rec:
+            return set()
+        line = self._ledger_line(instrument, side["seq"]) if side.get("last_line_sha256") else None
+        if line is None:
+            return set()
+        if end is None:
+            end = _rfind_line_end(path, line.encode("utf-8"), rec)
+            if end is None:
+                return set()
+        region = _read_range(path, end, rec - end)
+        return {ln + b"\n" for ln in region.split(b"\n")[:-1]}
 
     @staticmethod
     def _write_new(path: Path, chunks) -> None:
