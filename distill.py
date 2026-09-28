@@ -879,6 +879,10 @@ class BlankRejected(ValueError):
     """Raised when the reference blank carries sample-like signal."""
 
 
+class BlankUnreadable(RuntimeError):
+    """``compute(strict_blank=True)``: the blank CDF could not be read."""
+
+
 # A genuine ASTM D2887 blank has no peaks outside the solvent window. Anything
 # above this height (pA, after removing the slow bleed ramp) is a sample.
 BLANK_MAX_INTENSITY_PA = 200.0
@@ -942,12 +946,29 @@ def processed_cdf_filename(lab_id: str, inj_dt: datetime, suffix: str = ".CDF") 
     return f"{safe}{suffix.upper()}"
 
 
+# ANDI/AIA compact stamp: 14 digits plus an optional zone we discard (``Z``
+# or ``±HH[:]MM``). Matched FIRST: see ``parse_injection_datetime``.
+_ANDI_COMPACT = re.compile(r"^(\d{14})(?:Z|\s*[+-]\d{2}:?\d{2})?$")
+# ISO is tried only for text that starts with a date written with separators.
+_ISO_DATE_PREFIX = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}")
+_OTHER_DT_FORMATS = ("%d-%b-%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S")
+
+
 def parse_injection_datetime(raw: str) -> datetime | None:
     """Parse an injection timestamp from the many formats GC files use.
 
     Agilent/Thermo ANDI (.CDF) files store ``injection_date_time_stamp`` as a
     compact ``YYYYMMDDHHMMSS`` string, often with a trailing ``±ZZZZ`` zone;
     others use ISO, ``DD-Mon-YYYY HH:MM:SS`` or US ``MM/DD/YYYY HH:MM:SS``.
+
+    The compact form is matched explicitly **before** any ISO attempt, and
+    ISO is tried only when the text starts with a ``-``/``/``-separated
+    date. (v1 tried ``datetime.fromisoformat`` first; on Python >= 3.11 that
+    accepts ``20260925002450+0000`` and misreads it as 02:45:00, taking the
+    9th character as the date/time separator. ``v1_parse_injection_datetime``
+    keeps v1's answer for matching old CSV rows.) This is the same parse as
+    ``import_match._correct_parse``, so the hub and the history importer
+    agree on every sample's injection time.
 
     Returns a *naive* ``datetime`` (any zone offset is dropped — all runs from
     one instrument share a zone, so wall-clock time keeps ordering correct and
@@ -960,21 +981,21 @@ def parse_injection_datetime(raw: str) -> datetime | None:
     if not text:
         return None
 
-    # ISO (handles both " " and "T" separators, and offsets like +05:00).
-    try:
-        return datetime.fromisoformat(text).replace(tzinfo=None)
-    except ValueError:
-        pass
-
-    # ANDI/AIA compact: 14 digits, optional ±ZZZZ / ±ZZ:ZZ zone we discard.
-    m = re.match(r"^(\d{14})(?:\s*[+-]\d{2}:?\d{2})?$", text)
+    m = _ANDI_COMPACT.match(text)
     if m:
         try:
             return datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
         except ValueError:
+            return None
+
+    # ISO (" " or "T" separator, optional offset), only with date separators.
+    if _ISO_DATE_PREFIX.match(text):
+        try:
+            return datetime.fromisoformat(text.replace("/", "-")).replace(tzinfo=None)
+        except ValueError:
             pass
 
-    for fmt in ("%d-%b-%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+    for fmt in _OTHER_DT_FORMATS:
         try:
             return datetime.strptime(text, fmt)
         except ValueError:
@@ -982,8 +1003,28 @@ def parse_injection_datetime(raw: str) -> datetime | None:
     return None
 
 
-def cdf_metadata(path: Path) -> Tuple[str, datetime]:
-    """Return (sample_name, injection_datetime)."""
+def v1_parse_injection_datetime(raw: str) -> datetime | None:
+    """What v1 (phase 1, ``fromisoformat`` first) parsed ``raw`` as on Python
+    3.11-3.13, the interpreters the share copies ran: bug for bug, and the
+    same answer on any interpreter. Used only to compute
+    ``samples.legacy_injection_dt`` (the string v1 wrote to the CSV). Delegates
+    to ``import_match._v1_parse(raw, 'py311_313')``, the one emulation of it.
+    """
+    import import_match  # deferred: import_match imports distill
+    return import_match._v1_parse(raw or "", "py311_313")
+
+
+def normalise_method_name(raw) -> str:
+    """ChemStation method name as the hub compares it: trimmed, any directory
+    part stripped (``\\`` or ``/``), upper-cased; ``''`` if absent."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    return re.split(r"[\\/]", text)[-1].strip().upper()
+
+
+def _cdf_names(path: Path) -> Tuple[str, str, str]:
+    """``(sample_name or '', raw injection stamp, raw detection_method_name)``."""
     with _NETCDF_LOCK:
         with Dataset(path) as ds:
             vars_lc = {n.lower(): n for n in ds.variables}
@@ -997,16 +1038,54 @@ def cdf_metadata(path: Path) -> Tuple[str, datetime]:
                     return str(getattr(ds, attrs_lc[k]))
                 return ""
 
-            sample = _get("sample_name") or path.stem or "Unknown"
+            sample = _get("sample_name")
             raw_date = (
                 _get("injection_date_time_stamp")
                 or _get("injection_date")
                 or _get("injection_time")
             )
+            method = _get("detection_method_name")
+    return sample, raw_date, method
+
+
+def cdf_metadata(path: Path) -> Tuple[str, datetime]:
+    """Return (sample_name, injection_datetime)."""
+    path = Path(path)
+    sample, raw_date, _method = _cdf_names(path)
+    sample = sample or path.stem or "Unknown"
     inj_dt = parse_injection_datetime(raw_date)
     if inj_dt is None:
         inj_dt = datetime.fromtimestamp(path.stat().st_mtime)
     return sample, inj_dt
+
+
+def cdf_identity(path: Path, *, mtime: datetime | None = None, fallback_name: str | None = None
+                 ) -> Tuple[str, datetime, str, str, str]:
+    """``(sample, injection_dt, dt_source, method_name, raw_stamp)`` for a CDF.
+
+    ``sample`` is the ``sample_name``; when it is absent or blank,
+    ``fallback_name`` (the sender's file stem: what v1 used, since it read
+    the file under its original name), else this file's stem;
+    ``injection_dt`` a naive ``datetime`` from ``parse_injection_datetime``,
+    with ``dt_source`` ``'cdf'``, or, when the stamp is missing or
+    unparseable, ``mtime`` (the sender's file time; the file's own mtime when
+    not given) with ``dt_source`` ``'mtime'``. ``method_name`` is the
+    ``detection_method_name`` normalised (``normalise_method_name``; ``''``
+    if absent). ``raw_stamp`` is the stamp text as read.
+    """
+    path = Path(path)
+    sample, raw_date, method = _cdf_names(path)
+    if not sample.strip():
+        sample = (fallback_name or "").strip() or path.stem or "Unknown"
+    inj_dt = parse_injection_datetime(raw_date)
+    source = "cdf"
+    if inj_dt is None:
+        if raw_date.strip():
+            LOGGER.warning("%s: injection stamp %r does not parse; using the file time",
+                           path.name, raw_date)
+        source = "mtime"
+        inj_dt = mtime if mtime is not None else datetime.fromtimestamp(path.stat().st_mtime)
+    return sample, inj_dt, source, normalise_method_name(method), raw_date
 
 
 def gc_trace_from_cdf(path: Path) -> Scatter:
@@ -1204,7 +1283,8 @@ def _append_csv_row(dest_csv, row_data: list) -> None:
 
 def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None, *,
             corrections: Dict[str, float] | None = None,
-            honour_env: bool = True, allow_auto: bool = True) -> dict:
+            honour_env: bool = True, allow_auto: bool = True,
+            strict_blank: bool = False) -> dict:
     """Run the distillation for one sample; write nothing.
 
     ``conf`` supplies the calibration, the correction file and the best-fit
@@ -1214,7 +1294,11 @@ def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None
     The defaults are v1's behaviour. The hub passes ``honour_env=False``
     (``GC_CAL_CDF`` ignored), ``allow_auto=False`` (an unusable assigned
     calibration raises ``AutoCalibrationRefused``, a ``ValueError``, instead
-    of silently auto-detecting) and explicit ``corrections``.
+    of silently auto-detecting), explicit ``corrections`` and
+    ``strict_blank=True``: a blank that can't be read raises
+    ``BlankUnreadable``, and one that fails at subtraction (the
+    relative-height guard, or no elution window left) raises
+    ``BlankRejected``, instead of v1's silent "no blank".
 
     Returns a dict:
 
@@ -1223,7 +1307,8 @@ def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None
       with ``Source File`` = ``""``;
     * ``d2887``, ``d86_uncorrected`` and ``d86`` (corrected), keyed by cut;
     * ``lab_id`` and ``injection_dt`` (a naive ``datetime``);
-    * ``calibration``: ``{cdf, anchors_source, anchors}``.
+    * ``calibration``: ``{cdf, anchors_source, anchors}``;
+    * ``blank_applied``: whether a blank was actually subtracted.
 
     Raises ``FileNotFoundError`` when the calibration CDF is missing.
     """
@@ -1231,14 +1316,29 @@ def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None
 
     # 1 Chromatogram
     t, y = _read_cdf(path)
+    blank_applied = False
     if blank_path is not None:
         try:
             tb, yb = _read_cdf(Path(blank_path))
-            LOGGER.debug("Applying blank from %s", blank_path)
-            t, y = _apply_blank_and_clip(t, y, (tb, yb))
         except Exception as exc:  # noqa: BLE001
+            if strict_blank:
+                raise BlankUnreadable(f"blank {Path(blank_path).name} could not be read: {exc}") from exc
             LOGGER.warning("Blank subtraction failed: %s", exc)
             t, y = _apply_blank_and_clip(t, y, None)
+        else:
+            try:
+                LOGGER.debug("Applying blank from %s", blank_path)
+                t, y = _apply_blank_and_clip(t, y, (tb, yb))
+                blank_applied = True
+            except Exception as exc:  # noqa: BLE001
+                if strict_blank:
+                    if isinstance(exc, BlankRejected):
+                        raise
+                    if isinstance(exc, ValueError) and "No elution window" in str(exc):
+                        raise BlankRejected(f"after subtracting the blank: {exc}") from exc
+                    raise
+                LOGGER.warning("Blank subtraction failed: %s", exc)
+                t, y = _apply_blank_and_clip(t, y, None)
     else:
         t, y = _apply_blank_and_clip(t, y, None)
 
@@ -1338,6 +1438,7 @@ def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None
             "anchors_source": cal_info["source"],
             "anchors": [list(a) for a in cal_info["anchors"]],
         },
+        "blank_applied": blank_applied,
     }
 
 

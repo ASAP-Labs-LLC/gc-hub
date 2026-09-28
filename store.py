@@ -53,6 +53,7 @@ Samples and revisions::
     samples.find_by_legacy(instrument_id, lab_id, dt, *, db) -> list[dict]
         # injection_dt = dt OR legacy_injection_dt = dt; legacy matches first
     samples.latest_blank(instrument_id, at, method_names, *, exclude_sample_id=None, db) -> dict | None
+        # same-time ties: highest cdf_sha256 (content, not arrival)
     samples.is_gated(sample_id, *, db) -> bool                 # the export/QBench gate
     samples.methods_seen(instrument_id, *, db) -> list[{method_name, count, first_seen, last_seen}]
     samples.set_status(sample_id, status, *, error=None, db)   # error cleared unless given
@@ -63,7 +64,7 @@ Samples and revisions::
     samples.count(<same filters>, *, db) -> int
     add_revision(conn, sample_id, results, *, reason, by=None, d86_uncorrected=None,
                  calibration_used=None, blank_used=None, corrections_used=None,
-                 best_fit=None, fit_score=None, flags=None, processed_at=None) -> int
+                 best_fit=None, fit_score=None, flags=None, processed_at=None, notes=None) -> int
                  # MUST run inside write_txn(conn); bumps samples.current_revision
     get_revision(sample_id, revision=None, *, db) -> dict | None   # None = current
     list_revisions(sample_id, *, db) -> list[dict]                 # ascending
@@ -149,6 +150,11 @@ Conventions and decisions (where the spec left a choice)
 * ``samples.time_unverifiable`` (0/1, beyond the spec text; Lane D) marks a
   result-only import whose CSV time could be a v1 misparse, so its correct
   injection time can't be established.
+* ``samples.review_note`` (TEXT, beyond the spec; 2A1 T2) is a
+  human-readable note that a final result may need a look (e.g. an
+  earlier-injected blank arrived after it was processed). No revision is
+  touched. ``sample_results.notes`` (JSON, beyond the spec) records how a
+  revision was computed, e.g. ``{"blank_rejected": {"sample_id", "reason"}}``.
 * ``samples.time_corrected`` is an INTEGER flag (0/1). The spec's comment on
   that line (``'cdf'|'mtime'``) belongs to ``injection_dt_source``.
 * ``samples.id``, ``export_rows.seq`` and ``corrections_audit.id`` are
@@ -278,6 +284,7 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             qbench_uploaded_at TEXT,
             received_at TEXT NOT NULL,
             time_unverifiable INTEGER NOT NULL DEFAULT 0,
+            review_note TEXT,
             UNIQUE(instrument_id, lab_id, injection_dt))""",
         "CREATE INDEX samples_status ON samples(status)",
         "CREATE INDEX samples_inst_dt ON samples(instrument_id, injection_dt)",
@@ -300,6 +307,7 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             reason TEXT NOT NULL,
             "by" TEXT,
             processed_at TEXT NOT NULL,
+            notes TEXT,
             PRIMARY KEY(sample_id, revision))""",
         """CREATE TABLE conflicts(
             id INTEGER PRIMARY KEY,
@@ -400,11 +408,11 @@ REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
         "method_name", "legacy_injection_dt", "time_corrected", "cdf_sha256", "cdf_path",
         "legacy_unverified", "source_name", "is_blank", "status", "backfill", "error",
         "current_revision", "released_at", "released_by", "qbench_revision",
-        "qbench_uploaded_at", "received_at", "time_unverifiable"}),
+        "qbench_uploaded_at", "received_at", "time_unverifiable", "review_note"}),
     "sample_results": frozenset({
         "sample_id", "revision", "results", "d86_uncorrected", "calibration_used",
         "blank_used", "corrections_used", "best_fit", "fit_score", "flags", "reason",
-        "by", "processed_at"}),
+        "by", "processed_at", "notes"}),
     "conflicts": frozenset({
         "id", "instrument_id", "lab_id", "injection_dt", "existing_sample_id",
         "cdf_sha256", "cdf_path", "received_at", "resolved", "resolved_by", "resolved_at"}),
@@ -753,12 +761,15 @@ def add_revision(conn: sqlite3.Connection, sample_id: int, results: Any, *, reas
                  calibration_used: Any = None, blank_used: Optional[int] = None,
                  corrections_used: Any = None, best_fit: Optional[str] = None,
                  fit_score: Optional[float] = None, flags: Any = None,
-                 processed_at: Optional[str] = None) -> int:
+                 processed_at: Optional[str] = None, notes: Any = None) -> int:
     """Write the next ``sample_results`` revision and make it current.
 
     Must run inside ``write_txn(conn)``, so the revision, the export row and
     the status change commit together. Returns the new revision number
     (1 for the first). The spec's reasons are in ``REVISION_REASONS``.
+    ``notes`` is structured JSON about how the revision was computed (e.g.
+    ``{"blank_rejected": {"sample_id", "reason"}}``), ``None`` when there is
+    nothing to say.
     """
     _require_txn(conn, "add_revision")
     rev = conn.execute("SELECT COALESCE(MAX(revision), 0) + 1 FROM sample_results WHERE sample_id=?",
@@ -766,10 +777,10 @@ def add_revision(conn: sqlite3.Connection, sample_id: int, results: Any, *, reas
     conn.execute(
         'INSERT INTO sample_results(sample_id, revision, results, d86_uncorrected, '
         'calibration_used, blank_used, corrections_used, best_fit, fit_score, flags, '
-        'reason, "by", processed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        'reason, "by", processed_at, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (sample_id, rev, _enc(results), _enc(d86_uncorrected), _enc(calibration_used),
          blank_used, _enc(corrections_used), best_fit, fit_score, _enc(flags), reason, by,
-         processed_at or now_iso()))
+         processed_at or now_iso(), _enc(notes)))
     conn.execute("UPDATE samples SET current_revision=? WHERE id=?", (rev, sample_id))
     return rev
 
@@ -1063,7 +1074,9 @@ class samples:  # noqa: N801
                      exclude_sample_id: Optional[int] = None, db: Db = None) -> Optional[dict]:
         """The latest genuine blank (``is_blank=1``, with a stored CDF) on this
         instrument injected at or before ``at``, whose ``method_name`` is one of
-        ``method_names`` (the names mapped to the sample's hub method)."""
+        ``method_names`` (the names mapped to the sample's hub method). Blanks
+        injected at the same time are ordered by ``cdf_sha256`` (the file's
+        content), so the choice never depends on arrival order."""
         names = list(method_names)
         if not names:
             return None
@@ -1074,7 +1087,7 @@ class samples:  # noqa: N801
             sql += " AND id<>?"
             args.append(exclude_sample_id)
         with connection(db) as conn:
-            return _row(conn.execute(sql + " ORDER BY injection_dt DESC, id DESC LIMIT 1", args).fetchone())
+            return _row(conn.execute(sql + " ORDER BY injection_dt DESC, cdf_sha256 DESC LIMIT 1", args).fetchone())
 
     @staticmethod
     def is_gated(sample_id: int, *, db: Db = None) -> bool:

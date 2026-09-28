@@ -71,10 +71,11 @@ SPEC_COLUMNS = {
                 "method_name", "legacy_injection_dt", "time_corrected", "cdf_sha256",
                 "cdf_path", "legacy_unverified", "source_name", "is_blank", "status",
                 "backfill", "error", "current_revision", "released_at", "released_by",
-                "qbench_revision", "qbench_uploaded_at", "received_at", "time_unverifiable"},
+                "qbench_revision", "qbench_uploaded_at", "received_at", "time_unverifiable",
+                "review_note"},
     "sample_results": {"sample_id", "revision", "results", "d86_uncorrected",
                        "calibration_used", "blank_used", "corrections_used", "best_fit",
-                       "fit_score", "flags", "reason", "by", "processed_at"},
+                       "fit_score", "flags", "reason", "by", "processed_at", "notes"},
     "conflicts": {"id", "instrument_id", "lab_id", "injection_dt", "existing_sample_id",
                   "cdf_sha256", "cdf_path", "received_at", "resolved", "resolved_by",
                   "resolved_at"},
@@ -828,6 +829,36 @@ def test_latest_blank_at_or_before(gc1):
     with store.connection(gc1) as conn:
         names = {r[1] for r in conn.execute("PRAGMA index_list(samples)")}
         assert "samples_blanks" in names
+
+
+def test_latest_blank_ties_are_broken_by_content_not_arrival(gc1):
+    a = _sample(gc1, lab_id="Blank", dt="2026-09-01 08:00:00", is_blank=1, sha="a" * 64)
+    b = _sample(gc1, lab_id="Blank2", dt="2026-09-01 08:00:00", is_blank=1, sha="f" * 64)
+    m = ["SIMDISB.M"]
+    assert store.samples.latest_blank("gc1", "2026-09-01 09:00:00", m, db=gc1)["id"] == b
+    # the same two blanks arriving the other way round pick the same file
+    store.migrate(gc1)
+    with store.connection(gc1) as conn:
+        conn.execute("DELETE FROM samples")
+    b2 = _sample(gc1, lab_id="Blank2", dt="2026-09-01 08:00:00", is_blank=1, sha="f" * 64)
+    _sample(gc1, lab_id="Blank", dt="2026-09-01 08:00:00", is_blank=1, sha="a" * 64)
+    assert store.samples.latest_blank("gc1", "2026-09-01 09:00:00", m, db=gc1)["id"] == b2
+    assert a
+
+
+def test_revision_notes_and_sample_review_note(gc1):
+    sid = _sample(gc1)
+    with store.connection(gc1) as conn:
+        with store.write_txn(conn):
+            store.add_revision(conn, sid, {"Lab ID": "x"}, reason="processed",
+                               notes={"blank_rejected": {"sample_id": 7, "reason": "r"}})
+            store.add_revision(conn, sid, {"Lab ID": "x"}, reason="reprocess")
+    import json
+    assert json.loads(store.get_revision(sid, 1, db=gc1)["notes"]) == {
+        "blank_rejected": {"sample_id": 7, "reason": "r"}}
+    assert store.get_revision(sid, 2, db=gc1)["notes"] is None
+    store.samples.update(sid, review_note="check the blank", db=gc1)
+    assert store.samples.get(sid, db=gc1)["review_note"] == "check the blank"
 
 
 def test_latest_blank_needs_a_stored_cdf(gc1):
