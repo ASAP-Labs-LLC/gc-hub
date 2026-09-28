@@ -93,7 +93,7 @@ def test_dry_run_installs_everything_but_autostart(tmp_path):
     # D9b: the mirror is optional and off by default; v1's distill_output is
     # not offered, and nothing is adopted without an explicit --mirror-path.
     assert cfg["results_mirror_path"] == ""
-    assert not (mirror.parent / "distill_results.csv.gchub.json").exists()
+    assert not (mirror.parent / "distill_results.csv.gcagent.json").exists()
     assert "dry run" in r.stdout.lower() and "launcher.pyw" in r.stdout
     assert not (root / "launcher.log").exists()    # launcher not started
     assert "tok-123" not in r.stdout
@@ -106,7 +106,7 @@ def test_explicit_mirror_path_is_adopted(tmp_path):
     r = _run(src, root, home, "--mirror-path", str(mirror))
     assert r.returncode == 0, r.stdout + r.stderr
     assert json.loads((root / "agent.json").read_text())["results_mirror_path"] == str(mirror)
-    sc = json.loads((mirror.parent / "distill_results.csv.gchub.json").read_text())
+    sc = json.loads((mirror.parent / "distill_results.csv.gcagent.json").read_text())
     assert sc["size"] == mirror.stat().st_size and sc["seq"] == 0
     assert "A1" in r.stdout                        # the last row was shown
 
@@ -117,7 +117,7 @@ def test_wrong_mirror_header_stops_without_sidecar(tmp_path):
     r = _run(src, tmp_path / "root", home, "--mirror-path", str(mirror))
     assert r.returncode != 0
     assert "header" in (r.stdout + r.stderr)
-    assert not (mirror.parent / "distill_results.csv.gchub.json").exists()
+    assert not (mirror.parent / "distill_results.csv.gcagent.json").exists()
 
 
 def test_new_mirror_path_needs_no_adoption(tmp_path):
