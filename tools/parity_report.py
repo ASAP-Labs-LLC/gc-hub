@@ -622,7 +622,10 @@ class _Report:
         out = {
             "instrument": self.inst_id,
             "scope": dict(self.scope_info),
-            "accepted_methods": sorted(self.accepted),
+            # A D2887 name can't be accepted as excluded (it must be mapped):
+            # never listed as accepted, reported as ignored instead.
+            "accepted_methods": sorted(n for n in self.accepted if not self._is_d2887(n)),
+            "accept_ignored_d2887": sorted(n for n in self.accepted if self._is_d2887(n)),
             "open_conflicts": list(self.open_conflicts),
             "max_abs_difference": {t: round(v, 6) for t, v in biggest.items()},
             "v1_csv": str(self.v1_csv),
@@ -697,6 +700,9 @@ def verdict_line(summary: dict) -> str:
             f"v1 rows outside the scope: {summary['v1_rows_out_of_scope']}")
     if summary.get("accepted_methods"):
         line += f"; accepted excluded methods: {', '.join(summary['accepted_methods'])}"
+    if summary.get("accept_ignored_d2887"):
+        line += ("; not accepted (D2887 names must be mapped, not excluded): "
+                 f"{', '.join(summary['accept_ignored_d2887'])}")
     return line
 
 
