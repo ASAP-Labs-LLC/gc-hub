@@ -178,6 +178,8 @@ import admin_auth  # noqa: E402  (2B1: admin password + /admin/setup)
 import ingest_api  # noqa: E402  (2B1: the agent API, contract §1)
 app.register_blueprint(admin_auth.bp)
 app.register_blueprint(ingest_api.bp)
+import instruments_api  # noqa: E402  (2A2: the Instruments page)
+app.register_blueprint(instruments_api.bp)
 
 # ---------------------------------------------------------------------------
 # Global state

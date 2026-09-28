@@ -64,6 +64,10 @@
 <body>
   <div class="topbar">
     <h1>Calibration — Peak Assignment</h1>
+    <label class="sens" title="Which instrument's calibration to edit">
+      Instrument
+      <select id="inst" style="width:auto"></select>
+    </label>
     <span class="cdf" id="cdf-name">loading…</span>
     <span class="spacer"></span>
     <label class="sens" title="Higher = detect more (smaller) peaks">
@@ -73,7 +77,12 @@
     </label>
     <span class="status" id="status"></span>
     <button class="btn" id="btn-reload">Reload peaks</button>
+    <label class="sens" title="Saving a calibration needs the admin password">
+      Admin password
+      <input type="password" id="admin-pw" autocomplete="off" style="width:120px;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:5px;padding:3px 6px">
+    </label>
     <button class="btn primary" id="btn-save">Save calibration</button>
+    <a class="btn" id="btn-instruments" href="/instruments">Instruments</a>
     <a class="btn" href="/">← Back to app</a>
   </div>
 
@@ -110,8 +119,45 @@ const RT_TOL = 0.02;            // min — match saved assignment to a detected 
 let DATA = null;                // server payload
 let STATE = [];                 // per-peak: {rt, intensity, choice:""|"ignore"|carbonNum}
 let selectedIdx = -1;
+// Which instrument's calibration this page edits (2A2): ?instrument=<id>, default gc1.
+const INSTRUMENT = new URLSearchParams(location.search).get("instrument") || "gc1";
+const CAL_API = "/api/instruments/" + encodeURIComponent(INSTRUMENT) + "/calibration";
 
 const $ = (id) => document.getElementById(id);
+
+async function loadInstruments(){
+  const sel = $("inst");
+  try{
+    const r = await fetch("/api/instruments");
+    const j = await r.json();
+    for(const inst of (j.instruments || [])){
+      const o = document.createElement("option");
+      o.value = inst.id;
+      o.textContent = inst.name + " (" + inst.id + ")";
+      sel.appendChild(o);
+    }
+  }catch(e){ /* the selector stays empty; the page still edits INSTRUMENT */ }
+  if(![...sel.options].some(o => o.value === INSTRUMENT)){
+    const o = document.createElement("option");
+    o.value = INSTRUMENT; o.textContent = INSTRUMENT; sel.appendChild(o);
+  }
+  sel.value = INSTRUMENT;
+  sel.addEventListener("change", () => {
+    location.search = "?instrument=" + encodeURIComponent(sel.value);
+  });
+  $("btn-instruments").href = "/instruments?instrument=" + encodeURIComponent(INSTRUMENT);
+}
+
+function messageRow(text, extra){
+  // Server text is shown with textContent, never as HTML.
+  const tr = document.createElement("tr");
+  const td = document.createElement("td");
+  td.colSpan = 5; td.className = "empty";
+  td.textContent = text;
+  if(extra){ td.appendChild(document.createElement("br")); td.appendChild(document.createTextNode(extra)); }
+  tr.appendChild(td);
+  $("rows").replaceChildren(tr);
+}
 function setStatus(msg, cls){ const s=$("status"); s.textContent=msg||""; s.className="status"+(cls?" "+cls:""); }
 
 async function load(sensitivity, preserveChoices){
@@ -121,13 +167,14 @@ async function load(sensitivity, preserveChoices){
     : null;
   setStatus("Detecting peaks…");
   try{
-    const url = "/api/calibration" +
+    const url = CAL_API +
       (sensitivity != null ? ("?sensitivity=" + sensitivity) : "");
     const r = await fetch(url);
     const j = await r.json();
     if(!r.ok){ throw new Error(j.error || ("HTTP "+r.status)); }
     DATA = j;
-    $("cdf-name").textContent = j.cdf_name || "";
+    $("cdf-name").textContent = (j.instrument_name ? j.instrument_name + " — " : "") + (j.cdf_name || "") +
+      (j.usable ? "" : " (not usable yet: " + (j.problem || "assign the peaks") + ")");
     if(sensitivity == null && j.sensitivity != null){
       $("sens").value = j.sensitivity;
       $("sens-val").textContent = Math.round(j.sensitivity);
@@ -138,8 +185,7 @@ async function load(sensitivity, preserveChoices){
     setStatus("");
   }catch(e){
     setStatus(e.message, "err");
-    $("rows").innerHTML = `<tr><td colspan="5" class="empty">${e.message}<br>
-      Set a calibration CDF in the main app's Settings first.</td></tr>`;
+    messageRow(e.message, "Choose this instrument's calibration CDF on the Instruments page first.");
   }
 }
 
@@ -277,9 +323,11 @@ async function save(){
   });
   setStatus("Saving…");
   try{
-    const r = await fetch("/api/calibration", {
+    const password = $("admin-pw").value;
+    if(!password){ setStatus("Enter the admin password to save.", "err"); return; }
+    const r = await fetch("/api/admin/instruments/" + encodeURIComponent(INSTRUMENT) + "/calibration", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({assignments, sensitivity: +$("sens").value})
+      body: JSON.stringify({assignments, sensitivity: +$("sens").value, password})
     });
     const j = await r.json();
     if(!r.ok){ throw new Error(j.error || ("HTTP "+r.status)); }
@@ -287,7 +335,8 @@ async function save(){
       setStatus(`Saved, but only ${j.anchors} carbon(s) assigned — assign at least 4 `+
                 `(ideally the full ladder) for accurate distillation numbers.`, "err");
     }else{
-      setStatus(`Saved — ${j.anchors} calibration anchors active`, "ok");
+      setStatus(`Saved — ${j.anchors} calibration anchors active` +
+                (j.queued ? `; ${j.queued} waiting sample(s) queued` : ""), "ok");
     }
   }catch(e){ setStatus(e.message, "err"); }
 }
@@ -303,6 +352,7 @@ $("sens").addEventListener("input", e=>{
   sensTimer = setTimeout(()=> load(+e.target.value, true), 250);
 });
 
+loadInstruments();
 load();
 </script>
 

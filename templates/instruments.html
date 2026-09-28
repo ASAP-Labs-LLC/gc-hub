@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Instruments</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/instruments.css') }}?v=1">
+</head>
+<body>
+  <div class="topbar">
+    <h1>Instruments</h1>
+    <span class="spacer"></span>
+    <label class="pw" title="Needed for every change on this page. Kept in this tab only.">
+      Admin password
+      <input type="password" id="admin-pw" autocomplete="off" spellcheck="false">
+    </label>
+    <a class="btn" href="/calibration">Calibration</a>
+    <a class="btn" href="/">&larr; Back to app</a>
+  </div>
+  <div id="flash" class="flash" role="status" aria-live="polite"></div>
+
+  <div class="wrap">
+    <aside class="panel side">
+      <div class="panel-head"><h2>Instruments</h2><button class="btn" id="btn-refresh">Refresh</button></div>
+      <ul id="inst-list" class="inst-list"></ul>
+      <details class="add">
+        <summary>Add an instrument</summary>
+        <form id="add-form" autocomplete="off">
+          <label>Id <input name="id" placeholder="gc3" required></label>
+          <label>Name <input name="name" placeholder="GC-3" required></label>
+          <p class="hint">The id can't be changed later. Until live_since is set, everything
+            the instrument sends is backfill (never exported automatically).</p>
+          <button class="btn primary" type="submit">Add</button>
+        </form>
+      </details>
+      <details class="add" id="hub-url-box">
+        <summary>Hub URL for installers</summary>
+        <form id="hub-url-form" autocomplete="off">
+          <label>URL <input name="hub_url" placeholder="http://asapsv1:5560"></label>
+          <p class="hint">The address the GC PCs use to reach this hub. Empty clears it.</p>
+          <button class="btn" type="submit">Save hub URL</button>
+        </form>
+      </details>
+    </aside>
+
+    <main id="detail" class="panel detail">
+      <p class="empty">Choose an instrument.</p>
+    </main>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/instruments_logic.js') }}?v=1"></script>
+  <script src="{{ url_for('static', filename='js/instruments.js') }}?v=1"></script>
+
+  <!-- Which build is running, bottom-right. Same string /healthz reports. -->
+  <div id="app-version" aria-hidden="true">{{ app_version }}</div>
+</body>
+</html>

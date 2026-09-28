@@ -28,6 +28,12 @@ wire it): ``store.migrate`` → ``bootstrap_gc1`` → ``pipeline.Worker.start()`
 (which sweeps ``cdf/.incoming`` leftovers and runs
 ``pipeline.requeue_on_start`` before its thread starts). It returns the
 running Worker; call ``.stop()`` on shutdown.
+
+Corrections (2A2, D4b): ``startup`` gives the Worker
+``corrections_provider(db)``: an instrument's saved hub corrections
+(``StoreProvider``); ``gc1`` falls back to the phase-1 file until it is
+seeded on the Instruments page; other instruments wait
+(``pending_corrections``) until their eleven values are entered.
 """
 from __future__ import annotations
 
@@ -183,6 +189,38 @@ def bootstrap_gc1(global_conf: Dict[str, str], *, db: store.Db = None,
     return row
 
 
+class HubCorrections:
+    """The Worker's corrections provider (2A2, D4b/2C), for one job's conf.
+
+    An instrument with saved corrections in the store gets them
+    (``corrections.StoreProvider`` reading ``db``, never the default store).
+    ``gc1`` with none gets the phase-1 file (``FileProvider``,
+    ``conf['correction_factors_json']``): the interim source until it is
+    seeded on the Instruments page. Any other instrument with none raises
+    ``CorrectionsUnavailable`` (the sample goes ``pending_corrections``). A
+    database error reading them propagates (the pipeline retries it)."""
+
+    def __init__(self, db: store.Db, conf: Dict[str, str]) -> None:
+        self.db = db
+        self.conf = conf or {}
+
+    def _read(self, instrument_id: str) -> Optional[dict]:
+        return store.corrections.read(instrument_id, db=self.db)
+
+    def get(self, instrument: dict):
+        import corrections
+        inst_id = str((instrument or {}).get("id") or "")
+        if inst_id == GC1 and self._read(inst_id) is None:
+            return corrections.FileProvider(self.conf.get("correction_factors_json", "") or "").get(instrument)
+        return corrections.StoreProvider(self._read).get(instrument)
+
+
+def corrections_provider(db: store.Db = None):
+    """The ``pipeline.Worker(corrections_provider=...)`` factory:
+    ``(global_conf) -> HubCorrections``."""
+    return lambda conf: HubCorrections(db, conf)
+
+
 def startup(app_conf: Dict[str, str], notifier=None, *, db: store.Db = None,
             data_dir: Optional[Path] = None, conf_fn=None, **worker_kw):
     """Start the hub's processing: migrate the store, create ``gc1`` from
@@ -194,7 +232,9 @@ def startup(app_conf: Dict[str, str], notifier=None, *, db: store.Db = None,
     ``<data_dir>/gc.db`` and ``data_dir`` to ``paths.data_dir()``;
     ``conf_fn`` (default ``settings.load_settings``) supplies the global
     settings per job. ``format_line`` defaults to ``exports.format_line``
-    (the frozen v1 export line). Other keywords go to ``pipeline.Worker``.
+    (the frozen v1 export line) and ``corrections_provider`` to
+    ``corrections_provider(db)`` (hub corrections; gc1's file until seeded).
+    Other keywords go to ``pipeline.Worker``.
     """
     import exports
     import pipeline  # deferred: pipeline imports this module
@@ -206,6 +246,7 @@ def startup(app_conf: Dict[str, str], notifier=None, *, db: store.Db = None,
     if not hasattr(db, "execute"):
         store.migrate(db)
     bootstrap_gc1(app_conf, db=db)
+    worker_kw.setdefault("corrections_provider", corrections_provider(db))
     worker = pipeline.Worker(db=db, data_dir=data, conf_fn=conf_fn, notifier=notifier, **worker_kw)
     worker.start()
     return worker
