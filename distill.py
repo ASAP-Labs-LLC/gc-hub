@@ -52,10 +52,11 @@ _SETTINGS_CACHE: Dict[str, str] | None = None
 _SETTINGS_MTIME: float | None = None
 _SETTINGS_LOCK = threading.Lock()
 
-# (resolved calibration path, assignment signature) -> (CDF mtime, function).
-# Keyed by signature too, so confs that share one calibration file but assign
-# its peaks differently each keep their own entry instead of evicting another's.
-_CAL_CACHE: dict[Tuple[str, str], Tuple[float, Callable[[np.ndarray], np.ndarray]]] = {}
+# (resolved calibration path, assignment signature) -> (CDF mtime, function,
+# anchors used). Keyed by signature too, so confs that share one calibration
+# file but assign its peaks differently each keep their own entry instead of
+# evicting another's.
+_CAL_CACHE: dict[Tuple[str, str], Tuple[float, Callable[[np.ndarray], np.ndarray], dict]] = {}
 _CAL_LOCK = threading.Lock()
 _NETCDF_LOCK = threading.Lock()
 _CSV_LOCK = threading.Lock()  # guards all reads/writes to distill_results.csv
@@ -555,6 +556,62 @@ def upsert_assignments(raw: str, cdf_path, assignments: list) -> str:
     return json.dumps(amap)
 
 
+def _calibration_anchor_set(
+    cal_cdf: Path, conf: Dict[str, str], *, use_assignments: bool = True
+) -> Tuple[np.ndarray, np.ndarray, list, str]:
+    """Return ``(rt, bp, carbons, source)``: the anchors a calibration is built from.
+
+    ``source`` is ``"assignments"`` when ``conf`` holds at least two usable
+    peak→carbon assignments for ``cal_cdf`` (the same pairs ``anchors_for``
+    uses), else ``"auto"``: peaks auto-detected in the CDF, zipped in order
+    with the reference n-alkane ladder.
+    """
+    if use_assignments:
+        try:
+            amap = parse_assignment_map(conf.get("calibration_assignments", ""))
+            pairs = _assignment_pairs(amap, cal_cdf)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Calibration assignment lookup failed: %s", exc)
+            pairs = []
+        if len(pairs) >= 2:
+            cbp = carbon_bp_map()
+            return (np.array([p[0] for p in pairs], float),
+                    np.array([cbp[p[1]] for p in pairs], float),
+                    [p[1] for p in pairs], "assignments")
+
+    t, y = _read_cdf(cal_cdf)
+    rt = _detect_nalkane_peaks(t, y)
+    n = min(rt.size, len(N_ALKANE_BP))
+    last_c = N_ALKANE_CARBON[n - 1] if n else 0
+    LOGGER.debug("Calibration peaks detected: %d (C5–C%d)", n, last_c)
+    return rt[:n], np.asarray(N_ALKANE_BP[:n], float), list(N_ALKANE_CARBON[:n]), "auto"
+
+
+def _anchors_info(rt: np.ndarray, carbons: list, source: str) -> dict:
+    return {"source": source,
+            "anchors": [[float(r), int(c)] for r, c in zip(rt, carbons)]}
+
+
+def _build_calibration_and_anchors(
+    cal_cdf: Path, conf: Dict[str, str]
+) -> Tuple[Callable[[np.ndarray], np.ndarray], dict]:
+    """``_build_calibration`` plus the anchors it used (``_anchors_info`` shape)."""
+    rt, bp, carbons, source = _calibration_anchor_set(cal_cdf, conf)
+    if source == "assignments":
+        try:
+            cal = build_calibration_from_anchors(rt, bp)
+            LOGGER.debug("Calibration from %d manual assignments", rt.size)
+            return cal, _anchors_info(rt, carbons, source)
+        except Exception as exc:  # noqa: BLE001
+            # Never let a bad assignment set take down the whole pipeline —
+            # fall back to auto-detection (which feeds every sample's distillation).
+            LOGGER.warning(
+                "Calibration from assignments failed (%s); using auto-detection", exc
+            )
+            rt, bp, carbons, source = _calibration_anchor_set(cal_cdf, conf, use_assignments=False)
+    return build_calibration_from_anchors(rt, bp), _anchors_info(rt, carbons, source)
+
+
 def _build_calibration(cal_cdf: Path, conf: Dict[str, str]) -> Callable[[np.ndarray], np.ndarray]:
     """Return a calibration function for a calibration CDF.
 
@@ -562,34 +619,7 @@ def _build_calibration(cal_cdf: Path, conf: Dict[str, str]) -> Callable[[np.ndar
     (``calibration_assignments``); falls back to sequential auto-detection
     against the reference n-alkane ladder when no usable assignments exist.
     """
-    try:
-        amap = parse_assignment_map(conf.get("calibration_assignments", ""))
-        anchors = anchors_for(amap, cal_cdf)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Calibration assignment lookup failed: %s", exc)
-        anchors = None
-    if anchors is not None:
-        rt_a, bp_a = anchors
-        try:
-            cal = build_calibration_from_anchors(rt_a, bp_a)
-            LOGGER.debug("Calibration from %d manual assignments", rt_a.size)
-            return cal
-        except Exception as exc:  # noqa: BLE001
-            # Never let a bad assignment set take down the whole pipeline —
-            # fall back to auto-detection (which feeds every sample's distillation).
-            LOGGER.warning(
-                "Calibration from assignments failed (%s); using auto-detection", exc
-            )
-
-    t, y = _read_cdf(cal_cdf)
-    rt = _detect_nalkane_peaks(t, y)
-    n = min(rt.size, len(N_ALKANE_BP))
-    last_c = N_ALKANE_CARBON[n - 1] if n else 0
-    LOGGER.debug("Calibration peaks detected: %d (C5–C%d)", n, last_c)
-
-    rt = rt[:n]
-    bp = np.asarray(N_ALKANE_BP[:n], float)
-    return build_calibration_from_anchors(rt, bp)
+    return _build_calibration_and_anchors(cal_cdf, conf)[0]
 
 
 def _assignment_signature(cal_path: Path, conf: Dict[str, str]) -> str:
@@ -605,8 +635,10 @@ def _assignment_signature(cal_path: Path, conf: Dict[str, str]) -> str:
         return ""
 
 
-def _calibration_function(cal_cdf: Path, conf: Dict[str, str]) -> Callable[[np.ndarray], np.ndarray]:
-    """Cached ``_build_calibration(cal_cdf, conf)``.
+def _calibration_entry(
+    cal_cdf: Path, conf: Dict[str, str]
+) -> Tuple[Callable[[np.ndarray], np.ndarray], dict]:
+    """Cached ``_build_calibration_and_anchors(cal_cdf, conf)``.
 
     Cached per (resolved path, ``conf``'s assignment signature) and rebuilt
     when the CDF's mtime changes, so two confs never share a function built
@@ -621,18 +653,34 @@ def _calibration_function(cal_cdf: Path, conf: Dict[str, str]) -> Callable[[np.n
     try:
         mtime = cal_path.stat().st_mtime
     except Exception:  # noqa: BLE001
-        return _build_calibration(cal_path, conf)
+        return _build_calibration_and_anchors(cal_path, conf)
     with _CAL_LOCK:
         cached = _CAL_CACHE.get((key, sig))
         if cached and cached[0] == mtime:
-            return cached[1]
-    func = _build_calibration(cal_path, conf)
+            return cached[1], cached[2]
+    func, info = _build_calibration_and_anchors(cal_path, conf)
     with _CAL_LOCK:
         # Entries for an older version of this file can never match again.
         for stale in [k for k, v in _CAL_CACHE.items() if k[0] == key and v[0] != mtime]:
             del _CAL_CACHE[stale]
-        _CAL_CACHE[(key, sig)] = (mtime, func)
-    return func
+        _CAL_CACHE[(key, sig)] = (mtime, func, info)
+    return func, info
+
+
+def _calibration_function(cal_cdf: Path, conf: Dict[str, str]) -> Callable[[np.ndarray], np.ndarray]:
+    """Cached calibration function for ``cal_cdf`` under ``conf``."""
+    return _calibration_entry(cal_cdf, conf)[0]
+
+
+def calibration_anchors(cal_cdf: Path, conf: Dict[str, str]) -> dict:
+    """The anchors the calibration for ``cal_cdf`` under ``conf`` is built from.
+
+    Returns ``{"source": "assignments"|"auto", "anchors": [[rt, carbon], ...]}``
+    (``rt`` in minutes, sorted), exactly what the distillation math uses,
+    including the auto-detection fallback.
+    """
+    info = _calibration_entry(cal_cdf, conf)[1]
+    return {"source": info["source"], "anchors": [list(a) for a in info["anchors"]]}
 
 
 def _cumulative_percent(t: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -1109,13 +1157,27 @@ def _append_csv_row(dest_csv, row_data: list) -> None:
             w.writerow(row_data)
 
 
-def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool = False) -> Path:
-    """Parse *path* and append one row of distillation data to distill_output CSV.
+def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None,
+            corrections: Dict[str, float] | None = None) -> dict:
+    """Run the distillation for one sample; write nothing.
 
-    Returns the final path of the processed CDF (may be moved/renamed).
+    ``conf`` supplies the calibration, the correction file and the best-fit
+    settings. ``corrections`` maps D86 cut → value to add (as
+    ``load_d86_corrections`` returns); ``None`` loads them from
+    ``conf["correction_factors_json"]`` exactly as ``process_cdf`` always has.
+
+    Returns a dict:
+
+    * ``row``: every ``CSV_HEADER`` column, in order, holding the values
+      ``process_cdf`` writes (same rounding, ``""`` for a missing D86 cut),
+      with ``Source File`` = ``""``;
+    * ``d2887``, ``d86_uncorrected`` and ``d86`` (corrected), keyed by cut;
+    * ``lab_id`` and ``injection_dt`` (a naive ``datetime``);
+    * ``calibration``: ``{cdf, anchors_source, anchors}``.
+
+    Raises ``FileNotFoundError`` when the calibration CDF is missing.
     """
-    conf = _get_settings()
-    dest_csv = Path(conf.get("distill_output", str(paths.default_results_csv())))
+    path = Path(cdf_path)
 
     # 1 Chromatogram
     t, y = _read_cdf(path)
@@ -1134,7 +1196,7 @@ def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool =
     cal_cdf = active_calibration_path(conf)
     if cal_cdf is None or not cal_cdf.is_file():
         raise FileNotFoundError("Calibration CDF not found – set settings['calibration_cdf'] or GC_CAL_CDF")
-    cal_fn = _calibration_function(cal_cdf, conf)
+    cal_fn, cal_info = _calibration_entry(cal_cdf, conf)
     bp_curve = cal_fn(t)
 
     # 3 Cumulative %
@@ -1167,12 +1229,14 @@ def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool =
     if "50%" in d86 and "70%" in d86:
         d86["60%"] = _round2((d86["50%"] + d86["70%"]) / 2)
 
+    d86_uncorrected = dict(d86)
+
     # 5b Apply EQM correction factors (always written to CSV per lab policy)
-    corr_path = conf.get("correction_factors_json", "").strip()
-    if corr_path:
-        corrections = load_d86_corrections(corr_path)
-        if corrections:
-            d86 = apply_d86_corrections(d86, corrections)
+    if corrections is None:
+        corr_path = conf.get("correction_factors_json", "").strip()
+        corrections = load_d86_corrections(corr_path) if corr_path else {}
+    if corrections:
+        d86 = apply_d86_corrections(d86, corrections)
 
     # 5c Fuel-type best fit against the comparison standards (failure-safe:
     # blank columns rather than blocking the distillation on any error)
@@ -1202,6 +1266,44 @@ def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool =
     sample, inj_dt = cdf_metadata(path)
     lab_id = sample  # plain sample name for CSV
 
+    values = [
+        lab_id,
+        inj_dt.isoformat(sep=" "),
+        d2887["IBP"], d2887["5%"],  d2887["10%"], d2887["20%"], d2887["30%"], d2887["40%"],
+        d2887["50%"], d2887["60%"], d2887["70%"], d2887["80%"], d2887["90%"], d2887["95%"], d2887["FBP"],
+        d86.get("IBP", ""), d86.get("5%", ""),  d86.get("10%", ""), d86.get("20%", ""), d86.get("30%", ""), d86.get("40%", ""),
+        d86.get("50%", ""), d86.get("60%", ""), d86.get("70%", ""), d86.get("80%", ""), d86.get("90%", ""), d86.get("95%", ""), d86.get("FBP", ""),
+        best_fit_label, best_fit_score,
+        "",
+    ]
+    return {
+        "row": dict(zip(CSV_HEADER, values)),
+        "d2887": d2887,
+        "d86_uncorrected": d86_uncorrected,
+        "d86": d86,
+        "lab_id": lab_id,
+        "injection_dt": inj_dt,
+        "calibration": {
+            "cdf": str(cal_cdf),
+            "anchors_source": cal_info["source"],
+            "anchors": [list(a) for a in cal_info["anchors"]],
+        },
+    }
+
+
+def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool = False) -> Path:
+    """Parse *path* and append one row of distillation data to distill_output CSV.
+
+    Returns the final path of the processed CDF (may be moved/renamed).
+    """
+    conf = _get_settings()
+    dest_csv = Path(conf.get("distill_output", str(paths.default_results_csv())))
+
+    # 1-6 The numbers (compute writes nothing)
+    result = compute(path, conf, blank_path)
+    lab_id = result["lab_id"]
+    inj_dt = result["injection_dt"]
+
     # 7 Write CSV  (move section 8 first so we know the final path)
     proc_dir = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir()))).expanduser()
     if proc_dir:
@@ -1213,16 +1315,8 @@ def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool =
         source_file = str(path)
 
     dest_csv.parent.mkdir(parents=True, exist_ok=True)
-    row_data = [
-        lab_id,
-        inj_dt.isoformat(sep=" "),
-        d2887["IBP"], d2887["5%"],  d2887["10%"], d2887["20%"], d2887["30%"], d2887["40%"],
-        d2887["50%"], d2887["60%"], d2887["70%"], d2887["80%"], d2887["90%"], d2887["95%"], d2887["FBP"],
-        d86.get("IBP", ""), d86.get("5%", ""),  d86.get("10%", ""), d86.get("20%", ""), d86.get("30%", ""), d86.get("40%", ""),
-        d86.get("50%", ""), d86.get("60%", ""), d86.get("70%", ""), d86.get("80%", ""), d86.get("90%", ""), d86.get("95%", ""), d86.get("FBP", ""),
-        best_fit_label, best_fit_score,
-        source_file,
-    ]
+    row = dict(result["row"], **{"Source File": source_file})
+    row_data = [row[col] for col in CSV_HEADER]
     if reprocess:
         # Reprocess / Export-to-LIMS always appends a new row (per lab policy:
         # each run is a distinct line in the results CSV, duplicates allowed).

@@ -7,10 +7,13 @@ release (see RELEASING.md), never a refactor.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +24,7 @@ for _p in (WEBAPP_DIR, TESTS_DIR, TESTS_DIR / "golden"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+import cdf_fixtures as fx  # noqa: E402
 import distill  # noqa: E402
 import make_golden  # noqa: E402
 import settings  # noqa: E402
@@ -124,6 +128,135 @@ class ConfExplicitCalibrationTests(_IsolatedSettings):
         pct, bp = distill.distillation_curve_from_cdf(self.sample, blank_path=None, conf=self.conf_a)
         np.testing.assert_array_equal(pct, pct_a)
         np.testing.assert_array_equal(bp, bp_a)
+
+
+def _csv_strings(row: dict) -> dict:
+    """``row``'s values exactly as csv.writer writes them (what process_cdf does)."""
+    buf = io.StringIO()
+    csv.writer(buf).writerow(list(row.values()))
+    buf.seek(0)
+    return dict(zip(row.keys(), next(csv.reader(buf))))
+
+
+class CalibrationAnchorsTests(_IsolatedSettings):
+    def setUp(self) -> None:
+        super().setUp()
+        self.inputs = make_golden.build_inputs(self.root)
+        self.cal = self.inputs["cal"]
+        self.conf = make_golden.case_conf(self.root, self.inputs, "sample_40304_blank")
+
+    def _assert_matches_build(self, info: dict, conf: dict) -> None:
+        cbp = distill.carbon_bp_map()
+        rt = np.array([a[0] for a in info["anchors"]])
+        bp = np.array([cbp[a[1]] for a in info["anchors"]])
+        t = np.linspace(0.2, 7.5, 200)
+        np.testing.assert_array_equal(distill.build_calibration_from_anchors(rt, bp)(t),
+                                      distill._build_calibration(self.cal, conf)(t))
+
+    def test_assigned_anchors_skip_ignored_peaks(self) -> None:
+        info = distill.calibration_anchors(self.cal, self.conf)
+        self.assertEqual(info["source"], "assignments")
+        expected = [[rt, c] for rt, c in zip(fx.ladder_times(), distill.N_ALKANE_CARBON[:20])]
+        self.assertEqual(info["anchors"], expected)
+        self._assert_matches_build(info, self.conf)
+
+    def test_auto_detect_fallback(self) -> None:
+        conf = dict(self.conf, calibration_assignments="")
+        info = distill.calibration_anchors(self.cal, conf)
+        self.assertEqual(info["source"], "auto")
+        # Auto-detection takes the solvent as the first peak (C5) and stops at
+        # the ladder's 20 reference carbons.
+        self.assertEqual([c for _, c in info["anchors"]], distill.N_ALKANE_CARBON[:20])
+        self.assertAlmostEqual(info["anchors"][0][0], make_golden.SOLVENT_RT, places=3)
+        self.assertTrue(all(isinstance(rt, float) for rt, _ in info["anchors"]))
+        self._assert_matches_build(info, conf)
+
+
+class ComputeTests(_IsolatedSettings):
+    def setUp(self) -> None:
+        super().setUp()
+        self.inputs = make_golden.build_inputs(self.root)
+
+    def _loaded_conf(self, name: str) -> dict:
+        """The case's settings as process_cdf sees them (file merged over DEFAULTS)."""
+        path = self.root / f"{name}.settings.json"
+        path.write_text(json.dumps(make_golden.case_conf(self.root, self.inputs, name)),
+                        encoding="utf-8")
+        settings.CONFIG_PATH = path
+        distill._SETTINGS_CACHE = None
+        return distill._get_settings()
+
+    def _case(self, name: str):
+        sample_key, use_blank, _ = make_golden.CASES[name]
+        return (self.inputs["samples"][sample_key], self.inputs["blank"] if use_blank else None)
+
+    def test_row_equals_golden(self) -> None:
+        for name, expected in GOLDEN.items():
+            with self.subTest(case=name):
+                cdf, blank = self._case(name)
+                result = distill.compute(cdf, self._loaded_conf(name), blank)
+                row = result["row"]
+                self.assertEqual(list(row), distill.CSV_HEADER)
+                self.assertEqual(row["Source File"], "")
+                self.assertEqual(_csv_strings({k: v for k, v in row.items() if k != "Source File"}),
+                                 expected)
+
+    def test_result_fields(self) -> None:
+        cdf, blank = self._case("sample_40304_blank")
+        conf = self._loaded_conf("sample_40304_blank")
+        result = distill.compute(cdf, conf, blank)
+        self.assertEqual(result["lab_id"], "40304")
+        self.assertEqual(result["injection_dt"], datetime(2026, 9, 25, 14, 23, 0))
+        self.assertEqual(set(result["d2887"]), {"IBP", "5%", "10%", "20%", "30%", "40%", "50%",
+                                                "60%", "70%", "80%", "90%", "95%", "FBP"})
+        self.assertEqual(result["calibration"], {
+            "cdf": str(self.inputs["cal"]),
+            "anchors_source": "assignments",
+            "anchors": distill.calibration_anchors(self.inputs["cal"], conf)["anchors"],
+        })
+        # The uncorrected D86 is the no-corrections golden row; the corrected
+        # one is that plus each cut's correction.
+        golden_uncorrected = GOLDEN["no_corrections"]
+        for cut, col in (("IBP", "D86 IBP"), ("50%", "D86 T50"), ("FBP", "D86 FBP")):
+            self.assertEqual(str(result["d86_uncorrected"][cut]), golden_uncorrected[col])
+        self.assertAlmostEqual(result["d86"]["IBP"] - result["d86_uncorrected"]["IBP"], -12.08, places=6)
+        self.assertEqual(result["d86"]["20%"], result["d86_uncorrected"]["20%"])
+
+    def test_empty_corrections_leave_d86_uncorrected(self) -> None:
+        cdf, blank = self._case("sample_40304_blank")
+        result = distill.compute(cdf, self._loaded_conf("sample_40304_blank"), blank, corrections={})
+        self.assertEqual(result["d86"], result["d86_uncorrected"])
+        row = {k: v for k, v in result["row"].items() if k != "Source File"}
+        self.assertEqual(_csv_strings(row), GOLDEN["no_corrections"])
+
+    def test_compute_writes_nothing(self) -> None:
+        cdf, blank = self._case("sample_40304_blank")
+        conf = self._loaded_conf("sample_40304_blank")
+
+        def snapshot():
+            return {str(p): (p.stat().st_size, p.stat().st_mtime_ns) for p in self.root.rglob("*")}
+
+        before = snapshot()
+        distill.compute(cdf, conf, blank)
+        self.assertEqual(snapshot(), before)
+        self.assertFalse(Path(conf["distill_output"]).exists())
+        self.assertFalse(Path(conf["processed_cdf_dir"]).exists())
+        self.assertTrue(cdf.is_file())
+
+    def test_missing_calibration_raises_like_process_cdf(self) -> None:
+        cdf, _ = self._case("sample_40304_noblank")
+        conf = self._loaded_conf("sample_40304_noblank")
+        conf["calibration_cdf"] = str(self.root / "missing.CDF")
+        with self.assertRaises(FileNotFoundError) as got:
+            distill.compute(cdf, conf)
+        path = self.root / "missing.settings.json"
+        path.write_text(json.dumps(conf), encoding="utf-8")
+        settings.CONFIG_PATH = path
+        distill._SETTINGS_CACHE = None
+        with self.assertRaises(FileNotFoundError) as today:
+            distill.process_cdf(cdf)
+        self.assertEqual(str(got.exception), str(today.exception))
+        self.assertIn("Calibration CDF not found", str(got.exception))
 
 
 if __name__ == "__main__":
