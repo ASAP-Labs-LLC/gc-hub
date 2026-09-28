@@ -65,7 +65,8 @@ Samples and revisions::
     add_revision(conn, sample_id, results, *, reason, by=None, d86_uncorrected=None,
                  calibration_used=None, blank_used=None, corrections_used=None,
                  best_fit=None, fit_score=None, flags=None, processed_at=None, notes=None,
-                 cdf_sha256=<sample's>, cdf_path=<sample's>) -> int   # the CDF that produced it
+                 cdf_sha256=<sample's>, cdf_path=<sample's>,        # the CDF that produced it
+                 blank_cdf_sha256=<blank's>, blank_cdf_path=<blank's>) -> int   # the blank file subtracted
                  # MUST run inside write_txn(conn); bumps samples.current_revision
     get_revision(sample_id, revision=None, *, db) -> dict | None   # None = current
     list_revisions(sample_id, *, db) -> list[dict]                 # ascending
@@ -160,7 +161,8 @@ Conventions and decisions (where the spec left a choice)
   revision was computed, e.g. ``{"blank_rejected": {"sample_id", "reason"}}``.
 * ``sample_results.cdf_sha256``/``cdf_path`` (beyond the spec; 2D) record the
   CDF each revision was computed from (NULL for a result-only import), so a
-  conflict Replace leaves a trail. ``conflicts.error`` (beyond the spec) is
+  conflict Replace leaves a trail; ``blank_cdf_sha256``/``blank_cdf_path``
+  the blank file it subtracted (a blank sample's file can be replaced). ``conflicts.error`` (beyond the spec) is
   the last failed Replace attempt's message, cleared when it is resolved.
 * ``samples.time_corrected`` is an INTEGER flag (0/1). The spec's comment on
   that line (``'cdf'|'mtime'``) belongs to ``injection_dt_source``.
@@ -181,7 +183,9 @@ Conventions and decisions (where the spec left a choice)
   keeps the earlier ``not_before`` (NULL = now). ``enqueue_for_status``
   only brings a queued job forward to now and keeps its payload, since its
   own payload is the bare ``{"sample_id"}``. A running job re-queued while a twin is
-  queued becomes ``superseded``. ``claim_next`` marks a job with an
+  queued becomes ``superseded``. A conflict-Replace payload (``reason
+  'replace'``) is sticky: a plain ``enqueue`` keeps it, and a superseded
+  Replace job hands its payload to the surviving twin. ``claim_next`` marks a job with an
   undecodable payload ``failed`` and moves on. ``requeue_stale_running``
   treats every ``running`` job as stale: call it only at start-up.
 * **Corrections (D4b).** ``set_all`` writes only the cuts whose value
@@ -317,6 +321,8 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             notes TEXT,
             cdf_sha256 TEXT,
             cdf_path TEXT,
+            blank_cdf_sha256 TEXT,
+            blank_cdf_path TEXT,
             PRIMARY KEY(sample_id, revision))""",
         "CREATE INDEX sample_results_sha ON sample_results(cdf_sha256)",
         """CREATE TABLE conflicts(
@@ -423,7 +429,8 @@ REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
     "sample_results": frozenset({
         "sample_id", "revision", "results", "d86_uncorrected", "calibration_used",
         "blank_used", "corrections_used", "best_fit", "fit_score", "flags", "reason",
-        "by", "processed_at", "notes", "cdf_sha256", "cdf_path"}),
+        "by", "processed_at", "notes", "cdf_sha256", "cdf_path", "blank_cdf_sha256",
+        "blank_cdf_path"}),
     "conflicts": frozenset({
         "id", "instrument_id", "lab_id", "injection_dt", "existing_sample_id",
         "cdf_sha256", "cdf_path", "received_at", "resolved", "resolved_by", "resolved_at",
@@ -776,7 +783,8 @@ def add_revision(conn: sqlite3.Connection, sample_id: int, results: Any, *, reas
                  corrections_used: Any = None, best_fit: Optional[str] = None,
                  fit_score: Optional[float] = None, flags: Any = None,
                  processed_at: Optional[str] = None, notes: Any = None,
-                 cdf_sha256: Any = _FROM_SAMPLE, cdf_path: Any = _FROM_SAMPLE) -> int:
+                 cdf_sha256: Any = _FROM_SAMPLE, cdf_path: Any = _FROM_SAMPLE,
+                 blank_cdf_sha256: Any = _FROM_SAMPLE, blank_cdf_path: Any = _FROM_SAMPLE) -> int:
     """Write the next ``sample_results`` revision and make it current.
 
     Must run inside ``write_txn(conn)``, so the revision, the export row and
@@ -787,9 +795,19 @@ def add_revision(conn: sqlite3.Connection, sample_id: int, results: Any, *, reas
     nothing to say. ``cdf_sha256``/``cdf_path`` record the CDF that produced
     the revision; by default the sample's current file (both NULL for a
     result-only import). A caller that computed from another file (a conflict
-    Replace) passes it.
+    Replace) passes it. ``blank_cdf_sha256``/``blank_cdf_path`` record the
+    blank *file* subtracted: by default the ``blank_used`` sample's current
+    file (NULL without a blank); pass them (``None`` included) to record
+    another, e.g. a kept blank's recorded file or a copied revision's.
     """
     _require_txn(conn, "add_revision")
+    if blank_cdf_sha256 is _FROM_SAMPLE or blank_cdf_path is _FROM_SAMPLE:
+        b = (conn.execute("SELECT cdf_sha256, cdf_path FROM samples WHERE id=?",
+                          (blank_used,)).fetchone() if blank_used is not None else None)
+        if blank_cdf_sha256 is _FROM_SAMPLE:
+            blank_cdf_sha256 = b[0] if b is not None else None
+        if blank_cdf_path is _FROM_SAMPLE:
+            blank_cdf_path = b[1] if b is not None else None
     if cdf_sha256 is _FROM_SAMPLE or cdf_path is _FROM_SAMPLE:
         cur = conn.execute("SELECT cdf_sha256, cdf_path FROM samples WHERE id=?",
                            (sample_id,)).fetchone()
@@ -802,11 +820,12 @@ def add_revision(conn: sqlite3.Connection, sample_id: int, results: Any, *, reas
     conn.execute(
         'INSERT INTO sample_results(sample_id, revision, results, d86_uncorrected, '
         'calibration_used, blank_used, corrections_used, best_fit, fit_score, flags, '
-        'reason, "by", processed_at, notes, cdf_sha256, cdf_path) '
-        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        'reason, "by", processed_at, notes, cdf_sha256, cdf_path, blank_cdf_sha256, '
+        'blank_cdf_path) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (sample_id, rev, _enc(results), _enc(d86_uncorrected), _enc(calibration_used),
          blank_used, _enc(corrections_used), best_fit, fit_score, _enc(flags), reason, by,
-         processed_at or now_iso(), _enc(notes), cdf_sha256, cdf_path))
+         processed_at or now_iso(), _enc(notes), cdf_sha256, cdf_path, blank_cdf_sha256,
+         blank_cdf_path))
     conn.execute("UPDATE samples SET current_revision=? WHERE id=?", (rev, sample_id))
     return rev
 
@@ -1273,6 +1292,26 @@ _EARLIER_NOT_BEFORE = ("CASE WHEN excluded.not_before IS NULL OR jobs.not_before
                        "ELSE jobs.not_before END")
 
 
+def _is_replace(payload: Any) -> bool:
+    """A conflict-Replace payload (``reason == 'replace'``): an admin's decision
+    that a plain job for the same sample must never supersede or overwrite."""
+    if isinstance(payload, (str, bytes)):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            return False
+    return isinstance(payload, dict) and payload.get("reason") == "replace"
+
+
+def _carry_replace(conn: sqlite3.Connection, from_id: int, to_id: int) -> None:
+    """``from_id`` is being superseded by ``to_id``: if it carries a Replace and
+    the survivor doesn't, the survivor takes its payload."""
+    a = conn.execute("SELECT payload FROM jobs WHERE id=?", (from_id,)).fetchone()
+    b = conn.execute("SELECT payload FROM jobs WHERE id=?", (to_id,)).fetchone()
+    if a is not None and b is not None and _is_replace(a["payload"]) and not _is_replace(b["payload"]):
+        conn.execute("UPDATE jobs SET payload=? WHERE id=?", (a["payload"], to_id))
+
+
 class jobs:  # noqa: N801
     """Durable job queue. States: ``queued`` → ``running`` → ``done`` | ``failed``
     (| ``superseded``, see the module docstring)."""
@@ -1291,6 +1330,11 @@ class jobs:  # noqa: N801
         nb = _ts(not_before)
         body = json.dumps(payload)
         with _writing(db) as conn:
+            if sample_id is not None and not _is_replace(payload):
+                q = conn.execute("SELECT payload FROM jobs WHERE kind=? AND sample_id=? "
+                                 "AND state='queued'", (kind, sample_id)).fetchone()
+                if q is not None and _is_replace(q["payload"]):
+                    body = q["payload"]         # a plain request never replaces a Replace
             if sample_id is None:
                 cur = conn.execute(
                     "INSERT INTO jobs(kind, payload, state, attempts, not_before, created_at) "
@@ -1387,6 +1431,7 @@ class jobs:  # noqa: N801
                 return
             if twin["not_before"] is not None and retry < twin["not_before"]:
                 conn.execute("UPDATE jobs SET not_before=? WHERE id=?", (retry, twin["id"]))
+            _carry_replace(conn, job_id, twin["id"])
             conn.execute("UPDATE jobs SET state='superseded', last_error=?, finished_at=? WHERE id=?",
                          (error, now_iso(), job_id))
 
@@ -1402,6 +1447,12 @@ class jobs:  # noqa: N801
                 "UPDATE jobs SET not_before=NULL WHERE state='queued' AND sample_id IS NOT NULL "
                 "AND EXISTS (SELECT 1 FROM jobs r WHERE r.state='running' AND r.kind=jobs.kind "
                 "AND r.sample_id=jobs.sample_id)")
+            # a running Replace about to be superseded hands its payload to the survivor
+            for r in conn.execute(
+                    "SELECT r.id AS rid, o.id AS oid FROM jobs r JOIN jobs o ON o.kind=r.kind "
+                    "AND o.sample_id=r.sample_id AND o.state='queued' WHERE r.state='running' "
+                    "ORDER BY r.id").fetchall():
+                _carry_replace(conn, r["rid"], r["oid"])
             conn.execute(
                 "UPDATE jobs SET state='superseded', finished_at=? WHERE state='running' "
                 "AND sample_id IS NOT NULL AND EXISTS (SELECT 1 FROM jobs o WHERE o.kind=jobs.kind "

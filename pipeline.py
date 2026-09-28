@@ -62,6 +62,7 @@ Public API
     export_to_lims(sample_id, *, by, db=None, data_dir=None, format_line=None) -> {revision, seq}
     release_backfill(sample_id, *, by, db=None, data_dir=None, format_line=None) -> seq
     resolve_conflict_replace(conflict_id, *, by, conf=None, db=None, data_dir=None) -> job id
+    revision_blank_path(sample_id, revision=None, *, db=None, data_dir=None) -> Path | None
     request_reprocess(sample_id, *, by=None, use_current_blank=False,
                       use_current_corrections=False, db=None) -> int (job id)
     on_calibration_saved(instrument_id, *, db=None) -> int      # queues awaiting_calibration
@@ -145,6 +146,15 @@ Decisions (where the spec left a choice):
   existing. Only one Replace per sample may be pending; a reprocess request
   meanwhile returns the Replace job. Every revision records the CDF that
   produced it (``sample_results.cdf_sha256``/``cdf_path``).
+* **Blank provenance.** Each revision records the blank *file* it
+  subtracted (``blank_cdf_sha256``/``blank_cdf_path``) as well as the blank
+  sample. A reprocess that keeps the recorded blank (D5) subtracts that
+  recorded file (old CDFs stay on disk, D7), never the blank sample's
+  current one; a missing recorded file is ``BlankUnreadable``. A freshly
+  chosen blank whose file changes during the compute makes the write stale.
+  A Replace of a sample that final results used as their blank, or that
+  makes it a genuine blank (late-blank rule), marks those results with a
+  ``review_note`` (not reprocessed) and sends one notification.
 * A re-sent file that produced an earlier revision of a sample (the file a
   Replace swapped out) answers ``duplicate`` for that sample (or
   ``cross_instrument``) and creates nothing: it is not a new conflict. This
@@ -195,6 +205,8 @@ TRANSIENT_RETRY = timedelta(seconds=60)
 STUCK_ATTEMPTS = 10
 INCOMING_DIR = ".incoming"
 LATE_BLANK_NOTE = "earlier-injected blank arrived after processing (blank sample {blank_id})"
+BLANK_REPLACED_NOTE = ("the CDF of blank sample {blank_id} was replaced after this result used it "
+                       "(conflict {conflict_id}); the result still subtracts the previous file")
 
 # A genuine blank's name: "Blank", "blank2", "Blank - 1", "(Blank)", "[b] Blank2".
 _BLANK_NAME = re.compile(
@@ -500,7 +512,7 @@ def _existing_result(sha: str, instrument_id: str, db) -> Optional[SubmitResult]
 
 
 def _flag_late_blank(conn, inst: dict, blank_id: int, blank_dt: str, method_name: str) -> list:
-    """Mark the final samples a newly received genuine blank would have served
+    """Mark the final samples a new genuine blank would have served
     (see the module docstring); return their ids. Runs inside ``write_txn``."""
     mm = instruments.method_map(inst)
     hub_method = mm.get(method_name)
@@ -528,6 +540,26 @@ def _flag_late_blank(conn, inst: dict, blank_id: int, blank_dt: str, method_name
     for sid in flagged:
         store.samples.update(sid, review_note=note, db=conn)
     return flagged
+
+
+def _flag_blank_replaced(conn, cur: dict, src: dict) -> list:
+    """A conflict Replace is swapping sample ``cur``'s CDF for ``src``'s (inside
+    ``write_txn``): mark the final samples whose current result used it as
+    their blank, and, if it has just become a genuine blank, the ones it
+    would have served (``_flag_late_blank``). Returns their ids."""
+    sid = cur["id"]
+    users = [r["id"] for r in conn.execute(
+        "SELECT s.id FROM samples s JOIN sample_results r ON r.sample_id=s.id "
+        "AND r.revision=s.current_revision WHERE s.status='final' AND r.blank_used=? "
+        "AND s.id<>? ORDER BY s.injection_dt", (sid, sid))]
+    note = BLANK_REPLACED_NOTE.format(blank_id=sid, conflict_id=src["conflict_id"])
+    for uid in users:
+        store.samples.update(uid, review_note=note, db=conn)
+    late: list = []
+    if src["is_blank"] and not cur["is_blank"]:
+        inst = store.instruments.get(cur["instrument_id"], db=conn)
+        late = _flag_late_blank(conn, inst, sid, cur["injection_dt"], src["method_name"])
+    return users + [x for x in late if x not in users]
 
 
 def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.PathLike],
@@ -1030,8 +1062,13 @@ class Worker:
             if blank_named:
                 blank = None
             elif keep_blank:
-                blank = (store.samples.get(prev["blank_used"], db=self.db)
-                         if prev["blank_used"] is not None else None)
+                blank = None
+                if prev["blank_used"] is not None:
+                    if prev.get("blank_cdf_path"):     # the file it subtracted, not the current one
+                        blank = {"id": prev["blank_used"], "cdf_sha256": prev["blank_cdf_sha256"],
+                                 "cdf_path": prev["blank_cdf_path"]}
+                    else:                              # recorded before blank files were
+                        blank = store.samples.get(prev["blank_used"], db=self.db)
             else:
                 blank = store.samples.latest_blank(
                     sample["instrument_id"], sample["injection_dt"],
@@ -1041,7 +1078,8 @@ class Worker:
         blank_check = None
         if fresh_blank:
             blank_check = (methods.names_mapped_to(mm, hub_method),
-                           blank["id"] if blank is not None else None)
+                           blank["id"] if blank is not None else None,
+                           blank["cdf_sha256"] if blank is not None else None)
         blank_path = self.data_dir / blank["cdf_path"] if blank is not None else None
         if blank_path is not None and not blank_path.is_file():
             raise distill.BlankUnreadable(f"blank sample {blank['id']}'s CDF is missing: {blank_path}")
@@ -1094,6 +1132,8 @@ class Worker:
             "calibration_used": {"cdf": cal["cdf"], "sensitivity": float(ctx["calibration_sensitivity"]),
                                  "anchors_source": cal["anchors_source"], "anchors": cal["anchors"]},
             "blank_used": blank["id"] if applied else None,
+            "blank_cdf_sha256": blank["cdf_sha256"] if applied else None,
+            "blank_cdf_path": blank["cdf_path"] if applied else None,
             "corrections_used": {"source": corr.source, "updated_at": corr.updated_at,
                                  "updated_by": corr.updated_by, "values": dict(corr.values)},
             "best_fit": row.get("Best Fit") or None,
@@ -1125,6 +1165,7 @@ class Worker:
         afterwards marks the conflict ``replaced``; ``_Stale`` if the conflict
         was resolved meanwhile."""
         sid = sample["id"]
+        flagged: list = []
         with store.connection(self.db) as conn:
             with store.write_txn(conn):
                 cur = store.samples.get(sid, db=conn)
@@ -1132,11 +1173,12 @@ class Worker:
                         or cur["current_revision"] != sample["current_revision"]):
                     raise _Stale("changed while it was being computed")
                 if blank_check is not None:
-                    names, chosen = blank_check
+                    names, chosen, chosen_sha = blank_check
                     now = store.samples.latest_blank(cur["instrument_id"], cur["injection_dt"], names,
                                                      exclude_sample_id=sid, db=conn)
-                    if (now["id"] if now is not None else None) != chosen:
-                        raise _Stale("changed while it was being computed (a newer blank arrived)")
+                    if ((now["id"] if now is not None else None) != chosen
+                            or (now["cdf_sha256"] if now is not None else None) != chosen_sha):
+                        raise _Stale("changed while it was being computed (the blank changed)")
                 if src is not None:
                     c = store.conflicts.get(src["conflict_id"], db=conn)
                     if c is None or c["resolved"] is not None or c["cdf_sha256"] != src["cdf_sha256"]:
@@ -1144,6 +1186,7 @@ class Worker:
                     store.samples.update(sid, cdf_sha256=src["cdf_sha256"], cdf_path=src["cdf_path"],
                                          method_name=src["method_name"], is_blank=src["is_blank"],
                                          db=conn)
+                    flagged = _flag_blank_replaced(conn, cur, src)
                 rev = store.add_revision(conn, sid, results_json, reason=reason, by=by,
                                          notes=notes, **extra)
                 store.samples.set_status(sid, "final", db=conn)
@@ -1156,13 +1199,32 @@ class Worker:
                 store.jobs.complete(job["id"], db=conn)
         self._stuck.discard(sample["instrument_id"])
         log.info("pipeline: sample %s final at revision %s", sid, rev)
+        if flagged:
+            _notify(self.notifier, "warning",
+                    f"The CDF of sample {sid} ({cur['lab_id']}, injected {cur['injection_dt']}) "
+                    f"was replaced and changed the blank for {len(flagged)} final sample(s) "
+                    f"on {cur['instrument_id']}. They are marked for review and were not "
+                    f"reprocessed.")
         return rev
 
 
 # ── admin actions (one transaction each) ────────────────────────────────────
 
-_COPIED = ("d86_uncorrected", "calibration_used", "blank_used", "corrections_used", "best_fit",
-           "fit_score", "flags", "notes")
+_COPIED = ("d86_uncorrected", "calibration_used", "blank_used", "blank_cdf_sha256",
+           "blank_cdf_path", "corrections_used", "best_fit", "fit_score", "flags", "notes")
+
+
+def revision_blank_path(sample_id: int, revision: Optional[int] = None, *, db: store.Db = None,
+                        data_dir=None) -> Optional[Path]:
+    """The blank file a revision subtracted (``None`` = the current revision):
+    the recorded ``blank_cdf_path`` under the data folder, never the blank
+    sample's current file (it may have been replaced since). ``None`` if the
+    revision doesn't exist, subtracted no blank, or predates the record."""
+    data_dir = _data_dir(data_dir)
+    rev = store.get_revision(sample_id, revision, db=_db(db, data_dir))
+    if rev is None or rev.get("blank_used") is None or not rev.get("blank_cdf_path"):
+        return None
+    return data_dir / rev["blank_cdf_path"]
 
 
 def _line_for(sample: dict, rev: dict, format_line) -> str:
