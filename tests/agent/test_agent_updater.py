@@ -25,10 +25,12 @@ def _load_builder():
     return mod
 
 
-def _fake_agent_src(tmp_path, body="VALUE = 1\n", name="src"):
+def _fake_agent_src(tmp_path, body="VALUE = 1\n", name="src", tray=True):
     d = tmp_path / name
     (d / "gc_agent").mkdir(parents=True)
     (d / "gc_agent" / "__init__.py").write_text("", encoding="utf-8")
+    if tray:
+        (d / "gc_agent" / "tray.py").write_text("TRAY = 1\n", encoding="utf-8")
     (d / "gc_agent" / "__pycache__").mkdir()
     (d / "gc_agent" / "__pycache__" / "x.cpython-312.pyc").write_bytes(b"junk")
     (d / "agent_main.py").write_text("import gc_agent\n" + body, encoding="utf-8")
@@ -38,10 +40,10 @@ def _fake_agent_src(tmp_path, body="VALUE = 1\n", name="src"):
     return d
 
 
-def _build(tmp_path, version="v2.0.0", body="VALUE = 1\n", name="src"):
+def _build(tmp_path, version="v2.0.0", body="VALUE = 1\n", name="src", tray=True):
     b = _load_builder()
     out = tmp_path / ("%s-%s.zip" % (name, version))
-    sha = b.build(_fake_agent_src(tmp_path, body, name), version, out)
+    sha = b.build(_fake_agent_src(tmp_path, body, name, tray), version, out)
     return out, sha
 
 
@@ -50,7 +52,8 @@ def test_build_zip_layout_and_no_token(tmp_path):
     out, sha = _build(tmp_path)
     assert sha == hashlib.sha256(out.read_bytes()).hexdigest()
     names = sorted(zipfile.ZipFile(str(out)).namelist())
-    assert names == ["VERSION", "agent_main.py", "gc_agent/__init__.py", "requirements-agent.txt"]
+    assert names == ["VERSION", "agent_main.py", "gc_agent/__init__.py", "gc_agent/tray.py",
+                     "requirements-agent.txt"]
     assert zipfile.ZipFile(str(out)).read("VERSION") == b"v2.0.0\n"
 
 
@@ -112,9 +115,10 @@ def _root(tmp_path, running="v1.0.0", sha="old"):
     return root
 
 
-def _updater(root, hub, own_sha="old"):
+def _updater(root, hub, own_sha="old", clock=None):
+    kw = {"clock": clock} if clock else {}
     return Updater(str(root), HubClient(hub.url, hub.token, timeout=10), own_sha=own_sha,
-                   python=sys.executable)
+                   python=sys.executable, **kw)
 
 
 def test_same_sha_is_a_noop(tmp_path, hub):
@@ -220,3 +224,37 @@ def test_smoke_python_prefers_python_exe_beside_pythonw(tmp_path):
     (d / "python.exe").write_text("")
     assert updater.smoke_python(str(d / "pythonw.exe")) == str(d / "python.exe")
     assert updater.smoke_python("") == sys.executable
+
+
+def test_smoke_also_imports_the_tray_module(tmp_path, hub):
+    out, sha = _build(tmp_path, tray=False)
+    hub.package_version, hub.package_zip = "v2.0.0", out.read_bytes()
+    root = _root(tmp_path)
+    res = _updater(root, hub).check()
+    assert res.startswith("refused") and "smoke" in res
+    assert (root / "current.txt").read_text().strip() == "v1.0.0"
+
+
+def test_failed_package_is_not_retried_for_24h(tmp_path, hub, clock):
+    out, sha = _build(tmp_path, body="raise SystemExit('broken build')\n")
+    hub.package_version, hub.package_zip = "v2.0.0", out.read_bytes()
+    root = _root(tmp_path)
+    assert _updater(root, hub, clock=clock).check().startswith("refused")
+    failed = json.loads((root / "failed_packages.json").read_text())
+    assert sha in failed
+    n = len(hub.by_path("/api/agent/package.zip"))
+    clock.advance(23 * 3600)
+    assert _updater(root, hub, clock=clock).check() == "skipped"
+    assert len(hub.by_path("/api/agent/package.zip")) == n        # not downloaded again
+    clock.advance(3600 + 1)
+    assert _updater(root, hub, clock=clock).check().startswith("refused")
+    assert len(hub.by_path("/api/agent/package.zip")) == n + 1    # one retry after 24 h
+
+
+def test_download_sha_mismatch_is_not_recorded_as_failed(tmp_path, hub, clock):
+    out, sha = _build(tmp_path)
+    hub.package_version, hub.package_zip = "v2.0.0", out.read_bytes()
+    hub.package_sha_override = "f" * 64
+    root = _root(tmp_path)
+    assert _updater(root, hub, clock=clock).check().startswith("refused")
+    assert not (root / "failed_packages.json").exists()     # could be a torn download
