@@ -8,6 +8,13 @@ files or ``max_seconds`` of work before returning, so a first scan of a
 folder with years of CDFs never starves heartbeats, sends or tray actions.
 The next poll resumes where the cap stopped (already-queued files are skipped
 in memory).
+
+The time budget is charged only for probing and hashing new files: the clock
+starts at the first unknown file, so a slow walk over thousands of known
+files (antivirus on a GC PC) cannot use it up. And every pass queues at least
+one ready file before a cap can stop it, so a pass always makes progress. If
+passes keep stopping at a cap without queuing anything, ``behind`` says so
+(shown in the tray and the heartbeat's last_error).
 """
 from __future__ import annotations
 
@@ -22,6 +29,7 @@ log = logging.getLogger("gc_agent.scanner")
 
 MAX_NEW_PER_PASS = 200
 MAX_SECONDS_PER_PASS = 2.0
+FALLING_BEHIND_PASSES = 10
 
 
 def _walk(watch_dir, include_subdirs):
@@ -75,6 +83,8 @@ class Scanner:
         self.hasher = hasher
         self.timer = timer
         self.more = False            # the last pass stopped at a cap
+        self.behind = None           # "scan falling behind: ..." or None
+        self._stalled = 0
         self._seen = {}   # path -> (size, mtime_ns, first seen with that size/mtime)
 
     def scan(self, watch_dir, include_subdirs, stable_seconds,
@@ -82,7 +92,7 @@ class Scanner:
         """One pass. Returns how many file versions were newly queued."""
         watch_dir = os.path.normpath(watch_dir)
         now = self.clock()
-        t0 = self.timer()
+        t0 = None                    # starts at the first unknown file
         batch = []
         present = set()
         self.more = False
@@ -99,7 +109,12 @@ class Scanner:
                 if path in self._seen:
                     del self._seen[path]
                 continue
-            if len(batch) >= max_new or self.timer() - t0 >= max_seconds:
+            if t0 is None:
+                t0 = self.timer()
+            elif batch and self.timer() - t0 >= max_seconds:
+                self.more = True
+                break
+            if len(batch) >= max_new:
                 self.more = True
                 break
             prev = self._seen.get(path)
@@ -126,6 +141,16 @@ class Scanner:
             batch.append((path, size, mtime_ns, sha))
             self._seen.pop(path, None)
         self.ledger.add_queued_many(batch)
+        if self.more and not batch:
+            self._stalled += 1
+            if self._stalled >= FALLING_BEHIND_PASSES:
+                self.behind = ("scan falling behind: %d passes in a row stopped without queuing "
+                               "a file in %s" % (self._stalled, watch_dir))
+                if self._stalled == FALLING_BEHIND_PASSES:
+                    log.error("%s", self.behind)
+        else:
+            self._stalled = 0
+            self.behind = None
         if not self.more:
             for gone in set(self._seen) - present:
                 del self._seen[gone]

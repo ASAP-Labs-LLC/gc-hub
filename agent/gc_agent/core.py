@@ -12,6 +12,7 @@ import logging
 import os
 import queue
 import socket
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -79,6 +80,7 @@ class Agent:
         self.cfg_error = None
         self.watch_error = None
         self.mirror_error = None
+        self.scan_error = None
         self.client = None
         self.sender = Sender(self.ledger, None, clock=clock)
         self.mirror = None
@@ -173,7 +175,8 @@ class Agent:
         return "idle"
 
     def last_error(self):
-        for e in (self._revert_note, self.cfg_error, self.watch_error, self.sender.last_error,
+        for e in (self._revert_note, self.cfg_error, self.watch_error, self.scan_error,
+                  self.scanner.behind, self.sender.last_error,
                   self.hb_error, ("mirror: " + self.mirror_error) if self.mirror_error else None):
             if e:
                 return e
@@ -236,6 +239,14 @@ class Agent:
                     raise FileNotFoundError("")
                 self.scanner.scan(wd, self.cfg["include_subdirs"], self.cfg["stable_seconds"])
                 self.watch_error = None
+                self.scan_error = None
+            except sqlite3.Error as exc:
+                # The ledger could not record this pass; nothing was marked
+                # known, so the next poll retries. Keep heartbeating.
+                self.watch_error = None
+                if str(exc) not in (self.scan_error or ""):
+                    log.error("ledger error while scanning: %s", exc)
+                self.scan_error = "ledger error while scanning: %s" % exc
             except FileNotFoundError:
                 self.watch_error = "watch folder not found: %s" % (wd or "(not set)")
             except OSError as exc:
@@ -245,7 +256,13 @@ class Agent:
         for _ in range(SEND_BATCH):
             if not self._actions.empty():
                 break
-            if self.sender.send_next() not in ("sent", "rejected", "dropped"):
+            try:
+                outcome = self.sender.send_next()
+            except sqlite3.Error as exc:
+                log.error("ledger error while sending: %s", exc)
+                self.scan_error = "ledger error while sending: %s" % exc
+                break
+            if outcome not in ("sent", "rejected", "dropped"):
                 break
 
     def _heartbeat(self, now):
