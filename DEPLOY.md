@@ -6,22 +6,29 @@ updater is unchanged; gc is one more entry in its `config.json`. Everyday
 releases are in [`RELEASING.md`](RELEASING.md). This file covers the steps
 that have to be done by hand on the server, once.
 
-Resulting layout:
+Resulting layout (v2, the hub):
 
 ```
 C:\ASAPApps\gc\
-  releases\v1.2.3\      unpacked release (immutable), with its own .venv
+  releases\v2.0.0\      unpacked release (immutable), with its own .venv
   current               junction -> the live release
   data\                 GC_DATA_DIR: all state, never touched by a deploy
+    gc.db                the hub store (samples, revisions, jobs, instruments, ...)
+    backups\             gc-<date>.db + settings-<date>.json, nightly, 14 kept
+    cdf\gc1\2026\09\    every received CDF, kept forever
+    results\             gc1_results.csv (+ .gchub.json sidecar), unless an
+                         instrument's export path points at the share CSV LEM tails
     settings.json
-    distill_results.csv
-    processed_cdf\       (+ .blank_cache.json, .processed_index.json, ...)
-    exports\
+    exports\             report PDFs
     gc_comparison_standards\
-    notifications.json, dircache.json
+    notifications.json
+    admin-setup-code.txt until the admin password is set
     app.log              (rotating, 5 MB x 3)
     healthcheck\         the updater's scratch data dir for health checks
 ```
+
+A v1.x install also left `distill_results.csv`, `processed_cdf\` and
+`dircache.json` here. v2 neither reads nor deletes them.
 
 ## Before you start
 
@@ -59,8 +66,8 @@ What each field does for gc:
 
 | Field | Effect |
 |---|---|
-| `data_env: "GC_DATA_DIR"` | The updater sets `GC_DATA_DIR=C:\ASAPApps\gc\data`. That switches the app to deployed mode (`paths.py`): all state under that folder, logging to `data\app.log`, and restarts that exit and let the updater relaunch |
-| `port_arg: ""` | No `--port` flag; the port arrives as `PORT`, which wins in deployed mode (`instance.resolve_port`) |
+| `data_env: "GC_DATA_DIR"` | The updater sets `GC_DATA_DIR=C:\ASAPApps\gc\data`: all state under that folder (`paths.py`), logging to `data\app.log`, and restarts that exit and let the updater relaunch. v2 **refuses to start** without it (exit code 2, the message names this file) |
+| `port_arg: ""` | No `--port` flag; the port arrives as `PORT`, which always wins (`instance.resolve_port`) |
 | `health_args: ["--no-tray"]` | Accepted and ignored by `app.py`. Any other unknown flag makes the app exit with an error, so a typo here fails the health check loudly |
 | `auto_switch: false` | A healthy staged release waits until someone presses Settings > Restart ("Restart & install vX.Y.Z"). Leave it false until `/healthz` counts a running QBench upload or reprocess as activity (spec, Open items) |
 
@@ -125,10 +132,13 @@ From here on, a new release is installed with Settings > Restart (see
 
 ## Step 4: move existing settings into `C:\ASAPApps\gc\data\settings.json`
 
-A fresh deploy starts **unconfigured**: no watch folder (so the Looker does not
-start, and the log says why), no calibration, default analysis settings. You
-can configure it from Settings in the browser, or carry over an existing
-install's settings:
+(v1.0.0 setup. For v2 the keys that matter are the calibration and the
+corrections file, which seed `gc1` once at its first start, plus the analysis
+and best-fit settings; see "Upgrading to v2" below.)
+
+A fresh deploy starts **unconfigured**: no calibration, default analysis
+settings. You can configure it from Settings in the browser, or carry over an
+existing install's settings:
 
 1. Stop the app. Pausing it first keeps the updater from starting it again
    while you edit:
@@ -255,9 +265,8 @@ set), the store with the admin hash and agent-token hashes, and every CDF.
 Check with `icacls C:\ASAPApps\gc\data` and remove `Users` / `Everyone`
 entries if present.
 
-**Legacy mode has no admin.** The share copies (no `GC_DATA_DIR`) have no
-store to keep a password in, so every admin action there is refused. Change
-their settings on a hub, or by editing the settings file by hand.
+**The share copies are v1.x.** They have no hub store and keep their own
+behaviour until cutover; the hub's admin password does not apply to them.
 
 **Agent installers need the hub URL.** Before the first "Download
 installer", set the address the GC PCs use to reach the hub
@@ -265,17 +274,127 @@ installer", set the address the GC PCs use to reach the hub
 Instruments page from 2A2). A download from `localhost` or `127.0.0.1` on the
 server itself is refused until it is set.
 
-## Updating the share copies (legacy, until phase 2)
+## Upgrading to v2 (the hub)
 
-The GC PCs keep running their copies from `\\ASAPServer\Labsharedrive` with
-`run.pyw` and do not receive releases. If Ryan approves copying a fix onto a
-share copy (for example the calibration crash fix):
+v2.0.0 is the hub: it no longer watches a folder. CDFs arrive from the GC-PC
+agents (phase 2B2) or from **Load CDFs from a folder** on the Hub admin page,
+and each final result is appended to the instrument's results CSV. Read
+`docs/release-notes/v2.0.0.md` before installing; several numbers can differ
+from v1's for documented reasons.
 
-1. **Copy the whole tree, never individual files.** `app.py` now imports
+Before pressing Settings > Restart ("Restart & install v2.0.0"):
+
+1. **Check v1 is not watching a live folder on ASAPSV1**: `updater.py status`,
+   and `watch_dir` in `C:\ASAPApps\gc\data\settings.json`. v2 ignores it,
+   so anything that folder still receives would stop being processed on the
+   server.
+2. **Make sure `settings.json` has what gc1 is created from**: the
+   calibration (`calibration_cdf`, `calibration_assignments`,
+   `calibration_sensitivity`) and `correction_factors_json` (the phase-1
+   corrections file, reachable by the account the updater runs the app as).
+
+On the first v2 start (all automatic, visible in `app.log` and the
+notifications):
+
+- `gc.db` is created and the instrument **gc1** is made from `settings.json`,
+  with `live_since` = that moment: only injections from then on export
+  automatically; anything older loaded later is **backfill** and needs an
+  admin release.
+- **gc1's correction factors are seeded once** from `correction_factors_json`
+  into the hub (an info notification says so; check the values). If the file
+  is missing or invalid (e.g. the share is unreachable at that moment), an
+  error notification says so and gc1's samples wait as `pending_corrections`
+  (never corrected with zeros); the hub retries the seed every 10 minutes, or
+  enter the values on the Instruments page. From then on the factors are the
+  hub's; **never enter GC factors in LEM** (they would be applied twice).
+  Editing `correction_factors.json` later changes nothing in the hub.
+- Settings in the browser can change only the flag rules and series colours
+  freely, and the best-fit settings with the admin password. Paths (standards
+  and export folders are fixed under `data\`), the calibration, the
+  corrections path and `blank_max_intensity_pa` are changed by editing
+  `settings.json` on the server (pause / stop / edit / resume, Step 4).
+  Saving the calibration page and adding, renaming or deleting comparison
+  standards need the admin password; standards are added from a sample
+  ("Set as comparison standard"), never from a server path.
+- An **admin setup code** is written (see "Admin password" below). Set the
+  password first: every admin action needs it.
+- The nightly backup (from 1 AM, `data\backups\`, 14 kept, plus a copy of
+  `settings.json`) and the job-table prune run inside the hub. A failed backup
+  raises an error notification and is retried hourly.
+
+Then, as needed, on **Hub admin** (`http://asapsv1:5560/admin/hub`, admin
+password):
+
+- **Load CDFs from a folder**: one-shot and read-only on the folder (copy the
+  GC's processed folder locally first, e.g. with robocopy), resumable, in
+  injection-time order; the hub processes what it loads. Check what was
+  loaded with `tools/parity_report.py` (the 2A1 plan's T6 runbook) before
+  sign-off. **Before a GC is cut over, never load CDFs of that GC injected
+  after the hub's first start** without *force backfill*: they are live
+  (after gc1's `live_since`) and would be appended to the export, while v1 on
+  the share still writes the same results to LEM's CSV, so LEM would get them
+  twice. History belongs to the import (below), which keeps it as backfill.
+- **Exports**: gc1 appends to `data\results\gc1_results.csv` by default. To
+  keep feeding the CSV LEM tails on the share: **stop the v1 writer for that
+  GC first**, then *New path* to that CSV and *Adopt* it (the hub appends
+  after its current content, so LEM's read position carries on). The
+  account the app runs as needs write access to the file and
+  create/rename/delete rights in its folder (sidecar and lock file). A file
+  that changes behind the hub's back is refused (error notification) until
+  it is adopted again or moved. *Write fresh* starts a new file with every
+  exportable result; never point LEM at one without setting its tail offset to
+  the end.
+
+## Cutover runbook (per GC PC)
+
+Until a GC PC is cut over, its v1 copy on the share keeps processing and
+writing LEM's CSV; the hub holds that GC's history only as backfill. Cut over
+one PC at a time, **in this exact order**, so no row is lost or written twice
+between steps (spec, "Cutover runbook"):
+
+1. **Quit `run.pyw`** on that PC (tray > Quit) and remove its autostart
+   (Startup folder shortcut or scheduled task). Check nothing still listens on
+   its port (`netstat -ano | findstr :5560`, `taskkill /F /T /PID <pid>`).
+   From now on nothing processes that GC's new runs until step 4.
+2. **Re-run the history import for that instrument** (Hub admin: the history
+   import page lands with branch `t5/import-route`; until then the 2D CLI,
+   `tools/import_history.py`). It picks up only the delta since the last
+   import (files v1 processed after it); otherwise it is a no-op. Review the
+   summary (conflicts, rejected and truncated files).
+3. **Set that instrument's `live_since` to now** on the Instruments page.
+   Anything injected before it that arrives later is backfill and is listed
+   for review, never exported automatically.
+4. **Install the agent**: on the Instruments page, *Download installer* for
+   that instrument, run `install.pyw` on the PC, adopt the mirror file if
+   LEM tails a local CSV on that PC, and start the agent. Files v1 already
+   processed dedupe by sha256 against the imported copy.
+
+Then watch the first sync on the Instruments page and the hub's first appends
+to the adopted share CSV (Hub admin > Exports); LEM's read position carries
+on unchanged. Only after the last GC is cut over is v1 retired.
+
+## Updating the share copies (v1.x only, from `maint/v1`)
+
+The GC PCs keep running v1.x from `\\ASAPServer\Labsharedrive` with `run.pyw`
+until each is cut over to the agent. **v2 cannot run there** (no
+`GC_DATA_DIR`, no `run.pyw`): never copy a v2 release onto the share.
+
+Share fixes come from the branch **`maint/v1`**, cut at v1.1.0. They are
+**never published as GitHub releases**: the updater installs whatever GitHub
+calls "latest", so a v1.x release published after v2 would downgrade ASAPSV1.
+If a fix needs a tag at all, create the release with `make_latest=false`
+(`gh release create v1.1.1 --latest=false ...`) and check the latest release
+is still v2 afterwards (`gh release view`). Build the tree to copy locally
+from the branch (`git checkout maint/v1 && bash scripts/package_release.sh
+v1.1.1 "$TMPDIR/v1pkg"`).
+
+If Ryan approves copying a fix onto a share copy:
+
+1. **Copy the whole tree, never individual files.** `app.py` imports
    `paths`, `restart_policy`, `restart_update`, `supervisor`, `version` and
    `qbench_secrets`, so an `app.py` copied on its own does not start. Use the
-   contents of the release zip (`gc-hub-vX.Y.Z.zip`, which also carries
-   `VERSION`) and copy them over the share folder. The zip holds no state, so
+   contents of the `maint/v1` package (which also carries `VERSION`) and copy
+   them over the share folder. The zip holds no state, so
    the folder's results CSV, `processed_cdf` and caches are not touched.
    Quit `run.pyw` (tray > Quit) first: it restarts the server whenever a
    `.py` file changes, which mid-copy means starting a half-copied tree.
@@ -301,5 +420,7 @@ share copy (for example the calibration crash fix):
 - Everyday releases: [`RELEASING.md`](RELEASING.md).
 - Logs: `C:\ASAPApps\gc\data\app.log` for the app, `C:\ASAPApps\updater\updater.log`
   for staging, health checks, switches and rollbacks.
-- Back up `C:\ASAPApps\gc\data\`. The results CSV, processed CDFs and settings
-  there are the only copy of that state on this server.
+- Back up `C:\ASAPApps\gc\data\`. The hub makes its own nightly copy of
+  `gc.db` and `settings.json` in `data\backups\`, but on the same disk; the
+  store, the CDFs under `data\cdf\` and the results files are the only copy
+  of that state on this server.

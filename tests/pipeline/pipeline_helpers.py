@@ -30,6 +30,11 @@ import store  # noqa: E402
 SIMDIS = "SIMDISB.M"
 
 
+def file_corrections(conf):
+    import corrections
+    return corrections.FileProvider(conf.get("correction_factors_json", ""))
+
+
 class Hub:
     """One test hub: ``data`` folder, ``db`` path, ``conf`` (global settings)."""
 
@@ -84,6 +89,9 @@ class Hub:
     def worker(self, **kw):
         import pipeline
         kw.setdefault("conf_fn", lambda: self.conf)
+        # The phase-1 file, explicitly (the Worker's default is the hub's own
+        # corrections, which these fixtures don't seed).
+        kw.setdefault("corrections_provider", file_corrections)
         return pipeline.Worker(db=self.db, data_dir=self.data, **kw)
 
     def sample(self, sample_id) -> dict:

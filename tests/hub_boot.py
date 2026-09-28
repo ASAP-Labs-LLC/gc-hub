@@ -46,6 +46,11 @@ import pipeline  # noqa: E402
 import store  # noqa: E402
 
 SIMDIS = "SIMDISB.M"
+
+
+def file_corrections(conf):
+    import corrections
+    return corrections.FileProvider(conf.get("correction_factors_json", ""))
 LIVE_SINCE = datetime(2026, 9, 22, 0, 0, 0)
 
 
@@ -57,7 +62,7 @@ class Hub:
         self.src = self.root / "src"
         self.src.mkdir(exist_ok=True)
         self.db = self.data / store.DB_FILENAME
-        self.standards = self.data / "standards"
+        self.standards = self.data / "gc_comparison_standards"   # fixed in the hub
         self.standards.mkdir(exist_ok=True)
         self.cal = fx.calibration_cdf(self.src / "CAL_09162026_090000.CDF", method_name=SIMDIS)
         corr = self.src / "correction_factors.json"
@@ -90,7 +95,10 @@ class Hub:
         return res.sample_id
 
     def worker(self):
-        return pipeline.Worker(db=self.db, data_dir=self.data, conf_fn=lambda: self.conf)
+        # The phase-1 file, explicitly: the Worker's default is the hub's own
+        # corrections (the booted app seeds gc1 from this same file).
+        return pipeline.Worker(db=self.db, data_dir=self.data, conf_fn=lambda: self.conf,
+                               corrections_provider=file_corrections)
 
     def sample(self, key: str) -> dict:
         return store.samples.get(self.ids[key], db=self.db)

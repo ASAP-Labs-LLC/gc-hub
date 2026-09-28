@@ -49,7 +49,7 @@ def _prepare(tmp: Path):
     hub.worker(corrections_provider=instruments.corrections_provider(hub.db)).run_until_idle()
     assert store.samples.get(hub.b, db=hub.db)["status"] == "final"
     hub.conflict = hub.submit(hub.cdf(name="A1", injected=datetime(2026, 9, 10, 9), shift=0.3)).conflict_id
-    std = tmp / "standards"
+    std = hub.data / "gc_comparison_standards"      # fixed under the data folder (T5)
     std.mkdir()
     (std / "Diesel.CDF").write_bytes(hub.cal.read_bytes())
     settings = dict(hub.conf, comparison_defaults_dir=str(std))
@@ -150,8 +150,10 @@ def test_instruments_blueprint(tmp_path):
         assert code == 200 and body["changed"] == 11
         code, body = c.get("/api/instruments/gc3/corrections")
         assert body["values"] == ELEVEN and body["audit"][0]["changed_by"].startswith("admin@")
-        code, body = c.post("/api/admin/instruments/gc1/corrections/seed", {})
-        assert code == 200 and len(body["values"]) == 11
+        # T5: hub.start seeds gc1 from the phase-1 file at the first start, so
+        # the one-time admin seed finds it done.
+        rec = store.corrections.read("gc1", db=hub.db)
+        assert rec is not None and rec["updated_by"] == "startup" and len(rec["values"]) == 11
         assert c.post("/api/admin/instruments/gc1/corrections/seed", {})[0] == 409
         assert c.post("/api/admin/instruments/gc3/corrections/seed", {})[0] == 400
 

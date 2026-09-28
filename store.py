@@ -759,7 +759,8 @@ def backup_nightly(path: PathLike = None, keep: int = 14, *, settings_path: Path
                    now: Optional[datetime] = None) -> Path:
     """``VACUUM INTO backups/gc-<date>.db`` plus a copy of ``settings.json``; prune to ``keep``.
 
-    ``settings_path`` defaults to ``paths.settings_file()``. ``now`` (local
+    ``settings_path`` defaults to ``paths.settings_file()`` (the db's folder
+    without ``GC_DATA_DIR``). ``now`` (local
     date) is injectable for tests. Returns the backup path.
     """
     if keep < 1:
@@ -779,7 +780,12 @@ def backup_nightly(path: PathLike = None, keep: int = 14, *, settings_path: Path
         conn.close()
     os.replace(tmp, dest)
 
-    settings = Path(settings_path) if settings_path is not None else paths.settings_file()
+    if settings_path is not None:
+        settings = Path(settings_path)
+    elif paths.data_dir() is not None:
+        settings = paths.settings_file()
+    else:                                  # a tool without GC_DATA_DIR: the db's own folder
+        settings = db_path.parent / "settings.json"
     if settings.is_file():
         s_tmp = backups / f".settings-{day}.json.tmp"
         s_tmp.write_bytes(settings.read_bytes())

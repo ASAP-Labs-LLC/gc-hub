@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover
 
 pytestmark = pytest.mark.skipif(not HAVE_DEPS, reason="needs flask, netCDF4, scipy")
 
-from bootapp import booted, get, post, send  # noqa: E402
+from bootapp import booted, get, post, send, wait_for  # noqa: E402
 
 UNKNOWN = 999999
 
@@ -201,6 +201,40 @@ def test_table_is_current_revisions(hub_app):
     assert row[-1] == hub.sample("final")["cdf_path"]
 
 
+def test_table_shows_the_samples_corrected_injection_time(tmp_path):
+    # An imported (v1) revision keeps v1's cells verbatim as the record: its
+    # InjectionDateTime may be the misparsed time (spec, Injection time) and
+    # its numbers are strings. The table shows the sample's corrected
+    # injection_dt and every other cell as stored.
+    import distill
+    import hub_boot
+    import instruments
+    import store
+    h = hub_boot.Hub(tmp_path)
+    store.migrate(h.db)
+    instruments.bootstrap_gc1(h.conf, db=h.db)
+    cells = {c: "" for c in distill.CSV_HEADER}
+    cells.update({"Lab ID": "40305", "InjectionDateTime": "2026-09-25 02:45:00",
+                  "2887 T50": "301.20", "D86 T50": "288.0", "Fit Score": "0.9500"})
+    sid = store.samples.insert_received("gc1", "40305", "2026-09-25 00:24:50", "cdf",
+                                        cdf_sha256=None, cdf_path=None, status="final",
+                                        legacy_injection_dt="2026-09-25 02:45:00",
+                                        time_corrected=1, db=h.db)
+    with store.connection(h.db) as conn, store.write_txn(conn):
+        store.add_revision(conn, sid, json.dumps(cells), reason="import", by="test")
+    with booted(tmp_path) as (port, _proc, _data, _home):
+        code, body = get(port, "/api/table")
+        assert code == 200, body
+        row = body["rows"][body["sample_ids"].index(sid)]
+        col = distill.CSV_HEADER.index
+        assert row[col("InjectionDateTime")] == "2026-09-25 00:24:50"
+        assert row[col("Lab ID")] == "40305"
+        assert row[col("2887 T50")] == "301.20" and row[col("Fit Score")] == "0.9500"
+        # the stored record is untouched
+        rev = json.loads(store.get_revision(sid, db=h.db)["results"])
+        assert rev["InjectionDateTime"] == "2026-09-25 02:45:00"
+
+
 # ── removed routes ──────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("method,path", [
@@ -268,13 +302,13 @@ def test_reprocess_by_sample_ids(hub_app):
     assert body["status"] == "queued" and body["count"] == 1
     assert body["sample_ids"] == [hub.ids["final"]]
     job = store.jobs.get(body["job_ids"][0], db=hub.db)
-    assert job["state"] == "queued" and job["payload"]["sample_id"] == hub.ids["final"]
+    assert job["payload"]["sample_id"] == hub.ids["final"]
     assert job["payload"]["reason"] == "reprocess"
-
-    code, st = get(port, f"/api/reprocess/status?sample_ids={hub.ids['final']}")
-    assert code == 200 and st["phase"] == "processing" and st["pending"] == 1
-    hub.worker().run_until_idle()
-    code, st = get(port, f"/api/reprocess/status?sample_ids={hub.ids['final']}")
+    # the app's own Worker (hub.start) runs it; no worker in the test
+    status = f"/api/reprocess/status?sample_ids={hub.ids['final']}"
+    assert get(port, status)[1]["phase"] in ("processing", "done")
+    assert wait_for(lambda: get(port, status)[1]["phase"] == "done", timeout=30)
+    code, st = get(port, status)
     assert st["phase"] == "done" and st["processed"] == 1 and st["errors"] == 0
     assert st["samples"][0]["current_revision"] == 2
     assert get(port, "/api/reprocess/status")[1]["phase"] == "idle"
@@ -344,10 +378,13 @@ def test_report_routes_take_sample_ids(hub_app):
 
 def test_comparison_standard_from_a_sample(hub_app):
     port, hub, _ = hub_app
-    code, body = post(port, "/api/comparison-standard", {"sample_id": hub.ids["rerun"], "name": "Rerun"})
+    pw = _admin(port, hub)
+    code, body = post(port, "/api/comparison-standard",
+                      {"sample_id": hub.ids["rerun"], "name": "Rerun", "password": pw})
     assert code == 200, body
     assert (hub.standards / "Rerun.CDF").is_file()
-    assert post(port, "/api/comparison-standard", {"sample_id": UNKNOWN, "name": "X"})[0] == 404
+    assert post(port, "/api/comparison-standard",
+                {"sample_id": UNKNOWN, "name": "X", "password": pw})[0] == 404
 
 
 def test_calibration_reads_and_writes_the_gc1_row(hub_app):
@@ -361,14 +398,23 @@ def test_calibration_reads_and_writes_the_gc1_row(hub_app):
     assert code == 200 and active["mode"] == "manual" and active["calibration_cdf"] == str(hub.cal)
 
     entries = body["assignments"]
-    code, saved = post(port, "/api/calibration", {"assignments": entries, "sensitivity": 40})
+    # admin-gated (2A1 T5): no password, no change
+    code, refused = post(port, "/api/calibration", {"assignments": [], "sensitivity": 40})
+    assert code == 403, refused
+    assert json.loads(store.instruments.get("gc1", db=hub.db)["calibration_assignments"]) == entries
+    code, _ = send(port, "/api/calibration", json.dumps({"assignments": entries}).encode(),
+                   {"Content-Type": "text/plain"})
+    assert code == 415
+    pw = _admin(port, hub)
+    code, saved = post(port, "/api/calibration",
+                       {"assignments": entries, "sensitivity": 40, "password": pw})
     assert code == 200, saved
     assert saved["ok"] and saved["queued"] == 0
     row = store.instruments.get("gc1", db=hub.db)
     assert json.loads(row["calibration_assignments"]) == entries
     assert row["calibration_sensitivity"] == 40
     bad = [{"rt": 1.0, "carbon": 9}, {"rt": 2.0, "carbon": 7}]
-    assert post(port, "/api/calibration", {"assignments": bad})[0] == 400
+    assert post(port, "/api/calibration", {"assignments": bad, "password": pw})[0] == 400
     assert json.loads(store.instruments.get("gc1", db=hub.db)["calibration_assignments"]) == entries
 
 
@@ -379,11 +425,54 @@ def test_calibration_save_queues_awaiting_calibration(hub_app):
     store.samples.set_status(sid, "awaiting_calibration", error="test hold", db=hub.db)
     try:
         _, body = get(port, "/api/calibration")
-        code, saved = post(port, "/api/calibration", {"assignments": body["assignments"]})
+        code, saved = post(port, "/api/calibration",
+                           {"assignments": body["assignments"], "password": _admin(port, hub)})
         assert code == 200 and saved["queued"] == 1
-        assert any(j["sample_id"] == sid for j in store.jobs.list(state="queued", db=hub.db))
+        assert any(j["sample_id"] == sid for j in store.jobs.list(db=hub.db))
+        # the app's Worker processes it back to final
+        assert wait_for(lambda: hub.sample("rerun")["status"] == "final", timeout=30)
     finally:
         hub.worker().run_until_idle()
+
+
+def test_settings_save_needs_json_and_leaves_instrument_config_alone(hub_app):
+    port, hub, store = hub_app
+    before = store.instruments.get("gc1", db=hub.db)
+    # text/plain with no Origin (not a browser): refused before anything is read
+    code, _ = send(port, "/api/settings", json.dumps({"calibration_cdf": "/etc/hosts"}).encode(),
+                   {"Content-Type": "text/plain"})
+    assert code == 415
+    _, conf = get(port, "/api/settings")
+    for key, value in (("calibration_cdf", "/etc/hosts"),
+                       ("correction_factors_json", "/tmp/other.json"),
+                       ("calibration_sensitivity", "10"),
+                       ("calibration_assignments", "{}")):
+        code, body = post(port, "/api/settings", dict(conf, **{key: value}))
+        assert code == 400 and key in body["error"], (key, body)
+    after = store.instruments.get("gc1", db=hub.db)
+    assert (after["calibration_cdf"], after["calibration_assignments"]) == \
+        (before["calibration_cdf"], before["calibration_assignments"])
+    on_disk = json.loads((hub.data / "settings.json").read_text())
+    assert on_disk["correction_factors_json"] == hub.conf["correction_factors_json"]
+    # echoing them back unchanged is fine, and other settings save
+    code, saved = post(port, "/api/settings", dict(conf, series_colors="#123456"))
+    assert code == 200, saved
+    on_disk = json.loads((hub.data / "settings.json").read_text())
+    assert on_disk["series_colors"] == "#123456"
+    assert on_disk["correction_factors_json"] == hub.conf["correction_factors_json"]
+    assert on_disk["calibration_assignments"] == hub.conf["calibration_assignments"]
+    assert store.instruments.get("gc1", db=hub.db)["calibration_cdf"] == before["calibration_cdf"]
+
+
+_ADMIN_PW = {}
+
+
+def _admin(port, hub):
+    """Set the booted hub's admin password once (first-use setup) and return it."""
+    from bootapp import setup_admin
+    if port not in _ADMIN_PW:
+        _ADMIN_PW[port] = setup_admin(port, hub.data)
+    return _ADMIN_PW[port]
 
 
 # ── review fixes ────────────────────────────────────────────────────────────
@@ -481,10 +570,13 @@ def test_reports_zip_is_409_when_every_item_is_skipped(hub_app):
 @pytest.mark.parametrize("name", ["../evil", "a/b", "..", "x\\y", ""])
 def test_comparison_standard_names_cannot_escape_the_folder(hub_app, name):
     port, hub, _ = hub_app
-    code, body = post(port, "/api/comparison-standard", {"sample_id": hub.ids["final"], "name": name})
+    pw = _admin(port, hub)
+    code, body = post(port, "/api/comparison-standard",
+                      {"sample_id": hub.ids["final"], "name": name, "password": pw})
     assert _is_json_error(code, body, 400), (code, body)
     assert not (hub.data / "evil.CDF").exists()
-    for path, payload in (("/api/comparison-standard/rename", {"old_name": "Diesel", "new_name": name}),):
+    for path, payload in (("/api/comparison-standard/rename",
+                           {"old_name": "Diesel", "new_name": name, "password": pw}),):
         code, body = post(port, path, payload)
         assert _is_json_error(code, body, 400), (path, code, body)
     assert (hub.standards / "Diesel.CDF").is_file()
@@ -551,17 +643,16 @@ def test_index_has_no_scan_controls_and_loads_the_sample_helpers(hub_app):
 # ── no store ────────────────────────────────────────────────────────────────
 
 def test_an_empty_hub_answers_cleanly():
-    # Since 2B1, admin_auth migrates the store on first use, so a fresh data
-    # folder has an empty store: lists are empty, ids are 404, and the
-    # calibration routes say gc1 isn't set up (503) until instruments.startup.
+    # The app's start-up (hub.start, 2A1 T5) creates the store and gc1 on a
+    # background thread: until then store routes answer 503, then a fresh
+    # data folder has an empty store: lists are empty, ids are 404, and gc1
+    # exists with no calibration.
     with tempfile.TemporaryDirectory() as t:
         with booted(Path(t)) as (port, proc, data, home):
+            assert wait_for(lambda: get(port, "/api/calibration/active")[0] == 200, timeout=30)
             code, body = get(port, "/api/files")
-            if code == 503:                      # store not created yet: also fine
-                assert "store" in body["error"]
-                return
             assert code == 200 and body["samples"] == [] and body["total"] == 0
             assert get(port, "/api/table")[1]["rows"] == []
             assert get(port, "/api/samples/1/metadata")[0] == 404
-            code, body = get(port, "/api/calibration")
-            assert code == 503 and "gc1" in body["error"]
+            code, body = get(port, "/api/calibration/active")
+            assert code == 200 and body["mode"] == "unusable", body

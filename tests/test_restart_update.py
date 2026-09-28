@@ -70,10 +70,11 @@ class SharedModulesTests(unittest.TestCase):
 
 class RestartDecisionTests(unittest.TestCase):
     def test_supervised_restart_exits_without_spawning(self):
+        # v2 is hub mode only: the updater always supervises it, so a restart
+        # only exits (there is no legacy respawn mode).
         import restart_policy
         self.assertEqual(restart_policy.restart_mode(env={"GC_DATA_DIR": "C:/x"}), "exit")
-        self.assertEqual(restart_policy.restart_mode(env={"GC_DATA_DIR": "  "}), "respawn")
-        self.assertEqual(restart_policy.restart_mode(env={}), "respawn")
+        self.assertEqual(restart_policy.restart_mode(env={}), "exit")
 
     def test_respawn_blocked_while_switching(self):
         import restart_policy
@@ -187,7 +188,7 @@ class AwaitSwitchTests(unittest.TestCase):
 # ── Boot tests: the real app.py under the updater's environment ───────────
 
 def _bootstrap(tag=None, min_uptime=0):
-    """Launch app.py as __main__ the way run.pyw's runpy bootstrap does, with
+    """Launch app.py as __main__ through runpy, with
     two test-only overrides applied to the modules first:
 
     * ``version.APP_VERSION = tag`` — a checkout has no VERSION file, so it
@@ -287,18 +288,6 @@ class RestartRouteTests(unittest.TestCase):
                     (data / n).exists()
                     for n in ("switch-requested", "switch-accepted", "switch-refused")),
                     timeout=10))
-
-    def test_leftover_csv_temp_files_are_swept_at_boot(self):
-        with tempfile.TemporaryDirectory() as t:
-            data = Path(t, "data")
-            data.mkdir()
-            stale = data / ".distill_results.csv.k2j3h4.tmp"
-            stale.write_text("half a row", encoding="utf-8")
-            keep = data / "notes.tmp"
-            keep.write_text("not ours", encoding="utf-8")
-            with booted(Path(t)) as (port, proc, data, home):
-                self.assertTrue(wait_for(lambda: not stale.exists(), timeout=10))
-                self.assertTrue(keep.exists())
 
     def test_plain_restart_under_the_updater_exits_without_respawning(self):
         with tempfile.TemporaryDirectory() as t:
@@ -415,37 +404,15 @@ class RestartRouteTests(unittest.TestCase):
 
 
 class PolicyDecisionTests(unittest.TestCase):
-    def test_respawn_command_deployed_runs_via_the_junction(self):
+    def test_respawn_command_runs_via_the_junction(self):
         import restart_policy as rp
         args, cwd, flags = rp.respawn_command(
-            "py.exe", ["app.py", "--no-tray"], deployed=True, app_dir=Path("C:/r/releases/v1"),
-            cwd="C:/r/current", windows=True)
+            "py.exe", ["app.py", "--no-tray"], cwd="C:/r/current", windows=True)
         self.assertEqual(args, ["py.exe", "app.py", "--no-tray"])
         self.assertEqual(cwd, "C:/r/current")
         self.assertEqual(flags, rp.CREATE_NO_WINDOW | rp.CREATE_NEW_PROCESS_GROUP)
-        _, _, flags = rp.respawn_command("py", ["-c"], deployed=True, app_dir=Path("/a"),
-                                         cwd="/c", windows=False)
+        _, _, flags = rp.respawn_command("py", ["-c"], cwd="/c", windows=False)
         self.assertEqual(flags, 0)
-
-    def test_respawn_command_legacy_uses_the_app_dir(self):
-        import restart_policy as rp
-        args, cwd, flags = rp.respawn_command(
-            "py.exe", ["-c"], deployed=False, app_dir=Path("/share/gc"), cwd="/elsewhere",
-            windows=True)
-        self.assertEqual(args, ["py.exe", str(Path("/share/gc") / "app.py")])
-        self.assertEqual(cwd, str(Path("/share/gc")))
-        self.assertEqual(flags, rp.CREATE_NEW_PROCESS_GROUP)
-
-    def test_respawn_decision_legacy(self):
-        import restart_policy
-        with tempfile.TemporaryDirectory() as t:
-            d = Path(t)
-            self.assertTrue(restart_policy.should_respawn(d, env={}))
-            (d / "switching").write_text("")
-            self.assertFalse(restart_policy.should_respawn(d, env={}))
-            (d / "switching").unlink()
-            (d / "switch-accepted").write_text("{}")
-            self.assertFalse(restart_policy.should_respawn(d, env={}))
 
     def test_respawn_decision_under_the_updater(self):
         import restart_policy

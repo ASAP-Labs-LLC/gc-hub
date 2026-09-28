@@ -1416,7 +1416,8 @@ def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None
         if str(conf.get("bestfit_enabled", "true")).lower() == "true":
             import fuel_fit  # deferred: keeps distill importable without scipy.optimize
             standards = fuel_fit.load_standards(
-                Path(conf.get("comparison_defaults_dir", str(paths.standards_dir()))), gc_xy_from_cdf
+                Path(conf["comparison_defaults_dir"] if "comparison_defaults_dir" in conf
+                     else str(paths.standards_dir())), gc_xy_from_cdf
             )
             if standards:
                 fit = fuel_fit.classify(
@@ -1468,7 +1469,8 @@ def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool =
     Returns the final path of the processed CDF (may be moved/renamed).
     """
     conf = _get_settings()
-    dest_csv = Path(conf.get("distill_output", str(paths.default_results_csv())))
+    dest_csv = Path(conf["distill_output"] if "distill_output" in conf
+                    else str(paths.default_results_csv()))
 
     # 1-6 The numbers (compute writes nothing)
     result = compute(path, conf, blank_path)
@@ -1476,7 +1478,8 @@ def process_cdf(path: Path, *, blank_path: Path | None = None, reprocess: bool =
     inj_dt = result["injection_dt"]
 
     # 7 Write CSV  (move section 8 first so we know the final path)
-    proc_dir = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir()))).expanduser()
+    proc_dir = Path(conf["processed_cdf_dir"] if "processed_cdf_dir" in conf
+                    else str(paths.default_processed_dir())).expanduser()
     if proc_dir:
         proc_dir.mkdir(parents=True, exist_ok=True)
         final_dst = proc_dir / processed_cdf_filename(lab_id, inj_dt, path.suffix)

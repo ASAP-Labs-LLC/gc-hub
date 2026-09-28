@@ -217,7 +217,7 @@ class ReadersTakeTheLockTests(unittest.TestCase):
 class NoTruncatingRewritesTests(unittest.TestCase):
     def test_every_results_csv_rewrite_is_atomic(self):
         hits = []
-        for name in ("distill.py", "app.py", "looker.py"):
+        for name in ("distill.py", "app.py"):
             hits += _truncating_csv_rewrites(ROOT / name)
         self.assertEqual(hits, [], "rewrite the results CSV via distill._atomic_write_csv")
 

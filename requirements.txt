@@ -22,9 +22,6 @@ netCDF4==1.7.4
 plotly==7.1.0
 kaleido==1.4.0
 xhtml2pdf==0.2.20
-pystray==0.19.5
-Pillow==12.3.0
-watchdog==6.0.0
 
 # QBench PDF uploader
 selenium==4.49.0
@@ -33,7 +30,12 @@ chromedriver-autoinstaller==0.6.4
 PyJWT==2.15.0
 requests==2.34.2
 
-# --- transitive (frozen from a Python 3.14 venv, 2026-09-26) -------------------
+# --- transitive (frozen from a Python 3.14 venv, 2026-09-26; checked 2026-09-28) ---
+# 2026-09-28 (v2): pystray and watchdog dropped with run.pyw (the hub no longer
+# imports them; the agent declares its own in agent/requirements-agent.txt).
+# Pillow stays, as a transitive pin: reportlab and xhtml2pdf require it. A
+# clean 3.14 venv from the direct pins alone yields exactly this block (plus
+# newer cftime/platformdirs/Werkzeug releases, deliberately not taken here).
 # `pip freeze` of a clean Python 3.14.7 venv (macOS) built from the direct pins
 # above alone, i.e. no dev tools. Pinned because these are exactly the
 # packages that break a deploy without anyone having touched them. Werkzeug in
@@ -70,6 +72,7 @@ orjson==3.12.0
 oscrypto==1.3.0
 outcome==1.3.0.post0
 packaging==26.3
+pillow==12.3.0                    # reportlab + xhtml2pdf (was a direct pin for run.pyw's tray)
 platformdirs==4.12.0
 propcache==0.5.4
 pycparser==3.0
@@ -102,7 +105,3 @@ yarl==1.25.1
 # --- platform-only (a macOS freeze does not show the Windows ones) -------------
 # Checked from each package's Requires-Dist markers, 2026-09-26.
 tzdata==2026.4; sys_platform == "win32"          # pandas and tzlocal on Windows
-pyobjc-core==12.2.2; sys_platform == "darwin"     # pystray's macOS backend
-pyobjc-framework-Cocoa==12.2.2; sys_platform == "darwin"
-pyobjc-framework-Quartz==12.2.2; sys_platform == "darwin"
-python-xlib==0.33; sys_platform == "linux"       # pystray's X11 backend (CI)

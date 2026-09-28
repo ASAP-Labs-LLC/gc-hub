@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-app.py -- Flask backend for the GC Viewer & Distillation Parser webapp.
+app.py -- Flask backend of the GC hub (phase 2: hub mode only).
 
-This is a 1:1 web clone of the PyQt5 desktop application.  It exposes a
-JSON REST API consumed by the single-page frontend and delegates all
-heavy lifting to the existing backend modules (distill, looker, settings,
-qbench_pdf_uploader).
+It exposes the JSON REST API consumed by the single-page frontend and
+delegates the heavy lifting to the backend modules (store, pipeline,
+exports, distill, settings, qbench_pdf_uploader). Every piece of state lives
+in GC_DATA_DIR; without it the app refuses to start (DEPLOY.md). hub.start()
+(called from _init_app) owns the background work.
 """
 from __future__ import annotations
 
@@ -51,11 +52,9 @@ from flask import (
 # ---------------------------------------------------------------------------
 # Backend modules (already in the webapp/ folder)
 # ---------------------------------------------------------------------------
-# ── Per-instance identity ─────────────────────────────────────────────────
-# Resolve this instance's port BEFORE importing settings: settings.CONFIG_PATH
-# is derived from GC_PORT at import time, and distill/looker import settings.
-# Publishing it back to the environment means every module — and every
-# subprocess we spawn, including the daily auto-restart — agrees on the port.
+# ── Port ─────────────────────────────────────────────────────────────────
+# Resolved before the rest is imported and published back to the
+# environment, so every module and every subprocess we spawn agrees on it.
 import instance
 import paths
 import restart_policy
@@ -67,10 +66,10 @@ import version
 # The ASAPSV1 updater launches ``app.py --no-tray`` (its health_args); --dev
 # turns on the Flask debugger for local work only. --port is still resolved
 # by instance.resolve_port() below; it is declared here so it isn't "unknown".
-# Only a direct launch (``__main__``, which includes run.pyw's runpy
-# bootstrap whose sys.argv is ['-c']) parses the real argv: when app is
-# imported (tests), sys.argv belongs to someone else.
+# Only a direct launch (``__main__``) parses the real argv: when app is
+# imported, sys.argv belongs to someone else.
 import argparse
+import atexit
 
 _ap = argparse.ArgumentParser(prog="app.py", description="GC Hub web app",
                               allow_abbrev=False)  # --d must not mean --dev
@@ -86,6 +85,15 @@ if _bad_flags:
     # not boot with the flag silently ignored.
     _ap.error(f"unrecognized arguments: {' '.join(_bad_flags)}")
 
+# ── Hub mode only (spec D14): no GC_DATA_DIR, no start ─────────────────────
+# Checked before anything reads settings or writes a file: every path the
+# app uses lives under that folder. (The share copies run v1.x.)
+if paths.data_dir() is None:
+    if __name__ == "__main__":
+        print(f"ERROR: {paths.MISSING_TEXT}", file=_sys.stderr)
+        _sys.exit(2)
+    raise paths.DataDirMissing()
+
 GC_PORT = instance.resolve_port()
 os.environ["GC_PORT"] = str(GC_PORT)
 
@@ -97,10 +105,9 @@ try:
     import fuel_fit
 except Exception:  # pragma: no cover - scipy.optimize missing
     fuel_fit = None
-import looker as looker_mod
 import notifications as notifications_mod
 import reprocess_query
-import library_view
+import hub
 import instruments
 import pipeline
 import store
@@ -146,26 +153,23 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger("webapp")
 
-# Deployed (GC_DATA_DIR set): also log to DATA_DIR/app.log, rotating, so the
-# updater-supervised process — which has no console anyone watches — leaves
-# a trail. Legacy mode stays console-only, as before.
+# Also log to GC_DATA_DIR/app.log, rotating, so the updater-supervised
+# process (which has no console anyone watches) leaves a trail.
+import logging.handlers  # noqa: E402
+
 _LOG_FILE = paths.log_file()
-if _LOG_FILE is not None:
-    import logging.handlers
+_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+_fh = logging.handlers.RotatingFileHandler(
+    _LOG_FILE, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+_fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+logging.getLogger().addHandler(_fh)
 
-    _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _fh = logging.handlers.RotatingFileHandler(
-        _LOG_FILE, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
-    _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-    logging.getLogger().addHandler(_fh)
-
-    # The health check runs against an empty data dir: create the default
-    # folders up front so nothing downstream trips over their absence.
-    for _d in (paths.default_processed_dir(), paths.default_export_dir()):
-        try:
-            _d.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            LOGGER.exception("Could not create %s", _d)
+# The health check runs against an empty data dir: create the report export
+# folder up front so nothing downstream trips over its absence.
+try:
+    paths.default_export_dir().mkdir(parents=True, exist_ok=True)
+except OSError:
+    LOGGER.exception("Could not create %s", paths.default_export_dir())
 
 # ---------------------------------------------------------------------------
 # Flask app
@@ -176,28 +180,23 @@ app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # disable static file caching in de
 
 import admin_auth  # noqa: E402  (2B1: admin password + /admin/setup)
 import ingest_api  # noqa: E402  (2B1: the agent API, contract §1)
+import hub_admin  # noqa: E402  (2A1 T5: folder-loader job, export admin)
 app.register_blueprint(admin_auth.bp)
 app.register_blueprint(ingest_api.bp)
 import instruments_api  # noqa: E402  (2A2: the Instruments page)
 app.register_blueprint(instruments_api.bp)
+app.register_blueprint(hub_admin.bp)
 
 # ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
-_looker: Optional[looker_mod.Looker] = None
-_looker_lock = threading.Lock()
+_hub_runtime: Optional["hub.HubRuntime"] = None   # set by _init_app (hub.start)
 
 # SSE queues -- one per connected client
-_scan_subscribers: list[queue.Queue] = []
-_scan_sub_lock = threading.Lock()
-
 _upload_subscribers: list[queue.Queue] = []
 _upload_sub_lock = threading.Lock()
 
 # Background-task handles
-_scan_thread: Optional[threading.Thread] = None
-_scan_stop = threading.Event()
-
 _upload_thread: Optional[threading.Thread] = None
 _upload_stop = threading.Event()
 
@@ -216,47 +215,6 @@ _creds_ready  = threading.Event()   # set by API when user submits new creds
 _creds_lock   = threading.Lock()
 _creds_new: dict = {}               # {"username": ..., "password": ...}
 
-# Background file watcher — queues new CDFs and processes in batches
-_watcher_thread: Optional[threading.Thread] = None
-_watcher_start_lock = threading.Lock()
-_watcher_stop = threading.Event()
-_scan_halt = threading.Event()   # stop processing (checked per-file, not per-batch)
-SCAN_BATCH_SIZE = 50
-WATCHER_POLL_SECONDS = 5  # how often to check for new files
-
-# Backlog abandoned by a user Stop. The watcher loop used to clear _scan_halt at
-# the top of every iteration and re-scan the whole backlog after WATCHER_POLL
-# seconds — so "Stop" only paused for ~5s. Now a Stop records its not-yet-
-# processed candidates here and the watcher excludes them, so the backlog stays
-# stopped while genuinely NEW files (never seen, never suppressed) still process.
-# Pressing "Scan & Parse" (/api/scan) clears this set to re-attack the backlog.
-_suppressed_paths: set[str] = set()
-_suppressed_lock = threading.Lock()
-
-
-def _filter_candidates(all_cdfs, seen) -> list:
-    """Discovered CDFs minus already-seen and user-suppressed paths.
-
-    ``all_cdfs`` items may be Path or str; ``seen`` holds whatever the Looker
-    stores. Suppression compares on str(path)."""
-    with _suppressed_lock:
-        suppressed = set(_suppressed_paths)
-    return [fp for fp in all_cdfs
-            if fp not in seen and str(fp) not in suppressed]
-
-
-def _suppress_backlog(paths) -> None:
-    """Record un-processed backlog paths so the watcher won't auto-resume them."""
-    with _suppressed_lock:
-        _suppressed_paths.update(str(p) for p in paths)
-
-# ── Fast in-memory file list cache ────────────────────────────────────
-# Built once at startup with os.scandir (much faster than Path.glob on
-# network shares).  Updated incrementally as the watcher processes files.
-_files_cache: list[dict] = []
-_files_cache_lock = threading.Lock()
-_files_cache_ready = threading.Event()  # signalled once first scan completes
-
 # ── Activity tracking & auto-restart ─────────────────────────────────
 _last_activity: float = time.time()
 _last_activity_lock = threading.Lock()
@@ -267,170 +225,9 @@ AUTO_RESTART_HOUR = restart_policy.AUTO_RESTART_HOUR   # 3 AM local time
 AUTO_RESTART_IDLE_SECONDS = 600  # 10 minutes with no requests
 
 
-def _rebuild_files_cache() -> list[dict]:
-    """Build the sample list from the distillation CSV + processed CDF dir.
-
-    Each row in the CSV becomes one entry: name = plain Lab ID, path = Source File.
-    Entries are deduplicated by (Lab ID, InjectionDateTime) and sorted
-    chronologically by injection datetime (oldest first).
-
-    If the CSV is missing the ``Source File`` column (old header format) or
-    any entry lacks a valid file path, the processed-CDF directory is scanned
-    to resolve real paths.  If the CSV is empty/missing entirely, the
-    processed-CDF directory is scanned as a complete fallback so the sample
-    list is never empty when files actually exist on disk.
-    """
-    from datetime import datetime as _dt
-    conf = settings_mod.load_settings()
-    csv_path_str = conf.get("distill_output", str(paths.default_results_csv()))
-    csv_path = Path(csv_path_str)
-    proc_dir = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
-    files: list[dict] = []
-    t0 = time.time()
-    seen: set[tuple] = set()
-
-    # ── Strategy 1: Read CSV (per-row error handling, lock-protected) ──
-    try:
-        if csv_path.is_file():
-            with distill._CSV_LOCK:
-                with csv_path.open("r", encoding="utf-8", newline="") as fh:
-                    csv_rows = list(csv.DictReader(fh))
-            for row in csv_rows:
-                try:
-                    lab_id = (row.get("Lab ID") or "").strip()
-                    inj_dt_str = (row.get("InjectionDateTime") or "").strip()
-                    src_file = (row.get("Source File") or "").strip()
-                    if not lab_id:
-                        continue
-                    key = (lab_id, inj_dt_str)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    try:
-                        inj_dt = _dt.fromisoformat(inj_dt_str)
-                        mtime = inj_dt.timestamp()
-                    except Exception:
-                        mtime = 0.0
-                    files.append({
-                        "name": lab_id,
-                        "path": src_file if src_file else lab_id,
-                        "mtime": mtime,
-                        "inj_dt": inj_dt_str,
-                    })
-                except Exception as row_exc:
-                    LOGGER.debug("Skipping bad CSV row: %s", row_exc)
-    except Exception as exc:
-        LOGGER.warning("File cache build from CSV failed: %s", exc)
-
-    # ── Strategy 2: Resolve missing paths from processed-CDF dir ──────
-    # Entries whose path == name have no real file path (old CSV format
-    # without "Source File" column).  Try to find the actual CDF on disk.
-    needs_fixup = any(f["path"] == f["name"] for f in files)
-    if needs_fixup and proc_dir and proc_dir.is_dir():
-        try:
-            cdf_names: list[str] = [
-                e.name for e in os.scandir(proc_dir)
-                if e.is_file() and e.name.upper().endswith(".CDF")
-            ]
-            for f in files:
-                if f["path"] != f["name"]:
-                    continue  # already has a real path
-                lab = f["name"]
-                for cn in cdf_names:
-                    # Processed filenames look like "{lab_id}_{MMDDYYYY}.CDF"
-                    if cn.startswith(lab) or cn.startswith(
-                        lab.replace(" ", "_")
-                    ):
-                        f["path"] = str(proc_dir / cn)
-                        break
-        except Exception as exc:
-            LOGGER.warning("Processed-CDF path fixup failed: %s", exc)
-
-    # ── Strategy 3: Full fallback — scan processed-CDF dir ────────────
-    # If the CSV was empty, missing, or had zero usable rows, build the
-    # list directly from the CDF files so the UI is never blank.
-    if not files and proc_dir and proc_dir.is_dir():
-        LOGGER.info("CSV empty/missing — falling back to processed-CDF scan")
-        try:
-            for entry in os.scandir(proc_dir):
-                if not (entry.is_file() and entry.name.upper().endswith(".CDF")):
-                    continue
-                fp = proc_dir / entry.name
-                try:
-                    sample, inj_dt = distill.cdf_metadata(fp)
-                    mtime = inj_dt.timestamp()
-                    inj_dt_str = inj_dt.isoformat(sep=" ")
-                except Exception:
-                    sample = entry.name.rsplit(".", 1)[0]
-                    mtime = entry.stat().st_mtime
-                    inj_dt_str = ""
-                key = (sample, inj_dt_str)
-                if key in seen:
-                    continue
-                seen.add(key)
-                files.append({
-                    "name": sample,
-                    "path": str(fp),
-                    "mtime": mtime,
-                    "inj_dt": inj_dt_str,
-                })
-        except Exception as exc:
-            LOGGER.warning("Processed-CDF dir fallback scan failed: %s", exc)
-
-    # Show every injection, not just the latest per name. Re-runs of the same
-    # sample (including multiple runs in one day) are distinct rows in the CSV
-    # — keyed on (Lab ID, InjectionDateTime), already deduped above — and must
-    # all appear. Repeats get a run-order counter suffix for display only; the
-    # raw ``name`` stays the bare Lab ID for CSV/QBench/reprocess use.
-    library_view.assign_duplicate_labels(files)
-
-    # Sort chronologically: newest first
-    files.sort(key=lambda f: f["mtime"], reverse=True)
-
-    elapsed = time.time() - t0
-    LOGGER.info("File cache built: %d entries in %.1fs", len(files), elapsed)
-
-    global _files_cache
-    with _files_cache_lock:
-        _files_cache = files
-    _files_cache_ready.set()
-    return files
-
-
-# ── Throttled rebuild ────────────────────────────────────────────────
-# Mid-scan, the watcher used to call _rebuild_files_cache() after every batch,
-# each re-reading the whole CSV under distill._CSV_LOCK — the same lock
-# /api/files and /api/table need — which starved request handling on a network
-# share. Throttle it so the library stays responsive during a long scan.
-CACHE_REBUILD_MIN_INTERVAL = 10.0  # seconds between mid-scan full rebuilds
-_last_cache_rebuild: float = 0.0
-_cache_rebuild_lock = threading.Lock()
-
-
 def _monotonic() -> float:
     """Indirection seam so tests can freeze time."""
     return time.monotonic()
-
-
-def _maybe_rebuild_files_cache(force: bool = False) -> None:
-    """Rebuild the file cache at most once per CACHE_REBUILD_MIN_INTERVAL unless
-    ``force`` is set (used for the final end-of-scan refresh)."""
-    global _last_cache_rebuild
-    with _cache_rebuild_lock:
-        now = _monotonic()
-        if not force and (now - _last_cache_rebuild) < CACHE_REBUILD_MIN_INTERVAL:
-            return
-        _last_cache_rebuild = now
-    _rebuild_files_cache()
-
-
-def _add_to_files_cache(name: str, path: str, mtime: float) -> None:
-    """Append a newly processed file to the in-memory cache."""
-    entry = {"name": name, "path": path, "mtime": mtime}
-    with _files_cache_lock:
-        # Avoid duplicates (by path)
-        _files_cache[:] = [f for f in _files_cache if f["path"] != path]
-        _files_cache.insert(0, entry)  # newest first
 
 
 # ── Flags and best-fit: the store's sample_cache ─────────────────────
@@ -581,73 +378,6 @@ def _refresh_one(sid: int, data: Path, db: Path, conf: dict, fps: dict, standard
     store.sample_cache.put(sid, db=db, **fields)
 
 
-def _migrate_csv_header() -> None:
-    """Upgrade an old-format CSV to the current CSV_HEADER column set.
-
-    Reads the existing CSV, detects the old header, and rewrites the file with
-    the full ``CSV_HEADER``.  For old rows that lack the new intermediate
-    temperature columns, empty values are filled in.  ``Source File`` is
-    back-filled by scanning the processed-CDF directory for matching files.
-    """
-    conf = settings_mod.load_settings()
-    csv_path = Path(conf.get("distill_output", str(paths.default_results_csv())))
-    if not csv_path.is_file():
-        return
-    proc_dir = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
-
-    with distill._CSV_LOCK:
-        try:
-            with csv_path.open("r", encoding="utf-8", newline="") as fh:
-                reader = csv.DictReader(fh)
-                if reader.fieldnames and "Best Fit" in reader.fieldnames:
-                    return  # already migrated (newest column set present)
-                rows = list(reader)
-                old_fields = list(reader.fieldnames or [])
-        except Exception as exc:
-            LOGGER.warning("CSV migration: read failed: %s", exc)
-            return
-
-        if not old_fields or not rows:
-            return
-
-        LOGGER.info("Migrating CSV from %d-column to %d-column format (%d rows)",
-                     len(old_fields), len(distill.CSV_HEADER), len(rows))
-
-        # Build a lookup of processed CDF files for Source File back-fill
-        cdf_lookup: dict[str, str] = {}
-        if proc_dir and proc_dir.is_dir():
-            try:
-                for entry in os.scandir(proc_dir):
-                    if entry.is_file() and entry.name.upper().endswith(".CDF"):
-                        cdf_lookup[entry.name] = str(proc_dir / entry.name)
-            except Exception:
-                pass
-
-        new_rows: list[dict] = []
-        for row in rows:
-            new_row: dict[str, str] = {}
-            for col in distill.CSV_HEADER:
-                new_row[col] = row.get(col, "")
-            # Back-fill Source File by matching processed CDF filename
-            if not new_row.get("Source File"):
-                lab_id = new_row.get("Lab ID", "").strip()
-                if lab_id:
-                    for cn, full_path in cdf_lookup.items():
-                        if cn.startswith(lab_id) or cn.startswith(
-                            lab_id.replace(" ", "_")
-                        ):
-                            new_row["Source File"] = full_path
-                            break
-            new_rows.append(new_row)
-
-        try:
-            distill._atomic_write_csv(csv_path, distill.CSV_HEADER, new_rows)
-            LOGGER.info("CSV migration complete — %d rows written with new header",
-                        len(new_rows))
-        except Exception as exc:
-            LOGGER.warning("CSV migration: write failed: %s", exc)
-
-
 # ===================================================================== #
 #  Helpers
 # ===================================================================== #
@@ -690,12 +420,6 @@ def _sse_stream(
                 subscribers.remove(q)
 
 
-def _scan_log(msg: str) -> None:
-    """Emit a scan progress message to all SSE subscribers and to the log."""
-    LOGGER.info("[scan] %s", msg)
-    _publish(_scan_subscribers, _scan_sub_lock, msg)
-
-
 def _publish_json(
     subscribers: list[queue.Queue], lock: threading.Lock, data: dict
 ) -> None:
@@ -707,109 +431,6 @@ def _upload_log(msg: str) -> None:
     """Emit an upload progress message to all SSE subscribers."""
     LOGGER.info("[upload] %s", msg)
     _publish(_upload_subscribers, _upload_sub_lock, msg)
-
-
-WATCH_DIR_NOT_CONFIGURED = "Watch folder is not configured — set it in Settings"
-
-
-class WatchDirNotConfigured(RuntimeError):
-    """``watch_dir`` is empty or not an existing folder.
-
-    Raised by ``_get_looker()`` — the one door every Looker user goes
-    through — so nothing can scan a bogus folder. Routes turn it into a 409
-    with ``WATCH_DIR_NOT_CONFIGURED``; background loops skip the cycle.
-    """
-
-    def __init__(self, raw: Any = None) -> None:
-        super().__init__(f"{WATCH_DIR_NOT_CONFIGURED} (watch_dir={raw!r})")
-        self.raw = raw
-
-
-def _watch_dir_configured(conf: Dict[str, Any]) -> Optional[Path]:
-    """The configured watch folder, or ``None`` if it is unusable.
-
-    Tests the *raw* string before building a Path: ``Path("")`` is ``.``
-    (cwd — the release folder when deployed) and ``Path("").is_dir()`` is
-    True, so an empty setting would otherwise mean "watch the app itself".
-    """
-    raw = conf.get("watch_dir", paths.default_watch_dir())
-    if raw is None or not str(raw).strip():
-        return None
-    watch = Path(str(raw).strip())
-    try:
-        return watch if watch.is_dir() else None
-    except OSError:  # unreachable share, permission denied, ...
-        return None
-
-
-def _looker_or_409():
-    """``(looker, None)`` or ``(None, 409 response)`` when unconfigured."""
-    try:
-        return _get_looker(), None
-    except WatchDirNotConfigured:
-        return None, _error(WATCH_DIR_NOT_CONFIGURED, 409)
-
-
-def _get_looker() -> looker_mod.Looker:
-    """Return (and lazily create) the singleton Looker instance.
-
-    Raises ``WatchDirNotConfigured`` while ``watch_dir`` is empty or not an
-    existing folder — checked on every call, so clearing the setting (or the
-    share disappearing) stops scanning too, not just a fresh start.
-    """
-    global _looker
-    conf = settings_mod.load_settings()
-    watch = _watch_dir_configured(conf)
-    if watch is None:
-        raise WatchDirNotConfigured(conf.get("watch_dir", paths.default_watch_dir()))
-    with _looker_lock:
-        if _looker is None:
-            proc = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
-            blank = Path(conf.get("blank_cache_file", proc / ".blank_cache.json"))
-            _looker = looker_mod.Looker(
-                watch_dir=watch,
-                processed_dir=proc,
-                blank_cache=blank,
-            )
-        return _looker
-
-
-WATCH_DIR_IDLE_WARNING = "Watch folder is not set or not found — watcher idle"
-
-
-def _refresh_looker_paths() -> Optional[str]:
-    """Re-apply settings to the Looker after a save; return a warning or None.
-
-    With a usable ``watch_dir`` this updates the existing Looker's folders —
-    or, if there was none yet (first configuration of a fresh deploy),
-    creates it — and makes sure the watcher is running, so no restart is
-    needed. With an unusable one the watcher stays idle (``_get_looker()``
-    refuses), but an existing Looker still takes the new processed folder,
-    and the caller gets ``WATCH_DIR_IDLE_WARNING`` to show the operator.
-    """
-    conf = settings_mod.load_settings()
-    watch = _watch_dir_configured(conf)
-    processed = Path(conf.get("processed_cdf_dir", str(paths.default_processed_dir())))
-    with _looker_lock:
-        existing = _looker
-    if watch is None:
-        if existing is not None:
-            existing.update_paths(watch_dir=existing.watch_dir, processed_dir=processed)
-        LOGGER.warning("Watch folder %r is not set or missing - the watcher stays idle "
-                       "until it is configured in Settings",
-                       conf.get("watch_dir", paths.default_watch_dir()))
-        return WATCH_DIR_IDLE_WARNING
-    if existing is not None:
-        existing.update_paths(watch_dir=watch, processed_dir=processed)
-    else:
-        _get_looker()
-    _start_watcher()
-    return None
-
-
-def _safe_path(p: str) -> Path:
-    """Return a Path, handling UNC paths with spaces."""
-    return Path(p)
 
 
 _STANDARD_NAME_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
@@ -843,8 +464,8 @@ def _error(msg: str, status: int = 400) -> tuple:
 #  The hub store: samples are addressed by sample_id (phase 2, 2A1 T4)
 # ===================================================================== #
 # Routes read the store in GC_DATA_DIR/gc.db. They never create or migrate
-# it: instruments.startup() does, once, at start-up (T5 wires it into
-# _init_app). Until it exists every store route answers 503.
+# it: hub.start() does, once, at start-up (_init_app, on a background
+# thread). Until it exists every store route answers 503.
 
 class HubUnavailable(RuntimeError):
     """The hub store (or the gc1 instrument row) doesn't exist yet → 503."""
@@ -1109,11 +730,14 @@ def _admin_json_body():
     if not request.is_json:
         return None, _error("Expected Content-Type: application/json", 415)
     try:
-        return request.get_json(silent=True) or {}, None
+        body = request.get_json(silent=True)
     except RecursionError:                       # nested too deep (2B1 re-review G2)
         return None, _error("The request body is nested too deeply", 400)
     except admin_auth.RequestEntityTooLarge:
         return None, _error("The request body is too large.", 413)
+    if body is not None and admin_auth.json_too_deep(body):   # 3.14 parses it
+        return None, _error("The request body is nested too deeply", 400)
+    return body or {}, None
 
 
 # ===================================================================== #
@@ -1128,8 +752,7 @@ def _admin_json_body():
 # (setInterval(loadNotifications, 30000)); /healthz every 2s while waiting
 # for a restart (_waitForServerAndReload; /api/server-status, which it used
 # to poll, stays excluded for tabs still running an older app.js);
-# /api/scan/status every 2s
-# while a scan runs (startScanStatusPolling); /api/reprocess/status likewise
+# /api/reprocess/status every 2s while a reprocess runs
 # (_pollReprocessStatus); /api/qbench-upload-status once on load to
 # reconnect to an in-progress upload. Excluding /static/ covers page assets;
 # excluding paths ending in /stream covers the SSE routes' *reconnects* —
@@ -1140,7 +763,6 @@ _NON_ACTIVITY_PATHS = {
     "/healthz",
     "/api/notifications",
     "/api/server-status",
-    "/api/scan/status",
     "/api/reprocess/status",
     "/api/qbench-upload-status",
     # 2B1: GC-PC agents are machines, never users (ingest_api)
@@ -1166,12 +788,13 @@ def _is_server_idle() -> bool:
 
     "Idle" means:
       - No HTTP requests in the last AUTO_RESTART_IDLE_SECONDS
-      - No user-initiated upload thread running
-      - No queued reprocess / rebuild tasks being worked on
+      - No user-initiated QBench upload thread running
+      - No admin job running (``hub_admin.JOBS``: folder load, history import)
+      - No Worker job running or due now (``hub.background_busy``; a retry
+        scheduled for later, e.g. pending corrections, doesn't count)
 
-    The background file **watcher** and auto-scan are infrastructure —
-    they run 24/7 and do NOT block the restart.  SSE keep-alive pings
-    also don't count; the idle timer only advances on real requests.
+    SSE keep-alive pings and machine polling don't count; the idle timer
+    only advances on real requests.
     """
     with _last_activity_lock:
         idle_seconds = time.time() - _last_activity
@@ -1180,8 +803,13 @@ def _is_server_idle() -> bool:
     # Block if user-initiated upload is running
     if _upload_thread and _upload_thread.is_alive():
         return False
-    # Block if reprocess / rebuild tasks are queued
-    if _task_worker and _task_worker.is_alive() and not _task_queue.empty():
+    # Block while an admin job (folder load, history import) runs
+    job = hub_admin.JOBS.current()
+    if job is not None and job.get("state") == "running":
+        return False
+    # Block while the Worker has due jobs (a retry scheduled later doesn't count)
+    data = paths.data_dir()
+    if data is not None and hub.background_busy(data / store.DB_FILENAME):
         return False
     return True
 
@@ -1192,8 +820,8 @@ APP_DIR = Path(__file__).resolve().parent
 # One restart per process (button, second click or 3 AM): _restart_claimed is
 # the single-flight flag. Under the updater a restart only ever EXITS — the
 # updater's supervise() relaunches within ~20 s, and a replacement we spawned
-# would race it for the port. Legacy mode spawns its replacement, except
-# while a switch is under way (restart_policy.may_respawn).
+# would race it for the port. Only while the updater is paused do we spawn a
+# replacement, never while a switch is under way (restart_policy.should_respawn).
 _restart_lock = threading.RLock()
 _restart_claimed = False
 _restart_decision: tuple = ("restart", None)   # what the pending restart is doing
@@ -1209,40 +837,13 @@ def _claim_restart() -> bool:
         return True
 
 
-CSV_LOCK_EXIT_TIMEOUT_SECONDS = 30.0
-_csv_lock_held_for_exit = False
-
-
-def _hold_csv_lock_for_exit() -> bool:
-    """Take distill._CSV_LOCK for the rest of this process's life, so an exit
-    (ours, or the updater's taskkill /F) cannot land mid-write. Idempotent:
-    the lock is not reentrant, and both the switch watcher and _do_restart
-    call this. False if it stayed busy past the timeout."""
-    global _csv_lock_held_for_exit
-    if _csv_lock_held_for_exit:
-        return True
-    if distill._CSV_LOCK.acquire(timeout=CSV_LOCK_EXIT_TIMEOUT_SECONDS):
-        _csv_lock_held_for_exit = True
-        return True
-    LOGGER.error("Results CSV still busy after %.0fs — exiting anyway",
-                 CSV_LOCK_EXIT_TIMEOUT_SECONDS)
-    return False
-
-
-def _release_csv_lock_for_exit() -> None:
-    global _csv_lock_held_for_exit
-    if _csv_lock_held_for_exit:
-        _csv_lock_held_for_exit = False
-        distill._CSV_LOCK.release()
-
-
 def _do_restart(reason: str = "restart") -> None:
-    """Exit so a fresh process takes over: the updater relaunches us when
-    deployed; legacy mode (or a paused updater) spawns its own replacement
-    first — never while a switch is under way (restart_policy.should_respawn).
-
-    Holds distill._CSV_LOCK through the exit so os._exit cannot land in the
-    middle of a results-CSV write."""
+    """Exit so a fresh process takes over: the updater relaunches us, or,
+    while it is paused, we spawn our own replacement first (never while a
+    switch is under way: restart_policy.should_respawn). The hub (Worker,
+    exporter, maintenance) is stopped right before the exit, so a job or an
+    export append finishes first; if the replacement can't be spawned the
+    hub is started again and this process stays up."""
     global _restart_claimed
     LOGGER.info("=== SERVER RESTART INITIATED (%s) ===", reason)
     # Give a moment for any in-flight response to finish
@@ -1257,25 +858,26 @@ def _do_restart(reason: str = "restart") -> None:
         os._exit(0)
 
     try:
-        spawn = restart_policy.should_respawn(paths.data_dir() or APP_DIR)
+        spawn = restart_policy.should_respawn(paths.require_data_dir())
     except Exception:
         LOGGER.exception("could not decide whether to respawn — not respawning")
         spawn = False
 
-    _hold_csv_lock_for_exit()
     if not spawn:
         LOGGER.info("Exiting without a respawn; the updater restarts the app")
+        _stop_hub()
         _exit()
+    _stop_hub()
     try:
         # Spawn a new process *then* exit.  On Windows os.execv can be
         # unreliable, so use subprocess + os._exit instead.
         args, cwd, flags = restart_policy.respawn_command(
-            _sys.executable, _sys.argv, deployed=paths.data_dir() is not None,
-            app_dir=APP_DIR, cwd=os.getcwd(), windows=platform.system() == "Windows")
+            _sys.executable, _sys.argv, cwd=os.getcwd(),
+            windows=platform.system() == "Windows")
         subprocess.Popen(args, cwd=cwd, close_fds=True, creationflags=flags)
     except Exception:
-        LOGGER.exception("Failed to spawn new server process")
-        _release_csv_lock_for_exit()
+        LOGGER.exception("Failed to spawn new server process — staying up")
+        _restart_hub()
         with _restart_lock:   # stay up; a later request may try again
             _restart_claimed = False
         return  # don't exit if we couldn't start the replacement
@@ -1284,17 +886,12 @@ def _do_restart(reason: str = "restart") -> None:
 
 
 def _await_switch_then_restart(data_dir: Path, tag: str, at: float) -> None:
-    """Watch for the updater's answer, then restart. When it has the request
-    this only exits (should_respawn: the switch files are gone by now, so
-    only a paused updater makes us start our own replacement)."""
-    # By design: once the updater has taken the request, on_taken holds
-    # distill._CSV_LOCK until this process dies, so the updater's taskkill /F
-    # cannot cut a results-CSV write in half. Until then every request that
-    # reads the CSV (/api/table, /api/distillation-curve, the Looker's appends,
-    # ...) blocks, for up to restart_policy.ACCEPTED_WAIT_SECONDS (~45 s) if
-    # the updater is slow to stop us. Normally the stop comes within seconds.
-    action = restart_policy.await_switch(data_dir, tag, at,
-                                         on_taken=_hold_csv_lock_for_exit)
+    """Watch for the updater's answer, then restart. Once the updater has
+    taken the request (``on_taken``), the hub is stopped: the Worker finishes
+    its job and the exporter its append before the updater's taskkill can
+    land. Then this only exits (should_respawn: the switch files are gone by
+    now, so only a paused updater makes us start our own replacement)."""
+    action = restart_policy.await_switch(data_dir, tag, at, on_taken=_stop_hub)
     _do_restart(f"switch to {tag}: {action}")
 
 
@@ -1893,33 +1490,6 @@ def _gc1_calibration_cdf() -> Optional[str]:
     return None if row is None else (row.get("calibration_cdf") or "")
 
 
-def _mirror_calibration_cdf(body: dict, saved_conf: dict) -> None:
-    """A settings save that changes ``calibration_cdf`` changes the gc1 row
-    (the processing source of truth), taking the saved assignments for the
-    new CDF from the settings map when there are any, and queues gc1's
-    ``awaiting_calibration`` samples. No-op without a store."""
-    if "calibration_cdf" not in body:
-        return
-    try:
-        _data, db = _hub()
-        row = _gc1(db)
-    except HubUnavailable:
-        return
-    new = str(body.get("calibration_cdf") or "").strip()
-    if new == (row.get("calibration_cdf") or ""):
-        return
-    entries = None
-    if new:
-        found = distill.parse_assignment_map(saved_conf.get("calibration_assignments", "")) \
-            .get(distill._cal_key(Path(new)))
-        entries = json.dumps(found) if isinstance(found, list) and found else None
-    store.instruments.upsert({"id": instruments.GC1, "calibration_cdf": new or None,
-                              "calibration_assignments": entries}, db=db)
-    with distill._CAL_LOCK:
-        distill._CAL_CACHE.clear()
-    pipeline.on_calibration_saved(instruments.GC1, db=db)
-
-
 @app.route("/api/settings", methods=["GET"])
 def api_get_settings():
     try:
@@ -1934,22 +1504,46 @@ def api_get_settings():
 
 @app.route("/api/settings", methods=["POST"])
 def api_save_settings():
+    """Save global settings: only ``settings.OPERATOR_KEYS`` (anyone) and
+    ``settings.ADMIN_KEYS`` (with the admin ``password`` in the body) can
+    change. A body may echo any other key back unchanged (the page posts what
+    it read); a body that changes one is refused (400, naming the keys) and
+    nothing is saved. JSON only (415 otherwise: a text/plain post is a CORS
+    "simple" request). Only the changed keys are written; paths and
+    computed values never are."""
+    if not request.is_json:
+        return _error("Expected Content-Type: application/json", 415)
     try:
-        body = request.get_json(force=True)
+        body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return _error("Expected JSON object")
-        # Flag rules and best-fit settings need no cache clearing: sample_cache
-        # rows carry the fingerprint they were computed with.
-        settings_mod.save_settings(body)
-        warning = _refresh_looker_paths()
+        current = settings_mod.load_settings()
+        gc1_cal = _gc1_calibration_cdf()
+        if gc1_cal is not None:
+            current = dict(current, calibration_cdf=gc1_cal)
+        changed = {k: v for k, v in body.items()
+                   if k != "password" and (k not in current
+                                           or str(v if v is not None else "")
+                                           != str(current.get(k) if current.get(k) is not None
+                                                  else ""))}
+        allowed = set(settings_mod.OPERATOR_KEYS) | set(settings_mod.ADMIN_KEYS)
+        refused = sorted(k for k in changed if k not in allowed)
+        if refused:
+            return _error(f"{', '.join(refused)} cannot be changed here: paths, calibration, "
+                          f"corrections and the blank limit are set on the server (settings.json, "
+                          f"DEPLOY.md) or per instrument (Calibration and Instruments pages).", 400)
+        if any(k in settings_mod.ADMIN_KEYS for k in changed) and not _check_admin(body):
+            return _error("Best-fit and analysis defaults need the admin password", 403)
+        if changed:
+            # Flag rules and best-fit settings need no cache clearing:
+            # sample_cache rows carry the fingerprint they were computed with.
+            settings_mod.update_settings(changed)
+            LOGGER.info("Settings changed by %s: %s", _who(), ", ".join(sorted(changed)))
 
         conf = settings_mod.load_settings()
-        _mirror_calibration_cdf(body, conf)
         cal = _gc1_calibration_cdf()
         if cal is not None:
             conf = dict(conf, calibration_cdf=cal)
-        if warning:
-            conf = dict(conf, warning=warning)
         return jsonify(conf)
     except Exception as exc:
         return _error(str(exc), 500)
@@ -1966,15 +1560,15 @@ def api_save_analysis_defaults():
             return _error("Incorrect password", 403)
         params = body.get("params", {})
         overlays = body.get("range_overlays", [])
-        conf = settings_mod.load_settings()
+        changes = {}
         # Trend line + thresholds
         for key in ("quantile", "window", "sigma", "thresh_marginal",
                      "thresh_moderate", "thresh_significant", "x_max_min"):
             if key in params:
-                conf[f"analysis_{key}"] = str(params[key])
+                changes[f"analysis_{key}"] = str(params[key])
         # Full range overlays as JSON
-        conf["analysis_range_overlays"] = json.dumps(overlays)
-        settings_mod.save_settings(conf)
+        changes["analysis_range_overlays"] = json.dumps(overlays)
+        settings_mod.update_settings(changes)
         return jsonify({"ok": True})
     except Exception as exc:
         return _error(str(exc), 500)
@@ -2263,17 +1857,24 @@ def _csv_cell(v) -> str:
 def api_table():
     """Every sample's current revision in the results-CSV columns (cells as
     the CSV writes them), oldest injection first; ``sample_ids`` runs
-    parallel to ``rows``."""
+    parallel to ``rows``. ``InjectionDateTime`` is the sample's corrected
+    ``injection_dt``, never the revision's stored cell: an imported v1
+    revision keeps v1's (possibly misparsed) time verbatim as the record.
+    Other cells are shown as stored (numbers from the Worker, v1's exact
+    strings from an import)."""
     _data, db = _hub()
     header = list(distill.CSV_HEADER)
+    inj_col = header.index("InjectionDateTime")
     rows, ids = [], []
     with store.connection(db) as conn:
-        for sid, results in conn.execute(
-                "SELECT s.id, r.results FROM samples s JOIN sample_results r "
+        for sid, injection_dt, results in conn.execute(
+                "SELECT s.id, s.injection_dt, r.results FROM samples s JOIN sample_results r "
                 "ON r.sample_id = s.id AND r.revision = s.current_revision "
                 "ORDER BY s.injection_dt, s.id"):
             vals = _json_col(results, {}) or {}
-            rows.append([_csv_cell(vals.get(c)) for c in header])
+            row = [_csv_cell(vals.get(c)) for c in header]
+            row[inj_col] = _csv_cell(injection_dt)
+            rows.append(row)
             ids.append(sid)
     return jsonify({"columns": header, "rows": rows, "sample_ids": ids})
 
@@ -2367,7 +1968,13 @@ def api_calibration():
 def api_calibration_save():
     """Persist manual peak→carbon assignments (and the sensitivity) on the gc1
     instrument row, then queue gc1's ``awaiting_calibration`` samples (only
-    those: nothing final is reprocessed)."""
+    those: nothing final is reprocessed). Admin-gated (JSON body with the
+    admin ``password``): the calibration decides every result."""
+    body, err = _admin_json_body()
+    if err:
+        return err
+    if not _check_admin(body):
+        return _error("Incorrect password", 403)
     data, db = _hub()
     row = _gc1(db)
     try:
@@ -2376,7 +1983,6 @@ def api_calibration_save():
         if cal_path is None:
             return _error("No calibration CDF configured", 404)
 
-        body = request.get_json(silent=True) or {}
         assignments = body.get("assignments")
         if not isinstance(assignments, list):
             return _error("Body must contain an 'assignments' list")
@@ -2473,479 +2079,6 @@ def api_calibration_active():
         return jsonify(out)
     except Exception as exc:
         return _error(str(exc), 500)
-
-
-# ===================================================================== #
-#  API: Scanning
-# ===================================================================== #
-
-
-_scan_status: Dict[str, Any] = {
-    "phase": "idle",          # idle | scanning | processing | done | stopped
-    "total": 0, "new": 0, "already": 0,
-    "processed": 0, "errors": 0,
-    "current_batch": 0, "total_batches": 0,
-    "current_file": "",
-}
-_force_snapshot = threading.Event()  # set when user clicks Scan & Parse
-
-# ── Directory snapshot cache ──────────────────────────────────────────
-# Stores {folder_path: {"size": total_bytes, "count": num_files}} for
-# subfolders 1-2 levels deep under the watch directory.  On each poll
-# only folders whose size/count changed are re-scanned for new CDFs.
-_DIR_CACHE_PATH = paths.dir_cache_file()
-
-
-def _load_dir_cache() -> Dict[str, Any]:
-    """Load the directory snapshot cache from disk."""
-    try:
-        if _DIR_CACHE_PATH.is_file():
-            data = json.loads(_DIR_CACHE_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and "watch_dir" in data:
-                return data
-    except Exception as exc:
-        print(f"[DIRCACHE] Failed to load: {exc}", flush=True)
-    return {}
-
-
-def _save_dir_cache(cache: Dict[str, Any]) -> None:
-    """Persist the directory snapshot cache to disk."""
-    try:
-        _DIR_CACHE_PATH.write_text(json.dumps(cache, indent=1), encoding="utf-8")
-    except Exception as exc:
-        print(f"[DIRCACHE] Failed to save: {exc}", flush=True)
-
-
-def _invalidate_dir_cache() -> None:
-    """Clear the snapshot timestamp so the next scan does a fresh snapshot."""
-    try:
-        cache = _load_dir_cache()
-        if cache:
-            cache["snapshot_ts"] = 0
-            _save_dir_cache(cache)
-            print("[DIRCACHE] Cache invalidated (will re-snapshot on next scan)", flush=True)
-    except Exception as exc:
-        print(f"[DIRCACHE] Failed to invalidate: {exc}", flush=True)
-
-
-def _snapshot_folders(watch: Path) -> Dict[str, Dict[str, int]]:
-    """Build a snapshot of subfolders 1-2 levels deep.
-    Returns {relative_folder: {"size": total_bytes, "count": num_cdf_files}}.
-    Also includes the root watch dir itself (key=".")."""
-    snap: Dict[str, Dict[str, int]] = {}
-
-    def _stat_folder(folder: Path, rel_key: str) -> None:
-        total_size = 0
-        count = 0
-        try:
-            for f in folder.iterdir():
-                if f.is_file() and f.suffix.lower() == ".cdf":
-                    try:
-                        total_size += f.stat().st_size
-                        count += 1
-                    except OSError:
-                        pass
-        except OSError:
-            pass
-        snap[rel_key] = {"size": total_size, "count": count}
-
-    # Root level CDFs
-    _stat_folder(watch, ".")
-
-    # Level 1 subfolders
-    try:
-        for d1 in sorted(watch.iterdir()):
-            if not d1.is_dir() or d1.name.startswith("."):
-                continue
-            rel1 = d1.name
-            _stat_folder(d1, rel1)
-            # Level 2 subfolders
-            try:
-                for d2 in sorted(d1.iterdir()):
-                    if not d2.is_dir() or d2.name.startswith("."):
-                        continue
-                    _stat_folder(d2, f"{rel1}/{d2.name}")
-            except OSError:
-                pass
-    except OSError:
-        pass
-
-    return snap
-
-
-_SNAPSHOT_TTL = 30 * 60   # 30 minutes between full directory snapshots
-
-
-def _smart_scan_cdfs(watch: Path, force_snapshot: bool = False) -> list[Path]:
-    """Use the directory cache to only enumerate CDF files in folders that
-    changed since the last scan.  Falls back to full rglob on first run.
-    The expensive folder snapshot is only redone every _SNAPSHOT_TTL seconds
-    unless force_snapshot=True (e.g. user clicked Scan & Parse)."""
-    cache = _load_dir_cache()
-    old_watch = cache.get("watch_dir", "")
-    old_snap = cache.get("folders", {})
-    last_snapshot_ts = cache.get("snapshot_ts", 0)
-    now = time.time()
-    snapshot_age = now - last_snapshot_ts
-
-    # Decide if we need a fresh snapshot
-    need_snapshot = (
-        force_snapshot
-        or str(watch) != old_watch
-        or not old_snap
-        or snapshot_age >= _SNAPSHOT_TTL
-    )
-
-    if not need_snapshot:
-        remaining = _SNAPSHOT_TTL - snapshot_age
-        print(f"[DIRCACHE] Using cached snapshot ({snapshot_age:.0f}s old, "
-              f"next refresh in {remaining:.0f}s)", flush=True)
-        return []
-
-    print(f"[DIRCACHE] Snapshotting {watch} (1-2 levels) ...", flush=True)
-    t0 = time.time()
-    new_snap = _snapshot_folders(watch)
-    snap_time = time.time() - t0
-    total_files = sum(v["count"] for v in new_snap.values())
-    print(f"[DIRCACHE] Snapshot done in {snap_time:.1f}s: "
-          f"{len(new_snap)} folders, {total_files} CDF files total", flush=True)
-
-    # Determine which folders changed
-    if str(watch) != old_watch or not old_snap:
-        # First run or watch dir changed — scan everything
-        changed = set(new_snap.keys())
-        print(f"[DIRCACHE] First scan or watch dir changed — scanning all {len(changed)} folders",
-              flush=True)
-    else:
-        changed = set()
-        for key, info in new_snap.items():
-            old = old_snap.get(key)
-            if old is None or old["size"] != info["size"] or old["count"] != info["count"]:
-                changed.add(key)
-        print(f"[DIRCACHE] {len(changed)}/{len(new_snap)} folders changed", flush=True)
-
-    # Save updated cache with timestamp
-    _save_dir_cache({
-        "watch_dir": str(watch),
-        "folders": new_snap,
-        "snapshot_ts": now,
-    })
-
-    if not changed:
-        print("[DIRCACHE] No changes detected — skipping file enumeration", flush=True)
-        return []
-
-    # Only enumerate CDFs in changed folders
-    all_cdfs: list[Path] = []
-    for key in sorted(changed):
-        folder = watch if key == "." else watch / key
-        if not folder.is_dir():
-            continue
-        try:
-            for f in folder.iterdir():
-                if f.is_file() and f.suffix.lower() == ".cdf":
-                    all_cdfs.append(f)
-        except OSError as exc:
-            print(f"[DIRCACHE] Error listing {folder}: {exc}", flush=True)
-
-    # Sort by mtime
-    all_cdfs.sort(key=lambda p: p.stat().st_mtime)
-    print(f"[DIRCACHE] Enumerated {len(all_cdfs)} CDF files from {len(changed)} changed folders",
-          flush=True)
-    return all_cdfs
-
-
-def _fast_scan_cdfs(watch: Path, force: bool = False) -> list[Path]:
-    """Fast CDF enumeration using os.scandir (1-2 levels deep).
-
-    Much faster than rglob or the old snapshot-diff approach on network
-    shares because os.scandir returns DirEntry objects with metadata in a
-    single round-trip, avoiding per-file stat calls.
-
-    Only re-scans when *force* is True or when at least _SNAPSHOT_TTL
-    seconds have elapsed since the last full scan (light-weight polling).
-    """
-    cache = _load_dir_cache()
-    last_ts = cache.get("snapshot_ts", 0)
-    now = time.time()
-
-    if not force and (now - last_ts) < _SNAPSHOT_TTL:
-        # Return cached file list if recent enough (avoid hammering the FS)
-        cached_files = cache.get("cached_cdf_paths", [])
-        if cached_files:
-            return [Path(p) for p in cached_files]
-        # Cache exists but has no paths — fall through to full scan
-
-    all_cdfs: list[Path] = []
-
-    def _scan_dir(d: str) -> None:
-        try:
-            with os.scandir(d) as it:
-                for entry in it:
-                    if entry.is_file(follow_symlinks=False):
-                        if entry.name.upper().endswith(".CDF"):
-                            all_cdfs.append(Path(entry.path))
-                    elif entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
-                        # Level 2
-                        try:
-                            with os.scandir(entry.path) as it2:
-                                for e2 in it2:
-                                    if e2.is_file(follow_symlinks=False) and e2.name.upper().endswith(".CDF"):
-                                        all_cdfs.append(Path(e2.path))
-                        except OSError:
-                            pass
-        except OSError as exc:
-            LOGGER.warning(f"[SCAN] Error scanning {d}: {exc}")
-
-    _scan_dir(str(watch))
-
-    # Sort by mtime so the oldest files are processed first
-    try:
-        all_cdfs.sort(key=lambda p: p.stat().st_mtime)
-    except OSError:
-        pass
-
-    # Persist to cache so subsequent polls (within TTL) are instant
-    _save_dir_cache({
-        "watch_dir": str(watch),
-        "snapshot_ts": now,
-        "cached_cdf_paths": [str(p) for p in all_cdfs],
-        "folders": {},
-    })
-    LOGGER.info(f"[SCAN] os.scandir found {len(all_cdfs)} CDF files in {time.time()-now:.1f}s")
-    return all_cdfs
-
-
-def _start_watcher() -> None:
-    """Start the background watcher thread (idempotent, thread-safe).
-
-    Init, settings save and /api/scan can call this concurrently; the lock
-    makes check-then-start atomic so two watchers can never run.
-    """
-    global _watcher_thread
-    with _watcher_start_lock:
-        if _watcher_thread and _watcher_thread.is_alive():
-            return
-        _watcher_stop.clear()
-        _watcher_thread = threading.Thread(target=_watcher_loop, daemon=True, name="watcher")
-        _watcher_thread.start()
-    LOGGER.info("Background watcher started (poll=%ds, batch=%d)",
-                WATCHER_POLL_SECONDS, SCAN_BATCH_SIZE)
-
-
-def _watcher_loop() -> None:
-    """Background watcher using the Looker's rglob discovery (same as the old
-    desktop app) but with batch processing, SSE progress, and stop support.
-    """
-    from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-
-    LOGGER.info("[WATCHER] Background watcher started")
-
-    unconfigured_logged = False
-    while not _watcher_stop.is_set():
-        try:
-            try:
-                lk = _get_looker()
-            except WatchDirNotConfigured as exc:
-                # Idle until Settings names a real folder (or a missing share
-                # comes back); log once per outage, not every poll.
-                if not unconfigured_logged:
-                    LOGGER.warning("Watcher idle: watch folder %r is not set or missing - "
-                                   "configure it in Settings", exc.raw)
-                    unconfigured_logged = True
-                if _scan_status.get("phase") != "stopped":  # keep the user's Stop visible
-                    _scan_status["phase"] = "idle"
-                _scan_stop.wait(WATCHER_POLL_SECONDS)
-                _scan_stop.clear()
-                continue
-            if unconfigured_logged:
-                LOGGER.info("Watch folder available again: %s", lk.watch_dir)
-                unconfigured_logged = False
-            # _scan_halt is the *within-cycle* abort; clearing it here lets the
-            # next cycle process genuinely-new files. Stickiness of a user Stop
-            # comes from _suppressed_paths (set below on halt, excluded by
-            # _filter_candidates), NOT from leaving _scan_halt set — which would
-            # also block new files. This is the fix for the old auto-resume bug:
-            # the abandoned backlog stays in _suppressed_paths until /api/scan.
-            _scan_halt.clear()
-            lk._stop_event.clear()
-            _scan_status["phase"] = "scanning"
-
-            t0 = time.time()
-            LOGGER.info(f"[WATCHER] Scanning {lk.watch_dir} (rglob) ...")
-
-            # ── Phase 1: discover files using Looker's rglob (reliable) ──
-            try:
-                all_cdfs = sorted(
-                    (fp for fp in lk.watch_dir.rglob("*.cdf") if fp.is_file()),
-                    key=lambda p: p.stat().st_mtime,
-                )
-            except Exception as exc:
-                LOGGER.warning(f"[WATCHER] rglob failed: {exc}")
-                _scan_status["phase"] = "idle"
-                _scan_stop.wait(WATCHER_POLL_SECONDS)
-                _scan_stop.clear()
-                continue
-
-            candidates = _filter_candidates(all_cdfs, lk._seen)
-            total = len(all_cdfs)
-            new_count = len(candidates)
-            already = total - new_count
-            elapsed = time.time() - t0
-
-            _scan_status.update(total=total, new=new_count, already=already,
-                                processed=0, errors=0)
-            LOGGER.info(f"[WATCHER] Listed in {elapsed:.1f}s: {total} total, "
-                        f"{new_count} new, {already} seen")
-
-            if new_count == 0:
-                _scan_status["phase"] = "idle"
-                _scan_stop.wait(WATCHER_POLL_SECONDS)
-                _scan_stop.clear()
-                continue
-
-            _publish_json(_scan_subscribers, _scan_sub_lock,
-                          {"type": "total", "total": total, "new": new_count,
-                           "already": already})
-
-            # ── Phase 2: process in batches with stop + progress ─────────
-            _scan_status["phase"] = "processing"
-            total_batches = (new_count + SCAN_BATCH_SIZE - 1) // SCAN_BATCH_SIZE
-            processed = 0
-            errors = 0
-            stopped = False
-            max_workers = min(4, lk.max_workers)
-
-            LOGGER.info(f"[WATCHER] Processing {new_count} files in {total_batches} "
-                        f"batch(es) ({max_workers} workers)")
-
-            for batch_start in range(0, new_count, SCAN_BATCH_SIZE):
-                if _scan_halt.is_set():
-                    stopped = True
-                    # Abandon the rest of the backlog so it won't auto-resume.
-                    _suppress_backlog(candidates[batch_start:])
-                    break
-
-                batch = candidates[batch_start:batch_start + SCAN_BATCH_SIZE]
-                batch_num = batch_start // SCAN_BATCH_SIZE + 1
-
-                pool = ThreadPoolExecutor(max_workers=max_workers)
-                futs = {pool.submit(lk._handle_new, fp): fp for fp in batch
-                        if not _scan_halt.is_set()}
-
-                remaining = set(futs.keys())
-                while remaining and not _scan_halt.is_set():
-                    done, remaining = wait(remaining, timeout=0.5,
-                                           return_when=FIRST_COMPLETED)
-                    for fut in done:
-                        fp = futs[fut]
-                        try:
-                            fut.result()
-                            processed += 1
-                            lk._seen.add(fp)
-                        except Exception as exc:
-                            errors += 1
-                            LOGGER.warning(f"[WATCHER]   FAIL {fp.name}: {exc}")
-
-                if _scan_halt.is_set():
-                    for f in remaining:
-                        f.cancel()
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    stopped = True
-                    # Abandon the cancelled batch members + everything after this
-                    # batch so the stopped backlog won't auto-resume next cycle.
-                    not_started = candidates[batch_start + len(batch):]
-                    cancelled = [futs[f] for f in remaining]
-                    _suppress_backlog([*cancelled, *not_started])
-                else:
-                    pool.shutdown(wait=False)
-
-                if stopped:
-                    break
-
-                _scan_status.update(processed=processed, errors=errors)
-                _publish_json(_scan_subscribers, _scan_sub_lock, {
-                    "type": "progress",
-                    "current": already + processed + errors,
-                    "total": total,
-                    "batch": batch_num, "total_batches": total_batches,
-                    "processed": processed, "skipped": already,
-                    "errors": errors, "status": "ok",
-                })
-
-                # Refresh in-memory file list after each batch so the UI picks
-                # up newly processed samples mid-scan (throttled so the full-CSV
-                # read doesn't starve request handling).
-                if processed > 0:
-                    try:
-                        _maybe_rebuild_files_cache()
-                    except Exception:
-                        pass
-
-            # ── Summary ──────────────────────────────────────────────────
-            total_el = time.time() - t0
-            if stopped:
-                LOGGER.info(f"[WATCHER] STOPPED ({total_el:.1f}s): {processed} ok, "
-                            f"{errors} err")
-                _scan_status["phase"] = "stopped"
-                _publish_json(_scan_subscribers, _scan_sub_lock,
-                              {"type": "stopped", "processed": processed,
-                               "skipped": already, "errors": errors})
-            else:
-                LOGGER.info(f"[WATCHER] Complete ({total_el:.1f}s): {processed} ok, "
-                            f"{errors} err")
-                _scan_status["phase"] = "done"
-                _publish_json(_scan_subscribers, _scan_sub_lock,
-                              {"type": "done", "processed": processed,
-                               "skipped": already, "errors": errors,
-                               "total": total})
-
-            if processed > 0:
-                try:
-                    _maybe_rebuild_files_cache(force=True)
-                except Exception as fc_exc:
-                    LOGGER.warning(f"[WATCHER] File cache refresh failed: {fc_exc}")
-
-            _scan_status["phase"] = "idle"
-
-        except Exception as exc:
-            LOGGER.exception(f"[WATCHER] ERROR: {exc}")
-            _scan_status["phase"] = "idle"
-
-        _scan_stop.wait(WATCHER_POLL_SECONDS)
-        _scan_stop.clear()
-
-
-# ── Task queue (legacy watcher scaffolding; removed with the watcher in T5) ──
-_task_queue: queue.Queue = queue.Queue()
-_task_worker: Optional[threading.Thread] = None
-_task_worker_lock = threading.Lock()
-
-
-def _ensure_task_worker() -> None:
-    """Start the task worker thread if it isn't running."""
-    global _task_worker
-    with _task_worker_lock:
-        if _task_worker and _task_worker.is_alive():
-            return
-        _task_worker = threading.Thread(target=_task_worker_loop, daemon=True, name="task-worker")
-        _task_worker.start()
-
-
-def _task_worker_loop() -> None:
-    """Drain the task queue sequentially."""
-    while True:
-        try:
-            task_fn = _task_queue.get(timeout=30)
-        except queue.Empty:
-            return  # idle — thread exits, will be restarted on next submit
-        try:
-            task_fn()
-        except Exception as exc:
-            _scan_log(f"Task error: {exc}")
-            LOGGER.exception("Task worker error")
-        finally:
-            _task_queue.task_done()
 
 
 # ===================================================================== #
@@ -3155,35 +2288,49 @@ def api_comparison_standards():
         return _error(str(exc), 500)
 
 
+def _fixed_standards_dir() -> Path:
+    """The one standards folder, fixed under the data folder."""
+    return paths.standards_dir()
+
+
+def _standard_file(name: str) -> Optional[Path]:
+    """``<name>.CDF``/``.cdf`` in the standards folder, or None. Never outside it."""
+    comp_dir = _fixed_standards_dir()
+    for suffix in (".CDF", ".cdf"):
+        p = comp_dir / f"{name}{suffix}"
+        if p.is_file() and p.resolve().parent == comp_dir.resolve():
+            return p
+    return None
+
+
 @app.route("/api/comparison-standard", methods=["POST"])
 def api_add_comparison_standard():
-    body = request.get_json(force=True) or {}
-    src = None
-    if body.get("sample_id") is not None:
-        # A sample from the list: its current revision's CDF.
-        data, db = _hub()
-        s = _sample_or_404(body["sample_id"], db)
-        src = _revision_cdf(s, store.get_revision(s["id"], db=db) if s["current_revision"] else None,
-                            data)
+    """Admin: make a stored sample's CDF (``sample_id``, its current
+    revision's file) a comparison standard ``name``. Server paths are never
+    accepted (``source_path`` is refused)."""
+    body, err = _admin_json_body()
+    if err:
+        return err
+    if not _check_admin(body):
+        return _error("Incorrect password", 403)
+    if body.get("source_path") is not None:
+        return _error("source_path is not accepted: add a standard from a sample (sample_id)")
+    name = str(body.get("name") or "").strip()
+    problem = _standard_name_problem(name)
+    if problem:
+        return _error(problem)
+    if body.get("sample_id") is None:
+        return _error("sample_id and name are required")
+    data, db = _hub()
+    s = _sample_or_404(body["sample_id"], db)
+    src = _revision_cdf(s, store.get_revision(s["id"], db=db) if s["current_revision"] else None,
+                        data)
     try:
-        source_path = str(body.get("source_path") or src or "").strip()
-        name = str(body.get("name") or "").strip()
-        problem = _standard_name_problem(name)
-        if problem:
-            return _error(problem)
-        if not source_path:
-            return _error("source_path (or sample_id) and name are required")
-
-        src = src or _safe_path(source_path)
-        if not src.is_file():
-            return _error(f"Source file not found: {source_path}", 404)
-
-        conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
+        comp_dir = _fixed_standards_dir()
         comp_dir.mkdir(parents=True, exist_ok=True)
-
         dest = comp_dir / f"{name}.CDF"
         shutil.copy2(str(src), str(dest))
+        LOGGER.info("Comparison standard %s added from sample %s by %s", name, s["id"], _who())
         return jsonify({"status": "ok", "path": str(dest)})
     except Exception as exc:
         return _error(str(exc), 500)
@@ -3191,19 +2338,22 @@ def api_add_comparison_standard():
 
 @app.route("/api/comparison-standard/<name>", methods=["DELETE"])
 def api_delete_comparison_standard(name: str):
+    """Admin (JSON body with the password): delete a standard from the
+    standards folder."""
+    body, err = _admin_json_body()
+    if err:
+        return err
+    if not _check_admin(body):
+        return _error("Incorrect password", 403)
     problem = _standard_name_problem(name)
     if problem:
         return _error(problem)
     try:
-        conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
-        target = comp_dir / f"{name}.CDF"
-        if not target.is_file():
-            # Try lowercase
-            target = comp_dir / f"{name}.cdf"
-        if not target.is_file():
+        target = _standard_file(name)
+        if target is None:
             return _error(f"Standard not found: {name}", 404)
         target.unlink()
+        LOGGER.info("Comparison standard %s deleted by %s", name, _who())
         return jsonify({"status": "ok"})
     except Exception as exc:
         return _error(str(exc), 500)
@@ -3211,23 +2361,24 @@ def api_delete_comparison_standard(name: str):
 
 @app.route("/api/comparison-standard/rename", methods=["POST"])
 def api_rename_comparison_standard():
+    """Admin: rename a standard within the standards folder."""
+    body, err = _admin_json_body()
+    if err:
+        return err
+    if not _check_admin(body):
+        return _error("Incorrect password", 403)
     try:
-        body = request.get_json(force=True)
         old_name = str(body.get("old_name") or "").strip()
         new_name = str(body.get("new_name") or "").strip()
         problem = _standard_name_problem(old_name) or _standard_name_problem(new_name)
         if problem:
             return _error(problem)
-
-        conf = settings_mod.load_settings()
-        comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
-        old_path = comp_dir / f"{old_name}.CDF"
-        if not old_path.is_file():
-            old_path = comp_dir / f"{old_name}.cdf"
-        if not old_path.is_file():
+        old_path = _standard_file(old_name)
+        if old_path is None:
             return _error(f"Standard not found: {old_name}", 404)
-
-        new_path = comp_dir / f"{new_name}{old_path.suffix}"
+        new_path = old_path.parent / f"{new_name}{old_path.suffix}"
+        if new_path.exists():
+            return _error(f"A standard named {new_name} already exists", 409)
         old_path.rename(new_path)
         return jsonify({"status": "ok", "path": str(new_path)})
     except Exception as exc:
@@ -3417,6 +2568,8 @@ def api_export_lims():
             exported.append({"sample_id": sid, "revision": r["revision"], "seq": r["seq"]})
         except pipeline.NotExportable as exc:
             refused.append({"sample_id": sid, "error": str(exc)})
+    if exported:
+        _wake_exports()
     if refused:
         notifications_mod.get_store().add(
             "warning", f"Export to LIMS: {len(refused)} of {len(ids)} sample(s) refused — "
@@ -3920,54 +3073,28 @@ def api_qbench_upload():
                     _emit_item(idx, lab_id, "error", msg="No standard")
                     continue
                 try:
-                    sample_p = _revision_cdf(sample_row, store.get_revision(sid, rev_no, db=hub_db),
-                                             hub_data)
+                    # The same analysis as the report export (both detection
+                    # channels, the saved range overlays or the item's
+                    # ranges, the revision's calibration anchors).
                     report_params = {
                         "lab_id": lab_id,
-                        "doc_name": item.get("sample_name", "GC Analysis"),
+                        "doc_name": item.get("sample_name") or "GC Analysis",
                         "standard_name": standard_name,
-                        "conclusion": item.get("conclusion", ""),
-                        "bullets": item.get("bullets", ""),
                         "overlay_standards": item.get("overlay_standards", []),
+                        "ranges": item.get("ranges"),
                     }
-                    comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
-                    std_path = comp_dir / f"{standard_name}.CDF"
-                    if not std_path.is_file():
-                        std_path = comp_dir / f"{standard_name}.cdf"
-                    if not std_path.is_file():
+                    for key in ("conclusion", "bullets"):   # empty → the generated text
+                        if item.get(key):
+                            report_params[key] = item[key]
+                    try:
+                        ar, ranges, ladder = _run_export_analysis(sample_row, report_params, conf,
+                                                                  hub_data, hub_db)
+                    except ValueError as exc:
                         fail_count += 1
-                        _emit_item(idx, lab_id, "error", msg=f"Standard '{standard_name}' not found")
+                        _emit_item(idx, lab_id, "error", msg=str(exc))
                         continue
-
-                    q = float(conf.get("analysis_quantile", 0.20))
-                    w = int(conf.get("analysis_window", 301))
-                    sig = float(conf.get("analysis_sigma", 34.0))
-                    tm = float(conf.get("analysis_thresh_marginal", 100))
-                    tmod = float(conf.get("analysis_thresh_moderate", 500))
-                    ts = float(conf.get("analysis_thresh_significant", 2000))
-
-                    t_s, y_s = distill.gc_xy_from_cdf(sample_p)
-                    t_st, y_st = distill.gc_xy_from_cdf(std_path)
-                    if len(t_s) != len(t_st) or not np.allclose(t_s, t_st, atol=1e-6):
-                        y_st = np.interp(t_s, t_st, y_st)
-                    trend_s = compute_trend_line(t_s, y_s, q, w, sig)
-                    trend_st = compute_trend_line(t_s, y_st, q, w, sig)
-                    diff = trend_s - trend_st
-                    cal_times, cal_carbons = _revision_ladder(sample_row, conf, hub_db, hub_data)
-                    segs = detect_deviation_segments(diff, t_s, tm, tmod, ts, cal_times, cal_carbons) if cal_times else []
-
-                    ar = {
-                        "sample_trend": {"x": t_s.tolist(), "y": trend_s.tolist()},
-                        "std_trend": {"x": t_s.tolist(), "y": trend_st.tolist()},
-                        "sample_raw": {"x": t_s.tolist(), "y": y_s.tolist()},
-                        "std_raw": {"x": t_s.tolist(), "y": y_st.tolist()},
-                        "difference": {"x": t_s.tolist(), "y": diff.tolist()},
-                        "segments": segs,
-                        "conclusion": report_params.get("conclusion", ""),
-                        "bullets": report_params.get("bullets", ""),
-                    }
-                    report_bytes = _generate_analysis_report_pdf(report_params, ar,
-                                                                 ladder=(cal_times, cal_carbons))
+                    report_bytes = _generate_analysis_report_pdf(report_params, ar, ranges=ranges,
+                                                                 ladder=ladder)
                     safe_id = _safe_filename(lab_id)
                     out_file = export_dir / f"{safe_id}_analysis.pdf"
                     out_file.write_bytes(report_bytes)
@@ -4304,65 +3431,6 @@ def api_qbench_api_credentials_post():
 #  API: Utility
 # ===================================================================== #
 
-@app.route("/api/browse", methods=["POST"])
-def api_browse():
-    """Open a native file/folder picker dialog (runs on the server machine).
-    Uses tkinter which is available in standard Python."""
-    body = request.get_json(force=True)
-    browse_type = body.get("type", "dir")  # "dir" or "file"
-    title = body.get("title", "Select")
-    initial = body.get("initial", "")
-
-    result = {"path": ""}
-    err = [None]
-
-    def _pick():
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            if browse_type == "dir":
-                path = filedialog.askdirectory(title=title, initialdir=initial or None)
-            else:
-                path = filedialog.askopenfilename(title=title, initialdir=initial or None)
-            root.destroy()
-            result["path"] = path or ""
-        except Exception as exc:
-            err[0] = str(exc)
-
-    # tkinter must run on the main thread on some OSes, but on Windows
-    # it works fine from any thread. Run in a thread with a timeout.
-    t = threading.Thread(target=_pick, daemon=True)
-    t.start()
-    t.join(timeout=120)  # 2 min timeout for user to pick
-
-    if err[0]:
-        return _error(f"Browse dialog failed: {err[0]}", 500)
-    return jsonify(result)
-
-
-@app.route("/api/open-folder", methods=["GET"])
-def api_open_folder():
-    folder = request.args.get("path", "").strip()
-    if not folder:
-        return _error("Missing 'path' query parameter")
-    try:
-        p = _safe_path(folder)
-        if not p.is_dir():
-            return _error(f"Not a directory: {folder}", 404)
-        if platform.system() == "Windows":
-            os.startfile(str(p))  # type: ignore[attr-defined]
-        elif platform.system() == "Darwin":
-            subprocess.Popen(["open", str(p)])
-        else:
-            subprocess.Popen(["xdg-open", str(p)])
-        return jsonify({"status": "ok"})
-    except Exception as exc:
-        return _error(str(exc), 500)
-
-
 # ===================================================================== #
 #  Serve the SPA index
 # ===================================================================== #
@@ -4414,50 +3482,92 @@ def calibration_page():
 # ===================================================================== #
 
 def _init_app() -> None:
-    """Start Looker + watcher + file cache in background so the server starts instantly."""
-    def _bg_init():
-        try:
-            LOGGER.info("Migrating CSV header if needed ...")
-            _migrate_csv_header()
-        except Exception:
-            LOGGER.exception("CSV migration failed (non-fatal)")
-
-        # The sample list, flags and best-fit come from the hub store
-        # (sample_cache); the JSON caches and the CSV-built file cache are
-        # no longer loaded.
-
-        try:
-            LOGGER.info("Initialising Looker (this may take a moment with many files)...")
-            _get_looker()
-            LOGGER.info("Looker initialised — starting watcher")
-        except WatchDirNotConfigured as exc:
-            # Fresh deploy / health check (empty data dir) or a share that is
-            # down. Don't build a Looker; the watcher below idles and picks the
-            # folder up as soon as Settings (or the network) provides it.
-            LOGGER.warning("Looker not started: watch folder %r is not set or missing - "
-                           "configure it in Settings", exc.raw)
-        except Exception:
-            LOGGER.exception("Looker init failed (will retry on first request)")
-        try:
-            _start_watcher()
-        except Exception:
-            LOGGER.exception("Watcher start failed")
-
-    threading.Thread(target=_bg_init, daemon=True, name="init").start()
+    """Start the hub on a background thread (``_start_hub``) and the 3 AM
+    auto-restart loop, so the server answers /healthz at once: the start-up
+    may read the phase-1 corrections file on the share (seeding gc1), which
+    can stall on an unreachable UNC path. Store routes answer 503 until the
+    store exists."""
+    threading.Thread(target=_start_hub, daemon=True, name="hub-start").start()
     threading.Thread(target=_auto_restart_loop, daemon=True, name="auto-restart").start()
 
 
-def _sweep_csv_temps() -> None:
-    """Remove temp files a killed atomic CSV rewrite left beside the results
-    CSV. Only after the port guard: a live instance may be mid-rewrite."""
+def _start_hub() -> None:
+    """``hub.start`` (store migrate, gc1 bootstrap, the pipeline Worker, the
+    export flusher, the gc1 corrections seed, nightly backup and job prune),
+    retried with backoff (``hub.start_with_retry``: 5 s doubling to 5 min,
+    notified after repeated failures) so a locked or briefly unreachable
+    store doesn't leave the hub down until someone restarts it. Meanwhile the
+    app serves: /healthz answers, and ingest keeps accepting (samples queue).
+    Then primes ``sample_cache``."""
+    global _hub_runtime
+    rt = hub.start_with_retry(
+        lambda: hub.start(settings_mod.load_settings(), on_final=_on_sample_final),
+        notifier=hub.default_notifier())
+    if rt is None:
+        return
+    _hub_runtime = rt
+    if not _stop_hub_registered.is_set():
+        _stop_hub_registered.set()
+        atexit.register(_stop_hub)
+    _prime_sample_cache()
+
+
+_stop_hub_registered = threading.Event()
+
+
+def _stop_hub() -> None:
+    """Stop the Worker, exporter and maintenance threads (best effort,
+    idempotent: the switch watcher and the restart may both call it)."""
+    global _hub_runtime
+    rt = _hub_runtime
+    if rt is not None:
+        _hub_runtime = None
+        try:
+            rt.stop(timeout=5.0)
+        except Exception:
+            LOGGER.exception("Could not stop the hub cleanly")
+
+
+def _restart_hub() -> None:
+    """Start the hub again after a restart that didn't happen (the respawn
+    failed), on a background thread like at start-up."""
+    if _hub_runtime is None and hub.running() is None:
+        threading.Thread(target=_start_hub, daemon=True, name="hub-restart").start()
+
+
+def _wake_exports() -> None:
+    """A ledger row was written outside the Worker: flush it now."""
+    rt = _hub_runtime
+    if rt is not None:
+        rt.wake_exports()
+
+
+def _on_sample_final(sample_id: int) -> None:
+    """Worker hook: a sample became final; compute its flags/best-fit off
+    the request path."""
+    _schedule_cache_refresh([sample_id])
+
+
+CACHE_PRIME_LIMIT = 2000
+
+
+def _prime_sample_cache() -> None:
+    """At start, queue the newest samples with no ``sample_cache`` row (or
+    one from other rules) so the first list after a start is warm."""
     try:
-        conf = settings_mod.load_settings()
-        csv_path = Path(conf.get("distill_output", str(paths.default_results_csv())))
-        removed = distill.sweep_stale_csv_temps(csv_path)
-        if removed:
-            LOGGER.warning("Removed %d leftover results-CSV temp file(s)", removed)
+        _data, db = _hub()
+        fps = _cache_fingerprints(settings_mod.load_settings())
+        with store.connection(db) as conn:
+            ids = [r[0] for r in conn.execute(
+                "SELECT s.id FROM samples s LEFT JOIN sample_cache c ON c.sample_id = s.id "
+                "WHERE c.sample_id IS NULL OR c.rules_fingerprint IS NOT ? "
+                "ORDER BY s.injection_dt DESC LIMIT ?", (fps["rules_fp"], CACHE_PRIME_LIMIT))]
+        if ids:
+            _schedule_cache_refresh(ids)
+    except HubUnavailable:
+        pass
     except Exception:
-        LOGGER.exception("Could not sweep results-CSV temp files (non-fatal)")
+        LOGGER.exception("Could not prime sample_cache (non-fatal)")
 
 
 if __name__ != "__main__":
@@ -4477,7 +3587,6 @@ if __name__ == "__main__":
         _sys.exit(1)
     # Only now are we the serving process.
     _tidy_switch_files()
-    _sweep_csv_temps()
     _init_app()
     # debug=True would expose the Werkzeug interactive debugger — remote code
     # execution — on 0.0.0.0. Only an explicit --dev turns it on.

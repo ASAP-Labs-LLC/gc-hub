@@ -123,6 +123,8 @@ def main(argv=None) -> int:
         conf = settings.load_settings()
         if args.instrument == instruments.GC1:
             instruments.bootstrap_gc1(conf, db=db)
+            import hub
+            hub.seed_gc1_corrections(conf, db)     # as the hub's start-up does
         try:
             summary = load_folder(args.instrument, args.folder, backfill=args.backfill, db=db,
                                   data_dir=data_dir, conf=conf)

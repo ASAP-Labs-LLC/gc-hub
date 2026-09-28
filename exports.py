@@ -29,7 +29,8 @@ Public API
         .new_path(instrument, path) -> Path          # admin: switch the export to another file
         .write_fresh(instrument, path, *, by=None) -> int   # admin: new file of gated current revisions
         .tick() -> {instrument: {...}}       # one background pass over every instrument
-        .start(interval=FLUSH_INTERVAL_SECONDS) / .stop()
+        .start(interval=FLUSH_INTERVAL_SECONDS) / .stop() / .is_alive()
+        .wake()                              # flush now (a row just became pending)
         .status(instrument) -> dict          # for the admin page
 
 ``notifier(level, message)`` has the signature of
@@ -629,6 +630,7 @@ class HubExporter:
         self._pending_since: dict[str, float] = {}
         self._alerted: set[str] = set()
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
     # ── paths ──
@@ -1268,15 +1270,25 @@ class HubExporter:
 
         def loop() -> None:
             while not self._stop.is_set():
+                self._wake.clear()
                 self.tick()
-                self._stop.wait(interval)
+                self._wake.wait(interval)
 
         self._thread = threading.Thread(target=loop, name="gc-hub-exports", daemon=True)
         self._thread.start()
         return self._thread
 
+    def wake(self) -> None:
+        """Run the next background pass now (a result just became final)
+        instead of waiting out the interval."""
+        self._wake.set()
+
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def stop(self, timeout: float = 10.0) -> None:
         self._stop.set()
+        self._wake.set()
         if self._thread is not None:
             self._thread.join(timeout)
             self._thread = None
