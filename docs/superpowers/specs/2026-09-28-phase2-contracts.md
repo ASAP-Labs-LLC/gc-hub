@@ -83,7 +83,7 @@ into the hub is Lane A's job after 2A1.
   and `agent.log`.
 - **`agent.json`:**
   `{"hub_url", "token", "watch_dir", "include_subdirs": true, "poll_seconds": 5, "stable_seconds": 30, "results_mirror_path": "", "paused": false, "python": "<abs path to pythonw.exe>"}`.
-- **Mirror sidecar:** `<mirror>.gchub.json` =
+- **Mirror sidecar (amended after the integration review):** `<mirror>.gcagent.json`, never the hub's `.gchub.json`. The agent refuses to mirror into any file that has a hub sidecar. Its temp files are named `.gcagent-<sidecar>.<rand>.part`. Fields:
   `{"size": int, "sha256": str, "seq": int, "adopted_at": str}`.
 - **Launcher exit codes:** 0 = quit, 3 = restart (re-read `current.txt`),
   anything else = crash.
