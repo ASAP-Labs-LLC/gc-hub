@@ -30,15 +30,24 @@
     return j;
   }
 
+  function jobStateClass(state) {
+    if (state === "failed") return "err";
+    if (state === "done") return "ok";
+    if (state === "stopped") return "warn";
+    return "";
+  }
+
   function renderJob(job) {
     const box = $("job");
     box.textContent = "";
     if (!job) return;
     const p = job.params || {};
     const prog = job.progress || {};
-    box.appendChild(el("p", `Job ${job.id}: ${job.kind} ${p.instrument || ""} from ${p.folder || ""} ` +
-      `— ${job.state}` + (prog.phase ? ` (${prog.phase} ${prog.done || 0}/${prog.total || 0})` : ""),
-      job.state === "failed" ? "err" : (job.state === "done" ? "ok" : "")));
+    const source = p.folder || p.processed_dir || "";
+    box.appendChild(el("p", `Job ${job.id}: ${job.kind} ${p.instrument || ""} from ${source}` +
+      (p.results_csv ? ` (csv ${p.results_csv})` : "") +
+      ` — ${job.state}` + (prog.phase ? ` (${prog.phase} ${prog.done || 0}/${prog.total || 0})` : ""),
+      jobStateClass(job.state)));
     const counts = Object.entries(job.counts || {}).map(([k, v]) => `${k}: ${v}`).join(", ");
     if (counts) box.appendChild(el("p", counts));
     if (job.error) box.appendChild(el("p", job.error, "err"));
@@ -76,17 +85,25 @@
     refreshExports();
   }
 
+  function populateInstrumentSelects(names) {
+    for (const sel of document.querySelectorAll(".inst-select")) {
+      const chosen = sel.value;
+      sel.textContent = "";
+      for (const name of names) {
+        const opt = el("option", name);
+        opt.value = name;
+        sel.appendChild(opt);
+      }
+      if (chosen) sel.value = chosen;
+    }
+  }
+
   async function refreshExports() {
     const tbody = $("exports");
     const j = await call("/api/admin/exports");
     tbody.textContent = "";
-    const sel = $("lf-inst");
-    const chosen = sel.value;
-    sel.textContent = "";
+    populateInstrumentSelects(j.instruments.map((s) => s.instrument));
     for (const s of j.instruments) {
-      const opt = el("option", s.instrument);
-      opt.value = s.instrument;
-      sel.appendChild(opt);
       const tr = document.createElement("tr");
       tr.appendChild(el("td", s.instrument));
       tr.appendChild(el("td", s.path || s.error || ""));
@@ -104,7 +121,6 @@
       tr.appendChild(td);
       tbody.appendChild(tr);
     }
-    if (chosen) sel.value = chosen;
   }
 
   async function refresh() {
@@ -126,7 +142,70 @@
     } catch (e) { say(e.message, "err"); }
   }
 
+  function ihAliases() {
+    return $("ih-aliases").value.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+
+  function ihParams() {
+    return {
+      instrument: $("ih-inst").value, processed_dir: $("ih-processed").value.trim(),
+      results_csv: $("ih-csv").value.trim(), aliases: ihAliases(),
+    };
+  }
+
+  async function ihDryRun() {
+    const box = $("ih-result");
+    box.textContent = "";
+    try {
+      const j = await call("/api/admin/import-history/dry-run", ihParams());
+      box.appendChild(el("pre", JSON.stringify(j.summary, null, 1)));
+      say("Dry run done (nothing written)", "ok");
+    } catch (e) { say(e.message, "err"); }
+  }
+
+  async function ihStart() {
+    if (!window.confirm(`Start the real history import for ${$("ih-inst").value}? ` +
+        "This writes to the hub's database (every imported sample stays backfill).")) return;
+    try {
+      const j = await call("/api/admin/import-history/start",
+        Object.assign(ihParams(), {confirm: true}));
+      renderJob(j.job);
+      pollJob();
+    } catch (e) { say(e.message, "err"); }
+  }
+
+  async function ihStop() {
+    try {
+      const j = await call("/api/admin/jobs/stop");
+      renderJob(j.job);
+      say("Stop requested; the run ends after the batch in progress commits", "ok");
+    } catch (e) { say(e.message, "err"); }
+  }
+
+  async function ihLastRun() {
+    const box = $("ih-last");
+    box.textContent = "";
+    try {
+      const j = await call("/api/admin/import-history/last-run", {instrument: $("ih-inst").value});
+      const r = j.last_run;
+      if (!r) {
+        box.appendChild(el("p", "No import run yet for this instrument.", "muted"));
+        return;
+      }
+      $("ih-processed").value = r.processed_dir || "";
+      $("ih-csv").value = r.results_csv || "";
+      $("ih-aliases").value = (r.aliases || []).join(", ");
+      box.appendChild(el("p",
+        `Last run ${r.started_at}${r.stopped ? " (stopped: " + r.stopped + ")" : ""}: ` +
+        JSON.stringify(r.counts || {}), "muted"));
+    } catch (e) { say(e.message, "err"); }
+  }
+
   $("btn-refresh").addEventListener("click", refresh);
   $("btn-load").addEventListener("click", startLoad);
+  $("btn-ih-last").addEventListener("click", ihLastRun);
+  $("btn-ih-dryrun").addEventListener("click", ihDryRun);
+  $("btn-ih-start").addEventListener("click", ihStart);
+  $("btn-ih-stop").addEventListener("click", ihStop);
   $("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") refresh(); });
 })();

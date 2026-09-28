@@ -109,11 +109,15 @@ are exactly as written in the decorator (module constants resolved).
 | `/api/admin/hub-url` | POST | new | 2B1 `ingest_api` blueprint; unchanged by T4 |
 | `/api/admin/load-folder` | POST | new | T5 `hub_admin` blueprint: `{password, instrument, folder, backfill?}` → 202 `{job}` (the T6 loader in a background thread; the hub Worker processes what it submits); 400 bad folder, 404 unknown instrument, 409 a job is running |
 | `/api/admin/jobs/status` | POST | new | T5 `hub_admin`: `{password}` → `{job}` (current or last admin job: state, progress, counts, recent files, summary) |
+| `/api/admin/jobs/stop` | POST | new | T5 `hub_admin`: `{password}` → `{job}`; asks the running job (load-folder or import-history) to stop between batches, by raising from its progress callback; 409 if none is running |
+| `/api/admin/import-history/dry-run` | POST | new | T5 `hub_admin`: `{password, instrument, processed_dir, results_csv?, aliases?, batch_size?}` → 200 `{summary}` (2D `jobs.import_history`, `dry_run=True`; nothing written); 400 bad folder/CSV/aliases, 404 unknown instrument |
+| `/api/admin/import-history/start` | POST | new | T5 `hub_admin`: `{password, instrument, processed_dir, results_csv?, aliases?, batch_size?, confirm: true}` → 202 `{job}` (kind `import-history`, the same `AdminJobs` runner as load-folder); 400 missing/false `confirm` or bad folder/CSV/aliases, 404 unknown instrument, 409 a job is running |
+| `/api/admin/import-history/last-run` | POST | new | T5 `hub_admin`: `{password, instrument}` → `{last_run}` (`jobs.import_history.last_run`; defaults the admin page's form) |
 | `/api/admin/exports` | POST | new | T5 `hub_admin`: `{password}` → `{instruments:[HubExporter.status]}`; 503 until the exporter runs |
 | `/api/admin/exports/<instrument_id>/adopt` | POST | new | T5 `hub_admin`: adopt the export file; 409 `{error, reason}` on a refusal, 404 unknown instrument |
 | `/api/admin/exports/<instrument_id>/new-path` | POST | new | T5 `hub_admin`: `{password, path}` (absolute `.csv` in an existing folder) |
 | `/api/admin/exports/<instrument_id>/write-fresh` | POST | new | T5 `hub_admin`: `{password, path}` → `{status, rows}`; 409 `exists`/`in-use` |
-| `/admin/hub` | GET | new | T5 `hub_admin`: the admin page (load folder, exports) |
+| `/admin/hub` | GET | new | T5 `hub_admin`: the admin page (load folder, history import, exports) |
 | `/instruments` | GET | new | 2A2 `instruments_api` blueprint: the Instruments page |
 | `/api/instruments` | GET | new | 2A2 `instruments_api` blueprint: every instrument + summary (open read) |
 | `/api/instruments/<iid>` | GET | new | 2A2 `instruments_api` blueprint: one instrument with corrections/methods/export (open read) |
