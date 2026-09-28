@@ -1,5 +1,7 @@
-"""Library reorder (/api/library/reindex-times) must not hold the results-CSV
-lock while it reads every source CDF.
+"""distill.derive_injection_times / apply_injection_times: the helpers the
+legacy library reorder used so it never held the results-CSV lock while it
+read every source CDF. (The /api/library/reindex-times route and its worker
+were removed in phase 2 T4: the hub store holds injection times.)
 
 Re-deriving injection times opens one NetCDF file per row, which on a share
 can take minutes; holding ``distill._CSV_LOCK`` for all of that froze every
@@ -11,7 +13,6 @@ under the lock and applies them only to rows still present
 """
 from __future__ import annotations
 
-import ast
 import sys
 import unittest
 from datetime import datetime
@@ -88,53 +89,6 @@ class ApplyInjectionTimesTests(unittest.TestCase):
         current = [_row("L1", "changed-by-someone-else", "/a.cdf")]
         self.assertEqual(distill.apply_injection_times(current, derived), 0)
         self.assertEqual(current[0]["InjectionDateTime"], "changed-by-someone-else")
-
-
-def _worker_fn():
-    tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_do_reindex_injection_times":
-            return node
-    raise AssertionError("_do_reindex_injection_times not found in app.py")
-
-
-def _is_csv_lock_with(node):
-    if not isinstance(node, ast.With):
-        return False
-    for item in node.items:
-        expr = item.context_expr
-        if isinstance(expr, ast.Attribute) and expr.attr == "_CSV_LOCK":
-            return True
-    return False
-
-
-def _calls(node):
-    out = set()
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Call):
-            f = sub.func
-            out.add(f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", ""))
-    return out
-
-
-class WorkerLockScopeTests(unittest.TestCase):
-    def test_cdfs_are_not_read_under_the_csv_lock(self):
-        fn = _worker_fn()
-        locked = [n for n in ast.walk(fn) if _is_csv_lock_with(n)]
-        self.assertGreaterEqual(len(locked), 2, "expected snapshot + merge lock blocks")
-        for block in locked:
-            called = _calls(block)
-            self.assertNotIn("cdf_metadata", called)
-            self.assertNotIn("derive_injection_times", called)
-        self.assertIn("derive_injection_times", _calls(fn))
-
-    def test_merge_and_atomic_write_happen_under_the_lock(self):
-        fn = _worker_fn()
-        locked_calls = set()
-        for block in (n for n in ast.walk(fn) if _is_csv_lock_with(n)):
-            locked_calls |= _calls(block)
-        self.assertIn("apply_injection_times", locked_calls)
-        self.assertIn("_atomic_write_csv", locked_calls)
 
 
 if __name__ == "__main__":
