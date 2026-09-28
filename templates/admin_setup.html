@@ -42,7 +42,13 @@
       <p>Set the password that protects admin actions: saving defaults, credentials,
         instrument settings and agent installers. There is no default password; until
         this is set, admin actions are refused.</p>
+      <p>First use needs the one-time <strong>setup code</strong>. It is in
+        <code>{{ code_file }}</code> in the hub's data folder on the server
+        (C:\ASAPApps\gc\data on ASAPSV1), and in a WARNING line of <code>app.log</code>
+        in the same folder.</p>
       <form id="setup" autocomplete="off">
+        <label for="code">Setup code</label>
+        <input id="code" type="text" required autocomplete="off" spellcheck="false">
         <label for="pw">New password (at least {{ min_length }} characters)</label>
         <input id="pw" type="password" minlength="{{ min_length }}" required autocomplete="new-password">
         <label for="pw2">Repeat it</label>
@@ -68,7 +74,7 @@
       btn.disabled = true;
       fetch("/api/admin/setup", {
         method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({password: pw})
+        body: JSON.stringify({password: pw, setup_code: document.getElementById("code").value.trim()})
       }).then(function (r) {
         return r.json().then(function (b) { return {status: r.status, body: b}; });
       }).then(function (res) {

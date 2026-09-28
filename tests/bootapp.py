@@ -69,10 +69,12 @@ def send(port, path, data=b"", headers=None, method="POST", timeout=10.0):
 TEST_ADMIN_PASSWORD = "test-admin-pw"
 
 
-def setup_admin(port, password=TEST_ADMIN_PASSWORD) -> str:
+def setup_admin(port, data_dir, password=TEST_ADMIN_PASSWORD) -> str:
     """Set the booted app's admin password through the first-use setup API
-    (2B1, D13: there is no default password). Returns it."""
-    code, body = post(port, "/api/admin/setup", {"password": password})
+    (2B1, D13: there is no default password), with the one-time code the app
+    wrote to ``<data_dir>/admin-setup-code.txt``. Returns the password."""
+    setup_code = (Path(data_dir) / "admin-setup-code.txt").read_text(encoding="utf-8").strip()
+    code, body = post(port, "/api/admin/setup", {"password": password, "setup_code": setup_code})
     if code != 201:
         raise RuntimeError(f"admin setup failed: {code} {body}")
     return password

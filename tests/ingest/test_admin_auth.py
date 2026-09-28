@@ -22,6 +22,12 @@ def db(tmp_path):
     admin_auth.reset_throttle()
 
 
+def _setup(db, pw):
+    """First-use setup the way the page does it: with the one-time code."""
+    code = admin_auth.ensure_setup_code(db=db)
+    admin_auth.setup(pw, code, db=db)
+
+
 class Clock:
     def __init__(self):
         self.t = 1000.0
@@ -38,7 +44,7 @@ def test_not_set_on_a_new_store(db):
 
 
 def test_setup_stores_a_salted_pbkdf2_hash(db, tmp_path):
-    admin_auth.setup("correct horse", db=db)
+    _setup(db, "correct horse")
     stored = store.settings_kv.get(admin_auth.KEY, db=db)
     algo, iters, salt, digest = stored.split("$")
     assert algo == "pbkdf2_sha256"
@@ -48,12 +54,12 @@ def test_setup_stores_a_salted_pbkdf2_hash(db, tmp_path):
     assert "correct horse" not in stored
     other = tmp_path / "other.db"
     store.migrate(other)
-    admin_auth.setup("correct horse", db=other)
+    _setup(other, "correct horse")
     assert store.settings_kv.get(admin_auth.KEY, db=other).split("$")[2] != salt   # per-install salt
 
 
 def test_check_right_and_wrong(db):
-    admin_auth.setup("correct horse", db=db)
+    _setup(db, "correct horse")
     assert admin_auth.is_set(db=db)
     assert admin_auth.check("correct horse", db=db).ok
     wrong = admin_auth.check("admin", db=db)
@@ -63,7 +69,7 @@ def test_check_right_and_wrong(db):
 
 
 def test_check_admin_body_shape(db):
-    admin_auth.setup("correct horse", db=db)
+    _setup(db, "correct horse")
     assert admin_auth.check_admin_body({"password": "correct horse"}, db=db) is True
     assert admin_auth.check_admin_body({"password": "nope"}, db=db) is False
     assert admin_auth.check_admin_body(None, db=db) is False
@@ -72,21 +78,21 @@ def test_check_admin_body_shape(db):
 
 def test_setup_refuses_short_and_non_str(db):
     with pytest.raises(admin_auth.PasswordError):
-        admin_auth.setup("short", db=db)
+        _setup(db, "short")
     with pytest.raises(admin_auth.PasswordError):
-        admin_auth.setup(None, db=db)
+        _setup(db, None)
     assert admin_auth.is_set(db=db) is False
 
 
 def test_setup_only_once(db):
-    admin_auth.setup("correct horse", db=db)
+    _setup(db, "correct horse")
     with pytest.raises(admin_auth.AlreadySet):
-        admin_auth.setup("another one", db=db)
+        _setup(db, "another one")
     assert admin_auth.check("correct horse", db=db).ok
 
 
 def test_change_needs_the_current_password(db):
-    admin_auth.setup("correct horse", db=db)
+    _setup(db, "correct horse")
     with pytest.raises(admin_auth.PasswordError):
         admin_auth.change("wrong one", "battery staple", db=db)
     admin_auth.change("correct horse", "battery staple", db=db)
@@ -95,7 +101,7 @@ def test_change_needs_the_current_password(db):
 
 
 def test_iterations_are_read_back_from_the_stored_hash(db, monkeypatch):
-    admin_auth.setup("correct horse", db=db)
+    _setup(db, "correct horse")
     monkeypatch.setattr(admin_auth, "ITERATIONS", 999_999)
     assert admin_auth.check("correct horse", db=db).ok
 
@@ -103,7 +109,7 @@ def test_iterations_are_read_back_from_the_stored_hash(db, monkeypatch):
 def test_backoff_after_repeated_failures(db, monkeypatch):
     clock = Clock()
     monkeypatch.setattr(admin_auth, "_clock", clock)
-    admin_auth.setup("correct horse", db=db)
+    _setup(db, "correct horse")
     for _ in range(admin_auth.FREE_ATTEMPTS):
         assert admin_auth.check("wrong", client="10.0.0.9", db=db).reason == "wrong"
     res = admin_auth.check("correct horse", client="10.0.0.9", db=db)   # even the right one
@@ -120,7 +126,7 @@ def test_backoff_after_repeated_failures(db, monkeypatch):
 def test_backoff_grows_and_is_capped(db, monkeypatch):
     clock = Clock()
     monkeypatch.setattr(admin_auth, "_clock", clock)
-    admin_auth.setup("correct horse", db=db)
+    _setup(db, "correct horse")
     delays = []
     for _ in range(admin_auth.FREE_ATTEMPTS + 12):
         res = admin_auth.check("wrong", client="c", db=db)

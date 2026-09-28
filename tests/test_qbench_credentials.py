@@ -294,7 +294,7 @@ class CredentialRouteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t, fake_token_server() as url:
             tmp = Path(t)
             with booted(tmp, extra_env={"QBENCH_TOKEN_URL": url}) as (port, _p, _data, home):
-                setup_admin(port)   # 2B1: no default admin password
+                setup_admin(port, _data)   # 2B1: no default admin password
                 store = home / "qbench.json"
                 seen = []
 
@@ -380,7 +380,7 @@ class CredentialRouteTests(unittest.TestCase):
             tmp = Path(t)
             with booted(tmp, extra_env={"QBENCH_TOKEN_URL": "http://127.0.0.1:1/token"}) \
                     as (port, _p, _data, home):
-                setup_admin(port)   # 2B1: no default admin password
+                setup_admin(port, _data)   # 2B1: no default admin password
                 code, body = post(port, ROUTE, {"client_id": GOOD_ID,
                                                 "client_secret": GOOD_SECRET,
                                                 "password": TEST_ADMIN_PASSWORD})
@@ -547,8 +547,8 @@ class BoundedProbeRouteTests(unittest.TestCase):
 
     def test_rejection_is_one_token_request(self):
         with tempfile.TemporaryDirectory() as t, counting_token_server() as (url, srv):
-            with booted(Path(t), extra_env={"QBENCH_TOKEN_URL": url}) as (port, *_):
-                setup_admin(port)   # 2B1: no default admin password
+            with booted(Path(t), extra_env={"QBENCH_TOKEN_URL": url}) as (port, _p, _d, _h):
+                setup_admin(port, _d)   # 2B1: no default admin password
                 code, body = post(port, ROUTE, self.BODY)
             self.assertEqual(code, 400, body)
             self.assertIn("400", body["error"])
@@ -557,7 +557,7 @@ class BoundedProbeRouteTests(unittest.TestCase):
     def test_hanging_token_server_times_out_quickly(self):
         with tempfile.TemporaryDirectory() as t, counting_token_server(hang=True) as (url, srv):
             with booted(Path(t), extra_env={"QBENCH_TOKEN_URL": url}) as (port, _p, _d, home):
-                setup_admin(port)   # 2B1: no default admin password
+                setup_admin(port, _d)   # 2B1: no default admin password
                 start = time.time()
                 code, body = post(port, ROUTE, self.BODY, timeout=25)
                 elapsed = time.time() - start
@@ -578,7 +578,7 @@ class CrossSiteTests(unittest.TestCase):
     def test_guard(self):
         with tempfile.TemporaryDirectory() as t, fake_token_server() as url:
             with booted(Path(t), extra_env={"QBENCH_TOKEN_URL": url}) as (port, _p, _d, home):
-                setup_admin(port)   # 2B1: no default admin password
+                setup_admin(port, _d)   # 2B1: no default admin password
                 store = home / "qbench.json"
                 good = json.dumps({"client_id": GOOD_ID, "client_secret": GOOD_SECRET,
                                    "password": TEST_ADMIN_PASSWORD}).encode()
