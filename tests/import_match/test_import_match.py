@@ -143,5 +143,125 @@ class ReadCdfMetaTests(_TmpCase):
             meta.lab_id = "other"  # type: ignore[misc]
 
 
+# ── CSV helpers ────────────────────────────────────────────────────────────
+# v1 before the Best Fit / Fit Score / Source File columns and the
+# intermediate T40/T60 cuts (app._migrate_csv_header's "old header").
+OLD_HEADER = (["Lab ID", "InjectionDateTime"]
+              + ["2887 IBP", "2887 T5", "2887 T10", "2887 T20", "2887 T30", "2887 T50",
+                 "2887 T70", "2887 T80", "2887 T90", "2887 T95", "2887 FBP"]
+              + ["D86 IBP", "D86 T5", "D86 T10", "D86 T20", "D86 T30", "D86 T50",
+                 "D86 T70", "D86 T80", "D86 T90", "D86 T95", "D86 FBP"])
+
+
+def csv_line(cells) -> str:
+    import csv as _csv
+    import io
+    buf = io.StringIO()
+    _csv.writer(buf).writerow(cells)
+    return buf.getvalue()
+
+
+def full_row(lab_id, dt, source="", ibp="100.0", best_fit="Diesel"):
+    vals = {c: "" for c in distill.CSV_HEADER}
+    for i, c in enumerate(distill.CSV_HEADER[2:28]):
+        vals[c] = f"{100 + i}.5"
+    vals.update({"Lab ID": lab_id, "InjectionDateTime": dt, "2887 IBP": ibp,
+                 "Best Fit": best_fit, "Fit Score": "0.950", "Source File": source})
+    return [vals[c] for c in distill.CSV_HEADER]
+
+
+def write_csv_text(path, text, *, bom=False) -> Path:
+    path = Path(path)
+    data = text.encode("utf-8")
+    if bom:
+        data = b"\xef\xbb\xbf" + data
+    path.write_bytes(data)
+    return path
+
+
+@unittest.skipUnless(HAVE_DEPS, "needs numpy + netCDF4")
+class ReadResultsCsvTests(_TmpCase):
+    def test_current_header(self) -> None:
+        text = (csv_line(distill.CSV_HEADER)
+                + csv_line(full_row("AF26", "2026-09-17 14:29:42", r"\\srv\p\AF26.CDF"))
+                + csv_line(full_row(" AF27 ", "2026-09-17 14:50:18", ibp="99.99")))
+        rows = im.read_results_csv(write_csv_text(self.tmp / "r.csv", text))
+        self.assertEqual(len(rows), 2)
+        r0, r1 = rows
+        self.assertEqual((r0.line_no, r0.lab_id, r0.injection_dt_raw),
+                         (2, "AF26", "2026-09-17 14:29:42"))
+        self.assertEqual(r0.source_file, r"\\srv\p\AF26.CDF")
+        self.assertEqual(r1.lab_id, "AF27")                 # stripped for identity
+        self.assertEqual(r1.values["Lab ID"], " AF27 ")     # values verbatim
+        self.assertEqual(r1.values["2887 IBP"], "99.99")
+        self.assertEqual(r1.line_no, 3)
+        self.assertEqual(list(r0.values), list(distill.CSV_HEADER))
+
+    def test_old_header_rows_get_blank_new_columns(self) -> None:
+        old = {c: f"{i}.0" for i, c in enumerate(OLD_HEADER)}
+        old["Lab ID"], old["InjectionDateTime"] = "L1", "2022-03-07 15:28:09"
+        text = csv_line(OLD_HEADER) + csv_line([old[c] for c in OLD_HEADER])
+        (row,) = im.read_results_csv(write_csv_text(self.tmp / "o.csv", text))
+        self.assertEqual(row.lab_id, "L1")
+        self.assertEqual(row.values["2887 T50"], old["2887 T50"])
+        self.assertEqual(row.values["D86 FBP"], old["D86 FBP"])
+        for col in ("2887 T40", "2887 T60", "D86 T40", "D86 T60",
+                    "Best Fit", "Fit Score", "Source File"):
+            self.assertEqual(row.values[col], "", col)
+        self.assertEqual(row.source_file, "")
+
+    def test_new_rows_appended_under_an_old_header(self) -> None:
+        old = ["L1", "2022-03-07 15:28:09"] + ["1.0"] * (len(OLD_HEADER) - 2)
+        text = (csv_line(OLD_HEADER) + csv_line(old)
+                + csv_line(full_row("L2", "2022-03-08 10:00:00", r"\\srv\p\L2.CDF")))
+        rows, issues = im.read_results_csv_ex(write_csv_text(self.tmp / "m.csv", text))
+        self.assertEqual([r.lab_id for r in rows], ["L1", "L2"])
+        self.assertEqual(rows[1].source_file, r"\\srv\p\L2.CDF")
+        self.assertEqual(rows[1].values["Best Fit"], "Diesel")
+        self.assertTrue(any(i["kind"] == "full-width-row-under-old-header" for i in issues))
+
+    def test_bom_blank_lines_and_repeated_header(self) -> None:
+        text = (csv_line(distill.CSV_HEADER)
+                + csv_line(full_row("A", "2026-01-01 00:00:01"))
+                + "\r\n\r\n"
+                + ",,,\r\n"
+                + csv_line(distill.CSV_HEADER)
+                + csv_line(full_row("B", "2026-01-01 00:00:02")))
+        rows = im.read_results_csv(write_csv_text(self.tmp / "b.csv", text, bom=True))
+        self.assertEqual([r.lab_id for r in rows], ["A", "B"])
+        self.assertEqual([r.line_no for r in rows], [2, 7])
+        self.assertNotIn("\ufeff", rows[0].values["Lab ID"])
+
+    def test_old_header_repeated_mid_file_switches_columns(self) -> None:
+        old = ["L1", "2022-03-07 15:28:09"] + ["1.0"] * (len(OLD_HEADER) - 2)
+        text = (csv_line(distill.CSV_HEADER)
+                + csv_line(full_row("A", "2026-01-01 00:00:01", "x.CDF"))
+                + csv_line(OLD_HEADER) + csv_line(old))
+        rows = im.read_results_csv(write_csv_text(self.tmp / "s.csv", text))
+        self.assertEqual(rows[1].lab_id, "L1")
+        self.assertEqual(rows[1].values["Source File"], "")
+        self.assertEqual(rows[1].values["2887 T95"], "1.0")
+
+    def test_headerless_file_uses_csv_header(self) -> None:
+        text = csv_line(full_row("A", "2026-01-01 00:00:01", "a.CDF"))
+        rows, issues = im.read_results_csv_ex(write_csv_text(self.tmp / "h.csv", text))
+        self.assertEqual((rows[0].lab_id, rows[0].source_file), ("A", "a.CDF"))
+        self.assertTrue(any(i["kind"] == "no-header" for i in issues))
+
+    def test_short_and_long_records_are_padded_and_reported(self) -> None:
+        text = (csv_line(distill.CSV_HEADER)
+                + csv_line(["A", "2026-01-01 00:00:01", "1.0"])
+                + csv_line(full_row("B", "2026-01-01 00:00:02") + ["extra"]))
+        rows, issues = im.read_results_csv_ex(write_csv_text(self.tmp / "w.csv", text))
+        self.assertEqual(rows[0].values["2887 IBP"], "1.0")
+        self.assertEqual(rows[0].values["Source File"], "")
+        self.assertEqual(rows[1].lab_id, "B")
+        by_kind = {i["kind"]: i["line_no"] for i in issues}
+        self.assertEqual(by_kind, {"short-row": 2, "long-row": 3})
+
+    def test_empty_file(self) -> None:
+        self.assertEqual(im.read_results_csv(write_csv_text(self.tmp / "e.csv", "")), [])
+
+
 if __name__ == "__main__":
     unittest.main()

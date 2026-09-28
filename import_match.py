@@ -18,6 +18,7 @@ another instrument's folder, never to attach a row.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime
@@ -89,6 +90,106 @@ def _read_cdf_meta_ex(path) -> tuple[CdfMeta, str]:
     meta = CdfMeta(path=str(path), sha256=_sha256_file(p), lab_id=name,
                    injection_dt=inj_dt.isoformat(sep=" "), dt_source=dt_source)
     return meta, name_source
+
+
+@dataclass(frozen=True)
+class CsvRow:
+    line_no: int            # 1-based physical line the record starts on
+    lab_id: str             # "Lab ID", stripped
+    injection_dt_raw: str   # "InjectionDateTime" as written (whitespace stripped)
+    source_file: str        # "Source File", stripped ("" on pre-Source-File rows)
+    values: dict            # every CSV_HEADER name -> the cell verbatim ("" if absent)
+
+
+def _is_header(cells: list[str]) -> bool:
+    stripped = [c.strip() for c in cells]
+    return bool(stripped) and stripped[0] == "Lab ID" and "InjectionDateTime" in stripped
+
+
+def read_results_csv_ex(path) -> tuple[list[CsvRow], list[dict]]:
+    """``read_results_csv`` plus a list of anomalies ``{"line_no", "kind",
+    "detail"}`` for the dry-run report.
+
+    The v1 CSV's layout changed over time (the T40/T60 cuts, then ``Best
+    Fit``/``Fit Score``/``Source File`` were added) and v1 appended rows with
+    whatever layout it had at the time, so this reader is driven by headers,
+    not positions:
+
+    * a record whose first cell is ``Lab ID`` and that contains
+      ``InjectionDateTime`` is a header and defines the columns from there on
+      (a header repeated mid-file is never a row);
+    * a record with exactly ``len(CSV_HEADER)`` cells under an older, shorter
+      header is read with ``CSV_HEADER`` (a new-format row appended to an
+      unmigrated file);
+    * short records are padded with ``""``, extra cells are ignored, both
+      reported;
+    * blank and all-empty records are skipped; a BOM is ignored;
+    * a file that starts without a header is read with ``CSV_HEADER``.
+    """
+    current = list(distill.CSV_HEADER)
+    rows: list[CsvRow] = []
+    issues: list[dict] = []
+    seen_header = False
+    prev_end = 0
+
+    def _issue(line_no: int, kind: str, detail: str = "") -> None:
+        issues.append({"line_no": line_no, "kind": kind, "detail": detail})
+
+    with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as fh:
+        reader = csv.reader(fh)
+        for cells in reader:
+            line_no = prev_end + 1
+            prev_end = reader.line_num
+            if cells:
+                cells[0] = cells[0].lstrip("﻿")
+            if not any(c.strip() for c in cells):
+                continue
+            if _is_header(cells):
+                current = [c.strip() for c in cells]
+                unknown = [c for c in current if c and c not in distill.CSV_HEADER]
+                if unknown:
+                    _issue(line_no, "unknown-columns", ", ".join(unknown))
+                if seen_header or rows:
+                    _issue(line_no, "repeated-header",
+                           f"{len(current)} columns")
+                seen_header = True
+                continue
+            if not seen_header and not rows:
+                _issue(line_no, "no-header", "read with the current CSV_HEADER")
+            if any("�" in c for c in cells):
+                _issue(line_no, "decode-error", "not valid UTF-8")
+
+            cols = current
+            if len(cells) != len(current):
+                if (len(cells) == len(distill.CSV_HEADER)
+                        and current != list(distill.CSV_HEADER)):
+                    cols = list(distill.CSV_HEADER)
+                    _issue(line_no, "full-width-row-under-old-header",
+                           f"header has {len(current)} columns")
+                elif len(cells) < len(current):
+                    _issue(line_no, "short-row", f"{len(cells)} of {len(current)} cells")
+                else:
+                    _issue(line_no, "long-row", f"{len(cells)} of {len(current)} cells")
+
+            by_name = {}
+            for name, cell in zip(cols, cells):
+                if name and name not in by_name:
+                    by_name[name] = cell
+            values = {c: by_name.get(c, "") for c in distill.CSV_HEADER}
+            rows.append(CsvRow(
+                line_no=line_no,
+                lab_id=values["Lab ID"].strip(),
+                injection_dt_raw=values["InjectionDateTime"].strip(),
+                source_file=values["Source File"].strip(),
+                values=values,
+            ))
+    return rows, issues
+
+
+def read_results_csv(path) -> list[CsvRow]:
+    """Every data row of a v1 results CSV, in file order (see
+    ``read_results_csv_ex`` for the layouts it accepts)."""
+    return read_results_csv_ex(path)[0]
 
 
 def read_cdf_meta(path) -> CdfMeta:
