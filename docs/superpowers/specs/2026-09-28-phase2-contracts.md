@@ -117,43 +117,51 @@ def values_differ(a: dict, b: dict) -> bool: ...           # missing cut counts 
 The store (Lane A) owns the `instrument_corrections` and `corrections_audit`
 tables and supplies `read_fn`.
 
-## §3 History import matcher (Lane D builds it; the Lane A importer job calls it)
+## §3 History import matcher (AMENDED 2026-09-28 after the Lane D review; Lane D builds it, the Lane A importer and parity report call it)
 
 ```python
-# import_match.py  (pure: no DB, no Flask; reads files only)
+# import_match.py  (pure: no DB, no Flask; reads files only; has its own pinned v1 parser)
 @dataclass(frozen=True)
 class CdfMeta:
-    path: str; sha256: str; lab_id: str; injection_dt: str   # canonical naive isoformat(sep=" ")
-    dt_source: str                                           # 'cdf' | 'mtime'
-    method_name: str                                         # detection_method_name, trimmed, basename, upper-cased; '' if absent
-    legacy_injection_dt: str                                 # what v1 wrote (fromisoformat-first bug on py>=3.11); == injection_dt when unaffected
+    path: str; sha256: str; lab_id: str
+    injection_dt: str                 # CORRECT time, canonical naive isoformat(sep=" ")
+    dt_source: str                    # 'cdf' | 'mtime'
+    method_name: str = ""             # detection_method_name, trimmed, basename, upper; '' if absent
+    legacy_injection_dt: str = ""     # what v1 wrote on py>=3.11 (fromisoformat-first bug)
+    raw_stamp: str = ""
+    v1_injection_dts: tuple = ()      # candidate strings v1 may have written (3.11+ form, correct form)
 
 @dataclass(frozen=True)
 class CsvRow:
-    line_no: int; lab_id: str; injection_dt_raw: str; source_file: str; values: dict  # CSV_HEADER -> str
+    line_no: int; lab_id: str; injection_dt_raw: str; source_file: str; values: dict
 
 @dataclass
 class MatchedSample:
-    cdf: CdfMeta | None                 # None = result-only (legacy_unverified)
-    rows: list[CsvRow]                  # CSV order; last = current revision; may be empty (orphan CDF)
+    cdf: CdfMeta | None               # None = result-only (legacy_unverified, dt_source 'csv')
+    rows: list[CsvRow]                # CSV order; last = current revision; [] = orphan CDF
+    # derived: lab_id, injection_dt (correct), dt_source
 
 @dataclass
 class MatchReport:
     samples: list[MatchedSample]
-    unmatched_rows: list[CsvRow]        # also represented as result-only samples above; listed for review
-    dup_sha: list[tuple[str, str]]      # (path, path) identical bytes within the folder
-    no_injection_time: list[str]        # CDF paths that needed the mtime fallback
-    mixed_rows: list[CsvRow]            # rows whose CDF lives outside this instrument's folder
-    stats: dict                         # includes 'method_names': {name: count} ('' = absent)
+    unmatched_rows: list[CsvRow]
+    dup_sha: list[tuple[str, str]]
+    no_injection_time: list[str]
+    mixed_rows: list[CsvRow]
+    key_collisions: list[tuple[CdfMeta, CdfMeta]]   # (kept, other): store `other` as a conflict
+    held_rows: list[CsvRow]                         # short/long/decode-error rows: never imported blindly
+    stats: dict   # method_names, v1_misparsed_cdfs, rows_matched_via_v1_form, collided_rows, near_misses, timezone, ...
 
+def normalise_lab_id(s) -> str: ...   # strip only; keep the original for display
 def read_cdf_meta(path) -> CdfMeta: ...
-def read_results_csv(path) -> list[CsvRow]: ...
-def match(cdfs: list[CdfMeta], rows: list[CsvRow], *, instrument_folder: str) -> MatchReport: ...
-def dry_run(processed_dir, results_csv, *, instrument_folder) -> MatchReport: ...   # plus a text summary CLI
+def read_results_csv_ex(path) -> (rows, issues): ...
+def match(cdfs, rows, *, instrument_folder: str | Sequence[str], csv_issues=None) -> MatchReport: ...
+def dry_run(processed_dir, results_csv=None, *, instrument_folder, on_progress=None) -> MatchReport: ...
 ```
 
-- **Match rule:** a row attaches to a CDF only when the lab IDs are equal
-  (stripped) **and** `injection_dt_raw` equals the CDF's
-  **`legacy_injection_dt`** (canonical string equal; see spec "Injection
-  time"). `injection_dt` is the corrected time that gets stored. `Source File` prefix matches are never trusted
-  on their own. Filenames are never used for identity.
+- **Match rule:** normalised lab IDs are equal, **and** `injection_dt_raw`
+  equals **any** of the CDF's `v1_injection_dts`, as an exact string. The
+  hub stores `injection_dt` (the correct time), `legacy_injection_dt`, and
+  `time_corrected` when the two differ.
+- **Schema amendment:** `samples.injection_dt_source` also allows `'csv'`
+  (result-only imports).
