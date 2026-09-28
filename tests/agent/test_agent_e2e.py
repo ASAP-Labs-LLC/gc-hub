@@ -48,7 +48,7 @@ def test_agent_sends_a_dropped_cdf_and_mirrors_its_row(tmp_path, hub):
         "hub_url": hub.url, "token": hub.token, "watch_dir": str(tmp_path / "chem"),
         "include_subdirs": True, "poll_seconds": 0.2, "stable_seconds": 1,
         "results_mirror_path": str(mirror), "paused": False, "python": sys.executable}))
-    env = dict(os.environ, GC_AGENT_HEARTBEAT_SECONDS="0.5")
+    env = dict(os.environ, GC_AGENT_HEARTBEAT_SECONDS="0.5", GC_AGENT_FAST_POLL="1")
     proc = subprocess.Popen([sys.executable, str(AGENT_MAIN), "--root", str(root), "--no-tray"],
                             cwd=str(tmp_path), env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

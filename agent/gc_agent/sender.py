@@ -101,7 +101,16 @@ class Sender:
             if (st.st_size, st.st_mtime_ns) != (e.size, e.mtime_ns):
                 raise FileNotFoundError("changed since it was queued")
             if e.size > self.max_bytes:
-                return self._reject(key, "HTTP 413: larger than 25 MB (not sent)")
+                return self._reject(key, "too large to send (%d bytes > 25 MB)" % e.size)
+            dup = self.ledger.sent_with_sha(e.sha256)
+            if dup is not None:
+                # The same bytes were already accepted (a re-export or a copy):
+                # the hub would only answer "duplicate", so do not upload again.
+                self.ledger.mark_sent(key, sample_id=dup.sample_id)
+                self.last_sent = os.path.basename(e.path)
+                log.info("%s has the same bytes as %s, already sent; not uploading",
+                         e.path, dup.path)
+                return "sent"
             with open(e.path, "rb") as fh:
                 data = fh.read()
         except OSError as exc:

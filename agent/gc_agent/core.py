@@ -42,6 +42,13 @@ def heartbeat_seconds(env=None):
         return 30.0
 
 
+def effective_poll(cfg, env=None):
+    """poll_seconds, floored at 1 s unless GC_AGENT_FAST_POLL=1 (tests only)."""
+    env = os.environ if env is None else env
+    v = float(cfg["poll_seconds"])
+    return v if env.get("GC_AGENT_FAST_POLL") == "1" else max(v, 1.0)
+
+
 def read_version(directory):
     try:
         line = (Path(directory) / "VERSION").read_text(encoding="utf-8").splitlines()[0].strip()
@@ -222,7 +229,7 @@ class Agent:
         if self.cfg is None or self.cfg_error or self.paused:
             return
         if now >= self._next_scan:
-            self._next_scan = now + float(self.cfg["poll_seconds"])
+            self._next_scan = now + effective_poll(self.cfg)
             wd = self.cfg["watch_dir"]
             try:
                 if not wd:
@@ -272,8 +279,10 @@ class Agent:
             except OSError:
                 pass
         cmd = r.json.get("command")
-        if cmd:
+        if cmd in COMMANDS:
             self._do(cmd, "hub command")
+        elif cmd is not None:
+            log.warning("ignoring unknown hub command %r", cmd)
         hub_sha = r.json.get("agent_package_sha256")
         if (isinstance(hub_sha, str) and hub_sha and hub_sha.lower() != self.package_sha.lower()
                 and self.updates_enabled):
@@ -343,6 +352,6 @@ class Agent:
                 return code
             wait = 1.0
             if self.cfg:
-                wait = min(1.0, float(self.cfg["poll_seconds"]))
+                wait = min(1.0, effective_poll(self.cfg))
             stop_event.wait(wait)
         return self.exit_code if self.exit_code is not None else EXIT_QUIT

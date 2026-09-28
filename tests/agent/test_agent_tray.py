@@ -51,6 +51,12 @@ def test_apply_settings_blank_token_keeps_old():
     assert new["include_subdirs"] is False
 
 
+def test_apply_settings_normalises_watch_dir():
+    import os
+    new = settings_ui.apply_settings(_cfg(), {"watch_dir": "C:/w/sub/../x/"})
+    assert new["watch_dir"] == os.path.normpath("C:/w/x")
+
+
 def test_apply_settings_new_token_and_validation():
     new = settings_ui.apply_settings(_cfg(), {"token": " new "})
     assert new["token"] == "new"

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from . import util
@@ -54,6 +55,9 @@ def validate(raw):
     if bad:
         raise ConfigError("agent.json: bad " + "; ".join(bad))
     cfg["hub_url"] = cfg["hub_url"].rstrip("/")
+    cfg["token"] = cfg["token"].strip()
+    if cfg["watch_dir"].strip():
+        cfg["watch_dir"] = os.path.normpath(cfg["watch_dir"].strip())
     return cfg
 
 

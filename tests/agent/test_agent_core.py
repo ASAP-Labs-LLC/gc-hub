@@ -264,3 +264,42 @@ def test_adopt_mirror_is_a_noop_when_mirroring_is_off(tmp_path, hub, clock):
     assert hub.by_path("/api/agent/results") == []     # nothing pulled
     assert a.ledger.results_seq() == 0
     assert list(root.glob("*.gchub.json")) == []
+
+
+def test_big_first_scan_does_not_block_heartbeat_or_quit(tmp_path, hub, clock):
+    import time as _t
+    root = _root(tmp_path, hub)
+    for i in range(2500):
+        p = root / "watch" / ("f%05d.CDF" % i)
+        p.write_bytes(b"%d" % i)
+        os.utime(str(p), (1000, 1000))
+    a = _agent(root, clock)
+    t0 = _t.monotonic()
+    a.tick()
+    assert _t.monotonic() - t0 < 10
+    assert len(hub.heartbeats) == 1                    # the first tick still heartbeats
+    c = a.ledger.counts()
+    assert 0 < c["queued"] + c["sent"] <= 200          # one capped scan pass
+    a.request("pause")
+    clock.advance(1)
+    a.tick()
+    assert a.cfg["paused"] is True
+    a.request("quit")
+    assert a.tick() == 0
+
+
+def test_poll_seconds_floor_outside_tests(monkeypatch):
+    from gc_agent import core
+    monkeypatch.delenv("GC_AGENT_FAST_POLL", raising=False)
+    assert core.effective_poll({"poll_seconds": 0.2}) == 1.0
+    assert core.effective_poll({"poll_seconds": 5}) == 5.0
+    monkeypatch.setenv("GC_AGENT_FAST_POLL", "1")
+    assert core.effective_poll({"poll_seconds": 0.2}) == 0.2
+
+
+def test_hub_command_quit_is_not_accepted(tmp_path, hub, clock):
+    root = _root(tmp_path, hub)
+    hub.commands = ["quit"]
+    a = _agent(root, clock)
+    assert a.tick() is None
+    assert a.tick() is None
