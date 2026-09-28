@@ -244,3 +244,303 @@ class FileProvider:
 
 def _in_cut_order(values: Dict[str, float]) -> Dict[str, float]:
     return {cut: values[cut] for cut in D86_CUTS if cut in values}
+
+
+# ── the cache store ──────────────────────────────────────────────────────────
+#
+# Contract §2: ``load(instrument_id) -> dict | None`` and
+# ``save(instrument_id, values, methods, fetched_at)``. ``load`` returns
+# ``{"values": {cut: float}, "methods": [str], "fetched_at": str}``: the
+# values per cut exactly as they were used, and LEM's ``methods`` for the
+# record. Only a successful LEM fetch is ever saved. Lane A's SQLite store
+# (table ``corrections_cache``) must return the same keys, and should drop the
+# entry when an instrument's ``lem_machine_uid`` or ``correction_map`` changes
+# (after a restart this module cannot tell such an entry from a current one).
+
+
+class MemoryCacheStore:
+    """In-memory cache store (tests, and anywhere persistence is not wanted)."""
+
+    def __init__(self) -> None:
+        self._rows: Dict[str, dict] = {}
+
+    def load(self, instrument_id: str) -> Optional[dict]:
+        row = self._rows.get(str(instrument_id))
+        if row is None:
+            return None
+        return {"values": dict(row["values"]), "methods": list(row["methods"]),
+                "fetched_at": row["fetched_at"]}
+
+    def save(self, instrument_id: str, values: dict, methods: list, fetched_at: str) -> None:
+        self._rows[str(instrument_id)] = {"values": dict(values), "methods": list(methods),
+                                          "fetched_at": str(fetched_at)}
+
+
+# ── LEM (2C) ─────────────────────────────────────────────────────────────────
+
+ACCEPTED_UNITS = ("°C", "C", "")
+HttpGet = Callable[[str, float], tuple]
+
+
+def requests_http_get(url: str, timeout: float) -> tuple:
+    """The default ``http_get``: ``(status, content_type, body_bytes)``.
+    Raises on a timeout or connection error (the caller counts both as
+    unreachable)."""
+    import requests  # deferred: keeps this module importable without it
+
+    resp = requests.get(url, timeout=timeout, headers={"Accept": "application/json"})
+    return resp.status_code, resp.headers.get("Content-Type", ""), resp.content
+
+
+@dataclass
+class _Attempt:
+    at: datetime
+    key: tuple
+    outcome: object      # Corrections | CorrectionsUnavailable
+
+
+class LemProvider:
+    """Corrections from LEM: ``GET {lem_url}/api/machines/<uid>/corrections``.
+
+    LEM answers ``200 {"corrections": [{"test_name", "correction", "units"}],
+    "methods": [str]}`` (``LEM Web Server/web_app.py`` ``api_get_corrections``);
+    an unknown uid is ``200`` with both lists empty, and a LabCore it cannot
+    read is a 502/503 JSON body (``_labcore_unreadable``), never an empty 200.
+
+    - A 200 JSON answer is authoritative. The machine is known iff ``methods``
+      is non-empty. Per mapped test name: in ``corrections`` -> its value; in
+      ``methods`` only -> 0.0 (LEM's rule: a missing correction is zero); in
+      neither -> ``config``. Units of a mapped test must be °C, C or empty.
+    - A non-JSON 200 (a sign-in page), a timeout, a connection error, a 429
+      or a 5xx -> ``unreachable``, answered from a cache entry at most
+      ``max_cache_age`` seconds old (``source='cache'``), else raised.
+    - Any other status, or JSON that is not LEM's shape -> ``config`` (a
+      wrong ``LEM_URL`` or an auth wall; waiting will not fix it). A config
+      error never falls back to the cache.
+    - At most one fetch per ``fresh_seconds`` per instrument, whatever the
+      outcome, so a backlog during an outage does not wait out the timeout
+      once per sample. ``refresh()`` always fetches.
+    """
+
+    def __init__(self, lem_url: str, cache_store, *, timeout: float = 5.0,
+                 fresh_seconds: float = 300, max_cache_age: float = 86400,
+                 http_get: Optional[HttpGet] = None, clock: Optional[Clock] = None) -> None:
+        self.lem_url = str(lem_url or "").strip().rstrip("/")
+        self.cache_store = cache_store
+        self.timeout = float(timeout)
+        self.fresh_seconds = float(fresh_seconds)
+        self.max_cache_age = float(max_cache_age)
+        self._http_get = http_get or requests_http_get
+        self._clock = clock or datetime.now
+        self._attempts: Dict[str, _Attempt] = {}
+
+    # ── public ──────────────────────────────────────────────────────────
+    def get(self, instrument: dict) -> Corrections:
+        inst_id, uid, mapping, key = self._resolve(instrument)
+        now = self._clock()
+        last = self._attempts.get(inst_id)
+        if last is not None and last.key == key and self._is_fresh(last.at, now):
+            return self._replay(inst_id, mapping, now, last.outcome)
+        if last is None or last.key == key:
+            fresh = self._fresh_from_store(inst_id, mapping, now)
+            if fresh is not None:
+                self._attempts[inst_id] = _Attempt(_parse_iso(fresh.fetched_at), key, fresh)
+                return fresh
+        return self._fetch(inst_id, uid, mapping, key, now)
+
+    def refresh(self, instrument: dict) -> Corrections:
+        inst_id, uid, mapping, key = self._resolve(instrument)
+        return self._fetch(inst_id, uid, mapping, key, self._clock())
+
+    def changed_since(self, instrument_id: str, used: Corrections) -> bool:
+        """Do the latest fetched values differ from the ones ``used``?
+        False when nothing has been fetched yet: there is nothing to compare."""
+        inst_id = str(instrument_id)
+        entry = self._load(inst_id)
+        latest = entry["values"] if entry is not None else None
+        if latest is None:
+            last = self._attempts.get(inst_id)
+            if last is not None and isinstance(last.outcome, Corrections):
+                latest = last.outcome.values
+        if latest is None:
+            return False
+        return values_differ(latest, used.values)
+
+    # ── steps ───────────────────────────────────────────────────────────
+    def _resolve(self, instrument: dict):
+        instrument = instrument or {}
+        inst_id = str(instrument.get("id") or "").strip()
+        if not inst_id:
+            raise _config("The instrument has no id.")
+        uid = str(instrument.get("lem_machine_uid") or "").strip()
+        if not uid:
+            raise _config(f"Instrument {inst_id!r} has no LEM machine uid; set it on "
+                          f"the Instruments page.")
+        if not self.lem_url:
+            raise _config("LEM_URL is not set.")
+        mapping = parse_correction_map(instrument.get("correction_map"))
+        return inst_id, uid, mapping, (uid, tuple(sorted(mapping.items())))
+
+    def _is_fresh(self, then: Optional[datetime], now: datetime) -> bool:
+        age = _age(then, now)
+        return age is not None and 0 <= age < self.fresh_seconds
+
+    def _replay(self, inst_id, mapping, now, outcome) -> Corrections:
+        if isinstance(outcome, Corrections):
+            return outcome
+        if outcome.kind == "config":
+            raise CorrectionsUnavailable(outcome.reason, outcome.kind)
+        return self._fallback(inst_id, mapping, now, outcome)
+
+    def _fetch(self, inst_id, uid, mapping, key, now) -> Corrections:
+        try:
+            result, methods = self._ask_lem(uid, mapping, now)
+        except CorrectionsUnavailable as exc:
+            self._attempts[inst_id] = _Attempt(now, key, exc)
+            if exc.kind == "config":
+                raise
+            return self._fallback(inst_id, mapping, now, exc)
+        self._attempts[inst_id] = _Attempt(now, key, result)
+        try:
+            self.cache_store.save(inst_id, dict(result.values), methods, result.fetched_at)
+        except Exception as exc:  # noqa: BLE001 - a lost cache row is not a lost answer
+            LOGGER.warning("Could not cache corrections for %s: %s", inst_id, exc)
+        return result
+
+    def _ask_lem(self, uid: str, mapping: Dict[str, str], now: datetime):
+        url = f"{self.lem_url}/api/machines/{quote(uid, safe='')}/corrections"
+        try:
+            status, content_type, body = self._http_get(url, self.timeout)
+        except Exception as exc:  # noqa: BLE001 - timeout, refused, DNS, TLS: all "not asked"
+            raise _unreachable(f"LEM did not answer ({type(exc).__name__}: {exc}).") from None
+        content_type = str(content_type or "").lower()
+        if status == 429 or 500 <= status <= 599:
+            raise _unreachable(f"LEM answered HTTP {status}{_lem_error(body)}.")
+        if status != 200:
+            raise _config(f"LEM answered HTTP {status} for {url}; check LEM_URL and that "
+                          f"the hub can reach LEM without signing in.")
+        if "html" in content_type:
+            raise _unreachable("LEM answered with a web page instead of data (a sign-in "
+                               "page or a proxy error).")
+        try:
+            data = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
+        except (ValueError, UnicodeDecodeError, AttributeError, TypeError):
+            raise _unreachable("LEM's answer was not JSON (a sign-in page or a proxy "
+                               "error).") from None
+        return _apply_lem_rules(uid, mapping, data, now)
+
+    def _fallback(self, inst_id, mapping, now, exc) -> Corrections:
+        entry = self._load(inst_id)
+        if entry is None:
+            raise _unreachable(f"{exc.reason} No cached corrections to fall back on.")
+        age = _age(_parse_iso(entry["fetched_at"]), now)
+        if age is None or age < 0:
+            raise _unreachable(f"{exc.reason} The cached corrections carry an unusable "
+                               f"time ({entry['fetched_at']!r}).")
+        if age > self.max_cache_age:
+            raise _unreachable(f"{exc.reason} The cached corrections are from "
+                               f"{entry['fetched_at']}, older than "
+                               f"{self.max_cache_age / 3600:g} h.")
+        if set(entry["values"]) != set(mapping.values()):
+            raise _unreachable(f"{exc.reason} The cached corrections were taken with a "
+                               f"different correction map.")
+        return Corrections(source="cache", fetched_at=entry["fetched_at"],
+                           values=_in_cut_order(entry["values"]))
+
+    def _fresh_from_store(self, inst_id, mapping, now) -> Optional[Corrections]:
+        entry = self._load(inst_id)
+        if entry is None or not self._is_fresh(_parse_iso(entry["fetched_at"]), now):
+            return None
+        if set(entry["values"]) != set(mapping.values()):
+            return None
+        return Corrections(source="lem", fetched_at=entry["fetched_at"],
+                           values=_in_cut_order(entry["values"]))
+
+    def _load(self, inst_id: str) -> Optional[dict]:
+        """The store's entry, validated; None for none, a broken store, or junk."""
+        try:
+            entry = self.cache_store.load(inst_id)
+        except Exception as exc:  # noqa: BLE001 - an unreadable cache is no cache
+            LOGGER.warning("Could not read cached corrections for %s: %s", inst_id, exc)
+            return None
+        if not isinstance(entry, dict) or not isinstance(entry.get("values"), dict):
+            return None
+        values = {}
+        for cut, value in entry["values"].items():
+            number = _finite_float(value)
+            if cut not in D86_CUTS or number is None:
+                return None
+            values[cut] = number
+        fetched_at = str(entry.get("fetched_at") or "")
+        if _parse_iso(fetched_at) is None:
+            return None
+        return {"values": values, "methods": list(entry.get("methods") or []),
+                "fetched_at": fetched_at}
+
+
+def _apply_lem_rules(uid: str, mapping: Dict[str, str], data, now: datetime):
+    """LEM's 200 JSON answer -> ``(Corrections, methods)``, or a config raise."""
+    if (not isinstance(data, dict) or not isinstance(data.get("corrections"), list)
+            or not isinstance(data.get("methods"), list)):
+        raise _config("LEM's answer is not the corrections shape "
+                      "({corrections: [...], methods: [...]}); check LEM_URL.")
+    saved: Dict[str, dict] = {}
+    for row in data["corrections"]:
+        if not isinstance(row, dict):
+            raise _config(f"LEM sent a correction that is not an object: {row!r}.")
+        name = str(row.get("test_name") or "").strip()
+        if name:
+            saved[name] = row
+    methods = [str(m).strip() for m in data["methods"] if str(m).strip()]
+    if not methods:
+        raise _config(f"LEM does not know machine {uid!r}: no methods mapped and no "
+                      f"corrections saved.")
+    known = set(methods)
+    values: Dict[str, float] = {}
+    missing = []
+    for test_name, cut in mapping.items():
+        if test_name in saved:
+            row = saved[test_name]
+            number = _finite_float(row.get("correction"))
+            if number is None:
+                raise _config(f"LEM's correction for {test_name!r} is not a number "
+                              f"({row.get('correction')!r}).")
+            units = str(row.get("units") or "").strip()
+            if units not in ACCEPTED_UNITS:
+                raise _config(f"LEM's correction for {test_name!r} is in {units!r}; D86 "
+                              f"corrections must be in °C (°C, C or blank).")
+            values[cut] = number
+        elif test_name in known:
+            values[cut] = 0.0          # LEM's rule: a missing correction is zero
+        else:
+            missing.append(test_name)
+    if missing:
+        raise _config(f"LEM machine {uid!r} reports none of: {', '.join(missing)}. Fix "
+                      f"the instrument's correction map or the machine's mapping in LEM.")
+    return Corrections(source="lem", fetched_at=_iso(now), values=_in_cut_order(values)), methods
+
+
+def _age(then: Optional[datetime], now: datetime) -> Optional[float]:
+    return None if then is None else (now - then).total_seconds()
+
+
+def _parse_iso(text) -> Optional[datetime]:
+    """Naive local datetime from ISO text; an aware one is converted to local."""
+    try:
+        dt = datetime.fromisoformat(str(text))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
+def _lem_error(body) -> str:
+    """LEM's own error sentence from a JSON error body, if there is one."""
+    try:
+        data = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
+    except Exception:  # noqa: BLE001
+        return ""
+    if isinstance(data, dict) and data.get("error"):
+        return f": {str(data['error'])[:300]}"
+    return ""
