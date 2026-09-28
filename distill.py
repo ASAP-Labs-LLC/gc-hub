@@ -21,6 +21,7 @@ import stat
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, Sequence, Tuple
@@ -55,8 +56,10 @@ _SETTINGS_LOCK = threading.Lock()
 # (resolved calibration path, assignment signature) -> (CDF mtime, function,
 # anchors used). Keyed by signature too, so confs that share one calibration
 # file but assign its peaks differently each keep their own entry instead of
-# evicting another's.
-_CAL_CACHE: dict[Tuple[str, str], Tuple[float, Callable[[np.ndarray], np.ndarray], dict]] = {}
+# evicting another's. Least recently used first; at most
+# CAL_CACHE_SIGNATURES_PER_PATH signatures are kept per path.
+CAL_CACHE_SIGNATURES_PER_PATH = 8
+_CAL_CACHE: "OrderedDict[Tuple[str, str], Tuple[float, Callable[[np.ndarray], np.ndarray], dict]]" = OrderedDict()
 _CAL_LOCK = threading.Lock()
 _NETCDF_LOCK = threading.Lock()
 _CSV_LOCK = threading.Lock()  # guards all reads/writes to distill_results.csv
@@ -646,14 +649,17 @@ def _build_calibration(cal_cdf: Path, conf: Dict[str, str]) -> Callable[[np.ndar
 
 
 def _assignment_signature(cal_path: Path, conf: Dict[str, str]) -> str:
-    """Stable signature of ``conf``'s assignments for ``cal_path``.
+    """Stable signature of the assignment pairs ``conf`` gives ``cal_path``.
 
     Lets the calibration cache refresh when assignments change — the CDF file's
     mtime alone is blind to assignment edits (they live in settings, not the CDF).
+    It signs the ``(rt, carbon)`` pairs actually used (``_assignment_pairs``,
+    which also finds entries saved under a legacy unresolved key), so confs
+    whose used pairs differ never share a signature.
     """
     try:
         amap = parse_assignment_map(conf.get("calibration_assignments", ""))
-        return json.dumps(amap.get(_cal_key(cal_path)), sort_keys=True)
+        return json.dumps(_assignment_pairs(amap, cal_path))
     except Exception:  # noqa: BLE001
         return ""
 
@@ -690,6 +696,7 @@ def _calibration_entry_cached(
     with _CAL_LOCK:
         cached = _CAL_CACHE.get((key, sig))
         if cached and cached[0] == mtime:
+            _CAL_CACHE.move_to_end((key, sig))
             return cached[1], cached[2]
     func, info = _build_calibration_and_anchors(cal_path, conf, allow_auto=allow_auto)
     with _CAL_LOCK:
@@ -697,6 +704,10 @@ def _calibration_entry_cached(
         for stale in [k for k, v in _CAL_CACHE.items() if k[0] == key and v[0] != mtime]:
             del _CAL_CACHE[stale]
         _CAL_CACHE[(key, sig)] = (mtime, func, info)
+        _CAL_CACHE.move_to_end((key, sig))
+        same_path = [k for k in _CAL_CACHE if k[0] == key]
+        for old in same_path[:-CAL_CACHE_SIGNATURES_PER_PATH]:
+            del _CAL_CACHE[old]
     return func, info
 
 

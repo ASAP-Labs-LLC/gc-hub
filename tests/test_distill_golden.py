@@ -11,6 +11,7 @@ import csv
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -94,6 +95,59 @@ class ProcessCdfGoldenTests(_IsolatedSettings):
     @SNAPSHOT
     def test_snapshot_rows_equal_golden(self) -> None:
         self._assert_rows(make_golden.SNAPSHOT_CASES, _golden(make_golden.SNAPSHOT_JSON))
+
+
+class ProcessCdfWritePathTests(_IsolatedSettings):
+    """process_cdf's own work around compute(): the move, Source File, dedupe
+    and reprocess appends."""
+
+    NAME = "sample_40304_blank"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.inputs = make_golden.build_inputs(self.root)
+        self.case_dir = self.root / self.NAME
+        (self.case_dir / "in").mkdir(parents=True)
+        path = self.case_dir / "settings.json"
+        path.write_text(json.dumps(make_golden.case_conf(self.root, self.inputs, self.NAME)),
+                        encoding="utf-8")
+        settings.CONFIG_PATH = path
+        distill._SETTINGS_CACHE = None
+        self.src, self.blank = make_golden.case_paths(self.inputs, self.NAME)
+        # <Lab ID>_<MMDDYYYY>_<HHMMSS>.CDF, as processed_cdf_filename builds it.
+        self.expected_dst = self.case_dir / "processed" / "40304_09252026_142300.CDF"
+
+    def _process(self, **kw) -> Path:
+        cdf = self.case_dir / "in" / self.src.name
+        shutil.copyfile(self.src, cdf)
+        final = distill.process_cdf(cdf, blank_path=self.blank, **kw)
+        self.assertFalse(cdf.exists(), "the input CDF was not moved")
+        return final
+
+    def _rows(self) -> list:
+        with (self.case_dir / "distill_results.csv").open(encoding="utf-8", newline="") as fh:
+            return list(csv.DictReader(fh))
+
+    def test_moves_the_cdf_and_records_it_as_source_file(self) -> None:
+        final = self._process()
+        self.assertEqual(final, self.expected_dst)
+        self.assertTrue(self.expected_dst.is_file())
+        self.assertEqual(self.expected_dst.read_bytes(), self.src.read_bytes())
+        (row,) = self._rows()
+        self.assertEqual(row["Source File"], str(self.expected_dst))
+        self.assertEqual({k: v for k, v in row.items() if k != "Source File"}, GOLDEN[self.NAME])
+
+    def test_processing_the_same_injection_again_does_not_add_a_row(self) -> None:
+        self._process()
+        self._process()
+        self.assertEqual(len(self._rows()), 1)
+
+    def test_reprocess_appends_an_identical_row(self) -> None:
+        self._process()
+        self._process(reprocess=True)
+        rows = self._rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0], rows[1])
 
 
 class ConfExplicitCalibrationTests(_IsolatedSettings):
@@ -356,6 +410,71 @@ class HubModeFlagsTests(_IsolatedSettings):
         self.assertEqual(auto["calibration"]["anchors_source"], "auto")
         with self.assertRaisesRegex(ValueError, "auto-detection is off"):
             distill.compute(self.cdf, conf, self.blank, allow_auto=False)
+
+
+class CalibrationCacheTests(_IsolatedSettings):
+    def setUp(self) -> None:
+        super().setUp()
+        import cdf_fixtures as fx
+        self.cal = fx.calibration_cdf(self.root / "cal.CDF")
+        self.key = distill._cal_key(self.cal)
+        self.ladder = fx.ladder_times()
+
+    def _conf(self, first_carbon_index: int = 0, raw_key=None, extra=()) -> dict:
+        carbons = distill.N_ALKANE_CARBON[first_carbon_index:]
+        entries = [{"rt": rt, "carbon": c} for rt, c in zip(self.ladder, carbons)] + list(extra)
+        key = raw_key if raw_key is not None else self.key
+        return {"calibration_cdf": str(self.cal),
+                "calibration_assignments": json.dumps({key: entries})}
+
+    def _entries_for_path(self) -> list:
+        return [k for k in distill._CAL_CACHE if k[0] == self.key]
+
+    def test_touching_the_cdf_rebuilds_and_leaves_one_entry(self) -> None:
+        conf_a, conf_b = self._conf(0), self._conf(1)
+        f_a = distill._calibration_function(self.cal, conf_a)
+        distill._calibration_function(self.cal, conf_b)
+        self.assertEqual(len(self._entries_for_path()), 2)
+        self.assertIs(distill._calibration_function(self.cal, conf_a), f_a)   # cached
+        st = self.cal.stat()
+        os.utime(self.cal, (st.st_atime + 10, st.st_mtime + 10))
+        f_a2 = distill._calibration_function(self.cal, conf_a)
+        self.assertIsNot(f_a2, f_a)
+        self.assertEqual(self._entries_for_path(), [(self.key, distill._assignment_signature(self.cal, conf_a))])
+
+    def test_at_most_eight_signatures_per_path_least_recently_used_evicted(self) -> None:
+        confs = [self._conf(i) for i in range(10)]
+        sigs = [distill._assignment_signature(self.cal, c) for c in confs]
+        self.assertEqual(len(set(sigs)), 10)
+        for c in confs[:8]:
+            distill._calibration_function(self.cal, c)
+        self.assertEqual(len(self._entries_for_path()), 8)
+        distill._calibration_function(self.cal, confs[0])       # a hit refreshes conf 0
+        distill._calibration_function(self.cal, confs[8])       # evicts conf 1, not conf 0
+        cached = set(self._entries_for_path())
+        self.assertEqual(len(cached), distill.CAL_CACHE_SIGNATURES_PER_PATH)
+        self.assertIn((self.key, sigs[0]), cached)
+        self.assertNotIn((self.key, sigs[1]), cached)
+        self.assertIn((self.key, sigs[8]), cached)
+
+    def test_signature_is_the_pairs_used_so_legacy_keys_do_not_collide(self) -> None:
+        # Saved under the unresolved path (a legacy key): the old signature
+        # looked only at the resolved key and saw "null" for both confs.
+        raw = str(self.root / "sub" / ".." / "cal.CDF")
+        self.assertNotEqual(raw, self.key)
+        conf_a, conf_b = self._conf(0, raw_key=raw), self._conf(1, raw_key=raw)
+        cal_raw = Path(raw)
+        self.assertNotEqual(distill._assignment_signature(cal_raw, conf_a),
+                            distill._assignment_signature(cal_raw, conf_b))
+        t = np.linspace(0.5, 6.0, 20)
+        self.assertFalse(np.allclose(distill._calibration_function(cal_raw, conf_a)(t),
+                                     distill._calibration_function(cal_raw, conf_b)(t)))
+
+    def test_signature_ignores_entries_that_are_not_used(self) -> None:
+        plain = self._conf(0)
+        with_ignored = self._conf(0, extra=[{"rt": 0.3, "ignore": True}, {"rt": 1.13}])
+        self.assertEqual(distill._assignment_signature(self.cal, plain),
+                         distill._assignment_signature(self.cal, with_ignored))
 
 
 if __name__ == "__main__":
