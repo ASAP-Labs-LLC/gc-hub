@@ -610,13 +610,40 @@ def _too_large(exc):
     return exc
 
 
+MAX_JSON_DEPTH = 64
+
+
+def json_too_deep(value, limit: int = MAX_JSON_DEPTH) -> bool:
+    """True when parsed JSON nests lists/objects deeper than *limit*.
+    Iterative, so it can't itself hit the recursion limit. Needed because
+    CPython 3.14 (the server's) parses very deep JSON without the
+    ``RecursionError`` older versions raise."""
+    stack = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            children = item.values()
+        elif isinstance(item, list):
+            children = item
+        else:
+            continue
+        if depth > limit:
+            return True
+        stack.extend((c, depth + 1) for c in children)
+    return False
+
+
 def get_json_object():
     """``request.get_json(silent=True)``, with too-deeply nested JSON treated as
-    unparseable (``None``) instead of a ``RecursionError`` (a 500)."""
+    unparseable (``None``) instead of a ``RecursionError`` (a 500), whatever
+    the Python version (``json_too_deep``)."""
     try:
-        return request.get_json(silent=True)
+        body = request.get_json(silent=True)
     except RecursionError:
         return None
+    if body is not None and json_too_deep(body):
+        return None
+    return body
 
 
 def _json_body():

@@ -111,3 +111,19 @@ def test_nested_json_and_surrogates_over_http(tmp_path):
                           json.dumps({"password": "test-admin-pw"}).encode()[:-1]
                           + b', "new_password": "abc\\ud800defgh"}', js)
         assert code == 400, (code, body)
+
+
+def test_json_nesting_is_bounded_whatever_the_python():
+    # CPython 3.14 (the server's) parses 20000 nested brackets without a
+    # RecursionError, so the depth is checked after parsing too: an admin body
+    # nested deeper than MAX_JSON_DEPTH is unparseable (400), never a wrong
+    # password (403) or a crash.
+    deep = "x"
+    for _ in range(admin_auth.MAX_JSON_DEPTH + 1):
+        deep = [deep]
+    assert admin_auth.json_too_deep({"password": deep})
+    ok = "x"
+    for _ in range(admin_auth.MAX_JSON_DEPTH - 2):
+        ok = {"k": ok}
+    assert not admin_auth.json_too_deep({"password": ok})
+    assert not admin_auth.json_too_deep({"password": "pw", "params": {"a": [1, 2]}})
