@@ -13,22 +13,33 @@ Every helper takes a keyword-only ``db`` argument, which is one of:
   if ``GC_DATA_DIR`` is unset);
 * a path (``str``/``Path``): a short-lived connection is opened for this one
   call and closed again; writes run in their own ``BEGIN IMMEDIATE``;
-* an open ``sqlite3.Connection`` (from ``open_db``/``connection``): used as is
-  and never closed. If the connection is inside ``write_txn`` the write joins
-  that transaction; otherwise it gets its own ``BEGIN IMMEDIATE``.
+* an open ``sqlite3.Connection``: used as is and never closed. Inside
+  ``write_txn(conn)`` the write joins that transaction; otherwise it gets its
+  own ``BEGIN IMMEDIATE``.
+
+**Inside ``write_txn(conn)`` always pass ``db=conn``.** Opening any new
+connection on a thread that holds a write transaction raises
+``RuntimeError("... pass db=conn inside write_txn")`` at once: a second
+connection would either wait ``busy_timeout`` for the lock its own thread
+holds, or read the pre-transaction state. **Never call network, corrections
+or other slow code inside ``write_txn``**; compute first, then write.
 
 Connections and transactions::
 
-    open_db(path=None) -> sqlite3.Connection    # WAL, busy_timeout=10000, synchronous=NORMAL,
-                                                # foreign_keys=ON, row_factory=sqlite3.Row,
-                                                # autocommit (isolation_level=None)
-    connection(db=None)                         # context manager: open_db + close
-    write_txn(conn)                             # context manager: BEGIN IMMEDIATE ... COMMIT,
-                                                # ROLLBACK on exception; nested = SAVEPOINT
-    migrate(path=None) -> int                   # additive, PRAGMA user_version; returns version
+    open_db(path=None, *, create=False, readonly=False) -> sqlite3.Connection
+        # WAL, busy_timeout=10000, synchronous=NORMAL, foreign_keys=ON, row_factory=Row,
+        # autocommit (isolation_level=None). The file must exist unless create=True
+        # (only migrate creates it).
+    connection(db=None)                   # context manager: open_db + close
+    write_txn(conn)                       # BEGIN IMMEDIATE ... COMMIT; ROLLBACK on exception
+                                          # or COMMIT failure; nested = SAVEPOINT
+    migrate(path=None) -> int             # creates/upgrades; additive; PRAGMA user_version
     backup_nightly(path=None, keep=14, *, settings_path=None, now=None) -> Path
     default_db_path() -> Path
-    now_iso() -> str                            # UTC 'YYYY-MM-DDTHH:MM:SS.ffffff+00:00'
+    now_iso() -> str                      # UTC 'YYYY-MM-DDTHH:MM:SS.ffffff+00:00'
+    local_dt(value) -> str                # naive local 'YYYY-MM-DD HH:MM:SS' (injection_dt form)
+    is_backfill(live_since, injection_dt) -> bool
+    GATE_SQL                              # "status='final' AND (backfill=0 OR released_at IS NOT NULL)"
 
 Samples and revisions::
 
@@ -39,11 +50,16 @@ Samples and revisions::
     samples.get(sample_id, *, db) -> dict | None
     samples.find_by_sha(sha256, *, db) -> dict | None          # across ALL instruments
     samples.find_by_key(instrument_id, lab_id, injection_dt, *, db) -> dict | None
+    samples.find_by_legacy(instrument_id, lab_id, dt, *, db) -> list[dict]
+        # injection_dt = dt OR legacy_injection_dt = dt; legacy matches first
+    samples.latest_blank(instrument_id, at, method_names, *, exclude_sample_id=None, db) -> dict | None
+    samples.is_gated(sample_id, *, db) -> bool                 # the export/QBench gate
+    samples.methods_seen(instrument_id, *, db) -> list[{method_name, count, first_seen, last_seen}]
     samples.set_status(sample_id, status, *, error=None, db)   # error cleared unless given
     samples.update(sample_id, *, db, **fields)                 # whitelisted columns only
     samples.search(q=None, instrument=None, date_from=None, date_to=None, status=None,
-                   limit=100, offset=0, *, db) -> list[dict]   # newest injection first
-    samples.count(q=None, instrument=None, date_from=None, date_to=None, status=None, *, db) -> int
+                   limit=100, offset=0, *, method_name=None, backfill=None, db) -> list[dict]
+    samples.count(<same filters>, *, db) -> int
     add_revision(conn, sample_id, results, *, reason, by=None, d86_uncorrected=None,
                  calibration_used=None, blank_used=None, corrections_used=None,
                  best_fit=None, fit_score=None, flags=None, processed_at=None) -> int
@@ -51,11 +67,14 @@ Samples and revisions::
     get_revision(sample_id, revision=None, *, db) -> dict | None   # None = current
     list_revisions(sample_id, *, db) -> list[dict]                 # ascending
 
-Instruments::
+Instruments and corrections (D4b)::
 
     instruments.get(instrument_id, *, db) -> dict | None
     instruments.list(enabled_only=False, *, db) -> list[dict]      # ordered by id
     instruments.upsert(fields: dict, *, db) -> dict                 # 'id' required; partial update
+    corrections.read(instrument_id, *, db) -> {values, updated_at, updated_by} | None
+    corrections.set_all(conn, instrument_id, values, *, by, reason) -> int (cuts changed)
+    corrections.audit(instrument_id, limit=100, *, db) -> list[dict]   # newest first
 
 Exports (the ledger; file writing is exports.py)::
 
@@ -67,83 +86,109 @@ Exports (the ledger; file writing is exports.py)::
 
 Jobs (durable queue)::
 
-    jobs.enqueue(kind, payload, not_before=None, *, db) -> int
+    jobs.enqueue(kind, payload, not_before=None, *, sample_id=None, db) -> int
+    jobs.enqueue_for_status(db, instrument_id, status, *, method_name=None, kind='process') -> int
     jobs.claim_next(now=None, *, kind=None, db) -> dict | None   # atomic; payload decoded
     jobs.complete(job_id, *, db)
-    jobs.fail(job_id, error, retry_at=None, *, db)   # retry_at -> 'queued' again, else 'failed'
+    jobs.fail(job_id, error, retry_at=None, *, db)   # retry_at -> queued again, else 'failed'
     jobs.requeue_stale_running(*, db) -> int
-    jobs.get(job_id, *, db) -> dict | None
+    jobs.prune_done(older_than, *, db) -> int
+    jobs.get(job_id, *, db) / jobs.list(state=None, kind=None, *, db)
 
 Small tables::
 
-    sample_cache.get(sample_id, *, db) -> dict | None
-    sample_cache.put(sample_id, *, db, **fields)        # merges only the fields given
-    settings_kv.get(key, default=None, *, db) -> str | None
-    settings_kv.set(key, value, *, db) / settings_kv.delete(key, *, db)
+    sample_cache.get(sample_id, *, db) / sample_cache.put(sample_id, *, db, **fields)
+    settings_kv.get(key, default=None, *, db) / .set(key, value, *, db) / .delete(key, *, db)
     conflicts.add(instrument_id, lab_id, injection_dt, existing_sample_id, cdf_sha256,
                   cdf_path, *, received_at=None, db) -> int
     conflicts.list(instrument_id=None, unresolved_only=True, *, db) -> list[dict]
+    conflicts.find_by_sha(sha256, unresolved_only=True, *, db) -> dict | None
     conflicts.resolve(conflict_id, resolution, *, by, db)   # 'kept-existing' | 'replaced'
-    CorrectionsCacheStore(db=None).load(instrument_id) / .save(instrument_id, values, methods, fetched_at)
-                                                        # the contracts §2 cache_store
 
 Conventions and decisions (where the spec left a choice)
 ========================================================
 
 * **Rows come back as plain ``dict``s**, detached from the connection.
   JSON columns (``method_map``, ``results``, ``flags``...) are returned as the
-  stored TEXT; helpers accept a ``dict``/``list`` for them and encode it with
+  stored TEXT; helpers accept a ``dict``/``list`` and encode it with
   ``json.dumps`` (a ``str`` is stored verbatim). The one exception is
-  ``jobs`` rows, whose ``payload`` is decoded.
-* **Timestamps** written by the store (``received_at``, ``created_at``,
-  ``processed_at``, ``resolved_at``, ``hub_appended_at``, jobs'
-  ``not_before``) are UTC ISO-8601 with microseconds and ``+00:00``
-  (``now_iso()``), so they sort as strings. ``jobs`` normalise any datetime or
-  ISO string they are given (naive = UTC). ``injection_dt`` is **not** a
-  store timestamp: it is the naive local ``isoformat(sep=" ")`` from the CDF,
-  stored exactly as given.
+  ``jobs`` rows, whose ``payload`` is decoded (left as TEXT if undecodable).
+* **Two time domains.**
+  - *Store timestamps* (``received_at``, ``created_at``/``updated_at``,
+    ``processed_at``, ``resolved_at``, ``hub_appended_at``, jobs'
+    ``not_before``/``finished_at``, corrections' ``updated_at``/``changed_at``)
+    are tz-aware UTC, ``now_iso()`` form, so they sort as strings. Jobs
+    **reject** naive datetimes and offset-less strings (``ValueError``).
+  - *Instrument-clock times* (``injection_dt``, ``legacy_injection_dt``,
+    ``instruments.live_since`` and the ``search`` date bounds) are naive
+    local ``datetime.isoformat(sep=" ")``, e.g. ``2026-10-01 00:00:00``,
+    because that is how the CDF/CSV hold injection times. ``live_since`` and
+    the date bounds are normalised to that form (``local_dt``), so string
+    comparison with ``injection_dt`` is correct: the ISO ``T`` form would
+    sort after the same moment written with a space. An aware value is
+    converted to this machine's local time first.
+* **Statuses are validated in code** (``STATUSES``), with no CHECK
+  constraint, so a later release can add one additively; this code reads
+  unknown statuses without complaint. ``INJECTION_DT_SOURCES`` is
+  ``('cdf', 'mtime', 'csv')``; ``'csv'`` is result-only imports.
+* **``method_name``** is stored normalised (trimmed, basename, upper-case;
+  the caller normalises). ``''`` means the CDF had none; NULL only for
+  result-only imports. ``insert_received`` turns ``None`` into ``''`` for a
+  CDF-backed sample.
+* **``is_blank``** means a *genuine* blank, decided by the worker at
+  process time (name rule plus ``is_plausible_blank``), not merely a
+  blank-looking name. ``latest_blank`` also requires a stored CDF.
 * **Integrity errors are not wrapped.** ``insert_received`` raises
   ``sqlite3.IntegrityError`` on a duplicate ``cdf_sha256`` (any instrument)
-  or a duplicate (instrument, lab ID, injection time). Callers that need
-  "check then insert" do both inside one ``write_txn``.
+  or a duplicate (instrument, lab ID, injection time). Check and insert
+  inside one ``write_txn``.
 * ``samples.time_corrected`` is an INTEGER flag (0/1). The spec's comment on
   that line (``'cdf'|'mtime'``) belongs to ``injection_dt_source``.
-* ``samples.status`` has a CHECK constraint with exactly the eight statuses
-  of the spec's status machine (``STATUSES``). Adding a status later is not
-  an additive change (SQLite cannot alter a CHECK): it needs a table rebuild
-  in a migration.
-* ``samples.id`` and ``export_rows.seq`` are ``AUTOINCREMENT`` so they are
-  never reused, even if a row is deleted: agents track ``results_seq`` and
-  stored CDF filenames embed the sample id.
-* Foreign keys beyond the spec's explicit ones: ``sample_results.blank_used``
-  and ``conflicts.existing_sample_id`` → ``samples``; ``export_rows`` →
-  ``instruments``, ``samples`` and ``(sample_id, revision)`` →
-  ``sample_results``; ``agents``, ``corrections_cache``, ``standards`` →
-  ``instruments``; ``sample_cache`` → ``samples``. ``current_revision`` and
-  ``qbench_revision`` carry no FK (circular / optional).
-* ``jobs.state`` is one of ``queued``, ``running``, ``done``, ``failed``
-  (no CHECK, so new states stay additive). There is one worker, so
-  ``requeue_stale_running`` treats every ``running`` job as stale; call it
-  only at start-up, before the worker runs.
-* Column names that are SQL keywords (``corrections_cache."values"``,
-  ``export_rows."row"``, ``sample_results."by"``) are always quoted.
-  ``export_rows.row`` is exposed as ``line`` by the helpers.
+* ``samples.id``, ``export_rows.seq`` and ``corrections_audit.id`` are
+  ``AUTOINCREMENT``: never reused, even after a delete.
+* Foreign keys beyond the spec's explicit ones: ``sample_results.blank_used``,
+  ``conflicts.existing_sample_id`` and ``jobs.sample_id`` → ``samples``;
+  ``export_rows`` → ``instruments``, ``samples`` and ``(sample_id, revision)``
+  → ``sample_results``; ``agents``, ``instrument_corrections``,
+  ``standards``, ``conflicts.instrument_id`` → ``instruments``;
+  ``sample_cache`` → ``samples``. ``corrections_audit`` has none (append-only
+  history must survive anything).
+* **Jobs.** States ``queued``, ``running``, ``done``, ``failed``,
+  ``superseded`` (no CHECK). Two columns beyond the spec: ``sample_id``
+  (nullable) and ``finished_at``. At most one *queued* job per
+  ``(kind, sample_id)`` (partial unique index): enqueuing a duplicate
+  returns the existing job and brings its ``not_before`` forward to the
+  earlier of the two (NULL = now). A running job re-queued while a twin is
+  queued becomes ``superseded``. ``claim_next`` marks a job with an
+  undecodable payload ``failed`` and moves on. ``requeue_stale_running``
+  treats every ``running`` job as stale: call it only at start-up.
+* **Corrections (D4b).** ``set_all`` upserts every cut given with one
+  timestamp and writes one audit row per *changed* cut (``old_value`` NULL
+  on first insert). The reason is required. Checking for all 11 cuts and
+  the ±50 °C limit is ``corrections.py``'s job; the store only refuses
+  non-finite numbers.
+* Column names that are SQL keywords (``export_rows."row"``,
+  ``sample_results."by"``) are always quoted. ``export_rows.row`` is exposed
+  as ``line`` by the helpers.
 * **Backups.** Pre-migrate copies go to ``<db dir>/backups/pre-migrate-<from
-  version>-<UTC stamp>.db`` via the SQLite backup API (WAL-safe), only when
-  the file already existed and a migration is pending. Nightly backups are
-  ``<db dir>/backups/gc-<YYYY-MM-DD>.db`` (``VACUUM INTO``; a second run on
-  the same day replaces that day's file) plus ``settings-<YYYY-MM-DD>.json``.
-  Pruning keeps the newest ``keep`` ``gc-*.db`` files and removes the settings
-  copies of pruned days; pre-migrate copies are never pruned.
+  version>-<UTC stamp>.db`` via the SQLite backup API (includes WAL frames),
+  only when the file already existed and a migration is pending. Nightly:
+  ``<db dir>/backups/gc-<YYYY-MM-DD>.db`` by ``VACUUM INTO`` from a read-only
+  connection (a second run the same day replaces that day's file), plus
+  ``settings-<YYYY-MM-DD>.json`` copied from ``paths.settings_file()``.
+  Pruning keeps the newest ``keep`` (≥ 1) ``gc-*.db`` files and the settings
+  copies of the days kept; pre-migrate copies are never pruned.
 * **Rollback safety.** ``migrate`` on a database whose ``user_version`` is
-  higher than ``SCHEMA_VERSION`` logs a warning and carries on. It raises
+  higher than ``len(MIGRATIONS)`` logs a warning and carries on. It raises
   ``SchemaError`` only if a table or column this code needs is missing.
+  Each migration step is one transaction with its ``user_version`` bump.
 """
 from __future__ import annotations
 
 import contextlib
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -163,12 +208,15 @@ STATUSES: tuple[str, ...] = (
     "received", "awaiting_calibration", "pending_corrections", "final",
     "raw_only", "error", "other_method", "review_method",
 )
+INJECTION_DT_SOURCES: tuple[str, ...] = ("cdf", "mtime", "csv")
 CONFLICT_RESOLUTIONS: tuple[str, ...] = ("kept-existing", "replaced")
 REVISION_REASONS: tuple[str, ...] = (
     "processed", "reprocess", "import", "export-lims", "corrections-released", "replace",
 )
+GATE_SQL = "status='final' AND (backfill=0 OR released_at IS NOT NULL)"
 
 Db = Union[None, str, os.PathLike, sqlite3.Connection]
+PathLike = Union[None, str, os.PathLike]
 
 
 class SchemaError(RuntimeError):
@@ -176,8 +224,6 @@ class SchemaError(RuntimeError):
 
 
 # ── schema ──────────────────────────────────────────────────────────────────
-
-_STATUS_LIST = ", ".join(f"'{s}'" for s in STATUSES)
 
 # MIGRATIONS[i] takes user_version i to i + 1. Additive only: CREATE TABLE,
 # CREATE INDEX, ALTER TABLE ... ADD COLUMN. Never drop, rename or rewrite.
@@ -193,14 +239,13 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             calibration_assignments TEXT,
             calibration_sensitivity REAL NOT NULL DEFAULT 50,
             lem_machine_uid TEXT,
-            correction_map TEXT,
             token_hash TEXT,
             token_issued_at TEXT,
             export_path TEXT,
             method_map TEXT,
             created_at TEXT,
             updated_at TEXT)""",
-        f"""CREATE TABLE samples(
+        """CREATE TABLE samples(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             instrument_id TEXT NOT NULL REFERENCES instruments(id),
             lab_id TEXT NOT NULL,
@@ -214,7 +259,7 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             legacy_unverified INTEGER NOT NULL DEFAULT 0,
             source_name TEXT,
             is_blank INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL CHECK (status IN ({_STATUS_LIST})),
+            status TEXT NOT NULL,
             backfill INTEGER NOT NULL DEFAULT 0,
             error TEXT,
             current_revision INTEGER,
@@ -228,6 +273,9 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         "CREATE INDEX samples_inst_dt ON samples(instrument_id, injection_dt)",
         "CREATE INDEX samples_dt ON samples(injection_dt)",
         "CREATE INDEX samples_lab ON samples(lab_id)",
+        "CREATE INDEX samples_legacy ON samples(instrument_id, lab_id, legacy_injection_dt)",
+        "CREATE INDEX samples_blanks ON samples(instrument_id, injection_dt) WHERE is_blank=1",
+        "CREATE INDEX samples_methods ON samples(instrument_id, method_name)",
         """CREATE TABLE sample_results(
             sample_id INTEGER NOT NULL REFERENCES samples(id),
             revision INTEGER NOT NULL,
@@ -255,6 +303,7 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             resolved TEXT,
             resolved_by TEXT,
             resolved_at TEXT)""",
+        "CREATE INDEX conflicts_sha ON conflicts(cdf_sha256)",
         """CREATE TABLE export_rows(
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
             instrument_id TEXT NOT NULL REFERENCES instruments(id),
@@ -273,8 +322,11 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             attempts INTEGER,
             not_before TEXT,
             last_error TEXT,
-            created_at TEXT)""",
+            created_at TEXT,
+            sample_id INTEGER REFERENCES samples(id),
+            finished_at TEXT)""",
         "CREATE INDEX jobs_state ON jobs(state, not_before, id)",
+        "CREATE UNIQUE INDEX jobs_queued_sample ON jobs(kind, sample_id) WHERE state='queued'",
         """CREATE TABLE agents(
             instrument_id TEXT PRIMARY KEY REFERENCES instruments(id),
             version TEXT,
@@ -288,11 +340,23 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             last_seen TEXT,
             results_seq INTEGER,
             pending_command TEXT)""",
-        """CREATE TABLE corrections_cache(
-            instrument_id TEXT PRIMARY KEY REFERENCES instruments(id),
-            "values" TEXT,
-            methods TEXT,
-            fetched_at TEXT)""",
+        """CREATE TABLE instrument_corrections(
+            instrument_id TEXT NOT NULL REFERENCES instruments(id),
+            cut TEXT NOT NULL,
+            value REAL NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by TEXT,
+            PRIMARY KEY(instrument_id, cut))""",
+        """CREATE TABLE corrections_audit(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            instrument_id TEXT NOT NULL,
+            cut TEXT NOT NULL,
+            old_value REAL,
+            new_value REAL,
+            changed_at TEXT NOT NULL,
+            changed_by TEXT,
+            reason TEXT NOT NULL)""",
+        "CREATE INDEX corrections_audit_inst ON corrections_audit(instrument_id, id)",
         """CREATE TABLE standards(
             id INTEGER PRIMARY KEY,
             name TEXT,
@@ -313,14 +377,14 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 
-# Tables and columns this code reads or writes. On a newer database these
-# must exist; anything extra is ignored.
+# Tables and columns this code reads or writes (equal to a fresh v1 database).
+# On a newer database these must exist; anything extra is ignored.
 REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
     "instruments": frozenset({
         "id", "name", "method", "enabled", "live_since", "calibration_cdf",
         "calibration_assignments", "calibration_sensitivity", "lem_machine_uid",
-        "correction_map", "token_hash", "token_issued_at", "export_path", "method_map",
-        "created_at", "updated_at"}),
+        "token_hash", "token_issued_at", "export_path", "method_map", "created_at",
+        "updated_at"}),
     "samples": frozenset({
         "id", "instrument_id", "lab_id", "injection_dt", "injection_dt_source",
         "method_name", "legacy_injection_dt", "time_corrected", "cdf_sha256", "cdf_path",
@@ -338,11 +402,15 @@ REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
         "seq", "instrument_id", "sample_id", "revision", "row", "hub_appended_at"}),
     "jobs": frozenset({
         "id", "kind", "payload", "state", "attempts", "not_before", "last_error",
-        "created_at"}),
+        "created_at", "sample_id", "finished_at"}),
     "agents": frozenset({
         "instrument_id", "version", "state", "queue_size", "rejected_count", "last_file",
         "last_error", "host", "agent_time", "last_seen", "results_seq", "pending_command"}),
-    "corrections_cache": frozenset({"instrument_id", "values", "methods", "fetched_at"}),
+    "instrument_corrections": frozenset({
+        "instrument_id", "cut", "value", "updated_at", "updated_by"}),
+    "corrections_audit": frozenset({
+        "id", "instrument_id", "cut", "old_value", "new_value", "changed_at", "changed_by",
+        "reason"}),
     "standards": frozenset({"id", "name", "instrument_id", "cdf_path", "added_at"}),
     "sample_cache": frozenset({
         "sample_id", "rules_fingerprint", "flags", "bestfit_fingerprint", "best_fit",
@@ -351,24 +419,58 @@ REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
 }
 
 
-# ── small utilities ─────────────────────────────────────────────────────────
+# ── time and encoding utilities ─────────────────────────────────────────────
 
 def now_iso() -> str:
     """Current UTC time as the store's canonical timestamp string."""
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-def _ts(value: Union[None, str, datetime, date]) -> Optional[str]:
-    """Normalise a datetime or ISO string to the canonical UTC form (naive = UTC)."""
+def _ts(value: Union[None, str, datetime]) -> Optional[str]:
+    """A tz-aware datetime or ISO string with an offset → canonical UTC string.
+
+    Naive datetimes and offset-less strings raise ``ValueError``: a job time
+    must never be guessed into UTC or local time.
+    """
     if value is None:
         return None
     if isinstance(value, str):
-        value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    elif isinstance(value, date) and not isinstance(value, datetime):
-        value = datetime(value.year, value.month, value.day)
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+        text = value.strip()
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        value = datetime.fromisoformat(text)
+    if not isinstance(value, datetime):
+        raise ValueError(f"expected a tz-aware datetime, got {value!r}")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"naive time {value!r}: store timestamps must be tz-aware")
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def local_dt(value: Union[str, datetime, date]) -> str:
+    """Normalise to the instrument-clock form ``YYYY-MM-DD HH:MM:SS`` (naive local).
+
+    Accepts a ``datetime`` (aware → this machine's local time), a ``date``
+    (midnight) or an ISO string with ``T`` or a space, or a bare date.
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        value = datetime.fromisoformat(text)
+    if isinstance(value, date) and not isinstance(value, datetime):
+        value = datetime(value.year, value.month, value.day)
+    if not isinstance(value, datetime):
+        raise ValueError(f"not a date/time: {value!r}")
+    if value.tzinfo is not None:
+        value = value.astimezone().replace(tzinfo=None)
+    return value.isoformat(sep=" ")
+
+
+def is_backfill(live_since: Union[None, str, datetime], injection_dt: str) -> bool:
+    """D11: an injection before ``live_since`` (or with ``live_since`` unset) is backfill."""
+    if live_since is None or (isinstance(live_since, str) and not live_since.strip()):
+        return True
+    return local_dt(injection_dt) < local_dt(live_since)
 
 
 def _enc(value: Any) -> Any:
@@ -386,6 +488,10 @@ def _rows(rs: Iterable[sqlite3.Row]) -> list[dict]:
     return [dict(r) for r in rs]
 
 
+def _in(values: Sequence[Any]) -> str:
+    return ", ".join("?" for _ in values)
+
+
 def default_db_path() -> Path:
     """``paths.data_dir()/gc.db``. Raises ``RuntimeError`` without ``GC_DATA_DIR``."""
     d = paths.data_dir()
@@ -394,28 +500,46 @@ def default_db_path() -> Path:
     return d / DB_FILENAME
 
 
-def _resolve(path: Union[None, str, os.PathLike]) -> Path:
+def _resolve(path: PathLike) -> Path:
     return default_db_path() if path is None else Path(path)
 
 
 # ── connections and transactions ────────────────────────────────────────────
 
-def open_db(path: Union[None, str, os.PathLike] = None) -> sqlite3.Connection:
+_local = threading.local()
+
+
+def _txn_depth() -> int:
+    return getattr(_local, "txn_depth", 0)
+
+
+def open_db(path: PathLike = None, *, create: bool = False, readonly: bool = False) -> sqlite3.Connection:
     """Open a short-lived connection with the hub's pragmas.
 
-    Autocommit mode (``isolation_level=None``): nothing is in a transaction
-    unless ``write_txn`` (or a helper) begins one. The caller must close it;
-    prefer ``with connection(...)``.
+    The file must already exist (``mode=rw``) unless ``create=True``
+    (``migrate`` only); ``readonly=True`` opens ``mode=ro`` (backups).
+    Autocommit mode: nothing is in a transaction unless ``write_txn`` (or a
+    helper) begins one. The caller must close it; prefer ``with connection()``.
+    Raises ``RuntimeError`` if this thread holds a write transaction.
     """
-    p = _resolve(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p), timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None)
+    if _txn_depth():
+        raise RuntimeError("this thread holds a write transaction; "
+                           "pass db=conn inside write_txn instead of opening a new connection")
+    p = _resolve(path).resolve()
+    if create:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        mode = "rwc"
+    else:
+        mode = "ro" if readonly else "rw"
+    conn = sqlite3.connect(f"{p.as_uri()}?mode={mode}", uri=True,
+                           timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-        if str(mode).lower() != "wal":
-            conn.execute("PRAGMA journal_mode = WAL")
+        if not readonly:
+            mode_now = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            if str(mode_now).lower() != "wal":
+                conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA foreign_keys = ON")
     except BaseException:
@@ -437,38 +561,46 @@ def connection(db: Db = None) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-_savepoint_ids = threading.local()
-
-
 @contextlib.contextmanager
 def write_txn(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
-    """``BEGIN IMMEDIATE`` ... ``COMMIT``; ``ROLLBACK`` and re-raise on any exception.
+    """``BEGIN IMMEDIATE`` ... ``COMMIT``.
 
-    Nested use (the connection is already in a transaction) opens a
-    SAVEPOINT instead, which is rolled back on its own if the inner block
-    raises, leaving the outer transaction to decide.
+    Any exception in the block, or a failed ``COMMIT`` (e.g. a deferred
+    foreign key), rolls back and re-raises. Nested use (the connection is
+    already in a transaction) opens a SAVEPOINT, rolled back on its own if
+    the inner block raises. While the outer transaction is open, this thread
+    may not open another connection (see ``open_db``).
     """
     if conn.in_transaction:
-        n = getattr(_savepoint_ids, "n", 0) + 1
-        _savepoint_ids.n = n
-        name = f"sp_{n}"
+        _local.sp = getattr(_local, "sp", 0) + 1
+        name = f"sp_{_local.sp}"
         conn.execute(f"SAVEPOINT {name}")
         try:
             yield conn
         except BaseException:
-            conn.execute(f"ROLLBACK TO {name}")
-            conn.execute(f"RELEASE {name}")
+            if conn.in_transaction:
+                conn.execute(f"ROLLBACK TO {name}")
+                conn.execute(f"RELEASE {name}")
             raise
         conn.execute(f"RELEASE {name}")
         return
     conn.execute("BEGIN IMMEDIATE")
+    _local.txn_depth = _txn_depth() + 1
     try:
-        yield conn
-    except BaseException:
-        if conn.in_transaction:
-            conn.execute("ROLLBACK")
-        raise
-    conn.execute("COMMIT")
+        try:
+            yield conn
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        try:
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    finally:
+        _local.txn_depth = _txn_depth() - 1
 
 
 @contextlib.contextmanager
@@ -515,35 +647,36 @@ def _check_columns(conn: sqlite3.Connection) -> None:
         if not have:
             missing.append(table)
             continue
-        for c in sorted(cols - have):
-            missing.append(f"{table}.{c}")
+        missing += [f"{table}.{c}" for c in sorted(cols - have)]
     if missing:
         raise SchemaError("database is missing: " + ", ".join(missing))
 
 
-def migrate(path: Union[None, str, os.PathLike] = None) -> int:
-    """Bring the database to ``SCHEMA_VERSION``; return the resulting ``user_version``.
+def migrate(path: PathLike = None) -> int:
+    """Create or upgrade the database to ``len(MIGRATIONS)``; return ``user_version``.
 
-    Additive only. If the file existed and a migration is pending, it is
-    first copied to ``backups/pre-migrate-<v>-<ts>.db``. Each step runs in
-    one ``BEGIN IMMEDIATE`` transaction together with its ``user_version``
-    bump, re-reading the version under the lock so two processes can't
-    apply a step twice. A newer ``user_version`` is logged and tolerated.
+    Additive only. If the file existed and a step is pending, it is first
+    copied to ``backups/pre-migrate-<v>-<ts>.db``. Each step runs in one
+    ``BEGIN IMMEDIATE`` transaction with its ``user_version`` bump,
+    re-reading the version under the lock so two processes can't apply a
+    step twice. A newer ``user_version`` is logged and tolerated.
     """
     db_path = _resolve(path)
+    target = len(MIGRATIONS)
     existed = db_path.exists() and db_path.stat().st_size > 0
-    with connection(db_path) as conn:
+    conn = open_db(db_path, create=True)
+    try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > SCHEMA_VERSION:
+        if version > target:
             log.warning("store: database user_version %s is newer than this code's %s; "
-                        "carrying on (additive migrations)", version, SCHEMA_VERSION)
-        elif version < SCHEMA_VERSION:
+                        "carrying on (additive migrations)", version, target)
+        elif version < target:
             if existed:
                 _pre_migrate_backup(conn, db_path, version)
             while True:
                 with write_txn(conn):
                     version = conn.execute("PRAGMA user_version").fetchone()[0]
-                    if version >= SCHEMA_VERSION:
+                    if version >= target:
                         break
                     for stmt in MIGRATIONS[version]:
                         conn.execute(stmt)
@@ -552,6 +685,8 @@ def migrate(path: Union[None, str, os.PathLike] = None) -> int:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
         _check_columns(conn)
         return version
+    finally:
+        conn.close()
 
 
 # ── backups ─────────────────────────────────────────────────────────────────
@@ -559,15 +694,15 @@ def migrate(path: Union[None, str, os.PathLike] = None) -> int:
 _NIGHTLY_RE = re.compile(r"^gc-(\d{4}-\d{2}-\d{2})\.db$")
 
 
-def backup_nightly(path: Union[None, str, os.PathLike] = None, keep: int = 14, *,
-                   settings_path: Union[None, str, os.PathLike] = None,
+def backup_nightly(path: PathLike = None, keep: int = 14, *, settings_path: PathLike = None,
                    now: Optional[datetime] = None) -> Path:
     """``VACUUM INTO backups/gc-<date>.db`` plus a copy of ``settings.json``; prune to ``keep``.
 
-    ``settings_path`` defaults to ``settings.json`` next to the database (the
-    data folder). ``now`` (local date) is injectable for tests. Returns the
-    backup path.
+    ``settings_path`` defaults to ``paths.settings_file()``. ``now`` (local
+    date) is injectable for tests. Returns the backup path.
     """
+    if keep < 1:
+        raise ValueError("keep must be at least 1")
     db_path = _resolve(path)
     day = (now or datetime.now()).strftime("%Y-%m-%d")
     backups = db_path.parent / "backups"
@@ -576,11 +711,14 @@ def backup_nightly(path: Union[None, str, os.PathLike] = None, keep: int = 14, *
     tmp = backups / f".gc-{day}.db.tmp"
     if tmp.exists():
         tmp.unlink()
-    with connection(db_path) as conn:
+    conn = open_db(db_path, readonly=True)
+    try:
         conn.execute("VACUUM INTO ?", (str(tmp),))
+    finally:
+        conn.close()
     os.replace(tmp, dest)
 
-    settings = Path(settings_path) if settings_path is not None else db_path.parent / "settings.json"
+    settings = Path(settings_path) if settings_path is not None else paths.settings_file()
     if settings.is_file():
         s_tmp = backups / f".settings-{day}.json.tmp"
         s_tmp.write_bytes(settings.read_bytes())
@@ -609,8 +747,7 @@ def add_revision(conn: sqlite3.Connection, sample_id: int, results: Any, *, reas
 
     Must run inside ``write_txn(conn)``, so the revision, the export row and
     the status change commit together. Returns the new revision number
-    (1 for the first). ``reason`` is free text; the spec's values are in
-    ``REVISION_REASONS``.
+    (1 for the first). The spec's reasons are in ``REVISION_REASONS``.
     """
     _require_txn(conn, "add_revision")
     rev = conn.execute("SELECT COALESCE(MAX(revision), 0) + 1 FROM sample_results WHERE sample_id=?",
@@ -669,7 +806,8 @@ class instruments:  # noqa: N801  (a namespace: store.instruments.get(...))
 
         ``fields['id']`` is required, and ``name`` is required on insert.
         Only the given columns change on update. ``created_at``/``updated_at``
-        are maintained here. Unknown keys raise ``ValueError``.
+        are maintained here; ``live_since`` is normalised with ``local_dt``.
+        Unknown keys raise ``ValueError``.
         """
         fields = dict(fields)
         iid = fields.pop("id", None)
@@ -678,6 +816,8 @@ class instruments:  # noqa: N801  (a namespace: store.instruments.get(...))
         unknown = set(fields) - (instruments.COLUMNS - {"id"})
         if unknown:
             raise ValueError(f"unknown instrument columns: {sorted(unknown)}")
+        if fields.get("live_since") is not None:
+            fields["live_since"] = local_dt(fields["live_since"])
         stamp = now_iso()
         fields.pop("created_at", None)
         fields["updated_at"] = stamp
@@ -690,10 +830,79 @@ class instruments:  # noqa: N801  (a namespace: store.instruments.get(...))
             else:
                 fields["created_at"] = stamp
                 cols = ["id"] + sorted(fields)
-                conn.execute(f"INSERT INTO instruments({', '.join(cols)}) "
-                             f"VALUES ({', '.join('?' for _ in cols)})",
+                conn.execute(f"INSERT INTO instruments({', '.join(cols)}) VALUES ({_in(cols)})",
                              [iid] + [_enc(fields[c]) for c in cols[1:]])
             return dict(conn.execute("SELECT * FROM instruments WHERE id=?", (iid,)).fetchone())
+
+
+# ── corrections (D4b) ───────────────────────────────────────────────────────
+
+class corrections:  # noqa: N801
+    """Per-instrument D86 correction factors and their append-only audit."""
+
+    @staticmethod
+    def read(instrument_id: str, *, db: Db = None) -> Optional[dict]:
+        """``{values: {cut: float}, updated_at, updated_by}`` or ``None`` if none are set.
+
+        ``updated_at`` is the latest change; ``updated_by`` is who made it.
+        This is ``corrections.StoreProvider``'s ``read_fn``.
+        """
+        with connection(db) as conn:
+            rows = _rows(conn.execute(
+                "SELECT cut, value, updated_at, updated_by FROM instrument_corrections "
+                "WHERE instrument_id=?", (instrument_id,)))
+        if not rows:
+            return None
+        latest = max(rows, key=lambda r: r["updated_at"])
+        return {"values": {r["cut"]: r["value"] for r in rows},
+                "updated_at": latest["updated_at"], "updated_by": latest["updated_by"]}
+
+    @staticmethod
+    def set_all(conn: sqlite3.Connection, instrument_id: str, values: dict, *, by: Optional[str],
+                reason: str) -> int:
+        """Upsert every cut in ``values`` with one timestamp; audit each changed cut.
+
+        Must run inside ``write_txn(conn)``. ``reason`` is required.
+        Non-finite values raise ``ValueError``. Returns how many cuts changed
+        (a first-time cut counts, with ``old_value`` NULL in the audit).
+        """
+        _require_txn(conn, "corrections.set_all")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("a reason is required to change correction factors")
+        if not values:
+            raise ValueError("no correction values given")
+        clean = {}
+        for cut, v in values.items():
+            f = float(v)
+            if not math.isfinite(f):
+                raise ValueError(f"correction for {cut!r} is not a finite number: {v!r}")
+            clean[str(cut)] = f
+        stamp = now_iso()
+        old = {r["cut"]: r["value"] for r in conn.execute(
+            "SELECT cut, value FROM instrument_corrections WHERE instrument_id=?", (instrument_id,))}
+        changed = 0
+        for cut, new in clean.items():
+            conn.execute(
+                "INSERT INTO instrument_corrections(instrument_id, cut, value, updated_at, updated_by) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(instrument_id, cut) DO UPDATE SET "
+                "value=excluded.value, updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+                (instrument_id, cut, new, stamp, by))
+            prev = old.get(cut)
+            if prev is None or prev != new:
+                conn.execute(
+                    "INSERT INTO corrections_audit(instrument_id, cut, old_value, new_value, "
+                    "changed_at, changed_by, reason) VALUES (?,?,?,?,?,?,?)",
+                    (instrument_id, cut, prev, new, stamp, by, reason.strip()))
+                changed += 1
+        return changed
+
+    @staticmethod
+    def audit(instrument_id: str, limit: int = 100, *, db: Db = None) -> list[dict]:
+        """The audit trail, newest first."""
+        with connection(db) as conn:
+            return _rows(conn.execute(
+                "SELECT * FROM corrections_audit WHERE instrument_id=? ORDER BY id DESC LIMIT ?",
+                (instrument_id, int(limit))))
 
 
 # ── samples ─────────────────────────────────────────────────────────────────
@@ -702,41 +911,63 @@ def _like_escape(q: str) -> str:
     return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _search_where(q, instrument, date_from, date_to, status) -> tuple[str, list]:
+def _listify(v: Union[str, Sequence[Any]]) -> list:
+    return [v] if isinstance(v, str) else list(v)
+
+
+def _search_where(q, instrument, date_from, date_to, status, method_name, backfill) -> tuple[str, list]:
     where, args = [], []
     if q:
         pat = f"%{_like_escape(str(q).strip())}%"
         where.append("(lab_id LIKE ? ESCAPE '\\' OR source_name LIKE ? ESCAPE '\\')")
         args += [pat, pat]
     if instrument:
-        if isinstance(instrument, str):
-            instrument = [instrument]
-        where.append(f"instrument_id IN ({', '.join('?' for _ in instrument)})")
-        args += list(instrument)
+        inst = _listify(instrument)
+        where.append(f"instrument_id IN ({_in(inst)})")
+        args += inst
     if date_from:
         where.append("injection_dt >= ?")
-        args.append(str(date_from))
+        args.append(local_dt(date_from))
     if date_to:
-        s = str(date_to)
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        if isinstance(date_to, str) and re.fullmatch(r"\s*\d{4}-\d{2}-\d{2}\s*", date_to):
             # a bare date is inclusive of that whole day
             where.append("injection_dt < ?")
-            args.append((date.fromisoformat(s) + timedelta(days=1)).isoformat())
+            args.append(local_dt(date.fromisoformat(date_to.strip()) + timedelta(days=1)))
+        elif isinstance(date_to, date) and not isinstance(date_to, datetime):
+            where.append("injection_dt < ?")
+            args.append(local_dt(date_to + timedelta(days=1)))
         else:
             where.append("injection_dt <= ?")
-            args.append(s)
+            args.append(local_dt(date_to))
     if status:
-        if isinstance(status, str):
-            status = [status]
-        where.append(f"status IN ({', '.join('?' for _ in status)})")
-        args += list(status)
+        st = _listify(status)
+        where.append(f"status IN ({_in(st)})")
+        args += st
+    if method_name is not None:
+        mn = _listify(method_name)
+        where.append(f"method_name IN ({_in(mn)})")
+        args += mn
+    if backfill is not None:
+        where.append("backfill = ?")
+        args.append(1 if backfill else 0)
     return (" WHERE " + " AND ".join(where)) if where else "", args
+
+
+def _check_status(status: str) -> None:
+    if status not in STATUSES:
+        raise ValueError(f"unknown sample status {status!r}")
+
+
+def _check_dt_source(source: str) -> None:
+    if source not in INJECTION_DT_SOURCES:
+        raise ValueError(f"unknown injection_dt_source {source!r}")
 
 
 class samples:  # noqa: N801
     """The ``samples`` table."""
 
-    UPDATABLE = frozenset(REQUIRED_COLUMNS["samples"] - {"id", "instrument_id", "received_at"})
+    UPDATABLE = frozenset(REQUIRED_COLUMNS["samples"]
+                          - {"id", "instrument_id", "received_at", "current_revision"})
 
     @staticmethod
     def insert_received(instrument_id: str, lab_id: str, injection_dt: str,
@@ -749,10 +980,16 @@ class samples:  # noqa: N801
                         db: Db = None) -> int:
         """Insert a new sample (status ``received`` by default); return its id.
 
-        Raises ``sqlite3.IntegrityError`` on a duplicate sha256 (any
-        instrument), a duplicate (instrument, lab ID, injection time), an
-        unknown instrument, or a status outside ``STATUSES``.
+        ``ValueError`` for a status outside ``STATUSES`` or a source outside
+        ``INJECTION_DT_SOURCES``. ``sqlite3.IntegrityError`` on a duplicate
+        sha256 (any instrument), a duplicate (instrument, lab ID, injection
+        time) or an unknown instrument. A CDF-backed sample with
+        ``method_name=None`` is stored with ``''``.
         """
+        _check_status(status)
+        _check_dt_source(injection_dt_source)
+        if method_name is None and (cdf_sha256 is not None or cdf_path is not None):
+            method_name = ""
         with _writing(db) as conn:
             cur = conn.execute(
                 "INSERT INTO samples(instrument_id, lab_id, injection_dt, injection_dt_source, "
@@ -784,10 +1021,60 @@ class samples:  # noqa: N801
                 (instrument_id, lab_id, injection_dt)).fetchone())
 
     @staticmethod
+    def find_by_legacy(instrument_id: str, lab_id: str, dt: str, *, db: Db = None) -> list[dict]:
+        """Samples whose correct **or** v1 (legacy) injection time equals ``dt``.
+
+        For matching v1 CSV rows (parity report, importer). Can return more
+        than one sample (one's correct time may equal another's legacy
+        string); legacy matches come first, then by id.
+        """
+        with connection(db) as conn:
+            return _rows(conn.execute(
+                "SELECT * FROM samples WHERE instrument_id=? AND lab_id=? "
+                "AND (legacy_injection_dt=? OR injection_dt=?) "
+                "ORDER BY (legacy_injection_dt IS ?) DESC, id",
+                (instrument_id, lab_id, dt, dt, dt)))
+
+    @staticmethod
+    def latest_blank(instrument_id: str, at: str, method_names: Sequence[str], *,
+                     exclude_sample_id: Optional[int] = None, db: Db = None) -> Optional[dict]:
+        """The latest genuine blank (``is_blank=1``, with a stored CDF) on this
+        instrument injected at or before ``at``, whose ``method_name`` is one of
+        ``method_names`` (the names mapped to the sample's hub method)."""
+        names = list(method_names)
+        if not names:
+            return None
+        sql = (f"SELECT * FROM samples WHERE instrument_id=? AND is_blank=1 AND injection_dt<=? "
+               f"AND cdf_path IS NOT NULL AND method_name IN ({_in(names)})")
+        args: list = [instrument_id, at] + names
+        if exclude_sample_id is not None:
+            sql += " AND id<>?"
+            args.append(exclude_sample_id)
+        with connection(db) as conn:
+            return _row(conn.execute(sql + " ORDER BY injection_dt DESC, id DESC LIMIT 1", args).fetchone())
+
+    @staticmethod
+    def is_gated(sample_id: int, *, db: Db = None) -> bool:
+        """True if the sample passes the export/QBench gate (``GATE_SQL``)."""
+        with connection(db) as conn:
+            return conn.execute(f"SELECT 1 FROM samples WHERE id=? AND {GATE_SQL}",
+                                (sample_id,)).fetchone() is not None
+
+    @staticmethod
+    def methods_seen(instrument_id: str, *, db: Db = None) -> list[dict]:
+        """``[{method_name, count, first_seen, last_seen}]`` by injection time, for
+        the Instruments page. Result-only samples (NULL method) are left out."""
+        with connection(db) as conn:
+            return _rows(conn.execute(
+                "SELECT method_name, COUNT(*) AS count, MIN(injection_dt) AS first_seen, "
+                "MAX(injection_dt) AS last_seen FROM samples "
+                "WHERE instrument_id=? AND method_name IS NOT NULL "
+                "GROUP BY method_name ORDER BY method_name", (instrument_id,)))
+
+    @staticmethod
     def set_status(sample_id: int, status: str, *, error: Optional[str] = None, db: Db = None) -> None:
         """Set ``status`` and ``error`` (cleared unless given). ``ValueError`` on an unknown status."""
-        if status not in STATUSES:
-            raise ValueError(f"unknown sample status {status!r}")
+        _check_status(status)
         with _writing(db) as conn:
             conn.execute("UPDATE samples SET status=?, error=? WHERE id=?", (status, error, sample_id))
 
@@ -795,14 +1082,17 @@ class samples:  # noqa: N801
     def update(sample_id: int, *, db: Db = None, **fields: Any) -> None:
         """Update whitelisted columns (e.g. ``cdf_path``, ``released_at``/``released_by``,
         ``qbench_revision``/``qbench_uploaded_at``, ``backfill``, ``is_blank``).
-        ``id``, ``instrument_id`` and ``received_at`` are immutable (``ValueError``)."""
+        ``id``, ``instrument_id``, ``received_at`` and ``current_revision``
+        (only ``add_revision`` sets it) raise ``ValueError``."""
         if not fields:
             return
         bad = set(fields) - samples.UPDATABLE
         if bad:
             raise ValueError(f"cannot update sample columns: {sorted(bad)}")
-        if "status" in fields and fields["status"] not in STATUSES:
-            raise ValueError(f"unknown sample status {fields['status']!r}")
+        if "status" in fields:
+            _check_status(fields["status"])
+        if "injection_dt_source" in fields:
+            _check_dt_source(fields["injection_dt_source"])
         cols = sorted(fields)
         with _writing(db) as conn:
             conn.execute(f"UPDATE samples SET {', '.join(f'{c}=?' for c in cols)} WHERE id=?",
@@ -810,17 +1100,20 @@ class samples:  # noqa: N801
 
     @staticmethod
     def search(q: Optional[str] = None, instrument: Union[None, str, Sequence[str]] = None,
-               date_from: Optional[str] = None, date_to: Optional[str] = None,
+               date_from: Union[None, str, datetime, date] = None,
+               date_to: Union[None, str, datetime, date] = None,
                status: Union[None, str, Sequence[str]] = None, limit: int = 100,
-               offset: int = 0, *, db: Db = None) -> list[dict]:
+               offset: int = 0, *, method_name: Union[None, str, Sequence[str]] = None,
+               backfill: Optional[bool] = None, db: Db = None) -> list[dict]:
         """Filter samples, newest injection first (ties: newest id first).
 
         ``q``: case-insensitive substring of ``lab_id`` or ``source_name``
-        (LIKE wildcards are literal). ``instrument``/``status``: one value or a
-        list. ``date_from``/``date_to`` compare against ``injection_dt``; a
-        bare ``YYYY-MM-DD`` ``date_to`` includes that whole day.
+        (LIKE wildcards are literal). ``instrument``/``status``/``method_name``:
+        one value or a list. ``date_from``/``date_to`` are normalised with
+        ``local_dt`` and compared with ``injection_dt``; a bare date
+        ``date_to`` includes that whole day. ``backfill``: True/False/None.
         """
-        where, args = _search_where(q, instrument, date_from, date_to, status)
+        where, args = _search_where(q, instrument, date_from, date_to, status, method_name, backfill)
         with connection(db) as conn:
             return _rows(conn.execute(
                 f"SELECT * FROM samples{where} ORDER BY injection_dt DESC, id DESC LIMIT ? OFFSET ?",
@@ -828,10 +1121,13 @@ class samples:  # noqa: N801
 
     @staticmethod
     def count(q: Optional[str] = None, instrument: Union[None, str, Sequence[str]] = None,
-              date_from: Optional[str] = None, date_to: Optional[str] = None,
-              status: Union[None, str, Sequence[str]] = None, *, db: Db = None) -> int:
+              date_from: Union[None, str, datetime, date] = None,
+              date_to: Union[None, str, datetime, date] = None,
+              status: Union[None, str, Sequence[str]] = None, *,
+              method_name: Union[None, str, Sequence[str]] = None,
+              backfill: Optional[bool] = None, db: Db = None) -> int:
         """How many samples ``search`` would match without paging."""
-        where, args = _search_where(q, instrument, date_from, date_to, status)
+        where, args = _search_where(q, instrument, date_from, date_to, status, method_name, backfill)
         with connection(db) as conn:
             return int(conn.execute(f"SELECT COUNT(*) FROM samples{where}", args).fetchone()[0])
 
@@ -850,8 +1146,14 @@ class export_rows:  # noqa: N801
         """Record a newly final result's CSV line; return its ``seq``.
 
         Must run inside ``write_txn(conn)`` with the matching ``add_revision``.
+        ``ValueError`` if the sample is missing or belongs to another instrument.
         """
         _require_txn(conn, "export_rows.append_pending")
+        r = conn.execute("SELECT instrument_id FROM samples WHERE id=?", (sample_id,)).fetchone()
+        if r is None:
+            raise ValueError(f"sample {sample_id} does not exist")
+        if r[0] != instrument_id:
+            raise ValueError(f"sample {sample_id} belongs to {r[0]!r}, not {instrument_id!r}")
         cur = conn.execute('INSERT INTO export_rows(instrument_id, sample_id, revision, "row") '
                            "VALUES (?,?,?,?)", (instrument_id, sample_id, revision, line))
         return int(cur.lastrowid)
@@ -867,13 +1169,14 @@ class export_rows:  # noqa: N801
     @staticmethod
     def mark_hub_appended(seq: Union[int, Iterable[int]], *, at: Optional[str] = None,
                           db: Db = None) -> None:
-        """Stamp one ``seq`` or several as appended to the hub CSV."""
+        """Stamp one ``seq`` or several as appended; an existing stamp is kept."""
         seqs = [seq] if isinstance(seq, int) else list(seq)
         if not seqs:
             return
         stamp = at or now_iso()
         with _writing(db) as conn:
-            conn.executemany("UPDATE export_rows SET hub_appended_at=? WHERE seq=?",
+            conn.executemany("UPDATE export_rows SET hub_appended_at=? "
+                             "WHERE seq=? AND hub_appended_at IS NULL",
                              [(stamp, s) for s in seqs])
 
     @staticmethod
@@ -892,74 +1195,183 @@ def _job(r: Optional[sqlite3.Row]) -> Optional[dict]:
         return None
     d = dict(r)
     if d.get("payload") is not None:
-        d["payload"] = json.loads(d["payload"])
+        try:
+            d["payload"] = json.loads(d["payload"])
+        except ValueError:
+            pass  # a poison payload stays TEXT; claim_next fails such jobs
     return d
 
 
+_EARLIER_NOT_BEFORE = ("CASE WHEN excluded.not_before IS NULL OR jobs.not_before IS NULL THEN NULL "
+                       "WHEN excluded.not_before < jobs.not_before THEN excluded.not_before "
+                       "ELSE jobs.not_before END")
+
+
 class jobs:  # noqa: N801
-    """Durable job queue. States: ``queued`` → ``running`` → ``done`` | ``failed``."""
+    """Durable job queue. States: ``queued`` → ``running`` → ``done`` | ``failed``
+    (| ``superseded``, see the module docstring)."""
 
     @staticmethod
     def enqueue(kind: str, payload: Any, not_before: Union[None, str, datetime] = None, *,
-                db: Db = None) -> int:
-        """Queue a job; ``payload`` is JSON-encoded. Returns the job id."""
+                sample_id: Optional[int] = None, db: Db = None) -> int:
+        """Queue a job; ``payload`` is JSON-encoded. Returns the job id.
+
+        With ``sample_id``, at most one job per ``(kind, sample_id)`` is
+        queued: a duplicate returns the queued job's id and moves its
+        ``not_before`` to the earlier of the two.
+        """
+        nb = _ts(not_before)
+        body = json.dumps(payload)
         with _writing(db) as conn:
-            cur = conn.execute(
-                "INSERT INTO jobs(kind, payload, state, attempts, not_before, created_at) "
-                "VALUES (?, ?, 'queued', 0, ?, ?)",
-                (kind, json.dumps(payload), _ts(not_before), now_iso()))
-            return int(cur.lastrowid)
+            if sample_id is None:
+                cur = conn.execute(
+                    "INSERT INTO jobs(kind, payload, state, attempts, not_before, created_at) "
+                    "VALUES (?, ?, 'queued', 0, ?, ?)", (kind, body, nb, now_iso()))
+                return int(cur.lastrowid)
+            conn.execute(
+                "INSERT INTO jobs(kind, payload, state, attempts, not_before, created_at, sample_id) "
+                "VALUES (?, ?, 'queued', 0, ?, ?, ?) "
+                "ON CONFLICT(kind, sample_id) WHERE state='queued' DO UPDATE SET "
+                f"not_before={_EARLIER_NOT_BEFORE}",
+                (kind, body, nb, now_iso(), sample_id))
+            return int(conn.execute("SELECT id FROM jobs WHERE kind=? AND sample_id=? AND state='queued'",
+                                    (kind, sample_id)).fetchone()[0])
+
+    @staticmethod
+    def enqueue_for_status(db: Db, instrument_id: str, status: str, *,
+                           method_name: Optional[str] = None, kind: str = "process") -> int:
+        """Queue ``kind`` (payload ``{"sample_id": id}``, due now) for every sample of
+        this instrument in ``status`` (and ``method_name``, if given), in one
+        statement. Samples that already have a queued job keep it, brought
+        forward to now. Returns the number of samples now queued."""
+        _check_status(status)
+        sql = ("INSERT INTO jobs(kind, payload, state, attempts, not_before, created_at, sample_id) "
+               "SELECT ?, json_object('sample_id', id), 'queued', 0, NULL, ?, id FROM samples "
+               "WHERE instrument_id=? AND status=?")
+        args: list = [kind, now_iso(), instrument_id, status]
+        if method_name is not None:
+            sql += " AND method_name=?"
+            args.append(method_name)
+        sql += (" ORDER BY id ON CONFLICT(kind, sample_id) WHERE state='queued' "
+                "DO UPDATE SET not_before=NULL")
+        with _writing(db) as conn:
+            return conn.execute(sql, args).rowcount
 
     @staticmethod
     def claim_next(now: Union[None, str, datetime] = None, *, kind: Optional[str] = None,
                    db: Db = None) -> Optional[dict]:
         """Atomically take the oldest due ``queued`` job (``not_before`` NULL or ≤ ``now``).
 
-        Marks it ``running`` and increments ``attempts``; returns the job with
-        ``payload`` decoded, or ``None``. ``BEGIN IMMEDIATE`` makes the
-        select-and-update exclusive, so two workers never claim the same job.
+        Marks it ``running`` and increments ``attempts``; returns it with
+        ``payload`` decoded, or ``None``. A job whose payload isn't JSON is
+        marked ``failed`` and skipped. ``BEGIN IMMEDIATE`` makes the
+        select-and-update exclusive, so two workers never claim one job.
         """
         stamp = _ts(now) or now_iso()
-        sql = ("SELECT id FROM jobs WHERE state='queued' AND (not_before IS NULL OR not_before <= ?)"
+        sql = ("SELECT * FROM jobs WHERE state='queued' AND (not_before IS NULL OR not_before <= ?)"
                + (" AND kind=?" if kind else "") + " ORDER BY id LIMIT 1")
         args = [stamp] + ([kind] if kind else [])
         with _writing(db) as conn:
-            r = conn.execute(sql, args).fetchone()
-            if r is None:
-                return None
-            conn.execute("UPDATE jobs SET state='running', attempts=COALESCE(attempts, 0) + 1 WHERE id=?",
-                         (r["id"],))
-            return _job(conn.execute("SELECT * FROM jobs WHERE id=?", (r["id"],)).fetchone())
+            while True:
+                r = conn.execute(sql, args).fetchone()
+                if r is None:
+                    return None
+                try:
+                    payload = json.loads(r["payload"]) if r["payload"] is not None else None
+                except (ValueError, TypeError) as exc:
+                    conn.execute("UPDATE jobs SET state='failed', last_error=?, finished_at=? WHERE id=?",
+                                 (f"undecodable payload: {exc}", now_iso(), r["id"]))
+                    log.error("store: job %s has an undecodable payload; marked failed", r["id"])
+                    continue
+                conn.execute("UPDATE jobs SET state='running', attempts=COALESCE(attempts, 0) + 1 "
+                             "WHERE id=?", (r["id"],))
+                job = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (r["id"],)).fetchone())
+                job["payload"] = payload
+                return job
 
     @staticmethod
     def complete(job_id: int, *, db: Db = None) -> None:
         with _writing(db) as conn:
-            conn.execute("UPDATE jobs SET state='done' WHERE id=?", (job_id,))
+            conn.execute("UPDATE jobs SET state='done', finished_at=? WHERE id=?", (now_iso(), job_id))
 
     @staticmethod
     def fail(job_id: int, error: Optional[str], retry_at: Union[None, str, datetime] = None, *,
              db: Db = None) -> None:
-        """Record ``error``. With ``retry_at`` the job is queued again for then; else ``failed``."""
+        """Record ``error``. With ``retry_at`` the job is queued again for then (or, if
+        a twin is already queued for the same sample, it is ``superseded`` and the
+        twin brought forward); without, it is ``failed``."""
+        retry = _ts(retry_at)
         with _writing(db) as conn:
-            if retry_at is not None:
+            if retry is None:
+                conn.execute("UPDATE jobs SET state='failed', last_error=?, finished_at=? WHERE id=?",
+                             (error, now_iso(), job_id))
+                return
+            me = conn.execute("SELECT kind, sample_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+            twin = None
+            if me is not None and me["sample_id"] is not None:
+                twin = conn.execute("SELECT id, not_before FROM jobs WHERE kind=? AND sample_id=? "
+                                    "AND state='queued' AND id<>?",
+                                    (me["kind"], me["sample_id"], job_id)).fetchone()
+            if twin is None:
                 conn.execute("UPDATE jobs SET state='queued', not_before=?, last_error=? WHERE id=?",
-                             (_ts(retry_at), error, job_id))
-            else:
-                conn.execute("UPDATE jobs SET state='failed', last_error=? WHERE id=?", (error, job_id))
+                             (retry, error, job_id))
+                return
+            if twin["not_before"] is not None and retry < twin["not_before"]:
+                conn.execute("UPDATE jobs SET not_before=? WHERE id=?", (retry, twin["id"]))
+            conn.execute("UPDATE jobs SET state='superseded', last_error=?, finished_at=? WHERE id=?",
+                         (error, now_iso(), job_id))
 
     @staticmethod
     def requeue_stale_running(*, db: Db = None) -> int:
-        """Put every ``running`` job back to ``queued`` (start-up only); return how many."""
+        """Put every ``running`` job back to ``queued`` (start-up only); return how many
+        were running. A running job whose ``(kind, sample_id)`` already has a queued
+        twin (or an older running twin) is ``superseded`` instead, and the queued
+        twin becomes due now."""
         with _writing(db) as conn:
-            return conn.execute("UPDATE jobs SET state='queued' WHERE state='running'").rowcount
+            n = conn.execute("SELECT COUNT(*) FROM jobs WHERE state='running'").fetchone()[0]
+            conn.execute(
+                "UPDATE jobs SET not_before=NULL WHERE state='queued' AND sample_id IS NOT NULL "
+                "AND EXISTS (SELECT 1 FROM jobs r WHERE r.state='running' AND r.kind=jobs.kind "
+                "AND r.sample_id=jobs.sample_id)")
+            conn.execute(
+                "UPDATE jobs SET state='superseded', finished_at=? WHERE state='running' "
+                "AND sample_id IS NOT NULL AND EXISTS (SELECT 1 FROM jobs o WHERE o.kind=jobs.kind "
+                "AND o.sample_id=jobs.sample_id AND (o.state='queued' OR "
+                "(o.state='running' AND o.id<jobs.id)))", (now_iso(),))
+            conn.execute("UPDATE jobs SET state='queued' WHERE state='running'")
+            return int(n)
+
+    @staticmethod
+    def prune_done(older_than: Union[str, datetime], *, db: Db = None) -> int:
+        """Delete ``done``/``superseded`` jobs finished before ``older_than`` (tz-aware)."""
+        cutoff = _ts(older_than)
+        if cutoff is None:
+            raise ValueError("older_than is required")
+        with _writing(db) as conn:
+            return conn.execute("DELETE FROM jobs WHERE state IN ('done', 'superseded') "
+                                "AND finished_at IS NOT NULL AND finished_at < ?", (cutoff,)).rowcount
 
     @staticmethod
     def get(job_id: int, *, db: Db = None) -> Optional[dict]:
         with connection(db) as conn:
             return _job(conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
 
+    @staticmethod
+    def list(state: Optional[str] = None, kind: Optional[str] = None, *, db: Db = None) -> list[dict]:
+        """Jobs, oldest first, optionally filtered by state and kind."""
+        where, args = [], []
+        if state:
+            where.append("state=?")
+            args.append(state)
+        if kind:
+            where.append("kind=?")
+            args.append(kind)
+        sql = "SELECT * FROM jobs" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY id"
+        with connection(db) as conn:
+            return [_job(r) for r in conn.execute(sql, args)]
 
-# ── sample_cache, settings_kv, conflicts, corrections_cache ─────────────────
+
+# ── sample_cache, settings_kv, conflicts ────────────────────────────────────
 
 class sample_cache:  # noqa: N801
     """Flags and best-fit cache, one row per sample (replaces the JSON caches)."""
@@ -987,7 +1399,7 @@ class sample_cache:  # noqa: N801
 
 
 class settings_kv:  # noqa: N801
-    """Hub-wide key/value settings (admin hash, LEM_URL...). Values are TEXT."""
+    """Hub-wide key/value settings (admin hash, etc.). Values are TEXT."""
 
     @staticmethod
     def get(key: str, default: Optional[str] = None, *, db: Db = None) -> Optional[str]:
@@ -1037,6 +1449,15 @@ class conflicts:  # noqa: N801
             return _rows(conn.execute(sql, args))
 
     @staticmethod
+    def find_by_sha(cdf_sha256: str, unresolved_only: bool = True, *, db: Db = None) -> Optional[dict]:
+        """The newest conflict holding this CDF (a re-sent conflicting file dedupes on it)."""
+        sql = "SELECT * FROM conflicts WHERE cdf_sha256=?"
+        if unresolved_only:
+            sql += " AND resolved IS NULL"
+        with connection(db) as conn:
+            return _row(conn.execute(sql + " ORDER BY id DESC LIMIT 1", (cdf_sha256,)).fetchone())
+
+    @staticmethod
     def resolve(conflict_id: int, resolution: str, *, by: str, db: Db = None) -> None:
         """Record the admin's choice. ``ValueError`` if the resolution is unknown or
         the conflict is missing or already resolved. (Replacing the sample's CDF
@@ -1049,29 +1470,3 @@ class conflicts:  # noqa: N801
                              (resolution, by, now_iso(), conflict_id)).rowcount
             if n != 1:
                 raise ValueError(f"conflict {conflict_id} is missing or already resolved")
-
-
-class CorrectionsCacheStore:
-    """SQLite ``cache_store`` for ``corrections.LemProvider`` (contracts §2)."""
-
-    def __init__(self, db: Union[None, str, os.PathLike] = None):
-        self.db = db
-
-    def load(self, instrument_id: str) -> Optional[dict]:
-        """``{values, methods, fetched_at}`` or ``None``."""
-        with connection(self.db) as conn:
-            r = conn.execute('SELECT "values", methods, fetched_at FROM corrections_cache '
-                             "WHERE instrument_id=?", (instrument_id,)).fetchone()
-        if r is None:
-            return None
-        return {"values": json.loads(r["values"]) if r["values"] else {},
-                "methods": json.loads(r["methods"]) if r["methods"] else [],
-                "fetched_at": r["fetched_at"]}
-
-    def save(self, instrument_id: str, values: dict, methods: list, fetched_at: str) -> None:
-        with _writing(self.db) as conn:
-            conn.execute('INSERT INTO corrections_cache(instrument_id, "values", methods, fetched_at) '
-                         "VALUES (?,?,?,?) ON CONFLICT(instrument_id) DO UPDATE SET "
-                         '"values"=excluded."values", methods=excluded.methods, '
-                         "fetched_at=excluded.fetched_at",
-                         (instrument_id, json.dumps(values), json.dumps(list(methods)), fetched_at))

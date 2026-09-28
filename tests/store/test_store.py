@@ -8,13 +8,16 @@ would shadow the top-level ``store`` module.
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 import sqlite3
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import uuid
 
 import pytest
 
@@ -40,16 +43,17 @@ def gc1(db) -> Path:
     return db
 
 
-_counter = [0]
+_counter = itertools.count(1)
 
 
 def _sample(db, instrument="gc1", lab_id="40305", dt="2026-09-25 00:24:50", sha=None, **kw):
-    _counter[0] += 1
+    n = next(_counter)  # itertools.count: atomic under the GIL, safe from threads
+    kw.setdefault("method_name", "SIMDISB.M")
     return store.samples.insert_received(
         instrument, lab_id, dt, "cdf",
-        cdf_sha256=sha if sha is not None else f"sha-{_counter[0]}",
-        cdf_path=f"cdf/{instrument}/2026/09/{lab_id}_{_counter[0]}.CDF",
-        method_name="SIMDISB.M", source_name=f"{lab_id}.CDF", db=db, **kw)
+        cdf_sha256=sha if sha is not None else f"sha-{uuid.uuid4().hex}",
+        cdf_path=f"cdf/{instrument}/2026/09/{lab_id}_{n}.CDF",
+        source_name=f"{lab_id}.CDF", db=db, **kw)
 
 
 def _columns(conn, table):
@@ -61,7 +65,7 @@ def _columns(conn, table):
 SPEC_COLUMNS = {
     "instruments": {"id", "name", "method", "enabled", "live_since", "calibration_cdf",
                     "calibration_assignments", "calibration_sensitivity", "lem_machine_uid",
-                    "correction_map", "token_hash", "token_issued_at", "export_path",
+                    "token_hash", "token_issued_at", "export_path",
                     "method_map", "created_at", "updated_at"},
     "samples": {"id", "instrument_id", "lab_id", "injection_dt", "injection_dt_source",
                 "method_name", "legacy_injection_dt", "time_corrected", "cdf_sha256",
@@ -76,11 +80,13 @@ SPEC_COLUMNS = {
                   "resolved_at"},
     "export_rows": {"seq", "instrument_id", "sample_id", "revision", "row", "hub_appended_at"},
     "jobs": {"id", "kind", "payload", "state", "attempts", "not_before", "last_error",
-             "created_at"},
+             "created_at", "sample_id", "finished_at"},
     "agents": {"instrument_id", "version", "state", "queue_size", "rejected_count",
                "last_file", "last_error", "host", "agent_time", "last_seen", "results_seq",
                "pending_command"},
-    "corrections_cache": {"instrument_id", "values", "methods", "fetched_at"},
+    "instrument_corrections": {"instrument_id", "cut", "value", "updated_at", "updated_by"},
+    "corrections_audit": {"id", "instrument_id", "cut", "old_value", "new_value", "changed_at",
+                          "changed_by", "reason"},
     "standards": {"id", "name", "instrument_id", "cdf_path", "added_at"},
     "sample_cache": {"sample_id", "rules_fingerprint", "flags", "bestfit_fingerprint",
                      "best_fit", "fit_score"},
@@ -93,7 +99,18 @@ def test_schema_has_every_spec_table_and_column(db):
         for table, cols in SPEC_COLUMNS.items():
             assert cols <= _columns(conn, table), (table, cols - _columns(conn, table))
         assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
-    assert store.SCHEMA_VERSION >= 1
+    assert store.SCHEMA_VERSION == len(store.MIGRATIONS) >= 1
+
+
+def test_required_columns_equal_fresh_db(db):
+    with store.connection(db) as conn:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+        assert tables == set(store.REQUIRED_COLUMNS) == set(SPEC_COLUMNS)
+        for t in tables:
+            assert _columns(conn, t) == set(store.REQUIRED_COLUMNS[t]) == SPEC_COLUMNS[t], t
+        assert "corrections_cache" not in tables
+    assert not hasattr(store, "CorrectionsCacheStore")
 
 
 def test_migrate_again_is_a_noop(db):
@@ -147,6 +164,61 @@ def test_pre_migrate_backup_is_written(tmp_path):
     copy.close()
 
 
+def _wal_v1_with_unflushed_rows(tmp_path):
+    path = tmp_path / "gc.db"
+    store.migrate(path)
+    holder = sqlite3.connect(path)  # an open reader keeps the WAL from being checkpointed away
+    holder.execute("PRAGMA wal_autocheckpoint=0")
+    holder.execute("SELECT 1").fetchone()
+    w = sqlite3.connect(path, isolation_level=None)
+    w.execute("PRAGMA wal_autocheckpoint=0")
+    for i in range(20):
+        w.execute("INSERT INTO settings_kv(key, value) VALUES (?, ?)", (f"k{i}", str(i)))
+    w.close()
+    assert Path(str(path) + "-wal").stat().st_size > 0
+    return path, holder
+
+
+def test_pre_migrate_backup_captures_wal_frames(tmp_path, monkeypatch):
+    path, holder = _wal_v1_with_unflushed_rows(tmp_path)
+    try:
+        v2 = ("CREATE TABLE extra_v2(x)", "INSERT INTO extra_v2 VALUES (1)")
+        monkeypatch.setattr(store, "MIGRATIONS", store.MIGRATIONS + (v2,))
+        assert store.migrate(path) == 2
+    finally:
+        holder.close()
+    backups = list((tmp_path / "backups").glob("pre-migrate-1-*.db"))
+    assert len(backups) == 1
+    copy = sqlite3.connect(backups[0])
+    try:
+        assert copy.execute("SELECT COUNT(*) FROM settings_kv").fetchone()[0] == 20
+        assert copy.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        copy.close()
+
+
+def test_failed_migration_step_is_atomic(tmp_path, monkeypatch):
+    path, holder = _wal_v1_with_unflushed_rows(tmp_path)
+    holder.close()
+    v2 = ("CREATE TABLE extra_v2(x)", "THIS IS NOT SQL")
+    monkeypatch.setattr(store, "MIGRATIONS", store.MIGRATIONS + (v2,))
+    with pytest.raises(sqlite3.OperationalError):
+        store.migrate(path)
+    with store.connection(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='extra_v2'").fetchone()
+        assert conn.execute("SELECT COUNT(*) FROM settings_kv").fetchone()[0] == 20
+
+
+def test_open_db_does_not_create_but_migrate_does(tmp_path):
+    missing = tmp_path / "nope" / "gc.db"
+    with pytest.raises(sqlite3.OperationalError):
+        store.open_db(missing)
+    assert not missing.exists()
+    store.migrate(missing)
+    assert missing.exists()
+
+
 def test_fresh_database_needs_no_backup(tmp_path):
     store.migrate(tmp_path / "gc.db")
     assert not list((tmp_path / "backups").glob("pre-migrate-*")) if (tmp_path / "backups").exists() else True
@@ -181,18 +253,34 @@ def test_default_path_without_data_dir_raises(monkeypatch):
 
 # ── constraints ─────────────────────────────────────────────────────────────
 
-def test_status_check_accepts_exactly_the_spec_statuses(gc1):
+def test_statuses_validated_in_code_not_by_check(gc1):
     assert set(store.STATUSES) == set(STATUSES)
     for i, status in enumerate(STATUSES):
         sid = _sample(gc1, lab_id=f"L{i}", status=status)
         assert store.samples.get(sid, db=gc1)["status"] == status
-    with store.connection(gc1) as conn:
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("UPDATE samples SET status='bogus' WHERE id=?", (sid,))
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("UPDATE samples SET status='Final' WHERE id=?", (sid,))
     with pytest.raises(ValueError):
         store.samples.set_status(sid, "bogus", db=gc1)
+    with pytest.raises(ValueError):
+        store.samples.set_status(sid, "Final", db=gc1)
+    with pytest.raises(ValueError):
+        _sample(gc1, lab_id="bad", status="bogus")
+    with pytest.raises(ValueError):
+        store.samples.update(sid, status="bogus", db=gc1)
+    with store.connection(gc1) as conn:
+        sql = conn.execute("SELECT sql FROM sqlite_master WHERE name='samples'").fetchone()[0]
+        assert "CHECK" not in sql.upper()
+        # a newer release may write a status this code doesn't know (additive)
+        conn.execute("UPDATE samples SET status='future_status' WHERE id=?", (sid,))
+    assert store.samples.get(sid, db=gc1)["status"] == "future_status"
+    assert sid in {r["id"] for r in store.samples.search(db=gc1)}
+    assert store.samples.count(status="future_status", db=gc1) == 1
+
+
+def test_injection_dt_source_validated(gc1):
+    assert set(store.INJECTION_DT_SOURCES) == {"cdf", "mtime", "csv"}
+    with pytest.raises(ValueError):
+        store.samples.insert_received("gc1", "1", "2026-01-01 00:00:00", "guess",
+                                      cdf_sha256="s", cdf_path="p", db=gc1)
 
 
 def test_foreign_keys_enforced(gc1):
@@ -203,6 +291,9 @@ def test_foreign_keys_enforced(gc1):
             with store.write_txn(conn):
                 store.add_revision(conn, 9999, {"Lab ID": "x"}, reason="processed")
         with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO export_rows(instrument_id, sample_id, revision, \"row\") "
+                         "VALUES ('gc1', 9999, 1, 'x')")
+        with pytest.raises(ValueError):
             with store.write_txn(conn):
                 store.export_rows.append_pending(conn, "gc1", 9999, 1, "x\r\n")
 
@@ -216,13 +307,19 @@ def test_sha256_unique_across_instruments(gc1):
 
 
 def test_null_sha_allowed_for_result_only_imports(gc1):
-    a = store.samples.insert_received("gc1", "1", "2026-01-01 00:00:00", "cdf",
+    a = store.samples.insert_received("gc1", "1", "2026-01-01 00:00:00", "csv",
                                       cdf_sha256=None, cdf_path=None, status="final",
                                       backfill=1, legacy_unverified=1, db=gc1)
-    b = store.samples.insert_received("gc1", "2", "2026-01-01 00:00:00", "cdf",
+    b = store.samples.insert_received("gc1", "2", "2026-01-01 00:00:00", "csv",
                                       cdf_sha256=None, cdf_path=None, status="final",
                                       backfill=1, legacy_unverified=1, db=gc1)
     assert a != b
+    assert store.samples.get(a, db=gc1)["method_name"] is None  # NULL only for result-only
+
+
+def test_method_name_absent_is_empty_string_for_cdf_samples(gc1):
+    sid = _sample(gc1, method_name=None)
+    assert store.samples.get(sid, db=gc1)["method_name"] == ""
 
 
 def test_key_unique_per_instrument(gc1):
@@ -253,6 +350,8 @@ def test_update_whitelisted_fields(gc1):
     assert row["cdf_path"] == "cdf/gc1/x.CDF" and row["released_by"] == "ryan"
     with pytest.raises(ValueError):
         store.samples.update(sid, id=5, db=gc1)
+    with pytest.raises(ValueError):
+        store.samples.update(sid, current_revision=3, db=gc1)
 
 
 def test_set_status_with_error(gc1):
@@ -276,7 +375,7 @@ def test_instruments_upsert_get_list(db):
     created = row["created_at"]
     store.instruments.upsert({"id": "gc1", "live_since": "2026-10-01T00:00:00"}, db=db)
     row = store.instruments.get("gc1", db=db)
-    assert row["name"] == "GC-1" and row["live_since"] == "2026-10-01T00:00:00"
+    assert row["name"] == "GC-1" and row["live_since"] == "2026-10-01 00:00:00"
     assert row["created_at"] == created and row["updated_at"] >= created
     store.instruments.upsert({"id": "gc2", "name": "GC-2", "enabled": 0}, db=db)
     assert [r["id"] for r in store.instruments.list(db=db)] == ["gc1", "gc2"]
@@ -284,6 +383,22 @@ def test_instruments_upsert_get_list(db):
     assert store.instruments.get("gc9", db=db) is None
     with pytest.raises(ValueError):
         store.instruments.upsert({"id": "gc1", "bogus": 1}, db=db)
+    with pytest.raises(ValueError):
+        store.instruments.upsert({"id": "gc1", "correction_map": "{}"}, db=db)  # dropped (D4b)
+
+
+def test_live_since_boundary_day_backfill(db):
+    store.instruments.upsert({"id": "gc1", "name": "GC-1", "live_since": "2026-10-01T00:00:00"}, db=db)
+    live = store.instruments.get("gc1", db=db)["live_since"]
+    assert live == "2026-10-01 00:00:00"
+    # the ISO 'T' form would sort after '2026-10-01 00:00:00' and wrongly mark it backfill
+    assert store.is_backfill(live, "2026-10-01 00:00:00") is False
+    assert store.is_backfill(live, "2026-10-01 08:00:00") is False
+    assert store.is_backfill(live, "2026-09-30 23:59:59") is True
+    assert store.is_backfill(None, "2030-01-01 00:00:00") is True  # unset: everything is backfill
+    assert store.is_backfill("2026-10-01", "2026-10-01 00:00:00") is False
+    store.instruments.upsert({"id": "gc1", "live_since": datetime(2026, 10, 2, 9, 30)}, db=db)
+    assert store.instruments.get("gc1", db=db)["live_since"] == "2026-10-02 09:30:00"
 
 
 # ── search ──────────────────────────────────────────────────────────────────
@@ -319,6 +434,21 @@ def test_search_filters_and_paging(gc1):
     assert store.samples.count(instrument="gc1", status="received", db=gc1) == 8
     # LIKE wildcards in q are literal
     assert store.samples.search(q="%", db=gc1) == []
+    # ISO 'T' bounds are normalised to the injection_dt form
+    t = store.samples.search(instrument="gc1", date_from="2026-09-03T10:00:00",
+                             date_to="2026-09-04T10:00:00", db=gc1)
+    assert {r["id"] for r in t} == {ids[2], ids[3]}
+
+
+def test_search_method_and_backfill_filters(gc1):
+    a = _sample(gc1, lab_id="A", method_name="SIMDISB.M")
+    b = _sample(gc1, lab_id="B", method_name="D7096.M", backfill=1)
+    c = _sample(gc1, lab_id="C", method_name="")
+    assert [r["id"] for r in store.samples.search(method_name="D7096.M", db=gc1)] == [b]
+    assert {r["id"] for r in store.samples.search(method_name=["", "SIMDISB.M"], db=gc1)} == {a, c}
+    assert [r["id"] for r in store.samples.search(backfill=True, db=gc1)] == [b]
+    assert {r["id"] for r in store.samples.search(backfill=False, db=gc1)} == {a, c}
+    assert store.samples.count(backfill=False, method_name="", db=gc1) == 1
 
 
 # ── revisions ───────────────────────────────────────────────────────────────
@@ -415,6 +545,23 @@ def test_pending_and_mark_hub_appended(gc1):
     assert store.export_rows.pending_hub_appends("gc2", db=gc1) == []
 
 
+def test_mark_hub_appended_keeps_first_stamp(gc1):
+    _, s1 = _final(gc1, "gc1", "A", "2026-09-01 00:00:00")
+    store.export_rows.mark_hub_appended(s1, at="2026-09-01T00:00:00+00:00", db=gc1)
+    store.export_rows.mark_hub_appended(s1, at="2026-09-02T00:00:00+00:00", db=gc1)
+    row = store.export_rows.rows_after("gc1", 0, db=gc1)[0]
+    assert row["hub_appended_at"] == "2026-09-01T00:00:00+00:00"
+
+
+def test_append_pending_checks_instrument(gc1):
+    sid = _sample(gc1, instrument="gc1")
+    with store.connection(gc1) as conn:
+        with pytest.raises(ValueError):
+            with store.write_txn(conn):
+                rev = store.add_revision(conn, sid, {}, reason="processed")
+                store.export_rows.append_pending(conn, "gc2", sid, rev, "x\r\n")
+
+
 def test_export_seq_never_reused(gc1):
     _, s1 = _final(gc1, "gc1", "A", "2026-09-01 00:00:00")
     with store.connection(gc1) as conn:
@@ -447,6 +594,19 @@ def test_jobs_lifecycle(db):
     assert job["id"] == j2 and job["attempts"] == 2
     store.jobs.fail(j2, "gave up", db=db)
     assert store.jobs.get(j2, db=db)["state"] == "failed"
+
+
+def test_jobs_reject_naive_times(db):
+    with pytest.raises(ValueError):
+        store.jobs.enqueue("k", {}, not_before=datetime(2026, 9, 28, 12, 0), db=db)
+    with pytest.raises(ValueError):
+        store.jobs.enqueue("k", {}, not_before="2026-09-28T12:00:00", db=db)
+    with pytest.raises(ValueError):
+        store.jobs.claim_next(datetime(2026, 9, 28, 12, 0), db=db)
+    with pytest.raises(ValueError):
+        store.jobs.claim_next("2026-09-28 12:00:00", db=db)
+    assert store.jobs.claim_next("2026-09-28T12:00:00Z", db=db) is None
+    assert store.jobs.claim_next("2026-09-28T14:00:00+02:00", db=db) is None
 
 
 def test_claim_next_is_fifo(db):
@@ -494,6 +654,245 @@ def test_requeue_stale_running(db):
     assert store.jobs.claim_next(T0, db=db)["id"] == a
 
 
+def test_enqueue_dedupes_queued_jobs_per_sample(gc1):
+    sid = _sample(gc1)
+    j1 = store.jobs.enqueue("process", {"sample_id": sid}, sample_id=sid,
+                            not_before=T0 + timedelta(minutes=5), db=gc1)
+    j2 = store.jobs.enqueue("process", {"sample_id": sid}, sample_id=sid, db=gc1)
+    assert j1 == j2
+    # the duplicate brought the queued job forward (NULL = due now)
+    assert store.jobs.get(j1, db=gc1)["not_before"] is None
+    j3 = store.jobs.enqueue("other", {"sample_id": sid}, sample_id=sid, db=gc1)
+    assert j3 != j1  # a different kind is a different job
+    claimed = store.jobs.claim_next(T0, kind="process", db=gc1)
+    assert claimed["id"] == j1 and claimed["sample_id"] == sid
+    j4 = store.jobs.enqueue("process", {"sample_id": sid}, sample_id=sid, db=gc1)
+    assert j4 != j1  # the first is running, so a new one may queue
+
+
+def test_enqueue_for_status(gc1):
+    a = _sample(gc1, lab_id="A", status="awaiting_calibration")
+    b = _sample(gc1, lab_id="B", status="awaiting_calibration")
+    _sample(gc1, lab_id="C", status="awaiting_calibration", instrument="gc2")
+    _sample(gc1, lab_id="D", status="final")
+    o1 = _sample(gc1, lab_id="E", status="other_method", method_name="SIMDISX.M")
+    _sample(gc1, lab_id="F", status="other_method", method_name="D7096.M")
+    store.jobs.enqueue("process", {"sample_id": a}, sample_id=a,
+                       not_before=T0 + timedelta(hours=1), db=gc1)
+    with store.connection(gc1) as conn:
+        with store.write_txn(conn):
+            n = store.jobs.enqueue_for_status(conn, "gc1", "awaiting_calibration")
+    assert n == 2
+    queued = store.jobs.list(state="queued", db=gc1)
+    assert sorted(j["sample_id"] for j in queued) == [a, b]
+    assert all(j["payload"] == {"sample_id": j["sample_id"]} and j["kind"] == "process" for j in queued)
+    assert all(j["not_before"] is None for j in queued)
+    assert store.jobs.enqueue_for_status(gc1, "gc1", "awaiting_calibration") == 2  # idempotent
+    assert len(store.jobs.list(state="queued", db=gc1)) == 2
+    assert store.jobs.enqueue_for_status(gc1, "gc1", "other_method", method_name="SIMDISX.M") == 1
+    assert o1 in {j["sample_id"] for j in store.jobs.list(state="queued", db=gc1)}
+
+
+def test_requeue_stale_running_with_queued_duplicate(gc1):
+    sid = _sample(gc1)
+    j1 = store.jobs.enqueue("process", {"sample_id": sid}, sample_id=sid, db=gc1)
+    store.jobs.claim_next(T0, db=gc1)
+    j2 = store.jobs.enqueue("process", {"sample_id": sid}, sample_id=sid,
+                            not_before=T0 + timedelta(hours=1), db=gc1)
+    assert j2 != j1
+    store.jobs.requeue_stale_running(db=gc1)  # must not raise a UNIQUE error
+    queued = store.jobs.list(state="queued", db=gc1)
+    assert [j["sample_id"] for j in queued] == [sid]
+    assert queued[0]["not_before"] is None  # the stale run was due now
+    assert store.jobs.get(j1, db=gc1)["state"] != "running"
+
+
+def test_fail_retry_with_queued_twin_supersedes(gc1):
+    sid = _sample(gc1)
+    j1 = store.jobs.enqueue("process", {"sample_id": sid}, sample_id=sid, db=gc1)
+    store.jobs.claim_next(T0, db=gc1)
+    j2 = store.jobs.enqueue("process", {"sample_id": sid}, sample_id=sid,
+                            not_before=T0 + timedelta(hours=1), db=gc1)
+    store.jobs.fail(j1, "LEM down", retry_at=T0 + timedelta(minutes=5), db=gc1)  # no UNIQUE error
+    assert store.jobs.get(j1, db=gc1)["state"] == "superseded"
+    twin = store.jobs.get(j2, db=gc1)
+    assert twin["state"] == "queued"
+    assert twin["not_before"] == (T0 + timedelta(minutes=5)).isoformat(timespec="microseconds")
+
+
+def test_claim_next_skips_poison_payload(db):
+    with store.connection(db) as conn:
+        conn.execute("INSERT INTO jobs(kind, payload, state, attempts, created_at) "
+                     "VALUES ('process', '{not json', 'queued', 0, ?)", (store.now_iso(),))
+    good = store.jobs.enqueue("process", {"ok": 1}, db=db)
+    job = store.jobs.claim_next(T0, db=db)
+    assert job["id"] == good
+    bad = [j for j in store.jobs.list(db=db) if j["id"] != good][0]
+    assert bad["state"] == "failed" and "payload" in bad["last_error"]
+    assert store.jobs.claim_next(T0, db=db) is None
+
+
+def test_prune_done(db):
+    a = store.jobs.enqueue("k", {}, db=db)
+    b = store.jobs.enqueue("k", {}, db=db)
+    c = store.jobs.enqueue("k", {}, db=db)
+    for _ in range(3):
+        store.jobs.claim_next(T0, db=db)
+    store.jobs.complete(a, db=db)
+    store.jobs.fail(b, "x", db=db)
+    assert store.jobs.get(a, db=db)["finished_at"]
+    later = datetime.now(timezone.utc) + timedelta(seconds=5)
+    assert store.jobs.prune_done(later, db=db) == 1
+    assert store.jobs.get(a, db=db) is None
+    assert store.jobs.get(b, db=db)["state"] == "failed"
+    assert store.jobs.get(c, db=db)["state"] == "running"
+    with pytest.raises(ValueError):
+        store.jobs.prune_done(datetime(2026, 1, 1), db=db)
+
+
+# ── blanks, gate, legacy lookup, methods seen ───────────────────────────────
+
+def test_latest_blank_at_or_before(gc1):
+    b1 = _sample(gc1, lab_id="blank", dt="2026-09-01 08:00:00", is_blank=1)
+    b2 = _sample(gc1, lab_id="blank", dt="2026-09-01 12:00:00", is_blank=1)
+    _sample(gc1, lab_id="blank", dt="2026-09-01 11:00:00", is_blank=1, method_name="D7096.M")
+    _sample(gc1, lab_id="blank", dt="2026-09-01 10:00:00", is_blank=1, instrument="gc2")
+    _sample(gc1, lab_id="notblank", dt="2026-09-01 10:30:00", is_blank=0)
+    m = ["SIMDISB.M", "SIMDISTB.M"]
+    assert store.samples.latest_blank("gc1", "2026-09-01 11:30:00", m, db=gc1)["id"] == b1
+    assert store.samples.latest_blank("gc1", "2026-09-01 12:00:00", m, db=gc1)["id"] == b2  # at
+    assert store.samples.latest_blank("gc1", "2026-09-01 07:00:00", m, db=gc1) is None
+    assert store.samples.latest_blank("gc1", "2026-09-01 12:00:00", m,
+                                      exclude_sample_id=b2, db=gc1)["id"] == b1
+    assert store.samples.latest_blank("gc1", "2026-09-02 00:00:00", [], db=gc1) is None
+    assert store.samples.latest_blank("gc1", "2026-09-01 11:30:00", ["D7096.M"], db=gc1)["lab_id"] == "blank"
+    with store.connection(gc1) as conn:
+        names = {r[1] for r in conn.execute("PRAGMA index_list(samples)")}
+        assert "samples_blanks" in names
+
+
+def test_is_gated(gc1):
+    live = _sample(gc1, lab_id="1", status="final")
+    back = _sample(gc1, lab_id="2", status="final", backfill=1)
+    rel = _sample(gc1, lab_id="3", status="final", backfill=1)
+    store.samples.update(rel, released_at=store.now_iso(), released_by="ryan", db=gc1)
+    pend = _sample(gc1, lab_id="4", status="pending_corrections")
+    assert store.samples.is_gated(live, db=gc1) is True
+    assert store.samples.is_gated(back, db=gc1) is False
+    assert store.samples.is_gated(rel, db=gc1) is True
+    assert store.samples.is_gated(pend, db=gc1) is False
+    assert store.samples.is_gated(99999, db=gc1) is False
+    with store.connection(gc1) as conn:
+        got = {r[0] for r in conn.execute(f"SELECT id FROM samples WHERE {store.GATE_SQL}")}
+    assert got == {live, rel}
+
+
+def test_find_by_legacy(gc1):
+    fixed = _sample(gc1, lab_id="40305", dt="2026-09-25 00:24:50",
+                    legacy_injection_dt="2026-09-25 02:45:00", time_corrected=1)
+    plain = _sample(gc1, lab_id="40306", dt="2026-09-25 01:00:00",
+                    legacy_injection_dt="2026-09-25 01:00:00")
+    assert [r["id"] for r in store.samples.find_by_legacy("gc1", "40305", "2026-09-25 02:45:00", db=gc1)] == [fixed]
+    assert [r["id"] for r in store.samples.find_by_legacy("gc1", "40305", "2026-09-25 00:24:50", db=gc1)] == [fixed]
+    assert [r["id"] for r in store.samples.find_by_legacy("gc1", "40306", "2026-09-25 01:00:00", db=gc1)] == [plain]
+    assert store.samples.find_by_legacy("gc2", "40305", "2026-09-25 02:45:00", db=gc1) == []
+    with store.connection(gc1) as conn:
+        cols = [r[2] for r in conn.execute("PRAGMA index_info(samples_legacy)")]
+    assert cols == ["instrument_id", "lab_id", "legacy_injection_dt"]
+
+
+def test_methods_seen(gc1):
+    _sample(gc1, lab_id="1", dt="2026-09-01 00:00:00", method_name="SIMDISB.M")
+    _sample(gc1, lab_id="2", dt="2026-09-03 00:00:00", method_name="SIMDISB.M")
+    _sample(gc1, lab_id="3", dt="2026-09-02 00:00:00", method_name="D7096.M")
+    _sample(gc1, lab_id="4", dt="2026-09-02 00:00:00", method_name="")
+    _sample(gc1, lab_id="5", dt="2026-09-02 00:00:00", method_name="X.M", instrument="gc2")
+    seen = {r["method_name"]: r for r in store.samples.methods_seen("gc1", db=gc1)}
+    assert set(seen) == {"SIMDISB.M", "D7096.M", ""}
+    assert seen["SIMDISB.M"]["count"] == 2
+    assert seen["SIMDISB.M"]["first_seen"] == "2026-09-01 00:00:00"
+    assert seen["SIMDISB.M"]["last_seen"] == "2026-09-03 00:00:00"
+
+
+# ── corrections (D4b) ───────────────────────────────────────────────────────
+
+CUTS = ["IBP", "5%", "10%", "20%", "30%", "50%", "70%", "80%", "90%", "95%", "FBP"]
+
+
+def test_corrections_set_all_read_audit(gc1):
+    assert store.corrections.read("gc1", db=gc1) is None
+    vals = {c: 0.0 for c in CUTS}
+    vals["IBP"] = 1.5
+    with store.connection(gc1) as conn:
+        with pytest.raises(RuntimeError):
+            store.corrections.set_all(conn, "gc1", vals, by="ryan", reason="seed")
+        with store.write_txn(conn):
+            n = store.corrections.set_all(conn, "gc1", vals, by="ryan",
+                                          reason="seeded from correction_factors.json")
+    assert n == 11
+    got = store.corrections.read("gc1", db=gc1)
+    assert got["values"] == vals and got["updated_by"] == "ryan" and got["updated_at"]
+    audit = store.corrections.audit("gc1", 100, db=gc1)
+    assert len(audit) == 11 and all(a["old_value"] is None for a in audit)
+    vals2 = dict(vals, **{"IBP": 2.0, "FBP": -1.0})
+    with store.connection(gc1) as conn:
+        with store.write_txn(conn):
+            n = store.corrections.set_all(conn, "gc1", vals2, by="amy", reason="re-cal")
+    assert n == 2
+    got = store.corrections.read("gc1", db=gc1)
+    assert got["values"] == vals2 and got["updated_by"] == "amy"
+    audit = store.corrections.audit("gc1", 100, db=gc1)
+    assert len(audit) == 13
+    assert {(a["cut"], a["old_value"], a["new_value"]) for a in audit[:2]} == {("IBP", 1.5, 2.0), ("FBP", 0.0, -1.0)}
+    assert audit[0]["id"] > audit[-1]["id"]  # newest first
+    assert len(store.corrections.audit("gc1", 5, db=gc1)) == 5
+    assert store.corrections.read("gc2", db=gc1) is None
+
+
+def test_corrections_rules(gc1):
+    with store.connection(gc1) as conn:
+        for bad_reason in ("", "   ", None):
+            with pytest.raises(ValueError):
+                with store.write_txn(conn):
+                    store.corrections.set_all(conn, "gc1", {"IBP": 1.0}, by="r", reason=bad_reason)
+        with pytest.raises(ValueError):
+            with store.write_txn(conn):
+                store.corrections.set_all(conn, "gc1", {"IBP": float("nan")}, by="r", reason="x")
+        with pytest.raises(sqlite3.IntegrityError):
+            with store.write_txn(conn):
+                store.corrections.set_all(conn, "nope", {"IBP": 1.0}, by="r", reason="x")
+    assert store.corrections.audit("gc1", 10, db=gc1) == []
+
+
+# ── transaction guard ───────────────────────────────────────────────────────
+
+def test_new_connection_inside_write_txn_fails_fast(gc1):
+    sid = _sample(gc1)
+    with store.connection(gc1) as conn:
+        with store.write_txn(conn):
+            store.samples.set_status(sid, "error", error="x", db=conn)
+            t = time.monotonic()
+            with pytest.raises(RuntimeError, match="db=conn"):
+                store.settings_kv.set("k", "v", db=gc1)  # would deadlock for busy_timeout
+            with pytest.raises(RuntimeError, match="db=conn"):
+                store.samples.get(sid, db=gc1)  # would read the stale, pre-txn row
+            assert time.monotonic() - t < 2
+            assert store.samples.get(sid, db=conn)["status"] == "error"
+        # released after the transaction
+        assert store.samples.get(sid, db=gc1)["status"] == "error"
+
+
+def test_write_txn_commit_failure_rolls_back(gc1):
+    with store.connection(gc1) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            with store.write_txn(conn):
+                conn.execute("PRAGMA defer_foreign_keys=ON")  # FK checked at COMMIT
+                conn.execute("INSERT INTO sample_cache(sample_id) VALUES (424242)")
+        assert not conn.in_transaction
+    store.settings_kv.set("after", "ok", db=gc1)  # no lock left behind
+    assert store.sample_cache.get(424242, db=gc1) is None
+
+
 # ── small tables ────────────────────────────────────────────────────────────
 
 def test_sample_cache_get_put_merges(gc1):
@@ -536,17 +935,11 @@ def test_conflicts_add_list_resolve(gc1):
     with pytest.raises(ValueError):
         store.conflicts.resolve(cid2, "whatever", by="ryan", db=gc1)
     assert [c["id"] for c in store.conflicts.list(instrument_id="gc2", db=gc1)] == [cid2]
+    assert store.conflicts.find_by_sha("s", db=gc1)["id"] == cid2
+    assert store.conflicts.find_by_sha("othersha", db=gc1) is None  # resolved
+    assert store.conflicts.find_by_sha("othersha", unresolved_only=False, db=gc1)["id"] == cid
 
 
-def test_corrections_cache_store(gc1):
-    cache = store.CorrectionsCacheStore(gc1)
-    assert cache.load("gc1") is None
-    cache.save("gc1", {"IBP": 1.5}, ["D86 IBP"], "2026-09-28T00:00:00+00:00")
-    got = cache.load("gc1")
-    assert got == {"values": {"IBP": 1.5}, "methods": ["D86 IBP"],
-                   "fetched_at": "2026-09-28T00:00:00+00:00"}
-    cache.save("gc1", {"IBP": 2.0}, [], "2026-09-28T01:00:00+00:00")
-    assert cache.load("gc1")["values"] == {"IBP": 2.0}
 
 
 # ── concurrency and handles ─────────────────────────────────────────────────
@@ -581,8 +974,17 @@ def _open_fds():
     return None
 
 
-def test_short_lived_connections_leak_no_handles(gc1):
+def test_short_lived_connections_leak_no_handles(gc1, monkeypatch):
     store.settings_kv.set("x", "1", db=gc1)
+    opened = []
+    real_connect = sqlite3.connect
+
+    def tracking_connect(*a, **k):
+        c = real_connect(*a, **k)
+        opened.append(c)
+        return c
+
+    monkeypatch.setattr(store.sqlite3, "connect", tracking_connect)
     before = _open_fds()
     for i in range(1000):
         with store.connection(gc1) as conn:
@@ -591,6 +993,11 @@ def test_short_lived_connections_leak_no_handles(gc1):
         conn2 = store.open_db(gc1)
         conn2.close()
     after = _open_fds()
+    monkeypatch.undo()
+    assert len(opened) >= 3000
+    for c in opened:  # every connection the store opened is closed
+        with pytest.raises(sqlite3.ProgrammingError):
+            c.execute("SELECT 1")
     if before is not None:
         assert after <= before + 2, (before, after)
     if sys.platform == "win32":  # an open handle would block the delete
@@ -602,7 +1009,8 @@ def test_short_lived_connections_leak_no_handles(gc1):
 
 # ── backups ─────────────────────────────────────────────────────────────────
 
-def test_backup_nightly_is_openable_and_copies_settings(gc1):
+def test_backup_nightly_is_openable_and_copies_settings(gc1, monkeypatch):
+    monkeypatch.setenv("GC_DATA_DIR", str(gc1.parent))  # settings path = paths.settings_file()
     (gc1.parent / "settings.json").write_text('{"a": 1}', encoding="utf-8")
     store.settings_kv.set("marker", "yes", db=gc1)
     out = store.backup_nightly(gc1, now=datetime(2026, 9, 28, 2, 0))
@@ -634,4 +1042,6 @@ def test_backup_nightly_prunes_to_keep(gc1):
     assert dbs[0] == "gc-2026-08-08.db"
     assert len(list(backups.glob("settings-*.json"))) <= 14
     assert not (backups / "settings-2026-08-01.json").exists()
+    with pytest.raises(ValueError):
+        store.backup_nightly(gc1, keep=0, now=datetime(2026, 9, 29))
     assert (backups / "pre-migrate-0-20260101T000000Z.db").exists()
