@@ -343,8 +343,21 @@ Rules:
   `instrument_id`. Every `distill` and `analysis_core` call that needs
   calibration gets this merged `conf`, including the Analysis tab and the
   PDF.
-- **Blank.** The genuine-blank rules are kept (exact name
-  `^blank[\s_\-]*\d*$`, `is_plausible_blank`). The blank used is **the
+- **Blank.** A genuine blank has a blank name (case-insensitive: `blank`,
+  `blank2`, `blank_3`, `(blank)`, `[b] blank`; all of these occur in
+  GC-1's history) **and** passes `is_plausible_blank`. The decision is made
+  once, at submit, from the CDF bytes. As in v1, a sample with a blank
+  **name** is never blank-subtracted itself, whether or not it is
+  plausible.
+- **Rejected blank.** If `compute`'s relative-height guard rejects the chosen
+  blank for a given sample, the sample is processed **without** a blank
+  (v1's numbers). `blank_used` stays NULL and a `blank_rejected` note (which
+  blank, and why) is stored on the revision. It never silently falls back
+  to an earlier blank.
+- **Late-arriving blank.** When a genuine blank arrives after samples it
+  would have applied to (injected earlier, delivered later), those final
+  samples are flagged with a review note and a notification is raised.
+  They are **not** reprocessed automatically. The blank used is **the
   latest genuine blank on the same instrument whose injection time is at or
   before the sample's**, so it doesn't depend on processing order.
   Reprocessing keeps `blank_used` unless the operator asks for the current
