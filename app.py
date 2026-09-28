@@ -896,20 +896,21 @@ def _revision_cdf(sample: dict, rev: Optional[dict], data: Path) -> Path:
 
 
 def _revision_blank_path(data: Path, db: Path, rev: dict) -> Optional[Path]:
-    """The blank CDF a revision subtracted, or None.
-
-    INTEGRATION NOTE: a1/blankprov records the blank's own file on the
-    revision (``pipeline.revision_blank_path``); swap this lookup for that
-    helper once it is merged. Until then this reads the blank sample's
-    current ``cdf_path``, which a later conflict Replace could change.
-    """
+    """The blank CDF a revision subtracted, or None: the blank file recorded
+    on the revision (``pipeline.revision_blank_path``), never the blank
+    sample's current file, which a later conflict Replace may have swapped.
+    A revision written before that record existed falls back to the blank
+    sample's file. ``FileNotFoundError`` if the file is gone (the curve would
+    no longer match the revision's numbers)."""
     if rev.get("blank_used") is None:
         return None
-    blank = store.samples.get(rev["blank_used"], db=db)
-    if blank is None or not blank.get("cdf_path"):
-        return None
-    p = data / blank["cdf_path"]
-    return p if p.is_file() else None
+    p = pipeline.revision_blank_path(rev["sample_id"], rev["revision"], db=db, data_dir=data)
+    if p is None and not rev.get("blank_cdf_path"):
+        blank = store.samples.get(rev["blank_used"], db=db)
+        p = data / blank["cdf_path"] if blank is not None and blank.get("cdf_path") else None
+    if p is None or not p.is_file():
+        raise FileNotFoundError(f"The blank CDF revision {rev['revision']} subtracted is missing: {p}")
+    return p
 
 
 def _gc1(db) -> dict:
