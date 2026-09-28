@@ -14,14 +14,17 @@ Public API
     format_line(results_json, source_file) -> str   # one frozen CSV line, "\\r\\n"-terminated
     header_line() -> str                             # CSV_HEADER as the same kind of line
     sidecar_path(csv_path) -> Path                   # <csv>.gchub.json
+    lock_path(csv_path) -> Path                      # <csv>.gchub.lock
 
     class ExportRefused(Exception):                  # .reason (code), .path, .detail
+    class ExportLocked(OSError):                     # another process holds the export lock
     class FlushResult:                               # .appended, .pending, .error, .path
 
     HubExporter(db=None, *, data_dir=None, notifier=None, clock=time.time,
                 tail_bytes=TAIL_BYTES, retry_sleep=time.sleep)
         .export_path(instrument) -> Path     # instruments.export_path or <data>/results/<inst>_results.csv
-        .flush(instrument) -> FlushResult    # raises ExportRefused; OSError -> result.error, rows stay pending
+        .flush(instrument) -> FlushResult    # raises ExportRefused; any OSError -> result.error
+        .verify_full(instrument) -> dict | None      # full hash of the recorded region now
         .adopt(instrument, *, by=None) -> dict       # admin: accept the file as it is now
         .new_path(instrument, path) -> Path          # admin: switch the export to another file
         .write_fresh(instrument, path, *, by=None) -> int   # admin: new file of gated current revisions
@@ -31,9 +34,9 @@ Public API
 
 ``notifier(level, message)`` has the signature of
 ``notifications.NotificationStore.add``; it is called once when an export is
-refused (``error``, until adopt/new path/success clears it) and once when an
-instrument's rows have been pending for more than ``PENDING_ALERT_SECONDS``
-(``warning``, until the backlog clears).
+refused (``error``, until a verified flush, adopt or new path clears it) and
+once when an instrument's rows have been pending for more than
+``PENDING_ALERT_SECONDS`` (``warning``, until the backlog clears).
 
 Frozen row bytes
 ================
@@ -44,7 +47,8 @@ minimal quoting, ``None`` as an empty cell) into a file opened with
 ``newline=""`` and UTF-8. ``results_json`` is the ``sample_results.results``
 JSON (or the dict), keyed by ``CSV_HEADER`` names; floats survive the JSON
 round-trip exactly (``repr``), so the text of every cell is v1's. Writers
-append ``line.encode("utf-8")`` verbatim.
+append ``line.encode("utf-8")`` verbatim. Before appending, each ledger line
+must end in ``\\r\\n`` and parse as exactly one 31-field record (``bad-line``).
 
 The sidecar and the refusal rules
 =================================
@@ -52,48 +56,56 @@ The sidecar and the refusal rules
 ``<file>.gchub.json`` is written atomically (temp file, fsync, replace) after
 each append::
 
-    {"size", "sha256", "seq", "tail_len", "tail_sha256", "mtime_ns", "updated_at",
-     ["adopted_at", "adopted_by"]}
+    {"instrument", "size", "sha256", "seq", "tail_len", "tail_sha256", "mtime_ns",
+     "updated_at", ["new_file"], ["adopted_at", "adopted_by"]}
 
 ``size``/``sha256`` describe the whole file as the hub last left it; ``seq``
-is the last ledger row known to be in it. ``flush`` refuses
-(``ExportRefused``) when:
+is the last ledger row known to be in it; ``instrument`` is whose file it is.
+``flush`` refuses (``ExportRefused``) when:
 
 * ``no-sidecar``: the file exists, is not empty and has no sidecar (a v1 file
   must be **adopted**; an empty file is treated as new);
+* ``foreign-sidecar``: the sidecar belongs to another instrument (or names
+  none); ``adopt`` refuses this too;
 * ``missing``: the sidecar records content but the file is gone;
 * ``shrunk``: the file is smaller than recorded;
 * ``grown``: it is larger, and the extra bytes are not the start of what the
   hub was about to append (see recovery below);
 * ``changed``: the recorded region's hash no longer matches;
-* ``sidecar-unreadable``, and ``bad-line`` (a ledger line without a newline
-  terminator would corrupt the next append).
+* ``sidecar-unreadable``, and ``bad-line``.
 
-``adopt`` refuses ``missing``, ``header-mismatch`` (naming a UTF-8 BOM if
-Excel re-saved the file) and ``no-trailing-newline``: v1's last line cut off
-mid-record would have the hub's first row glued onto it, so the file has to
-be fixed by hand (or a new path chosen) first. ``write_fresh`` refuses
+A flush with nothing pending still checks the file (cheaply) when it or its
+sidecar exists, and only a check that passes clears a refusal.
+
+``adopt`` refuses ``missing``, ``foreign-sidecar``, ``header-mismatch``
+(naming a UTF-8 BOM if Excel re-saved the file), ``no-trailing-newline`` (v1's
+last line cut off mid-record would have the hub's first row glued onto it)
+and ``permission`` (writing the sidecar needs create/rename/delete rights in
+the folder). It keeps the old sidecar's ``seq`` only if that sidecar is this
+instrument's, its size is at most the current size and the file's first
+``size`` bytes still hash to its ``sha256``; otherwise ``seq`` is the last
+row the ledger has marked appended. ``new_path`` and ``write_fresh`` refuse
+``in-use`` (another instrument's export path); ``write_fresh`` refuses
 ``exists``.
 
 **Cheap verification (why not a full sha256 on every append).** The share
 CSV is several MB and grows forever; hashing it over SMB every minute is
 slow and holds the file open while LEM and Excel want it. So:
 
-* the *first* check of a file in a process (start-up) and ``adopt`` hash the
-  whole recorded region and compare it with ``sha256``. The exporter keeps
-  that ``hashlib`` state in memory;
-* after that, each flush checks ``size``, ``mtime_ns`` and the sha256 of the
+* the *first* check of a file in a process (start-up), ``adopt`` and
+  ``verify_full`` hash the whole recorded region and compare it with
+  ``sha256``. The exporter keeps that ``hashlib`` state in memory; ``tick``
+  calls ``verify_full`` at most once per ``FULL_VERIFY_SECONDS`` (24 h);
+* otherwise each flush checks ``size``, ``mtime_ns`` and the sha256 of the
   last ``tail_len`` bytes (``TAIL_BYTES``, 64 KiB) only. A changed mtime at
-  the recorded size escalates to a full hash; an unchanged file is accepted
-  on the tail alone;
+  the recorded size escalates to a full hash;
 * each append extends the in-memory hash with the bytes it wrote, so the
   sidecar's ``sha256`` is always the true whole-file hash without re-reading.
 
 Trade-off: an edit **before** the last 64 KiB that keeps the size *and* puts
-the mtime back is not seen by a running exporter; the next start-up's full
-check refuses it. Everything LEM is exposed to by an in-place edit (a
-shrink, an append, a save by Excel, which changes size or mtime) is caught at
-once.
+the mtime back is not seen until the next full check (start-up or the daily
+one). Anything LEM is exposed to by an in-place edit (a shrink, an append, a
+save by Excel, which changes size or mtime) is caught at once.
 
 **Recovery (exactly once).** The order is: append + fsync, then the sidecar,
 then ``mark_hub_appended``. A crash (or error) between any two steps heals:
@@ -105,44 +117,79 @@ then ``mark_hub_appended``. A crash (or error) between any two steps heals:
 * rows in the sidecar but not marked: pending rows with ``seq <=
   sidecar.seq`` are marked without being written again.
 
-A brand-new file gets its sidecar (size 0) *before* the file is created, so
-a partial first write is also a recoverable "grown" state rather than an
-unexplained file without a sidecar.
+**New files and stale not-found.** Over SMB a flapping share can make an
+existing file look missing (``ERROR_BAD_NETPATH`` → ``FileNotFoundError``).
+So a new file never goes through ``open("ab")``: the sidecar is created first
+with ``O_EXCL`` (``new_file: true``, size 0) and the CSV with
+``open(path, "xb")``. Either ``FileExistsError`` means the earlier "missing"
+was wrong; the state is re-read (a few times, then the flush reports an
+error and the rows stay pending). ``"ab"`` is used only when the sidecar
+records content, or the file was seen and confirmed empty or holding the
+start of this very append.
 
-**Locks.** A ``PermissionError`` opening the file (Excel, antivirus, a backup)
-is retried ``APPEND_OPEN_ATTEMPTS`` times in the call, then reported in
-``FlushResult.error`` with the rows left pending; the background loop retries
-every ``FLUSH_INTERVAL_SECONDS``. ``pending_since`` is in memory only, so
+**Exclusion.** Within a process a per-instrument lock serialises flushes.
+Across processes (two hubs, or a hub and a stray tool) ``<file>.gchub.lock``
+next to the sidecar is locked (``fcntl.flock`` on POSIX, ``msvcrt.locking``
+on Windows, an SMB byte-range lock on a share; released by the OS when the
+process dies, so there is no stale lock to take over) around verify →
+append → sidecar → mark. A lock not obtained within ``LOCK_WAIT_SECONDS`` is
+an ``ExportLocked`` error, retried next time.
+
+**Locks by others.** A ``PermissionError`` opening the CSV (Excel, antivirus,
+a backup) is retried ``APPEND_OPEN_ATTEMPTS`` times in the call, then
+reported in ``FlushResult.error`` like every other ``OSError`` (and a
+``sqlite3.OperationalError``) with the rows left pending; the background loop
+retries every ``FLUSH_INTERVAL_SECONDS``. ``pending_since`` is in memory, so
 after a restart the 10-minute alert clock starts again.
+
+**Temp files.** The sidecar's temp file is ``.gchub-<sidecar name>.<random>.part``.
+v1 (and ``distill.sweep_stale_csv_temps``) deletes ``.<csv name>.*.tmp`` next
+to the results CSV at start-up; the hub's name can never match that glob, so
+a v1 instance starting beside an adopted file cannot delete a sidecar write
+in flight.
 
 **Write fresh** writes the header and every gated sample's current revision
 (its ledger line, or ``format_line`` of the stored results when there is
-none) to a new file, in ledger order, records the sidecar at the ledger's
-max ``seq`` for that instrument, marks the pending rows up to that ``seq``
-as appended (the fresh file covers them), and switches ``export_path`` to
-it. Never point LEM at a fresh file without setting its tail offset to the
-end, or it re-reads all of history.
+none) to a new file, in ledger order, creates its sidecar at the ledger's
+max ``seq`` for that instrument, switches ``export_path`` to it, and only
+then marks the pending rows up to that ``seq`` as appended. A crash before
+the marking loses nothing: the next flush marks them from the sidecar's
+``seq``. Never point LEM at a fresh file without setting its tail offset to
+the end, or it re-reads all of history.
 
-Limits: two instruments must not share an ``export_path``; nothing stops a
-v1 writer still appending to an adopted file except the refusal that follows
-(D9b: stop v1's writer before adopting).
+LEM (read-only notes, lab-equipment-manager ``lem_station_module.py``)
+======================================================================
+
+LEM's ``tail_new_text`` opens the file with plain ``open(path, "rb")``
+(Windows share mode read+write, so it never blocks the hub's appends), reads
+to EOF and advances ``last_position`` to EOF, not to the last newline. A
+partial append that is later completed can therefore be read as two broken
+lines; the hub writes each batch with a single ``write`` call to keep that
+window small. A shrink sends LEM back to offset 0 (it re-reads everything),
+which is one more reason the hub never truncates. LEM splits each line on the
+delimiter without CSV quoting, so a header line in the middle of the file
+would reach its parser as a print with Lab ID ``"Lab ID"``: the hub writes
+the header only to an empty file.
 """
 from __future__ import annotations
 
 import collections
+import contextlib
 import csv
+import errno
 import hashlib
 import io
 import json
 import logging
 import os
+import sqlite3
 import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Union
+from typing import Any, Callable, Iterator, Mapping, Optional, Union
 
 import distill
 import paths
@@ -152,11 +199,15 @@ LOGGER = logging.getLogger(__name__)
 
 CSV_HEADER = distill.CSV_HEADER
 SIDECAR_SUFFIX = ".gchub.json"
+LOCK_SUFFIX = ".gchub.lock"
 TAIL_BYTES = 64 * 1024
 FLUSH_INTERVAL_SECONDS = 60
 PENDING_ALERT_SECONDS = 600
+FULL_VERIFY_SECONDS = 24 * 3600
+LOCK_WAIT_SECONDS = 30.0
 APPEND_OPEN_ATTEMPTS = 3
 APPEND_OPEN_BACKOFF_SECONDS = 0.2
+REEVALUATE_ATTEMPTS = 3
 _CHUNK = 1024 * 1024
 _EMPTY_SHA = hashlib.sha256(b"").hexdigest()
 
@@ -192,16 +243,34 @@ def format_line(results_json: Union[str, Mapping[str, Any]], source_file: Any) -
     return _csv_line(values)
 
 
+def _is_one_record(line: str) -> bool:
+    if not line.endswith("\r\n"):
+        return False
+    try:
+        records = list(csv.reader(io.StringIO(line, newline="")))
+    except csv.Error:
+        return False
+    return len(records) == 1 and len(records[0]) == len(CSV_HEADER)
+
+
 # ── errors and results ──────────────────────────────────────────────────────
 
 class ExportRefused(Exception):
-    """The hub will not append to this file until an admin acts."""
+    """The hub will not write to this file until an admin acts."""
 
     def __init__(self, reason: str, path: PathLike, detail: str) -> None:
         self.reason = reason
         self.path = Path(path)
         self.detail = detail
         super().__init__(f"Export to {path} refused ({reason}): {detail}")
+
+
+class ExportLocked(OSError):
+    """Another process holds the export lock; try again later."""
+
+
+class _Reevaluate(Exception):
+    """The file system contradicted itself (stale not-found); read the state again."""
 
 
 @dataclass
@@ -219,20 +288,36 @@ def sidecar_path(csv_path: PathLike) -> Path:
     return csv_path.with_name(csv_path.name + SIDECAR_SUFFIX)
 
 
+def lock_path(csv_path: PathLike) -> Path:
+    csv_path = Path(csv_path)
+    return csv_path.with_name(csv_path.name + LOCK_SUFFIX)
+
+
 def _open_append(path: Path):
-    """Open *path* for appending (``O_APPEND``; creates it)."""
+    """Open an existing (confirmed) file for appending (``O_APPEND``)."""
     return open(path, "ab")
+
+
+def _open_new(path: Path):
+    """Create *path*; ``FileExistsError`` if anything is already there."""
+    return open(path, "xb")
 
 
 def _hash_prefix(path: Path, nbytes: int) -> "hashlib._Hash":
     """sha256 state of the first *nbytes* of *path* (the one full read)."""
-    h = hashlib.sha256()
-    left = nbytes
+    return _hash_extend(path, hashlib.sha256(), 0, nbytes)
+
+
+def _hash_extend(path: Path, h: "hashlib._Hash", start: int, end: int) -> "hashlib._Hash":
+    left = end - start
+    if left <= 0:
+        return h
     with open(path, "rb") as fh:
+        fh.seek(start)
         while left > 0:
             chunk = fh.read(min(_CHUNK, left))
             if not chunk:
-                raise OSError(f"{path} is shorter than {nbytes} bytes")
+                raise OSError(f"{path} is shorter than {end} bytes")
             h.update(chunk)
             left -= len(chunk)
     return h
@@ -256,8 +341,8 @@ def _read_sidecar(csv_path: Path) -> Optional[dict]:
         side = json.loads(raw)
         side["size"] = int(side["size"])
         side["seq"] = int(side.get("seq") or 0)
-        if not isinstance(side.get("sha256"), str):
-            raise ValueError("sha256")
+        if not isinstance(side.get("sha256"), str) or side["size"] < 0:
+            raise ValueError("sha256/size")
         return side
     except (ValueError, TypeError, KeyError) as exc:
         raise ExportRefused("sidecar-unreadable", csv_path,
@@ -266,9 +351,13 @@ def _read_sidecar(csv_path: Path) -> Optional[dict]:
 
 
 def _write_sidecar(csv_path: Path, side: dict) -> None:
-    """Replace the sidecar atomically (temp file in the same folder, fsync, replace)."""
+    """Replace the sidecar atomically (temp file in the same folder, fsync, replace).
+
+    The temp name ``.gchub-<sidecar>.<random>.part`` never matches v1's
+    ``.<csv>.*.tmp`` start-up sweep."""
     sp = sidecar_path(csv_path)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{sp.name}.", suffix=".tmp", dir=str(sp.parent))
+    fd, tmp_name = tempfile.mkstemp(prefix=f".gchub-{sp.name}.", suffix=".part",
+                                    dir=str(sp.parent))
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
@@ -284,6 +373,16 @@ def _write_sidecar(csv_path: Path, side: dict) -> None:
         raise
 
 
+def _create_sidecar(csv_path: Path, side: dict) -> None:
+    """Create the sidecar with ``O_EXCL``; ``FileExistsError`` if one is there."""
+    sp = sidecar_path(csv_path)
+    fd = os.open(sp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+        json.dump(side, fh, sort_keys=True)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
 def _tail_fields(tail: bytes, mtime_ns: Optional[int]) -> dict:
     return {"tail_len": len(tail), "tail_sha256": hashlib.sha256(tail).hexdigest(),
             "mtime_ns": mtime_ns}
@@ -294,6 +393,64 @@ def _stat(path: Path) -> Optional[os.stat_result]:
         return path.stat()
     except FileNotFoundError:
         return None
+
+
+def _same_file_path(a: PathLike, b: PathLike) -> bool:
+    norm = lambda p: os.path.normcase(os.path.abspath(os.fspath(p)))  # noqa: E731
+    return norm(a) == norm(b)
+
+
+# ── cross-process lock ──────────────────────────────────────────────────────
+
+if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+    import msvcrt
+
+    def _try_lock(fh) -> bool:
+        fh.seek(0)
+        try:
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EDEADLK, getattr(errno, "EDEADLOCK", -1)):
+                return False
+            raise
+
+    def _unlock(fh) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _try_lock(fh) -> bool:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+
+    def _unlock(fh) -> None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _file_lock(csv_path: PathLike, wait: Optional[float] = None) -> Iterator[None]:
+    """Hold ``<csv>.gchub.lock`` exclusively (OS lock: freed if the process dies)."""
+    wait = LOCK_WAIT_SECONDS if wait is None else wait
+    lp = lock_path(csv_path)
+    fh = open(lp, "a+b")
+    try:
+        deadline = time.monotonic() + wait
+        while not _try_lock(fh):
+            if time.monotonic() >= deadline:
+                raise ExportLocked(errno.EAGAIN, "the export lock is held by another process "
+                                   "(another hub?); will retry", str(lp))
+            time.sleep(0.02)
+        try:
+            yield
+        finally:
+            _unlock(fh)
+    finally:
+        fh.close()
 
 
 # ── the exporter ────────────────────────────────────────────────────────────
@@ -315,6 +472,9 @@ class _Verified:
     tail: bytes
 
 
+_TRANSIENT = (OSError, sqlite3.OperationalError)
+
+
 class HubExporter:
     def __init__(self, db: store.Db = None, *, data_dir: Optional[PathLike] = None,
                  notifier: Optional[Callable[[str, str], Any]] = None,
@@ -327,6 +487,7 @@ class HubExporter:
         self.tail_bytes = max(1, int(tail_bytes))
         self._sleep = retry_sleep
         self._verified: dict[str, _Verified] = {}
+        self._last_full: dict[str, float] = {}
         self._refused: dict[str, ExportRefused] = {}
         self._last_error: dict[str, Optional[str]] = {}
         self._pending_since: dict[str, float] = {}
@@ -352,6 +513,18 @@ class HubExporter:
     def export_path(self, instrument: str) -> Path:
         return self._configured_path(instrument) or self._default_path(instrument)
 
+    def _check_free(self, instrument: str, path: Path) -> None:
+        for other in store.instruments.list(db=self.db):
+            if other["id"] == instrument:
+                continue
+            try:
+                theirs = self.export_path(other["id"])
+            except RuntimeError:
+                continue
+            if _same_file_path(theirs, path):
+                raise ExportRefused("in-use", path, f"it is {other['id']}'s export file; "
+                                    "two instruments must never share one")
+
     # ── notifications and state ──
 
     def _notify(self, level: str, message: str) -> None:
@@ -371,6 +544,12 @@ class HubExporter:
 
     def _clear_refusal(self, instrument: str) -> None:
         self._refused.pop(instrument, None)
+
+    def _pending_count(self, instrument: str) -> int:
+        try:
+            return len(store.export_rows.pending_hub_appends(instrument, db=self.db))
+        except _TRANSIENT:
+            return 1  # unknown, but assume a backlog so the alert clock keeps running
 
     def _track_pending(self, instrument: str, pending: int) -> None:
         if pending <= 0:
@@ -402,6 +581,14 @@ class HubExporter:
 
     # ── verification ──
 
+    @staticmethod
+    def _check_owner(path: Path, side: dict, instrument: str) -> None:
+        owner = side.get("instrument")
+        if owner != instrument:
+            raise ExportRefused("foreign-sidecar", path, f"the sidecar belongs to "
+                                f"{owner or 'no instrument'}, not {instrument}; choose "
+                                "this instrument's own export path")
+
     def _verify(self, path: Path, side: dict, st: Optional[os.stat_result]) -> _Verified:
         """Check that the first ``side['size']`` bytes are what the sidecar
         records; return that region's hash state and tail. Refuses ``changed``."""
@@ -424,6 +611,8 @@ class HubExporter:
                                     "last wrote; it was edited by someone else")
             return _Verified(rec, cached.hasher, tail)
         hasher = _hash_prefix(path, rec) if rec else hashlib.sha256()
+        if rec:
+            self._last_full[key] = self._clock()
         if hasher.hexdigest() != side["sha256"]:
             self._verified.pop(key, None)
             raise ExportRefused("changed", path, f"the first {rec} bytes no longer match the "
@@ -432,30 +621,61 @@ class HubExporter:
         self._verified[key] = v
         return v
 
+    def verify_full(self, instrument: str) -> Optional[dict]:
+        """Hash the whole recorded region now (the daily check). ``None`` if
+        there is no sidecar yet. Raises ``ExportRefused``; ``OSError`` propagates."""
+        with _instrument_lock(instrument):
+            path = self.export_path(instrument)
+            try:
+                side = _read_sidecar(path)
+                if side is None:
+                    return None
+                self._check_owner(path, side, instrument)
+                with _file_lock(path):
+                    side = _read_sidecar(path) or side
+                    st = _stat(path)
+                    self._check_size(path, side, st)
+                    self._verified.pop(str(path), None)
+                    v = self._verify(path, side, st)
+            except ExportRefused as err:
+                self._record_refusal(instrument, err)
+                raise
+            self._last_full[str(path)] = self._clock()
+            return {"size": v.size, "sha256": v.hasher.hexdigest()}
+
+    @staticmethod
+    def _check_size(path: Path, side: dict, st: Optional[os.stat_result]) -> None:
+        rec = side["size"]
+        if st is None and rec > 0:
+            raise ExportRefused("missing", path, f"the sidecar records {rec} bytes but the file "
+                                "is gone; choose a new path (or restore the file)")
+        size = st.st_size if st else 0
+        if size < rec:
+            raise ExportRefused("shrunk", path, f"the file is {size} bytes, smaller than the "
+                                f"{rec} the hub last recorded; it was truncated or replaced")
+
     # ── flush ──
 
     def flush(self, instrument: str) -> FlushResult:
         """Append this instrument's pending ledger rows to its export file.
 
         Raises ``ExportRefused`` (and notifies once) when the file is not in
-        the state the sidecar records. An ``OSError`` on the file (a lock, a
-        dropped share) is returned in ``FlushResult.error`` with the rows left
-        pending for the next attempt.
+        the state the sidecar records. Any ``OSError`` (a lock, a dropped
+        share, the export lock held elsewhere) or ``sqlite3.OperationalError``
+        is returned in ``FlushResult.error`` with the rows left pending.
         """
         with _instrument_lock(instrument):
-            path = self.export_path(instrument)
-            rows = store.export_rows.pending_hub_appends(instrument, db=self.db)
-            if not rows:
-                self._last_error.pop(instrument, None)
-                self._clear_refusal(instrument)
-                self._track_pending(instrument, 0)
-                return FlushResult(0, 0, None, path)
+            path: Optional[Path] = None
             try:
-                result = self._flush_rows(instrument, path, rows)
+                path = self.export_path(instrument)
+                result = self._flush(instrument, path)
             except ExportRefused as err:
                 self._record_refusal(instrument, err)
-                self._track_pending(instrument, len(rows))
+                self._track_pending(instrument, self._pending_count(instrument))
                 raise
+            except _TRANSIENT as exc:
+                result = FlushResult(0, self._pending_count(instrument),
+                                     f"{type(exc).__name__}: {exc}", path)
             if result.error:
                 self._last_error[instrument] = result.error
                 LOGGER.warning("exports: %s append to %s failed: %s", instrument, path, result.error)
@@ -465,46 +685,56 @@ class HubExporter:
             self._track_pending(instrument, result.pending)
             return result
 
-    def _flush_rows(self, instrument: str, path: Path, rows: list) -> FlushResult:
-        def failed(exc: OSError, pending: int) -> FlushResult:
-            return FlushResult(0, pending, f"{type(exc).__name__}: {exc}", path)
+    def _flush(self, instrument: str, path: Path) -> FlushResult:
+        rows = store.export_rows.pending_hub_appends(instrument, db=self.db)
+        if not rows and _read_sidecar(path) is None and _stat(path) is None:
+            return FlushResult(0, 0, None, path)          # nothing written, nothing to check
+        if self._configured_path(instrument) is None:
+            # Only the hub's own folder is created; a configured (share)
+            # folder that is missing is an error to retry.
+            path.parent.mkdir(parents=True, exist_ok=True)
+        with _file_lock(path):
+            rows = store.export_rows.pending_hub_appends(instrument, db=self.db)
+            for _ in range(REEVALUATE_ATTEMPTS):
+                try:
+                    return self._flush_once(instrument, path, rows)
+                except _Reevaluate:
+                    continue
+        raise OSError(f"{path}: the file system kept contradicting itself (a flapping "
+                      "share?); the rows stay pending")
 
+    def _flush_once(self, instrument: str, path: Path, rows: list) -> FlushResult:
         for r in rows:
-            if not r["line"].endswith("\n"):
-                raise ExportRefused("bad-line", path, f"ledger row seq {r['seq']} has no line "
-                                    "terminator; appending it would corrupt the next row")
+            if not _is_one_record(r["line"]):
+                raise ExportRefused("bad-line", path, f"ledger row seq {r['seq']} is not one "
+                                    f"{len(CSV_HEADER)}-field CSV record ending in CRLF")
         side = _read_sidecar(path)
         st = _stat(path)
-        if side is None:
+        if side is not None:
+            self._check_owner(path, side, instrument)
+        else:
             if st is not None and st.st_size > 0:
                 raise ExportRefused("no-sidecar", path, "the file exists but the hub has no "
                                     "record of it (no sidecar); Adopt it to append after its "
                                     "current content, or choose a new path")
-            # New (or empty) file: record the intent first, so a partial first
-            # write is a recoverable "grown" state.
-            side = {"size": 0, "sha256": _EMPTY_SHA, "seq": rows[0]["seq"] - 1,
+            if not rows:
+                return FlushResult(0, 0, None, path)
+            # A new (or empty) file: record the intent first, exclusively, so
+            # a partial first write is a recoverable "grown" state and a stale
+            # not-found can't lead to writing over someone's sidecar.
+            side = {"instrument": instrument, "size": 0, "sha256": _EMPTY_SHA,
+                    "seq": rows[0]["seq"] - 1, "new_file": True,
                     **_tail_fields(b"", None), "updated_at": store.now_iso()}
             try:
-                if not self._configured_path(instrument):
-                    # Only the hub's own folder is created; a configured
-                    # (share) folder that is missing is an error to retry.
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                _write_sidecar(path, side)
-            except OSError as exc:
-                return failed(exc, len(rows))
+                _create_sidecar(path, side)
+            except FileExistsError:
+                raise _Reevaluate() from None
             self._verified[str(path)] = _Verified(0, hashlib.sha256(), b"")
+            self._last_full[str(path)] = self._clock()   # everything in it is hashed by us
+        self._check_size(path, side, st)
         rec = side["size"]
-        if st is None and rec > 0:
-            raise ExportRefused("missing", path, f"the sidecar records {rec} bytes but the file "
-                                "is gone; choose a new path (or restore the file)")
         size = st.st_size if st else 0
-        if size < rec:
-            raise ExportRefused("shrunk", path, f"the file is {size} bytes, smaller than the "
-                                f"{rec} the hub last recorded; it was truncated or replaced")
-        try:
-            v = self._verify(path, side, st)
-        except OSError as exc:
-            return failed(exc, len(rows))
+        v = self._verify(path, side, st)
 
         done = [r["seq"] for r in rows if r["seq"] <= side["seq"]]
         todo = [r for r in rows if r["seq"] > side["seq"]]
@@ -517,6 +747,9 @@ class HubExporter:
         if extra:
             ours = extra <= len(planned) and _read_range(path, rec, extra) == planned[:extra]
             if not ours:
+                if rec == 0 and side.get("new_file"):
+                    raise ExportRefused("no-sidecar", path, "a file the hub did not write "
+                                        "appeared at this path; Adopt it or choose a new path")
                 raise ExportRefused("grown", path, f"{extra} bytes were added after the hub's "
                                     "last append by someone else (is v1 still writing?); "
                                     "Adopt to append after them, or choose a new path")
@@ -524,11 +757,13 @@ class HubExporter:
             return FlushResult(0, 0, None, path)
 
         rest = planned[extra:]
-        if rest:
+        if st is None:
             try:
-                self._append(path, rest)
-            except OSError as exc:
-                return failed(exc, len(todo))
+                self._write_new(path, rest)
+            except FileExistsError:
+                raise _Reevaluate() from None
+        elif rest:
+            self._append(path, rest)
         new_size = rec + len(planned)
         st2 = _stat(path)
         if st2 is None or st2.st_size != new_size:
@@ -541,7 +776,8 @@ class HubExporter:
         hasher = v.hasher.copy()
         hasher.update(planned)
         tail = (v.tail + planned)[-self.tail_bytes:]
-        new_side = {"size": new_size, "sha256": hasher.hexdigest(), "seq": todo[-1]["seq"],
+        new_side = {"instrument": instrument, "size": new_size, "sha256": hasher.hexdigest(),
+                    "seq": todo[-1]["seq"],
                     **_tail_fields(tail, st2.st_mtime_ns if st2 else None),
                     "updated_at": store.now_iso()}
         for k in ("adopted_at", "adopted_by"):
@@ -549,12 +785,19 @@ class HubExporter:
                 new_side[k] = side[k]
         try:
             _write_sidecar(path, new_side)
-        except OSError as exc:
+        except BaseException:
             self._verified.pop(str(path), None)
-            return failed(exc, len(todo))
+            raise
         self._verified[str(path)] = _Verified(new_size, hasher, tail)
         store.export_rows.mark_hub_appended([r["seq"] for r in todo], db=self.db)
         return FlushResult(len(todo), 0, None, path)
+
+    @staticmethod
+    def _write_new(path: Path, data: bytes) -> None:
+        with _open_new(path) as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
 
     def _append(self, path: Path, data: bytes) -> None:
         for attempt in range(APPEND_OPEN_ATTEMPTS):
@@ -566,7 +809,7 @@ class HubExporter:
                     raise
                 self._sleep(APPEND_OPEN_BACKOFF_SECONDS * (attempt + 1))
         with fh:
-            fh.write(data)
+            fh.write(data)       # one write per batch: LEM reads to EOF, not to the last newline
             fh.flush()
             os.fsync(fh.fileno())
 
@@ -581,42 +824,88 @@ class HubExporter:
     def adopt(self, instrument: str, *, by: Optional[str] = None) -> dict:
         """Accept the export file as it is now: pending rows go after its content.
 
-        Refuses ``missing``, ``header-mismatch`` and ``no-trailing-newline``.
-        Returns the sidecar written.
+        Refuses ``missing``, ``foreign-sidecar``, ``header-mismatch``,
+        ``no-trailing-newline`` and ``permission``. Returns the sidecar written.
         """
         with _instrument_lock(instrument):
             path = self.export_path(instrument)
-            st = _stat(path)
-            if st is None:
+            if _stat(path) is None:
                 raise ExportRefused("missing", path, "there is no file to adopt")
-            size = st.st_size
-            if size:
-                head = _read_range(path, 0, min(size, TAIL_BYTES))
-                self._check_header(path, head)
-                if _read_range(path, size - 1, 1) != b"\n":
-                    raise ExportRefused("no-trailing-newline", path, "the last line has no "
-                                        "newline, so the hub's first row would be glued onto "
-                                        "it; end the file with a newline (or choose a new path)")
-            hasher = _hash_prefix(path, size) if size else hashlib.sha256()
-            n = min(size, self.tail_bytes)
-            tail = _read_range(path, size - n, n)
-            seq = self._max_appended_seq(instrument)
             try:
-                old = _read_sidecar(path)
-            except ExportRefused:
-                old = None
-            if old:
-                seq = max(seq, old["seq"])
-            stamp = store.now_iso()
-            side = {"size": size, "sha256": hasher.hexdigest(), "seq": seq,
-                    **_tail_fields(tail, st.st_mtime_ns), "updated_at": stamp,
-                    "adopted_at": stamp, "adopted_by": by}
-            _write_sidecar(path, side)
-            self._verified[str(path)] = _Verified(size, hasher, tail)
+                with _file_lock(path):
+                    side = self._adopt(instrument, path, by)
+            except PermissionError as exc:
+                raise ExportRefused("permission", path, "the hub needs create/rename/delete "
+                                    f"rights in the folder to keep the sidecar ({exc})") from exc
             self._clear_refusal(instrument)
-            LOGGER.info("exports: %s adopted %s at %d bytes (seq %d) by %s",
-                        instrument, path, size, seq, by)
             return side
+
+    def _adopt(self, instrument: str, path: Path, by: Optional[str]) -> dict:
+        st = _stat(path)
+        if st is None:
+            raise ExportRefused("missing", path, "there is no file to adopt")
+        size = st.st_size
+        if size:
+            head = _read_range(path, 0, min(size, TAIL_BYTES))
+            self._check_header(path, head)
+            if _read_range(path, size - 1, 1) != b"\n":
+                raise ExportRefused("no-trailing-newline", path, "the last line has no "
+                                    "newline, so the hub's first row would be glued onto "
+                                    "it; end the file with a newline (or choose a new path)")
+        try:
+            old = _read_sidecar(path)
+        except ExportRefused:
+            old = None
+        if old is not None and "instrument" in old and old["instrument"] != instrument:
+            self._check_owner(path, old, instrument)
+        seq = self._max_appended_seq(instrument)
+        if old is not None and old.get("instrument") == instrument and old["size"] <= size:
+            hasher = _hash_prefix(path, old["size"]) if old["size"] else hashlib.sha256()
+            if hasher.hexdigest() == old["sha256"]:
+                # The old record still describes this file: keep its seq, and
+                # count the hub's own complete rows written after it (an
+                # append whose sidecar update failed), so adopt never makes
+                # the hub write them twice.
+                seq = max(seq, old["seq"], self._own_rows_after(instrument, path, old, size))
+            _hash_extend(path, hasher, old["size"], size)
+        else:
+            hasher = _hash_prefix(path, size) if size else hashlib.sha256()
+        n = min(size, self.tail_bytes)
+        tail = _read_range(path, size - n, n)
+        stamp = store.now_iso()
+        side = {"instrument": instrument, "size": size, "sha256": hasher.hexdigest(),
+                "seq": seq, **_tail_fields(tail, st.st_mtime_ns), "updated_at": stamp,
+                "adopted_at": stamp, "adopted_by": by}
+        _write_sidecar(path, side)
+        self._verified[str(path)] = _Verified(size, hasher, tail)
+        self._last_full[str(path)] = self._clock()
+        LOGGER.info("exports: %s adopted %s at %d bytes (seq %d) by %s",
+                    instrument, path, size, seq, by)
+        return side
+
+    def _own_rows_after(self, instrument: str, path: Path, old: dict, size: int) -> int:
+        """The seq of the last pending row that sits, whole and in order,
+        right after the old sidecar's size (0 if none)."""
+        rows = [r for r in store.export_rows.pending_hub_appends(instrument, db=self.db)
+                if r["seq"] > old["seq"]]
+        if not rows or size <= old["size"]:
+            return 0
+        expect = b"".join(r["line"].encode("utf-8") for r in rows)
+        pos = 0
+        if old["size"] == 0:
+            expect = header_line().encode("utf-8") + expect
+            pos = len(header_line().encode("utf-8"))
+        extra = _read_range(path, old["size"], min(size - old["size"], len(expect)))
+        if old["size"] == 0 and extra[:pos] != expect[:pos]:
+            return 0
+        last = 0
+        for r in rows:
+            line = r["line"].encode("utf-8")
+            if extra[pos:pos + len(line)] != line:
+                break
+            pos += len(line)
+            last = r["seq"]
+        return last
 
     @staticmethod
     def _check_header(path: Path, head: bytes) -> None:
@@ -634,9 +923,10 @@ class HubExporter:
 
     def new_path(self, instrument: str, path: PathLike) -> Path:
         """Switch this instrument's export to *path* (an existing file there
-        must then be adopted before the hub appends to it)."""
+        must then be adopted before the hub appends to it). Refuses ``in-use``."""
         with _instrument_lock(instrument):
             path = Path(path)
+            self._check_free(instrument, path)
             store.instruments.upsert({"id": instrument, "export_path": str(path)}, db=self.db)
             self._clear_refusal(instrument)
             LOGGER.info("exports: %s now exports to %s", instrument, path)
@@ -672,35 +962,38 @@ class HubExporter:
         return lines, int(max_seq)
 
     def write_fresh(self, instrument: str, path: PathLike, *, by: Optional[str] = None) -> int:
-        """Admin: write every gated current revision to a **new** file and
-        switch the export to it. Refuses ``exists``. Returns the row count."""
+        """Admin: write every gated current revision to a **new** file, switch
+        the export to it, then mark the covered pending rows. Refuses
+        ``in-use`` and ``exists``. Returns the row count."""
         with _instrument_lock(instrument):
             path = Path(path)
+            self._check_free(instrument, path)
             if path.exists() or sidecar_path(path).exists():
                 raise ExportRefused("exists", path, "write fresh only creates a new file")
             lines, max_seq = self._fresh_lines(instrument)
             data = header_line().encode("utf-8") + "".join(lines).encode("utf-8")
-            try:
-                fh = open(path, "xb")
-            except FileExistsError as exc:
-                raise ExportRefused("exists", path, "write fresh only creates a new file") from exc
-            with fh:
-                fh.write(data)
-                fh.flush()
-                os.fsync(fh.fileno())
-            st = path.stat()
-            hasher = hashlib.sha256(data)
-            tail = data[-self.tail_bytes:]
-            stamp = store.now_iso()
-            side = {"size": len(data), "sha256": hasher.hexdigest(), "seq": max_seq,
-                    **_tail_fields(tail, st.st_mtime_ns), "updated_at": stamp,
-                    "adopted_at": stamp, "adopted_by": by}
-            _write_sidecar(path, side)
-            self._verified[str(path)] = _Verified(len(data), hasher, tail)
+            with _file_lock(path):
+                try:
+                    self._write_new(path, data)
+                    stamp = store.now_iso()
+                    st = path.stat()
+                    hasher = hashlib.sha256(data)
+                    tail = data[-self.tail_bytes:]
+                    _create_sidecar(path, {
+                        "instrument": instrument, "size": len(data),
+                        "sha256": hasher.hexdigest(), "seq": max_seq,
+                        **_tail_fields(tail, st.st_mtime_ns), "updated_at": stamp,
+                        "adopted_at": stamp, "adopted_by": by})
+                except FileExistsError as exc:
+                    raise ExportRefused("exists", path,
+                                        "write fresh only creates a new file") from exc
+                self._verified[str(path)] = _Verified(len(data), hasher, tail)
+            # Switch first: a crash before the marking below leaves the rows
+            # pending with seq <= the sidecar's, which the next flush marks.
+            self.new_path(instrument, path)
             covered = [r["seq"] for r in store.export_rows.pending_hub_appends(instrument, db=self.db)
                        if r["seq"] <= max_seq]
             store.export_rows.mark_hub_appended(covered, db=self.db)
-            self.new_path(instrument, path)
             LOGGER.info("exports: %s wrote a fresh file %s (%d rows, seq %d) by %s",
                         instrument, path, len(lines), max_seq, by)
             return len(lines)
@@ -708,11 +1001,16 @@ class HubExporter:
     # ── background ──
 
     def tick(self) -> dict:
-        """One pass: flush every instrument; never raises."""
+        """One pass: the daily full check where due, then flush every
+        instrument; never raises."""
         out = {}
+        now = self._clock()
         for inst in store.instruments.list(db=self.db):
             iid = inst["id"]
             try:
+                last = self._last_full.get(str(self.export_path(iid)))
+                if last is not None and now - last >= FULL_VERIFY_SECONDS:
+                    self.verify_full(iid)
                 r = self.flush(iid)
                 out[iid] = {"appended": r.appended, "pending": r.pending, "error": r.error,
                             "refused": None}

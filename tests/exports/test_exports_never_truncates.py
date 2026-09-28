@@ -11,6 +11,7 @@ every ledger row appears in the files exactly once.
 from __future__ import annotations
 
 import random
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,22 @@ class _Partial:
         self.fh.flush()
 
 
+def _sidecar_fail(*a, **k):
+    raise OSError(5, "sidecar write failed")
+
+
+def _mark_fail(*a, **k):
+    raise sqlite3.OperationalError("database is locked")
+
+
+def _inject(monkeypatch, op):
+    """Patch in one failure for the next exporter step; returns an undo."""
+    if op == "sidecar-fail":
+        monkeypatch.setattr(exports, "_write_sidecar", _sidecar_fail)
+    elif op == "mark-fail":
+        monkeypatch.setattr(store.export_rows, "mark_hub_appended", staticmethod(_mark_fail))
+
+
 def _snapshot(paths) -> dict:
     return {p: (p.read_bytes() if p.exists() else b"") for p in paths}
 
@@ -69,7 +86,7 @@ def test_exporter_only_ever_extends_files(tmp_path, seed, monkeypatch):
         before = _snapshot(paths)
         try:
             fn()
-        except (exports.ExportRefused, OSError):
+        except (exports.ExportRefused, OSError, sqlite3.Error):
             pass
         after_paths = touched | {exp.export_path("gc1")}
         touched.update(p for p in after_paths if p.exists())
@@ -80,7 +97,7 @@ def test_exporter_only_ever_extends_files(tmp_path, seed, monkeypatch):
     for _ in range(30):
         op = rng.choice(["add", "add", "flush", "flush", "lock", "partial", "restart",
                          "outside-append", "outside-edit", "outside-truncate", "adopt",
-                         "new-path", "write-fresh", "tick"])
+                         "new-path", "write-fresh", "tick", "sidecar-fail", "mark-fail"])
         path = exp.export_path("gc1")
         if op == "add":
             add_final(db)
@@ -95,6 +112,15 @@ def test_exporter_only_ever_extends_files(tmp_path, seed, monkeypatch):
             monkeypatch.setattr(exports, "_open_append", lambda p, n=n: _Partial(p, n))
             exporter_step(op, lambda: exp.flush("gc1"))
             monkeypatch.setattr(exports, "_open_append", real_open)
+        elif op in ("sidecar-fail", "mark-fail"):
+            _inject(monkeypatch, op)
+            what = rng.choice(["flush", "write-fresh", "adopt"])
+            fresh_n += 1
+            fn = {"flush": lambda: exp.flush("gc1"),
+                  "write-fresh": lambda: exp.write_fresh("gc1", data_dir / f"fresh{fresh_n}.csv"),
+                  "adopt": lambda: exp.adopt("gc1")}[what]
+            exporter_step(f"{op}/{what}", fn)
+            monkeypatch.undo()
         elif op == "restart":
             exp = exports.HubExporter(db=db, data_dir=data_dir, retry_sleep=lambda s: None,
                                       tail_bytes=rng.choice([16, 64, 4096]))
@@ -117,6 +143,32 @@ def test_exporter_only_ever_extends_files(tmp_path, seed, monkeypatch):
             fresh_n += 1
             exporter_step(op, lambda: exp.write_fresh("gc1", data_dir / f"fresh{fresh_n}.csv"))
 
+    # The world stops interfering and an admin recovers: Adopt, else a new path.
+    monkeypatch.undo()
+    for attempt in range(3):
+        try:
+            exporter_step("final-check", lambda: None)
+            exp.flush("gc1")
+            break
+        except exports.ExportRefused:
+            try:
+                exporter_step("final-adopt", lambda: exp.adopt("gc1"))
+                exp.adopt("gc1")
+            except exports.ExportRefused:
+                exp.new_path("gc1", data_dir / f"final{attempt}.csv")
+    last = add_final(db)
+    exp.flush("gc1")
+    assert pending(db) == [], f"seed {seed}"
+    final = exp.export_path("gc1")
+    touched.add(final)
+    lines = {r["seq"]: r["line"].encode("utf-8") for r in ledger_lines(db)}
+    assert final.read_bytes().count(lines[last]) == 1, f"seed {seed}"
+    # No file ever holds a ledger row twice, whatever happened on the way.
+    for p in touched:
+        data = p.read_bytes() if p.exists() else b""
+        for seq, line in lines.items():
+            assert data.count(line) <= 1, f"seed {seed}: seq {seq} twice in {p.name}"
+
 
 def test_clean_run_writes_every_row_exactly_once(tmp_path, monkeypatch):
     """Locks, partial writes and restarts only (no outsiders): the file ends
@@ -128,7 +180,8 @@ def test_clean_run_writes_every_row_exactly_once(tmp_path, monkeypatch):
         real_open = exports._open_append
         exp = exports.HubExporter(db=db, data_dir=root / "data", retry_sleep=lambda s: None)
         for _ in range(25):
-            op = rng.choice(["add", "add", "flush", "lock", "partial", "restart"])
+            op = rng.choice(["add", "add", "flush", "lock", "partial", "restart",
+                             "sidecar-fail", "mark-fail"])
             if op == "add":
                 add_final(db)
             elif op == "flush":
@@ -142,6 +195,11 @@ def test_clean_run_writes_every_row_exactly_once(tmp_path, monkeypatch):
                 monkeypatch.setattr(exports, "_open_append", lambda p, n=n: _Partial(p, n))
                 exp.flush("gc1")
                 monkeypatch.setattr(exports, "_open_append", real_open)
+            elif op in ("sidecar-fail", "mark-fail"):
+                _inject(monkeypatch, op)
+                res = exp.flush("gc1")
+                monkeypatch.undo()
+                assert res.appended == 0
             else:
                 exp = exports.HubExporter(db=db, data_dir=root / "data",
                                           retry_sleep=lambda s: None)

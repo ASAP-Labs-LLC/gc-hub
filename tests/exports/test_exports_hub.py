@@ -163,7 +163,8 @@ def test_sidecar_write_leaves_no_temp_files(exp, db):
     exp.flush("gc1")
     folder = exp.export_path("gc1").parent
     assert sorted(p.name for p in folder.iterdir()) == ["gc1_results.csv",
-                                                        "gc1_results.csv.gchub.json"]
+                                                        "gc1_results.csv.gchub.json",
+                                                        "gc1_results.csv.gchub.lock"]
 
 
 def test_a_ledger_line_without_terminator_is_refused(exp, db):
@@ -527,8 +528,8 @@ def test_a_crash_after_sidecar_before_marking_does_not_duplicate(exp, db, monkey
     add_final(db)
     monkeypatch.setattr(store.export_rows, "mark_hub_appended",
                         staticmethod(lambda *a, **k: (_ for _ in ()).throw(OSError(5, "db"))))
-    with pytest.raises(OSError):
-        exp.flush("gc1")
+    res = exp.flush("gc1")                          # returned, not raised (review item 6)
+    assert res.error and "db" in res.error
     monkeypatch.undo()
     assert len(pending(db)) == 1
     exp2 = exports.HubExporter(db=db, data_dir=tmp_path / "data", clock=clock)
@@ -540,6 +541,8 @@ def test_a_crash_after_sidecar_before_marking_does_not_duplicate(exp, db, monkey
 # ── pending-too-long notification, background loop ─────────────────────────
 
 def test_pending_over_ten_minutes_notifies_once(exp, db, notes, clock, monkeypatch):
+    add_final(db)
+    exp.flush("gc1")          # the file exists, so the next append goes through _open_append
     add_final(db)
     monkeypatch.setattr(exports, "_open_append",
                         lambda p: (_ for _ in ()).throw(PermissionError(13, "locked")))
