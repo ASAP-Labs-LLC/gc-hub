@@ -578,3 +578,80 @@ def seed_gc1(conf: dict, *, by: Optional[str], db: store.Db = None) -> dict:
             queued = store.jobs.enqueue_for_status(instruments.GC1, "pending_corrections", db=conn)
     log.warning("gc1 corrections seeded from %s by %s", conf.get("correction_factors_json"), by)
     return {"changed": changed, "queued": queued, "values": values}
+
+
+# ── methods seen (Method detection) ─────────────────────────────────────────
+
+METHOD_NAME_MAX = 200
+
+
+def methods_view(instrument_id: str, *, db: store.Db = None) -> dict:
+    """Every ChemStation method name the instrument has sent (``'' `` = none),
+    with count, first/last injection and what it maps to; mapped names never
+    seen are listed with count 0. ``review_count`` = samples held
+    ``review_method``."""
+    row = get(instrument_id, db=db)
+    mapping = instruments.method_map(row)
+    seen = {r["method_name"]: dict(r, mapped_to=mapping.get(r["method_name"]) if r["method_name"] else None)
+            for r in store.samples.methods_seen(instrument_id, db=db)}
+    for name, hub_method in mapping.items():
+        seen.setdefault(name, {"method_name": name, "count": 0, "first_seen": None,
+                               "last_seen": None, "mapped_to": hub_method})
+    review = store.samples.count(instrument=instrument_id, status="review_method", db=db)
+    return {"instrument": instrument_id, "hub_methods": methods.names(), "method_map": mapping,
+            "seen": sorted(seen.values(), key=lambda r: r["method_name"]), "review_count": review}
+
+
+def set_method_mapping(instrument_id: str, method_name: Any, hub_method: Any, *,
+                       db: store.Db = None) -> dict:
+    """Map a ChemStation method name (normalised) to a hub method, or unmap it
+    (``hub_method`` None). Mapping queues that name's ``other_method`` samples
+    (``pipeline.on_method_mapped``) in the same transaction; unmapping never
+    touches results."""
+    import pipeline
+    if not isinstance(method_name, str) or len(method_name) > METHOD_NAME_MAX:
+        raise AdminError("method_name must be a ChemStation method name, e.g. SIMDISB.M.")
+    name = methods.normalise_method_name(method_name)
+    if not name:
+        raise AdminError("A sample with no method name can't be mapped: mark it as another "
+                         "method, or fix the method in ChemStation.")
+    target = None
+    if hub_method is not None:
+        target = _method(hub_method)
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            row = get(instrument_id, db=conn)
+            mapping = instruments.method_map(row)
+            if target is None:
+                mapping.pop(name, None)
+            else:
+                mapping[name] = target
+            store.instruments.upsert({"id": instrument_id, "method_map": json.dumps(mapping)}, db=conn)
+            queued = pipeline.on_method_mapped(instrument_id, name, db=conn) if target else 0
+    log.warning("instrument %s: method %s %s", instrument_id, name,
+                f"mapped to {target} ({queued} queued)" if target else "unmapped")
+    return {"method_map": mapping, "queued": queued}
+
+
+def mark_review_other(instrument_id: str, sample_ids: Any = None, *, db: store.Db = None) -> int:
+    """Classify the instrument's ``review_method`` samples (all, or the given
+    ids) as ``other_method``: stored, never processed. Returns how many."""
+    ids = None
+    if sample_ids is not None:
+        if not isinstance(sample_ids, list) or len(sample_ids) > 5000:
+            raise AdminError("sample_ids must be a list of sample ids.")
+        ids = [_int_id(v, "sample_ids") for v in sample_ids]
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            get(instrument_id, db=conn)
+            sql = ("UPDATE samples SET status='other_method', error=? WHERE instrument_id=? "
+                   "AND status='review_method'")
+            args: list = ["classified as another method by an admin", instrument_id]
+            if ids is not None:
+                if not ids:
+                    return 0
+                sql += f" AND id IN ({','.join('?' for _ in ids)})"
+                args += ids
+            n = conn.execute(sql, args).rowcount
+    log.warning("instrument %s: %d review_method sample(s) marked other_method", instrument_id, n)
+    return n
