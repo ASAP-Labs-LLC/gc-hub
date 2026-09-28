@@ -126,7 +126,7 @@ instruments(
   live_since TEXT,                    -- ISO; injections before this are backfill (D11)
   calibration_cdf TEXT, calibration_assignments TEXT,  -- assignments: plain JSON list for this instrument's calibration CDF (re-keyed on migration)
   calibration_sensitivity REAL NOT NULL DEFAULT 50,
-  lem_machine_uid TEXT, correction_map TEXT,          -- 2C
+  lem_machine_uid TEXT,                               -- LabStation routing only (D4b: no LEM corrections)
   token_hash TEXT, token_issued_at TEXT,              -- 2B1
   export_path TEXT,                                   -- hub-side append-only CSV
   method_map TEXT,                    -- JSON {chemstation_method_name_upper: hub_method}, e.g. {"SIMDISB.M":"D2887","SIMDISTB.M":"D2887"}
@@ -139,14 +139,14 @@ samples(
   injection_dt TEXT NOT NULL,         -- canonical: naive datetime.isoformat(sep=" "), exactly as the CSV holds it
   injection_dt_source TEXT NOT NULL,
   method_name TEXT,                   -- the CDF's detection_method_name, e.g. 'SIMDISB.M' ('' if absent)
-  legacy_injection_dt TEXT,           -- v1's (possibly misparsed) string, imports only
+  legacy_injection_dt TEXT,           -- v1's (possibly misparsed) string; set for EVERY CDF-backed sample (parity/importer lookup)
   time_corrected INTEGER NOT NULL DEFAULT 0,  -- 'cdf'|'mtime'  (mtime = the sender's X-GC-Mtime, never the hub receive time)
   cdf_sha256 TEXT UNIQUE,             -- unique across ALL instruments (I18); NULL only for result-only imports
   cdf_path TEXT,                      -- relative to the data dir; NULL only for result-only imports
   legacy_unverified INTEGER NOT NULL DEFAULT 0,  -- imported CSV result with no matching CDF
   source_name TEXT,
   is_blank INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL,               -- see "Status machine"
+  status TEXT NOT NULL,               -- see "Status machine"; validated in code, NO CHECK (so new statuses stay additive)
   backfill INTEGER NOT NULL DEFAULT 0,
   error TEXT,
   current_revision INTEGER,
@@ -184,7 +184,10 @@ agents(instrument_id TEXT PRIMARY KEY, version TEXT, state TEXT, queue_size INTE
   agent_time TEXT, last_seen TEXT, results_seq INTEGER,
   pending_command TEXT)               -- 'restart'|'pause'|'resume'|'retry-rejected'|'adopt-mirror'
 
-corrections_cache(instrument_id TEXT PRIMARY KEY, values TEXT, methods TEXT, fetched_at TEXT)  -- 2C
+instrument_corrections(instrument_id TEXT, cut TEXT, value REAL NOT NULL, updated_at TEXT, updated_by TEXT,
+  PRIMARY KEY(instrument_id, cut))                    -- D4b
+corrections_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, instrument_id TEXT, cut TEXT, old_value REAL,
+  new_value REAL, changed_at TEXT, changed_by TEXT, reason TEXT NOT NULL)   -- D4b, append-only
 standards(id INTEGER PRIMARY KEY, name TEXT, instrument_id TEXT, cdf_path TEXT, added_at TEXT) -- 2A2
 sample_cache(sample_id INTEGER PRIMARY KEY, rules_fingerprint TEXT, flags TEXT,
   bestfit_fingerprint TEXT, best_fit TEXT, fit_score REAL)   -- replaces the JSON caches
