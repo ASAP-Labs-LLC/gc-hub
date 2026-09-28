@@ -77,7 +77,7 @@ SPEC_COLUMNS = {
     "sample_results": {"sample_id", "revision", "results", "d86_uncorrected",
                        "calibration_used", "blank_used", "corrections_used", "best_fit",
                        "fit_score", "flags", "reason", "by", "processed_at", "notes",
-                       "cdf_sha256", "cdf_path"},
+                       "cdf_sha256", "cdf_path", "blank_cdf_sha256", "blank_cdf_path"},
     "conflicts": {"id", "instrument_id", "lab_id", "injection_dt", "existing_sample_id",
                   "cdf_sha256", "cdf_path", "received_at", "resolved", "resolved_by",
                   "resolved_at", "error"},
@@ -536,6 +536,25 @@ def test_add_revision_records_the_samples_cdf_by_default(gc1):
     assert (r2["cdf_sha256"], r2["cdf_path"]) == ("sha-two", "cdf/gc1/conflicts/x.CDF")
 
 
+def test_add_revision_records_the_blanks_file(gc1):
+    blank = _sample(gc1, lab_id="Blank", sha="blank-one", is_blank=1)
+    bpath = store.samples.get(blank, db=gc1)["cdf_path"]
+    sid = _sample(gc1, lab_id="40306")
+    with store.connection(gc1) as conn:
+        with store.write_txn(conn):
+            store.add_revision(conn, sid, {"a": 1}, reason="processed", blank_used=blank)
+            store.add_revision(conn, sid, {"a": 2}, reason="reprocess", blank_used=blank,
+                               blank_cdf_sha256="blank-old", blank_cdf_path="cdf/old.CDF")
+            store.add_revision(conn, sid, {"a": 3}, reason="export-lims", blank_used=blank,
+                               blank_cdf_sha256=None, blank_cdf_path=None)   # copied as recorded
+            store.add_revision(conn, sid, {"a": 4}, reason="processed")
+    r1, r2, r3, r4 = store.list_revisions(sid, db=gc1)
+    assert (r1["blank_cdf_sha256"], r1["blank_cdf_path"]) == ("blank-one", bpath)
+    assert (r2["blank_cdf_sha256"], r2["blank_cdf_path"]) == ("blank-old", "cdf/old.CDF")
+    assert (r3["blank_cdf_sha256"], r3["blank_cdf_path"]) == (None, None)
+    assert (r4["blank_cdf_sha256"], r4["blank_cdf_path"]) == (None, None)
+
+
 def test_add_revision_of_a_result_only_import_records_no_cdf(gc1):
     sid = store.samples.insert_received("gc1", "40999", "2026-09-25 00:24:50", "csv",
                                         cdf_sha256=None, cdf_path=None, db=gc1)
@@ -816,6 +835,42 @@ def test_fail_retry_with_queued_twin_supersedes(gc1):
     twin = store.jobs.get(j2, db=gc1)
     assert twin["state"] == "queued"
     assert twin["not_before"] == (T0 + timedelta(minutes=5)).isoformat(timespec="microseconds")
+
+
+REPLACE = {"reason": "replace", "conflict_id": 7, "by": "ryan"}
+
+
+def test_enqueue_never_overwrites_a_replace_with_a_plain_payload(gc1):
+    sid = _sample(gc1)
+    j = store.jobs.enqueue("process", dict(REPLACE, sample_id=sid), sample_id=sid, db=gc1)
+    assert store.jobs.enqueue("process", {"sample_id": sid, "reason": "reprocess"},
+                              sample_id=sid, db=gc1) == j
+    assert store.jobs.get(j, db=gc1)["payload"]["reason"] == "replace"
+    newer = dict(REPLACE, sample_id=sid, conflict_id=8)
+    store.jobs.enqueue("process", newer, sample_id=sid, db=gc1)      # replace over replace: last wins
+    assert store.jobs.get(j, db=gc1)["payload"]["conflict_id"] == 8
+
+
+def test_fail_retry_carries_a_replace_onto_the_queued_twin(gc1):
+    sid = _sample(gc1)
+    j1 = store.jobs.enqueue("process", dict(REPLACE, sample_id=sid), sample_id=sid, db=gc1)
+    store.jobs.claim_next(T0, db=gc1)
+    j2 = store.jobs.enqueue("process", {"sample_id": sid}, sample_id=sid, db=gc1)
+    store.jobs.fail(j1, "locked", retry_at=T0 + timedelta(minutes=1), db=gc1)
+    assert store.jobs.get(j1, db=gc1)["state"] == "superseded"
+    twin = store.jobs.get(j2, db=gc1)
+    assert twin["state"] == "queued" and twin["payload"] == dict(REPLACE, sample_id=sid)
+
+
+def test_requeue_stale_running_carries_a_replace_onto_the_queued_twin(gc1):
+    sid = _sample(gc1)
+    store.jobs.enqueue("process", dict(REPLACE, sample_id=sid), sample_id=sid, db=gc1)
+    store.jobs.claim_next(T0, db=gc1)
+    j2 = store.jobs.enqueue("process", {"sample_id": sid}, sample_id=sid, db=gc1)
+    store.jobs.requeue_stale_running(db=gc1)
+    queued = store.jobs.list(state="queued", db=gc1)
+    assert [j["id"] for j in queued] == [j2]
+    assert queued[0]["payload"] == dict(REPLACE, sample_id=sid)
 
 
 def test_claim_next_skips_poison_payload(db):
