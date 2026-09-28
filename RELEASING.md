@@ -24,7 +24,11 @@ you: git tag -a v1.2.3 && git push origin v1.2.3
         │     GC_REQUIRE_DEPS=1 (a missing dep fails, never skips), identity
         │     checks against coa-reviewer's latest release, a dry-run package;
         │     plus an advisory Windows 3.14 install + /healthz boot
-        │  red means no release
+        │  job exports = .github/workflows/exports-ci.yml: the export tests
+        │     on Windows (file locking and share semantics for real)
+        │  job agent = .github/workflows/agent-ci.yml: the GC-PC agent on
+        │     Python 3.9 and 3.14, Linux and Windows
+        │  any of them red means no release
         │  job publish (the only job with a write token), from a fresh checkout,
         │  runs scripts/package_release.sh <tag> dist, which
         │     copies tracked source only (state and dev files excluded by name)

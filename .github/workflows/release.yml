@@ -18,13 +18,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The same checks as every push (.github/workflows/ci.yml). A red suite never
-  # releases.
+  # The same checks as every push (.github/workflows/ci.yml, exports-ci.yml and
+  # agent-ci.yml). A red suite never releases.
   test:
     uses: ./.github/workflows/ci.yml
 
+  # The append-only export tests on Windows (msvcrt locking, share semantics).
+  exports:
+    uses: ./.github/workflows/exports-ci.yml
+
+  # The GC-PC agent on the PCs' own Pythons (3.9 and 3.14, Linux and Windows).
+  agent:
+    uses: ./.github/workflows/agent-ci.yml
+
   publish:
-    needs: test
+    needs: [test, exports, agent]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Creating a release needs this. Without it a repo whose default token is
@@ -35,7 +43,7 @@ jobs:
     steps:
       # A fresh checkout of the tag. The token is not written into .git/config;
       # gh reads it from GH_TOKEN in the one step that needs it.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 

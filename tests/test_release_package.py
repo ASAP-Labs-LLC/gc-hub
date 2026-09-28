@@ -549,7 +549,22 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_tests_come_from_ci(self):
         self.assertIn("uses: ./.github/workflows/ci.yml", self.jobs["test"])
-        self.assertRegex(self.jobs["publish"], r"needs: \[?test\]?")
+        self.assertRegex(self.jobs["publish"], r"needs: \[?test\b")
+
+    def test_publish_also_needs_the_exports_and_agent_suites(self):
+        # A red Windows export suite or GC-PC agent suite never releases either.
+        self.assertIn("uses: ./.github/workflows/exports-ci.yml", self.jobs["exports"])
+        self.assertIn("uses: ./.github/workflows/agent-ci.yml", self.jobs["agent"])
+        m = re.search(r"needs: \[([^\]]*)\]", self.jobs["publish"])
+        self.assertIsNotNone(m, "publish must list its needs")
+        self.assertEqual({n.strip() for n in m.group(1).split(",")},
+                         {"test", "exports", "agent"})
+        for name in ("exports-ci.yml", "agent-ci.yml"):
+            text = (WF / name).read_text()
+            self.assertIn("workflow_call:", _top(text), name)
+            self.assertRegex(_top(text), r"permissions:\s*\n\s+contents: read", name)
+        for job in ("exports", "agent"):
+            self.assertNotIn("contents: write", self.jobs[job])
 
     def test_write_token_only_in_publish(self):
         self.assertNotIn("contents: write", _top(self.wf))
@@ -586,6 +601,22 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertRegex(top, r"concurrency:\s*\n\s+group: release")
         self.assertIn("cancel-in-progress: false", top)
 
+
+
+class ActionVersionTests(unittest.TestCase):
+    """Every workflow uses the same, Node-24-era major of each actions/* step."""
+
+    MAJORS = {"actions/checkout": 7, "actions/setup-python": 7, "actions/setup-node": 7}
+
+    def test_actions_are_on_the_current_majors_everywhere(self):
+        seen = {}
+        for wf in sorted(WF.glob("*.yml")):
+            for action, ref in re.findall(r"uses: (actions/[\w-]+)@(\S+)", wf.read_text()):
+                seen.setdefault(action, set()).add(ref)
+                if action in self.MAJORS:
+                    self.assertEqual(ref, f"v{self.MAJORS[action]}", f"{wf.name}: {action}@{ref}")
+        for action in ("actions/checkout", "actions/setup-python", "actions/setup-node"):
+            self.assertIn(action, seen)
 
 
 def _step_script(job_text, step_name):
