@@ -93,7 +93,12 @@ into the hub is Lane A's job after 2A1.
 ```python
 # corrections.py
 D86_CUTS = ["IBP","5%","10%","20%","30%","50%","70%","80%","90%","95%","FBP"]
-DEFAULT_CORRECTION_MAP = {  # LEM test_name -> D86 cut (mirrors distill._D86_CORRECTION_TEST_MAP)
+# AMENDED 2026-09-28 (Lane C review): two maps. The LEM default is the five real LEM method names
+# ("ASTM D2887/D86 - Distillation in Petroleum Products, IBP" / ", 10% Recovery" / ", 50% Recovery"
+# / ", 90% Recovery" / ", FBP" -> IBP/10%/50%/90%/FBP). The fixed 11-name map below is
+# PHASE1_FILE_MAP, used ONLY by FileProvider. `values` holds mapped cuts only, and a missing cut counts
+# as 0.0 in comparisons. The cache is keyed by (lem_machine_uid, map_key). 401/403 count as unreachable.
+PHASE1_FILE_MAP = {  # phase-1 JSON test_name -> D86 cut (mirrors distill._D86_CORRECTION_TEST_MAP)
   "IBP - D86":"IBP","5% - D86":"5%","10% - D86":"10%","20% - D86":"20%","30% - D86":"30%",
   "50% - D86":"50%","70% - D86":"70%","80% - D86":"80%","90% - D86":"90%","95% - D86":"95%",
   "FBP - D86":"FBP"}
