@@ -484,10 +484,17 @@ def test_reprocess_of_a_final_sample_without_corrections_keeps_it_final(hub):
     pipeline.request_reprocess(sid, by="ryan", use_current_corrections=True, db=hub.db)
     _run(hub)
     s = hub.sample(sid)
-    assert (s["status"], s["current_revision"], s["error"]) == ("final", 1, None)
+    assert (s["status"], s["current_revision"]) == ("final", 1)
+    assert s["error"].startswith("last reprocess failed: ") and "does not exist" in s["error"]
     failed = store.jobs.list(state="failed", kind="process", db=hub.db)
     assert len(failed) == 1 and "does not exist" in failed[0]["last_error"]
     assert _queued(hub, sid) == []
+    # the next successful reprocess clears it
+    hub.corrections.write_text(json.dumps({"Agilent GC": {"IBP - D86": {"correction_value": -1}}}))
+    pipeline.request_reprocess(sid, by="ryan", db=hub.db)
+    _run(hub)
+    s = hub.sample(sid)
+    assert (s["status"], s["current_revision"], s["error"]) == ("final", 2, None)
 
 
 def test_reprocess_of_a_final_sample_that_errors_keeps_it_final(hub):

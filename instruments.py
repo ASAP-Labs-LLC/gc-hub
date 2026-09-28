@@ -22,6 +22,12 @@ and sensitivity copied; the default ``method_map``; ``live_since`` = now, so
 only injections from then on export automatically, D11). After that the row
 is the source of truth and ``settings.json``'s calibration keys are not read
 again for processing.
+
+``startup(app_conf, notifier, ...)`` is the hub's one start-up call (T4/T5
+wire it): ``store.migrate`` → ``bootstrap_gc1`` → ``pipeline.Worker.start()``
+(which sweeps ``cdf/.incoming`` leftovers and runs
+``pipeline.requeue_on_start`` before its thread starts). It returns the
+running Worker; call ``.stop()`` on shutdown.
 """
 from __future__ import annotations
 
@@ -175,3 +181,28 @@ def bootstrap_gc1(global_conf: Dict[str, str], *, db: store.Db = None,
             }, db=conn)
     log.info("instruments: created %s from settings.json (live since %s)", GC1, row["live_since"])
     return row
+
+
+def startup(app_conf: Dict[str, str], notifier=None, *, db: store.Db = None,
+            data_dir: Optional[Path] = None, conf_fn=None, **worker_kw):
+    """Start the hub's processing: migrate the store, create ``gc1`` from
+    ``app_conf`` (``settings.json``) if needed, then start the one
+    ``pipeline.Worker`` (sweep ``.incoming``, requeue, thread) and return it.
+
+    ``notifier(level, message)`` receives the pipeline's notifications (e.g.
+    ``notifications.get_store().add``). ``db`` defaults to
+    ``<data_dir>/gc.db`` and ``data_dir`` to ``paths.data_dir()``;
+    ``conf_fn`` (default ``settings.load_settings``) supplies the global
+    settings per job. Other keywords go to ``pipeline.Worker``.
+    """
+    import pipeline  # deferred: pipeline imports this module
+    data = Path(data_dir) if data_dir is not None else paths.data_dir()
+    if data is None:
+        raise RuntimeError(f"{paths.DATA_ENV} is not set; the hub needs a data folder")
+    db = db if db is not None else data / store.DB_FILENAME
+    if not hasattr(db, "execute"):
+        store.migrate(db)
+    bootstrap_gc1(app_conf, db=db)
+    worker = pipeline.Worker(db=db, data_dir=data, conf_fn=conf_fn, notifier=notifier, **worker_kw)
+    worker.start()
+    return worker

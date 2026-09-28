@@ -44,7 +44,7 @@ def test_d2887_compute_is_distill_compute_in_hub_mode(tmp_path):
     assert out == {"row": {}}
     compute.assert_called_once_with(tmp_path / "x.CDF", {"k": "v"}, tmp_path / "b.CDF",
                                     corrections={"IBP": -1.0}, honour_env=False,
-                                    allow_auto=False)
+                                    allow_auto=False, strict_blank=True)
 
 
 def test_d2887_compute_requires_explicit_corrections(tmp_path):
