@@ -35,6 +35,13 @@ Routes::
     GET  /api/standards[?instrument=|for_instrument=]        D12
     POST /api/admin/standards/<sid>/instrument               {instrument_id | null}
 
+**The open GETs** (by design, like ``/api/agents``: the hub has no login and
+listens on the lab LAN) show instrument settings, correction values and their
+history, method names, backfill and conflict listings (hashes and stored file
+names, never server paths) and the standards list; they never show a token or
+its hash. Only changes are gated. The calibration GET runs peak detection, so
+it takes one slot at a time (``PEAK_WAIT_SECONDS``, else 429).
+
 The agent panel uses 2B1's routes (``/api/agents``, installer, revoke-token,
 agent-command, hub-url; ``ingest_api``).
 
@@ -250,10 +257,21 @@ def api_export_adopt(iid):
 
 # ── calibration ─────────────────────────────────────────────────────────────
 
+# This open GET runs peak detection on a CDF: one at a time, and a caller that
+# can't get the slot soon is told to retry (429) instead of queueing CPU work.
+PEAK_WAIT_SECONDS = 5.0
+_PEAK_SLOTS = threading.BoundedSemaphore(1)
+
+
 @bp.route("/api/instruments/<iid>/calibration", methods=["GET"])
 def api_calibration(iid):
-    return jsonify(ia.calibration_view(iid, _conf(), request.args.get("sensitivity"),
-                                       db=_db(), data_dir=_data()))
+    if not _PEAK_SLOTS.acquire(timeout=PEAK_WAIT_SECONDS):
+        return _err("Peak detection is busy; try again in a moment.", 429)
+    try:
+        return jsonify(ia.calibration_view(iid, _conf(), request.args.get("sensitivity"),
+                                           db=_db(), data_dir=_data()))
+    finally:
+        _PEAK_SLOTS.release()
 
 
 @bp.route("/api/instruments/<iid>/calibration-candidates", methods=["GET"])

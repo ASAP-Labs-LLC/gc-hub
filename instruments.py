@@ -247,6 +247,6 @@ def startup(app_conf: Dict[str, str], notifier=None, *, db: store.Db = None,
         store.migrate(db)
     bootstrap_gc1(app_conf, db=db)
     worker_kw.setdefault("corrections_provider", corrections_provider(db))
-    worker =pipeline.Worker(db=db, data_dir=data, conf_fn=conf_fn, notifier=notifier, **worker_kw)
+    worker = pipeline.Worker(db=db, data_dir=data, conf_fn=conf_fn, notifier=notifier, **worker_kw)
     worker.start()
     return worker
