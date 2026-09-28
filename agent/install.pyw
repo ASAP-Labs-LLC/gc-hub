@@ -42,6 +42,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from pathlib import Path
 
@@ -300,15 +301,31 @@ def update_running(launcher, root, hub_url, token, ui):
     """The agent is running: change only hub_url and token in agent.json.
     The agent notices the file changed and reloads it (no restart needed)."""
     cfg_path = Path(root) / "agent.json"
-    try:
-        raw = json.loads(cfg_path.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise ValueError("not an object")
-    except (OSError, ValueError) as exc:
-        raise InstallError("The GC agent is running but its agent.json cannot be read (%s). "
-                           "Quit it from its tray icon, then run the installer again." % exc)
-    raw["hub_url"], raw["token"] = hub_url, token
-    launcher.atomic_write_text(cfg_path, json.dumps(raw, indent=2, sort_keys=True) + "\n")
+
+    def read():
+        try:
+            raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("not an object")
+            return raw
+        except (OSError, ValueError) as exc:
+            raise InstallError("The GC agent is running but its agent.json cannot be read (%s). "
+                               "Quit it from its tray icon, then run the installer again." % exc)
+
+    # The running agent may write agent.json itself (Pause/Resume) between our
+    # read and write, from a copy it read before ours. So: re-read right before
+    # writing, merge only our two keys, then check they stuck; retry if not.
+    for _attempt in range(5):
+        raw = read()
+        raw["hub_url"], raw["token"] = hub_url, token
+        launcher.atomic_write_text(cfg_path, json.dumps(raw, indent=2, sort_keys=True) + "\n")
+        time.sleep(0.2)
+        now = read()
+        if now.get("hub_url") == hub_url and now.get("token") == token:
+            break
+    else:
+        raise InstallError("agent.json kept changing under the installer; quit the GC agent "
+                           "from its tray icon and run the installer again.")
     ui.info("The GC agent is running, so only its hub URL and token were updated in "
             "agent.json; it picks them up within a few seconds. Nothing else was changed.")
 

@@ -49,7 +49,9 @@ log = logging.getLogger("gc_launcher")
 
 
 # ── small file helpers ───────────────────────────────────────────────────
-def atomic_write_text(path, text):
+def atomic_write_text(path, text, retries=10):
+    """Temp file + fsync + os.replace, retried briefly on Windows sharing
+    violations (another process has the target open for a moment)."""
     path = Path(path)
     fd, tmp = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent))
     try:
@@ -57,7 +59,14 @@ def atomic_write_text(path, text):
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, str(path))
+        for attempt in range(retries):
+            try:
+                os.replace(tmp, str(path))
+                break
+            except PermissionError:
+                if attempt == retries - 1:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
     except BaseException:
         try:
             os.unlink(tmp)
