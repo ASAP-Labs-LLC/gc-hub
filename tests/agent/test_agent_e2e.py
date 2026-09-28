@@ -87,7 +87,7 @@ def test_agent_sends_a_dropped_cdf_and_mirrors_its_row(tmp_path, hub):
 
 
 def _builder():
-    p = REPO / "scripts" / "build_agent_zip.py"
+    p = REPO / "agent" / "build_package.py"
     loader = importlib.machinery.SourceFileLoader("build_agent_zip_e2e", str(p))
     spec = importlib.util.spec_from_loader("build_agent_zip_e2e", loader)
     mod = importlib.util.module_from_spec(spec)

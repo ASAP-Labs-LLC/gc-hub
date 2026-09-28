@@ -26,7 +26,7 @@ def _load(path, name):
     return mod
 
 
-BUILDER = _load(REPO / "scripts" / "build_agent_zip.py", "build_agent_zip_i")
+BUILDER = _load(REPO / "agent" / "build_package.py", "build_agent_zip_i")
 INSTALL = _load(AGENT / "install.pyw", "gc_install")
 
 

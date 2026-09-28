@@ -7,15 +7,24 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-SOURCES = sorted(list((REPO / "agent").rglob("*.py")) + list((REPO / "agent").glob("*.pyw"))
-                 + [REPO / "scripts" / "build_agent_zip.py"])
+SOURCES = sorted(list((REPO / "agent").rglob("*.py")) + list((REPO / "agent").glob("*.pyw")))
 HUB_MODULES = {p.stem for p in REPO.glob("*.py")}
 STDLIB_OK_THIRD_PARTY = {"pystray", "PIL"}
 
 
 def test_sources_found():
     names = {p.name for p in SOURCES}
-    assert {"agent_main.py", "launcher.pyw", "install.pyw", "core.py"} <= names
+    assert {"agent_main.py", "launcher.pyw", "install.pyw", "core.py", "build_package.py"} <= names
+
+
+def test_package_builder_ships_with_the_hub_release():
+    # The hub (2B1) builds the agent zip at runtime, so the builder must live
+    # under agent/, which scripts/package_release.sh ships (it drops /scripts/).
+    assert (REPO / "agent" / "build_package.py").is_file()
+    assert not (REPO / "scripts" / "build_agent_zip.py").exists()
+    sh = (REPO / "scripts" / "package_release.sh").read_text(encoding="utf-8")
+    assert "--exclude='/scripts/'" in sh
+    assert "/agent" not in sh
 
 
 @pytest.mark.parametrize("path", SOURCES, ids=lambda p: p.name)

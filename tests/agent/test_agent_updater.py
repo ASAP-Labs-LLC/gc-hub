@@ -15,7 +15,7 @@ from gc_agent.client import HubClient
 from gc_agent.updater import UpdateError, Updater, safe_extract
 
 REPO = Path(__file__).resolve().parents[2]
-BUILD = REPO / "scripts" / "build_agent_zip.py"
+BUILD = REPO / "agent" / "build_package.py"
 
 
 def _load_builder():
@@ -74,6 +74,7 @@ def test_build_real_agent_and_cli_prints_sha(tmp_path):
     assert "agent_main.py" in names and "gc_agent/__init__.py" in names
     assert "VERSION" in names and "requirements-agent.txt" in names
     assert not any(n.endswith((".json", ".pyc", ".pyw")) for n in names)
+    assert "build_package.py" not in names
     for n in names:
         assert b"Bearer tok" not in zipfile.ZipFile(str(out)).read(n)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the GC agent's update package (contract §1):
 
-    python scripts/build_agent_zip.py --version v2.3.0 --out dist/gc-agent-v2.3.0.zip
+    python agent/build_package.py --version v2.3.0 --out dist/gc-agent-v2.3.0.zip
 
 The zip's root holds ``agent_main.py``, the ``gc_agent/`` package (``*.py``
 only), ``VERSION`` and ``requirements-agent.txt``. It is built from an
@@ -11,7 +11,9 @@ are deterministic (sorted entries, fixed timestamps and modes), so the same
 source and version always give the same sha256, which is what the agents
 compare. Prints ``<sha256>  <zip name>``.
 
-Stdlib only; the hub (2B1) can import ``build()`` or run this file.
+Stdlib only. It lives in agent/ (not scripts/) because the hub release ships
+agent/ and the hub (2B1) builds the zip at runtime: import ``build()`` or run
+this file. It is not itself part of the zip (allowlist below).
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-DEFAULT_AGENT_DIR = Path(__file__).resolve().parent.parent / "agent"
+DEFAULT_AGENT_DIR = Path(__file__).resolve().parent
 _FIXED_TIME = (1980, 1, 1, 0, 0, 0)
 _ROOT_FILES = ("agent_main.py", "requirements-agent.txt")
 

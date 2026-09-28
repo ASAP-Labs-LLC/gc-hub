@@ -29,7 +29,7 @@ agent/
     core.py        Agent: loop, state, heartbeat, commands, actions queue
     tray.py        pystray + Pillow (optional); colours; menu; status lines
     settings_ui.py tkinter Settings dialog (runs as `agent_main.py --settings`)
-scripts/build_agent_zip.py deterministic package zip; prints sha256
+agent/build_package.py      deterministic package zip; prints sha256 (moved from scripts/ in review)
 tests/agent/               fakehub.py (http.server, all §1 routes), tests per module
 ```
 
