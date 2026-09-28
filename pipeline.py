@@ -58,7 +58,10 @@ Public API
     SubmitResult(outcome, sha256, sample_id, status, conflict_id, instrument_id, message)
         # outcome: 'created' | 'duplicate' | 'cross_instrument' | 'conflict'
     is_blank_name(name) -> bool
-    default_format_line(results_json, source_file) -> str   # v1's csv.writer row, \\r\\n
+    cdf_problem(path) -> str | None      # truncated / no intensity data (submit refuses)
+    export_to_lims(sample_id, *, by, db=None, data_dir=None, format_line=None) -> {revision, seq}
+    release_backfill(sample_id, *, by, db=None, data_dir=None, format_line=None) -> seq
+    resolve_conflict_replace(conflict_id, *, by, conf=None, db=None, data_dir=None) -> job id
     request_reprocess(sample_id, *, by=None, use_current_blank=False,
                       use_current_corrections=False, db=None) -> int (job id)
     on_calibration_saved(instrument_id, *, db=None) -> int      # queues awaiting_calibration
@@ -89,7 +92,7 @@ Injection points:
 * ``format_line(results_json, source_file) -> str``: the frozen export line.
   ``results_json`` is the revision's ``results`` column (JSON text keyed by
   ``CSV_HEADER``), ``source_file`` the hub-relative ``cdf_path``. Default
-  ``default_format_line``; the hub wires ``exports.format_line``.
+  ``exports.format_line`` (the frozen v1 line).
 * ``conf_fn() -> dict``: the global settings (default
   ``settings.load_settings``), overlaid per instrument by
   ``instruments.context``.
@@ -110,8 +113,24 @@ Decisions (where the spec left a choice):
   sender's file stem (v1). The export row keeps the name as
   ``distill.compute`` reads it, except that an empty one is the ``lab_id``.
 * ``injection_dt`` without a CDF stamp is the sender's ``mtime``, truncated
-  to whole seconds; bytes with neither are refused (the hub's receive time is
-  never used). The results' ``InjectionDateTime`` is always ``injection_dt``.
+  to whole seconds (hub-canonical); bytes with neither are refused (the hub's
+  receive time is never used). The results' ``InjectionDateTime`` is always
+  ``injection_dt``. ``legacy_injection_dt`` is exactly what v1 wrote: when
+  v1 fell back to the file time it is the **unrounded** mtime
+  (``datetime.fromtimestamp(st_mtime)``, microseconds included), which is
+  also what ``import_match.read_cdf_meta`` computes. So for a stamp-less CDF
+  the importer's ``injection_dt`` has microseconds and the hub's doesn't;
+  every other identity field agrees (tests/pipeline/test_pipeline_integ.py).
+* The lab ID rule is ``distill.cdf_lab_name`` (shared with the importer),
+  compared with ``import_match.normalise_lab_id``.
+* A file that is shorter than its NetCDF-3 header says, or has no intensity
+  data, is refused (``SubmitRejected``): netCDF4 would zero-fill it and the
+  numbers would be wrong.
+* Revision reasons: ``processed`` (first result), ``corrections-released``
+  (first result of a sample that was held ``pending_corrections``),
+  ``reprocess``, ``replace`` (``resolve_conflict_replace``), ``export-lims``
+  (``export_to_lims``: the current values copied, not recomputed).
+* The export gate is ``store.samples.is_gated`` (one definition, ``GATE_SQL``).
 * A re-sent file that was once held as a conflict (resolved or not) answers
   ``conflict`` with that conflict's id and creates nothing.
 * A reprocess (``request_reprocess``) keeps the recorded blank and
@@ -142,10 +161,12 @@ from typing import Any, Callable, Optional, Union
 
 import corrections as corrections_mod
 import distill
+import exports
 import instruments
 import methods
 import paths
 import store
+from import_match import normalise_lab_id
 
 log = logging.getLogger("pipeline")
 
@@ -178,6 +199,10 @@ class InstrumentDisabled(SubmitRejected):
     holds its queue instead of rejecting the file."""
 
 
+class NotExportable(ValueError):
+    """The sample doesn't pass the export gate (or isn't in a state the action needs)."""
+
+
 @dataclass(frozen=True)
 class SubmitResult:
     """What ``submit`` did.
@@ -208,19 +233,6 @@ def is_blank_name(name: Optional[str]) -> bool:
     return bool(_BLANK_NAME.match((name or "").strip()))
 
 
-def default_format_line(results_json: Union[str, bytes, dict], source_file: str) -> str:
-    """The export line v1 would append for these results: ``csv.writer``'s
-    default dialect (``\\r\\n`` terminator), the ``CSV_HEADER`` columns in
-    order, ``Source File`` = ``source_file``. ``results_json`` is the stored
-    JSON text (a dict is accepted too)."""
-    results = (json.loads(results_json) if isinstance(results_json, (str, bytes))
-               else dict(results_json))
-    results["Source File"] = source_file
-    buf = io.StringIO()
-    csv.writer(buf).writerow([results.get(col, "") for col in distill.CSV_HEADER])
-    return buf.getvalue()
-
-
 def _data_dir(data_dir) -> Path:
     if data_dir is not None:
         return Path(data_dir)
@@ -240,7 +252,7 @@ def _load_conf() -> dict:
 
 
 def _naive_local(value) -> Optional[datetime]:
-    """The sender's file time as a naive local datetime in whole seconds (None stays None)."""
+    """The sender's file time as a naive local datetime, unrounded (None stays None)."""
     if value is None:
         return None
     if isinstance(value, (int, float)):
@@ -256,7 +268,7 @@ def _naive_local(value) -> Optional[datetime]:
         raise TypeError(f"mtime must be a datetime, ISO string or epoch seconds, not {value!r}")
     if value.tzinfo is not None:
         value = value.astimezone().replace(tzinfo=None)
-    return value.replace(microsecond=0)
+    return value
 
 
 def _safe_stem(lab_id: str) -> str:
@@ -276,6 +288,128 @@ def _notify(notifier: Optional[Notifier], level: str, message: str) -> None:
         notifier(level, message)
     except Exception:  # noqa: BLE001 - a notification must never break processing
         log.exception("pipeline: notifier failed")
+
+
+_NC_TYPE_SIZE = {1: 1, 2: 1, 3: 2, 4: 4, 5: 4, 6: 8}
+_INTENSITY_VARS = ("total_intensity", "intensity_values", "intensity", "ordinate_values")
+
+
+class _Header:
+    def __init__(self, data: bytes):
+        self.data = data
+        self.pos = 0
+
+    def take(self, n: int) -> bytes:
+        if self.pos + n > len(self.data):
+            raise ValueError("the header runs past the end of the file")
+        out = self.data[self.pos:self.pos + n]
+        self.pos += n
+        return out
+
+    def int32(self) -> int:
+        return int.from_bytes(self.take(4), "big", signed=False)
+
+    def int64(self) -> int:
+        return int.from_bytes(self.take(8), "big", signed=False)
+
+    def name(self) -> str:
+        n = self.int32()
+        raw = self.take(n)
+        self.take((4 - n % 4) % 4)
+        return raw.decode("utf-8", "replace")
+
+    def attrs(self) -> None:
+        tag, n = self.int32(), self.int32()
+        if tag not in (0, 0x0C) or (tag == 0 and n):
+            raise ValueError("bad attribute list")
+        for _ in range(n):
+            self.name()
+            nc_type, nelems = self.int32(), self.int32()
+            size = _NC_TYPE_SIZE.get(nc_type)
+            if size is None:
+                raise ValueError(f"unknown attribute type {nc_type}")
+            self.take(-(-nelems * size // 4) * 4)
+
+
+def _netcdf3_required_size(path: Path) -> Optional[int]:
+    """The file size a NetCDF-3 (classic or 64-bit offset) header implies:
+    the end of the last variable's data. ``None`` for other formats
+    (netCDF-4/HDF5, CDF-5), which the netCDF library checks itself.
+    ``ValueError`` if the header itself is cut short or malformed."""
+    with open(path, "rb") as fh:
+        head = fh.read(4)
+        if len(head) < 4 or head[:3] != b"CDF" or head[3] not in (1, 2):
+            return None
+        fh.seek(0)
+        data = fh.read(1 << 20)          # headers are small; 1 MiB is plenty
+    h = _Header(data)
+    h.take(4)
+    numrecs = h.int32()
+    if numrecs == 0xFFFFFFFF:            # streaming: record count unknown
+        numrecs = 0
+    tag, ndims = h.int32(), h.int32()
+    dims = []
+    for _ in range(ndims if tag == 0x0A else 0):
+        h.name()
+        dims.append(h.int32())
+    h.attrs()
+    tag, nvars = h.int32(), h.int32()
+    if tag not in (0, 0x0B):
+        raise ValueError("bad variable list")
+    records, required = [], h.pos
+    for _ in range(nvars):
+        h.name()
+        dimids = [h.int32() for _ in range(h.int32())]
+        h.attrs()
+        nc_type, vsize = h.int32(), h.int32()
+        begin = h.int64() if data[3] == 2 else h.int32()
+        size = _NC_TYPE_SIZE.get(nc_type)
+        if size is None or any(d >= len(dims) for d in dimids):
+            raise ValueError("bad variable definition")
+        shape = [dims[d] for d in dimids]
+        if shape and shape[0] == 0:      # the record dimension
+            n = size
+            for d in shape[1:]:
+                n *= d
+            records.append((begin, vsize, n))
+        else:
+            n = size
+            for d in shape:
+                n *= d
+            required = max(required, begin + n)
+    if records and numrecs:
+        recsize = sum(v for _, v, _ in records) if len(records) > 1 else records[0][1]
+        for begin, _vsize, n in records:
+            required = max(required, begin + (numrecs - 1) * recsize + n)
+    return required
+
+
+def cdf_problem(path) -> Optional[str]:
+    """Why this CDF can't be trusted, or ``None``: the file is shorter than its
+    NetCDF-3 header says (an interrupted copy, which netCDF4 would silently
+    zero-fill), or it has no intensity data."""
+    p = Path(path)
+    try:
+        need = _netcdf3_required_size(p)
+    except ValueError as exc:
+        return f"truncated or corrupt NetCDF file: {exc}"
+    if need is not None:
+        have = p.stat().st_size
+        if have < need:
+            return f"truncated NetCDF file: {have} bytes, its header needs {need}"
+    from netCDF4 import Dataset
+    try:
+        with distill._NETCDF_LOCK:
+            with Dataset(p) as ds:
+                vars_lc = {n.lower(): n for n in ds.variables}
+                for key in _INTENSITY_VARS:
+                    if key in vars_lc:
+                        if ds.variables[vars_lc[key]].size == 0:
+                            return "the CDF's intensity data is empty"
+                        return None
+    except Exception as exc:  # noqa: BLE001
+        return f"not a readable CDF: {exc}"
+    return "the CDF has no intensity data (ordinate_values)"
 
 
 def sweep_incoming(data_dir, min_age_seconds: float = 600) -> int:
@@ -381,7 +515,10 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
             source_name = p.name
         if mtime is None:
             mtime = p.stat().st_mtime
-    sender_mtime = _naive_local(mtime)
+    raw_mtime = _naive_local(mtime)                  # exactly as sent (v1's legacy string)
+    sender_mtime = raw_mtime.replace(microsecond=0) if raw_mtime is not None else None
+    mtime_ts = (float(mtime) if isinstance(mtime, (int, float))
+                else raw_mtime.timestamp() if raw_mtime is not None else None)
     sha = hashlib.sha256(body).hexdigest()
 
     known = _existing_result(sha, instrument_id, db)
@@ -395,6 +532,9 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
     final: Optional[Path] = None
     flagged: list = []
     try:
+        problem = cdf_problem(tmp)
+        if problem is not None:
+            raise SubmitRejected(problem)
         fallback = Path(source_name).stem if source_name else None
         try:
             sample, inj, dt_source, method_name, raw_stamp = distill.cdf_identity(
@@ -403,16 +543,13 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
             raise SubmitRejected(f"not a readable CDF: {exc}") from exc
         if dt_source == "mtime" and sender_mtime is None:
             raise SubmitRejected("the CDF has no injection time and no file time was sent")
-        if sender_mtime is not None:
-            ts = sender_mtime.timestamp()
-            os.utime(tmp, (ts, ts))
-        lab_id = sample.strip()
+        lab_id = normalise_lab_id(sample)
         injection_dt = inj.isoformat(sep=" ")
         v1 = distill.v1_parse_injection_datetime(raw_stamp)
         if v1 is not None:
             legacy = v1.isoformat(sep=" ")
         else:   # v1 fell back to the file time
-            legacy = sender_mtime.isoformat(sep=" ") if sender_mtime is not None else injection_dt
+            legacy = raw_mtime.isoformat(sep=" ") if raw_mtime is not None else injection_dt
         conf = conf if conf is not None else _load_conf()
         is_blank = 0
         if is_blank_name(lab_id):
@@ -438,6 +575,8 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
                     cid = store.conflicts.add(instrument_id, lab_id, injection_dt, existing["id"],
                                               sha, _rel(final, data_dir), db=conn)
                     os.replace(tmp, final)
+                    if mtime_ts is not None:
+                        os.utime(final, (mtime_ts, mtime_ts))
                     log.warning("pipeline: %s %s at %s conflicts with sample %s; held as conflict %s",
                                 instrument_id, lab_id, injection_dt, existing["id"], cid)
                     return SubmitResult("conflict", sha, existing["id"], None, cid, instrument_id,
@@ -455,6 +594,8 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
                 if is_blank:
                     flagged = _flag_late_blank(conn, inst, sid, injection_dt, method_name)
                 os.replace(tmp, final)
+                if mtime_ts is not None:
+                    os.utime(final, (mtime_ts, mtime_ts))
         log.info("pipeline: received %s %s at %s as sample %s", instrument_id, lab_id,
                  injection_dt, sid)
         if flagged:
@@ -565,7 +706,7 @@ class Worker:
         self.db = _db(db, self.data_dir)
         self.conf_fn = conf_fn or _load_conf
         self.corrections_provider = corrections_provider
-        self.format_line = format_line or default_format_line
+        self.format_line = format_line or exports.format_line
         self.notifier = notifier
         self.poll_seconds = poll_seconds
         self.now_fn = now_fn or (lambda: datetime.now(timezone.utc))
@@ -681,7 +822,7 @@ class Worker:
         if sample is None:
             store.jobs.fail(job["id"], f"sample {sid} does not exist", db=self.db)
             return
-        reprocess = payload.get("reason") == "reprocess"
+        reprocess = payload.get("reason") in ("reprocess", "replace")
         was_final = sample["status"] == "final"
         if was_final and not reprocess:
             store.jobs.complete(job["id"], db=self.db)
@@ -826,7 +967,14 @@ class Worker:
             "best_fit": row.get("Best Fit") or None,
             "fit_score": float(score) if score not in (None, "") else None,
         }
-        reason = "reprocess" if (reprocess and sample["current_revision"] is not None) else "processed"
+        if sample["current_revision"] is not None and payload.get("reason") == "replace":
+            reason = "replace"
+        elif sample["current_revision"] is not None and reprocess:
+            reason = "reprocess"
+        elif sample["current_revision"] is None and sample["status"] == "pending_corrections":
+            reason = "corrections-released"
+        else:
+            reason = "processed"
         self._write_final(sample, job, results_json=results_json, line=line, reason=reason,
                           by=payload.get("by"), extra=extra, notes=notes, clear_review=fresh_blank,
                           blank_check=blank_check)
@@ -854,12 +1002,116 @@ class Worker:
                         raise _Stale("changed while it was being computed (a newer blank arrived)")
                 rev = store.add_revision(conn, sid, results_json, reason=reason, by=by,
                                          notes=notes, **extra)
-                if not cur["backfill"] or cur["released_at"] is not None:
-                    store.export_rows.append_pending(conn, cur["instrument_id"], sid, rev, line)
                 store.samples.set_status(sid, "final", db=conn)
+                if store.samples.is_gated(sid, db=conn):
+                    store.export_rows.append_pending(conn, cur["instrument_id"], sid, rev, line)
                 if clear_review and cur.get("review_note"):
                     store.samples.update(sid, review_note=None, db=conn)
                 store.jobs.complete(job["id"], db=conn)
         self._stuck.discard(sample["instrument_id"])
         log.info("pipeline: sample %s final at revision %s", sid, rev)
         return rev
+
+
+# ── admin actions (one transaction each) ────────────────────────────────────
+
+_COPIED = ("d86_uncorrected", "calibration_used", "blank_used", "corrections_used", "best_fit",
+           "fit_score", "flags", "notes")
+
+
+def _line_for(sample: dict, rev: dict, format_line) -> str:
+    return (format_line or exports.format_line)(rev["results"], sample["cdf_path"])
+
+
+def export_to_lims(sample_id: int, *, by: Optional[str], db: store.Db = None, data_dir=None,
+                   format_line: Optional[Callable[[str, str], str]] = None) -> dict:
+    """Export to LIMS: a new revision (reason ``export-lims``) copying the current
+    revision's values (no recompute) and its export row, in one transaction.
+    ``NotExportable`` unless the sample passes the gate. Returns
+    ``{"revision", "seq"}``."""
+    db = _db(db, _data_dir(data_dir)) if db is None else db
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            s = store.samples.get(sample_id, db=conn)
+            if s is None:
+                raise NotExportable(f"sample {sample_id} does not exist")
+            if not store.samples.is_gated(sample_id, db=conn):
+                raise NotExportable(f"sample {sample_id} ({s['lab_id']}) is not exportable: "
+                                    f"status {s['status']}, backfill {s['backfill']}, "
+                                    f"released {s['released_at'] or 'no'}")
+            cur = store.get_revision(sample_id, db=conn)
+            if cur is None:
+                raise NotExportable(f"sample {sample_id} has no result")
+            line = _line_for(s, cur, format_line)
+            rev = store.add_revision(conn, sample_id, cur["results"], reason="export-lims", by=by,
+                                     **{k: cur[k] for k in _COPIED})
+            seq = store.export_rows.append_pending(conn, s["instrument_id"], sample_id, rev, line)
+    log.info("pipeline: sample %s exported to LIMS by %s (revision %s)", sample_id, by, rev)
+    return {"revision": rev, "seq": seq}
+
+
+def release_backfill(sample_id: int, *, by: Optional[str], db: store.Db = None, data_dir=None,
+                     format_line: Optional[Callable[[str, str], str]] = None) -> int:
+    """Release a ``final`` backfill sample (D11): set ``released_at``/``by`` and
+    write the export row for its current revision, in one transaction. Returns
+    the row's ``seq``. ``NotExportable`` if it isn't final, isn't backfill, or
+    was already released."""
+    db = _db(db, _data_dir(data_dir)) if db is None else db
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            s = store.samples.get(sample_id, db=conn)
+            if s is None:
+                raise NotExportable(f"sample {sample_id} does not exist")
+            if s["status"] != "final" or s["current_revision"] is None:
+                raise NotExportable(f"sample {sample_id} is {s['status']}, not final")
+            if not s["backfill"]:
+                raise NotExportable(f"sample {sample_id} is not backfill; it exports on its own")
+            if s["released_at"] is not None:
+                raise NotExportable(f"sample {sample_id} was already released")
+            store.samples.update(sample_id, released_at=store.now_iso(), released_by=by, db=conn)
+            if not store.samples.is_gated(sample_id, db=conn):
+                raise NotExportable(f"sample {sample_id} still fails the gate")
+            cur = store.get_revision(sample_id, db=conn)
+            seq = store.export_rows.append_pending(conn, s["instrument_id"], sample_id,
+                                                   cur["revision"], _line_for(s, cur, format_line))
+    log.info("pipeline: backfill sample %s released by %s", sample_id, by)
+    return seq
+
+
+def resolve_conflict_replace(conflict_id: int, *, by: Optional[str], conf: Optional[dict] = None,
+                             db: store.Db = None, data_dir=None) -> int:
+    """Resolve a conflict by replacing the existing sample's CDF with the held one:
+    the conflict is marked ``replaced``; the sample takes the held file's sha,
+    path, method name and blank decision; and a ``process`` job (reason
+    ``replace``, current blank and corrections) is queued, all in one
+    transaction. The old file stays on disk (D7). Returns the job id.
+    ``ValueError`` if the conflict is missing or already resolved."""
+    data_dir = _data_dir(data_dir)
+    db = _db(db, data_dir)
+    c = next((x for x in store.conflicts.list(unresolved_only=False, db=db) if x["id"] == conflict_id),
+             None)
+    if c is None or c["resolved"] is not None:
+        raise ValueError(f"conflict {conflict_id} is missing or already resolved")
+    held = data_dir / c["cdf_path"]
+    _sample, _dt, _src, method_name, _raw = distill.cdf_identity(held)
+    conf = conf if conf is not None else _load_conf()
+    is_blank = 0
+    if is_blank_name(c["lab_id"]):
+        try:
+            limit = float(conf.get("blank_max_intensity_pa", distill.BLANK_MAX_INTENSITY_PA))
+        except (TypeError, ValueError):
+            limit = distill.BLANK_MAX_INTENSITY_PA
+        is_blank = int(distill.is_plausible_blank(held, limit))
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            store.conflicts.resolve(conflict_id, "replaced", by=by or "", db=conn)
+            sid = c["existing_sample_id"]
+            store.samples.update(sid, cdf_sha256=c["cdf_sha256"], cdf_path=c["cdf_path"],
+                                 method_name=method_name, is_blank=is_blank, db=conn)
+            job = store.jobs.enqueue(PROCESS, {
+                "sample_id": sid, "reason": "replace", "by": by,
+                "use_current_blank": True, "use_current_corrections": True,
+            }, sample_id=sid, db=conn)
+    log.info("pipeline: conflict %s resolved by %s: sample %s now holds %s", conflict_id, by,
+             c["existing_sample_id"], c["cdf_path"])
+    return job

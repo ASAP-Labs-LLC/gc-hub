@@ -19,6 +19,7 @@ import pytest
 
 import corrections
 import distill
+import exports
 import pipeline
 import store
 
@@ -86,7 +87,7 @@ def test_final_writes_revision_export_row_and_status(hub):
     rows = [r for r in _exports(hub) if r["sample_id"] == sid]
     assert len(rows) == 1
     assert rows[0]["revision"] == 1
-    assert rows[0]["line"] == pipeline.default_format_line(rev["results"], s["cdf_path"])
+    assert rows[0]["line"] == exports.format_line(rev["results"], s["cdf_path"])
     assert rows[0]["line"].endswith("\r\n")
     # the blank itself is processed without a blank
     b = _rev(hub, blank)
@@ -94,20 +95,6 @@ def test_final_writes_revision_export_row_and_status(hub):
     assert hub.sample(blank)["status"] == "final"
     # the job is done
     assert store.jobs.list(state="queued", db=hub.db) == []
-
-
-def test_default_format_line_is_v1s_csv_writer_row(tmp_path):
-    values = {c: "" for c in distill.CSV_HEADER}
-    values.update({"Lab ID": 'A "q", b', "InjectionDateTime": "2026-09-25 14:23:00",
-                   "2887 IBP": 101.25, "D86 IBP": -3.0, "Fit Score": "0.931"})
-    v1 = tmp_path / "v1.csv"
-    v1.write_text("", encoding="utf-8")
-    distill._append_csv_row(v1, [values[c] if c != "Source File" else "cdf/gc1/x.CDF"
-                                 for c in distill.CSV_HEADER])
-    line = pipeline.default_format_line(json.dumps(values), "cdf/gc1/x.CDF")
-    assert line.encode("utf-8") == v1.read_bytes()
-    # a dict is accepted as well as the stored JSON text
-    assert pipeline.default_format_line(values, "cdf/gc1/x.CDF") == line
 
 
 def test_format_line_is_injectable(hub):
