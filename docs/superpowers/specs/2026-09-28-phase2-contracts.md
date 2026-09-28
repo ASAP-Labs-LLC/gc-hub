@@ -145,6 +145,7 @@ class CdfMeta:
     path: str; sha256: str; lab_id: str; injection_dt: str   # canonical naive isoformat(sep=" ")
     dt_source: str                                           # 'cdf' | 'mtime'
     method_name: str                                         # detection_method_name, trimmed, basename, upper-cased; '' if absent
+    legacy_injection_dt: str                                 # what v1 wrote (fromisoformat-first bug on py>=3.11); == injection_dt when unaffected
 
 @dataclass(frozen=True)
 class CsvRow:
@@ -171,6 +172,7 @@ def dry_run(processed_dir, results_csv, *, instrument_folder) -> MatchReport: ..
 ```
 
 - **Match rule:** a row attaches to a CDF only when the lab IDs are equal
-  (stripped) **and** `injection_dt_raw` equals the CDF's `injection_dt`
-  (canonical string equal). `Source File` prefix matches are never trusted
+  (stripped) **and** `injection_dt_raw` equals the CDF's
+  **`legacy_injection_dt`** (canonical string equal; see spec "Injection
+  time"). `injection_dt` is the corrected time that gets stored. `Source File` prefix matches are never trusted
   on their own. Filenames are never used for identity.

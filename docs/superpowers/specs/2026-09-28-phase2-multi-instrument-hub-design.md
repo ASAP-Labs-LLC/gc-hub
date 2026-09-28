@@ -136,7 +136,9 @@ samples(
   lab_id TEXT NOT NULL,
   injection_dt TEXT NOT NULL,         -- canonical: naive datetime.isoformat(sep=" "), exactly as the CSV holds it
   injection_dt_source TEXT NOT NULL,
-  method_name TEXT,                   -- the CDF's detection_method_name, e.g. 'SIMDISB.M' ('' if absent)  -- 'cdf'|'mtime'  (mtime = the sender's X-GC-Mtime, never the hub receive time)
+  method_name TEXT,                   -- the CDF's detection_method_name, e.g. 'SIMDISB.M' ('' if absent)
+  legacy_injection_dt TEXT,           -- v1's (possibly misparsed) string, imports only
+  time_corrected INTEGER NOT NULL DEFAULT 0,  -- 'cdf'|'mtime'  (mtime = the sender's X-GC-Mtime, never the hub receive time)
   cdf_sha256 TEXT UNIQUE,             -- unique across ALL instruments (I18); NULL only for result-only imports
   cdf_path TEXT,                      -- relative to the data dir; NULL only for result-only imports
   legacy_unverified INTEGER NOT NULL DEFAULT 0,  -- imported CSV result with no matching CDF
@@ -272,6 +274,29 @@ Rules:
   current revision to a **new** path. It is only used to start a clean
   file. Never point LEM at a fresh file without setting its tail offset to
   the end, or LEM re-reads all of history.
+
+### Injection time (v1 parse bug)
+
+- **The bug.** v1's `parse_injection_datetime` tries `datetime.fromisoformat`
+  first. On Python ≥ 3.11 that accepts ChemStation's compact stamp
+  `YYYYMMDDHHMMSS+ZZZZ` for some values, but **misreads** it: the 9th
+  character is taken as the date/time separator. For example,
+  `20260925002450+0000` becomes 02:45:00 instead of 00:24:50.
+- **Scale.** Confirmed in production (sample 40305). About 21% of GC-1's
+  12,541 indexed samples show the tell-tale `:00` seconds. It affects the
+  CSV `InjectionDateTime`, processed filenames, dedupe and ordering. It
+  doesn't affect D2887/D86 values.
+- **Fix in 2A1 (MAJOR).** The hub parses the ANDI compact format with an
+  explicit regex **before** any ISO attempt, and ISO is accepted only when
+  it contains `-` date separators. A golden test pins every stamp form.
+- **Legacy matching (2D).** The matcher computes both the correct time and
+  `legacy_injection_dt`, the string v1 would have written. That is v1's
+  exact parse order on Python ≥ 3.11, which the hub runs, so `fromisoformat`
+  reproduces the bug. It matches CSV rows on the **legacy** string, stores
+  the **correct** time as `injection_dt`, and keeps the legacy string in
+  `samples.legacy_injection_dt`. Samples where the two differ are flagged
+  `time_corrected=1` and counted in the import summary.
+- **Share copies** keep the bug until cutover (Ryan, 2026-09-28).
 
 ### Method detection
 
