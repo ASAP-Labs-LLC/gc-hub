@@ -152,3 +152,50 @@ Strict TDD: every task starts with a failing test (red), then the code
 ### T8: docs and full suite
 - CLAUDE.md: admin password, agent API, activity exclusion.
 - Run the whole suite.
+
+## Deferred to 2A2 (the Instruments page) — review I6
+
+2B1 ships the APIs; the screens that use them move to 2A2, whose
+Instruments page owns every per-instrument control:
+- editing `live_since` (the D11 backfill boundary);
+- the **backfill release** screen (`pipeline.release_backfill` already exists);
+- the **conflicts** screen, Replace / Keep existing
+  (`pipeline.resolve_conflict_replace` and `store.conflicts.resolve` already exist);
+- "Download installer" (with the revoke confirmation, showing `hub_url` from
+  the 409 body), "Revoke token", the hub URL setting, agent commands, and the
+  agent status table from `GET /api/agents`.
+
+**M5 (must):** the Instruments page renders agent-supplied strings
+(`host`, `state`, `last_file`, `last_error`, `version`) and instrument names
+with `textContent` / escaped templates, never `innerHTML`. They come from
+the GC PCs and are not trusted.
+
+## Security review 1 (2026-09-28): fixes, each a test first
+
+- **C1** First-use setup needs a one-time code (`admin-setup-code.txt` in the
+  data folder, 0600, logged at WARNING; deleted on success; regenerated after
+  a reset). The setup route also refuses a `Host` that isn't an IP literal,
+  `localhost`, the machine's own names or the configured `hub_url` host (DNS
+  rebinding).
+- **I1** Each password/code attempt is reserved under a lock before hashing:
+  one in flight per client, counted as a failure up front and refunded on
+  success; a hub-wide budget of 30 failures per 10 minutes; at most two
+  PBKDF2 computations at once.
+- **I2** Heartbeat integers and `after`/`limit` are bounded (0 ≤ v < 2⁶³ for
+  counts); deeply nested JSON is a 400.
+- **I3/I4** `request.max_content_length` = 64 KiB for the heartbeat and every
+  admin/setup JSON body (`app._admin_json_body` too), so a chunked or
+  unauthenticated body can't be large. 413s under `/api/` are JSON.
+- **I5** The installer needs a trustworthy hub URL: the configured one, or
+  the request's host only when it is a non-loopback IP or one of the
+  machine's names; otherwise 409 `needs_hub_url`. The 409 `needs_confirm`
+  body carries `hub_url`. `hub_url` must be `http(s)://host[:port]`.
+- **M1** `POST /api/admin/instruments/<id>/revoke-token`. A disabled
+  instrument's token gets 403 on results and package; its heartbeat is
+  accepted but gets `command: null` (the command stays queued).
+- **M2/M3** `mint_token(require_no_token=)` checks inside the write; the zip
+  is built with a pre-generated token before its hash is stored.
+- **M4** 400 messages carry file base names, never server paths.
+- **M6/M7** DEPLOY.md: setup, reset procedure, legacy mode has no admin.
+- **M8** `change()` is a compare-and-set in one transaction.
+- **M10** The 403 hook overrides only `error` (and adds `setup_url`).
