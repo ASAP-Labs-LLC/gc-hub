@@ -263,5 +263,217 @@ class ReadResultsCsvTests(_TmpCase):
         self.assertEqual(im.read_results_csv(write_csv_text(self.tmp / "e.csv", "")), [])
 
 
+# ── match() works on plain values; no files needed ─────────────────────────
+FOLDER = r"\\ASAPServer\Labsharedrive\Ryan C\GC Data\GC2025\GC2025.1\processed_cdf"
+OTHER = r"\\ASAPServer\Labsharedrive\Ryan C\GC Data\GC2025\GC 2026.5 2887 Advanced analysis\webapp\processed_cdfs2"
+
+
+def mk_cdf(lab, dt, *, name=None, sha=None, source="cdf"):
+    name = name or f"{lab}_{dt[:10]}.CDF"
+    return im.CdfMeta(path=f"/local/copy/{name}", sha256=sha or hashlib.sha256(
+        f"{lab}|{dt}|{name}".encode()).hexdigest(), lab_id=lab, injection_dt=dt,
+        dt_source=source)
+
+
+_LINE = [1]
+
+
+def mk_row(lab, dt, *, source=None, line=None, ibp="1.0"):
+    if line is None:
+        _LINE[0] += 1
+        line = _LINE[0]
+    if source is None:
+        source = FOLDER + "\\" + f"{lab}_x.CDF"
+    values = {c: "" for c in distill.CSV_HEADER}
+    values.update({"Lab ID": lab, "InjectionDateTime": dt, "2887 IBP": ibp,
+                   "Source File": source})
+    return im.CsvRow(line_no=line, lab_id=lab.strip(), injection_dt_raw=dt.strip(),
+                     source_file=source.strip(), values=values)
+
+
+def by_key(report):
+    out = {}
+    for s in report.samples:
+        key = ((s.cdf.lab_id.strip(), s.cdf.injection_dt) if s.cdf
+               else (s.rows[0].lab_id, s.rows[0].injection_dt_raw))
+        out[key] = s
+    return out
+
+
+@unittest.skipUnless(HAVE_DEPS, "needs numpy + netCDF4")
+class MatchTests(unittest.TestCase):
+    def test_exact_match_attaches_the_row(self) -> None:
+        c = mk_cdf("AF26", "2026-09-17 14:29:42")
+        r = mk_row("AF26", "2026-09-17 14:29:42")
+        rep = im.match([c], [r], instrument_folder=FOLDER)
+        self.assertEqual(len(rep.samples), 1)
+        self.assertIs(rep.samples[0].cdf, c)
+        self.assertEqual(rep.samples[0].rows, [r])
+        self.assertEqual((rep.unmatched_rows, rep.dup_sha, rep.no_injection_time,
+                          rep.mixed_rows), ([], [], [], []))
+        self.assertEqual(rep.stats["attached_samples"], 1)
+        self.assertEqual(rep.stats["rows_attached"], 1)
+
+    def test_cdf_lab_id_is_compared_stripped(self) -> None:
+        c = mk_cdf("D2887-12  Std ", "2022-02-24 15:09:25")
+        r = mk_row("D2887-12  Std", "2022-02-24 15:09:25")
+        rep = im.match([c], [r], instrument_folder=FOLDER)
+        self.assertEqual(rep.samples[0].rows, [r])
+
+    def test_repeated_rows_become_revisions_in_csv_order(self) -> None:
+        c = mk_cdf("S1", "2026-01-02 03:04:05")
+        r1 = mk_row("S1", "2026-01-02 03:04:05", line=10, ibp="1")
+        other = mk_row("S2", "2026-01-02 04:00:00", line=11)
+        r2 = mk_row("S1", "2026-01-02 03:04:05", line=12, ibp="2")
+        r3 = mk_row("S1", "2026-01-02 03:04:05", line=30, ibp="3")
+        rep = im.match([c], [r1, other, r2, r3], instrument_folder=FOLDER)
+        s = by_key(rep)[("S1", "2026-01-02 03:04:05")]
+        self.assertEqual([r.values["2887 IBP"] for r in s.rows], ["1", "2", "3"])
+        self.assertEqual(rep.stats["revisions_extra"], 2)
+
+    def test_unmatched_rows_are_result_only_samples_and_listed(self) -> None:
+        r1 = mk_row("GONE", "2025-05-05 05:05:05", line=2)
+        r2 = mk_row("GONE", "2025-05-05 05:05:05", line=3)
+        rep = im.match([], [r1, r2], instrument_folder=FOLDER)
+        self.assertEqual(len(rep.samples), 1)
+        self.assertIsNone(rep.samples[0].cdf)
+        self.assertEqual(rep.samples[0].rows, [r1, r2])
+        self.assertEqual(rep.unmatched_rows, [r1, r2])
+        self.assertEqual(rep.stats["result_only_samples"], 1)
+
+    def test_cdf_without_rows_is_an_orphan(self) -> None:
+        c = mk_cdf("ORPH", "2024-01-01 00:00:00")
+        rep = im.match([c], [], instrument_folder=FOLDER)
+        self.assertEqual(len(rep.samples), 1)
+        self.assertIs(rep.samples[0].cdf, c)
+        self.assertEqual(rep.samples[0].rows, [])
+        self.assertEqual(rep.stats["orphan_cdfs"], 1)
+
+    def test_identical_bytes_are_reported_once_and_not_duplicated(self) -> None:
+        a = mk_cdf("S1", "2026-01-01 00:00:00", name="S1_a.CDF", sha="ab" * 32)
+        b = mk_cdf("S1", "2026-01-01 00:00:00", name="S1_b.CDF", sha="ab" * 32)
+        r = mk_row("S1", "2026-01-01 00:00:00")
+        rep = im.match([b, a], [r], instrument_folder=FOLDER)
+        self.assertEqual(rep.dup_sha, [(a.path, b.path)])
+        self.assertEqual(len(rep.samples), 1)
+        self.assertEqual(rep.samples[0].cdf.path, a.path)
+        self.assertEqual(rep.samples[0].rows, [r])
+
+    def test_mtime_fallback_is_listed_and_matches_only_on_equal_string(self) -> None:
+        c = mk_cdf("NOTIME", "2023-01-26 18:38:52.123456", source="mtime")
+        near = mk_row("NOTIME", "2023-01-26 18:38:52")
+        rep = im.match([c], [near], instrument_folder=FOLDER)
+        self.assertEqual(rep.no_injection_time, [c.path])
+        s = by_key(rep)
+        self.assertEqual(s[("NOTIME", "2023-01-26 18:38:52.123456")].rows, [])
+        self.assertEqual(rep.unmatched_rows, [near])
+
+        exact = mk_row("NOTIME", "2023-01-26 18:38:52.123456")
+        rep2 = im.match([c], [exact], instrument_folder=FOLDER)
+        self.assertEqual(rep2.samples[0].rows, [exact])
+        self.assertEqual(rep2.no_injection_time, [c.path])
+
+    def test_prefix_trap_source_file_is_never_trusted(self) -> None:
+        # app._migrate_csv_header back-filled Source File by filename prefix:
+        # lab "123" got 1234's file. The CDF's own metadata says 1234.
+        c = mk_cdf("1234", "2026-03-03 10:00:00", name="1234_03032026_100000.CDF")
+        r = mk_row("123", "2026-03-03 10:00:00",
+                   source=FOLDER + r"\1234_03032026_100000.CDF")
+        rep = im.match([c], [r], instrument_folder=FOLDER)
+        s = by_key(rep)
+        self.assertEqual(s[("1234", "2026-03-03 10:00:00")].rows, [])
+        self.assertIsNone(s[("123", "2026-03-03 10:00:00")].cdf)
+        self.assertEqual(rep.unmatched_rows, [r])
+
+    def test_same_lab_id_different_time_are_different_samples(self) -> None:
+        c1 = mk_cdf("AF26", "2026-09-17 14:29:42")
+        c2 = mk_cdf("AF26", "2026-09-17 14:50:18")
+        r1 = mk_row("AF26", "2026-09-17 14:29:42")
+        r2 = mk_row("AF26", "2026-09-17 14:50:18")
+        r3 = mk_row("AF26", "2026-09-17 15:00:00")
+        rep = im.match([c2, c1], [r2, r3, r1], instrument_folder=FOLDER)
+        s = by_key(rep)
+        self.assertEqual(s[("AF26", "2026-09-17 14:29:42")].rows, [r1])
+        self.assertEqual(s[("AF26", "2026-09-17 14:50:18")].rows, [r2])
+        self.assertIsNone(s[("AF26", "2026-09-17 15:00:00")].cdf)
+        self.assertEqual(rep.stats["unmatched_same_lab_other_time"], 1)
+
+    def test_rows_from_another_folder_are_mixed_not_attached(self) -> None:
+        c = mk_cdf("AF26", "2026-09-17 14:29:42")
+        mine_upper = mk_row("AF26", "2026-09-17 14:29:42",
+                            source=FOLDER.upper() + r"\AF26_09172026_142942.CDF")
+        theirs = mk_row("AF26", "2026-09-17 14:29:42",
+                        source=OTHER + r"\AF26_09172026_142942.CDF")
+        slashed = mk_row("X", "2026-01-01 00:00:00",
+                         source=FOLDER.replace("\\", "/") + "/X.CDF")
+        sibling = mk_row("Y", "2026-01-01 00:00:00", source=FOLDER + r"2\Y.CDF")
+        no_src = mk_row("Z", "2026-01-01 00:00:00", source="")
+        rep = im.match([c], [mine_upper, theirs, slashed, sibling, no_src],
+                       instrument_folder=FOLDER + "\\")
+        self.assertEqual(rep.mixed_rows, [theirs, sibling])
+        s = by_key(rep)
+        self.assertEqual(s[("AF26", "2026-09-17 14:29:42")].rows, [mine_upper])
+        self.assertNotIn(theirs, rep.unmatched_rows)
+        self.assertEqual(rep.unmatched_rows, [slashed, no_src])
+        self.assertEqual(rep.stats["rows_without_source_file"], 1)
+
+    def test_rows_without_a_key_are_listed_but_not_samples(self) -> None:
+        r1 = mk_row("", "2026-01-01 00:00:00")
+        r2 = mk_row("L", "")
+        rep = im.match([], [r1, r2], instrument_folder=FOLDER)
+        self.assertEqual(rep.samples, [])
+        self.assertEqual(rep.unmatched_rows, [r1, r2])
+        self.assertEqual(rep.stats["rows_missing_key"], 2)
+
+    def test_two_different_cdfs_with_one_key_are_a_collision(self) -> None:
+        a = mk_cdf("S", "2026-01-01 00:00:00", name="a.CDF")
+        b = mk_cdf("S", "2026-01-01 00:00:00", name="b.CDF")
+        r = mk_row("S", "2026-01-01 00:00:00")
+        rep = im.match([b, a], [r], instrument_folder=FOLDER)
+        self.assertEqual(len(rep.samples), 1)
+        self.assertEqual(rep.samples[0].cdf.path, a.path)
+        self.assertEqual(rep.samples[0].rows, [r])
+        self.assertEqual(rep.stats["key_collisions"], [(a.path, b.path)])
+
+    def test_output_is_deterministic_for_any_input_order(self) -> None:
+        import random
+        cdfs = [mk_cdf(f"L{i % 7}", f"2026-01-{1 + i % 9:02d} 00:00:{i:02d}") for i in range(30)]
+        cdfs.append(mk_cdf("L0", "2026-01-01 00:00:00", name="dup.CDF", sha=cdfs[0].sha256))
+        rows = [mk_row(c.lab_id, c.injection_dt, line=100 + i) for i, c in enumerate(cdfs[:20])]
+        rows += [mk_row("R", f"2025-01-01 00:00:{i:02d}", line=200 + i) for i in range(5)]
+        rows += [mk_row("M", "2025-01-01 00:00:00", source=OTHER + r"\M.CDF", line=300)]
+        base = im.match(cdfs, rows, instrument_folder=FOLDER)
+        rng = random.Random(7)
+        for _ in range(5):
+            c2, r2 = cdfs[:], rows[:]
+            rng.shuffle(c2)
+            rng.shuffle(r2)
+            r2.sort(key=lambda r: r.line_no)  # CSV order is the file's order
+            rep = im.match(c2, r2, instrument_folder=FOLDER)
+            self.assertEqual(rep.samples, base.samples)
+            self.assertEqual(rep.dup_sha, base.dup_sha)
+            self.assertEqual(rep.unmatched_rows, base.unmatched_rows)
+            self.assertEqual(rep.stats, base.stats)
+        keys = [(s.cdf.injection_dt if s.cdf else s.rows[0].injection_dt_raw) for s in base.samples]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_stats_add_up(self) -> None:
+        cdfs = [mk_cdf("A", "2026-01-01 00:00:00"), mk_cdf("B", "2026-01-02 00:00:00")]
+        rows = [mk_row("A", "2026-01-01 00:00:00"), mk_row("A", "2026-01-01 00:00:00"),
+                mk_row("C", "2026-01-03 00:00:00"),
+                mk_row("D", "2026-01-04 00:00:00", source=OTHER + r"\D.CDF")]
+        st = im.match(cdfs, rows, instrument_folder=FOLDER).stats
+        self.assertEqual(st["cdfs"], 2)
+        self.assertEqual(st["rows"], 4)
+        self.assertEqual(st["samples"], 3)
+        self.assertEqual(st["attached_samples"], 1)
+        self.assertEqual(st["orphan_cdfs"], 1)
+        self.assertEqual(st["result_only_samples"], 1)
+        self.assertEqual(st["rows_attached"], 2)
+        self.assertEqual(st["unmatched_rows"], 1)
+        self.assertEqual(st["mixed_rows"], 1)
+        self.assertEqual(st["rows"], st["rows_attached"] + st["unmatched_rows"] + st["mixed_rows"])
+
+
 if __name__ == "__main__":
     unittest.main()
