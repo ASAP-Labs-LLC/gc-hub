@@ -191,3 +191,25 @@ Probes from the critic became `tests/import_history/test_import_history_rework.p
   instrument's folder (`same_file_elsewhere`, D2). The importer uses public
   pipeline names only (`existing_result`, `genuine_blank`, `safe_stem`,
   `rel_path`, `load_conf`; the old private names remain as aliases).
+
+## Re-review fixes (2026-09-28, branch d/attachfix)
+
+Tests: `tests/import_history/test_import_history_attachfix.py` (red first).
+
+1. **No attach to an unverifiable, different time** (P13/P13b). The shared
+   `pipeline.match_result_only` sorts candidates: one whose
+   `time_unverifiable=1` and whose time differs from the CDF's correct time
+   is a *suspect*, never attached. Live submit: a normal sample, a
+   `review_note` on both ("possible match with result-only sample N — time
+   unverifiable"), one notification. Importer: `attach_ambiguous_time`,
+   nothing written. Consequence: since every v1 misparse output is a
+   whole-minute time (unverifiable), a CDF now attaches only to a
+   result-only sample stored at its correct time; the earlier C1 test that
+   attached a misparsed time was reversed.
+2. **Live attach, unmapped method** (P15): status and v1 revisions kept,
+   `review_note` "CDF method X not mapped for this instrument".
+3. **Conflicts against a result-only sample** (P16) carry
+   `pipeline.RESULT_ONLY_CONFLICT_REASON` in `conflicts.error` from creation
+   (submit and importer).
+4. `jobs.import_history.last_run(instrument_id)`: the latest run and its CSV
+   path; the summary has `previous_csv` and a warning when the path differs.
