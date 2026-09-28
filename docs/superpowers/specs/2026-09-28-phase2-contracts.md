@@ -144,6 +144,7 @@ class LemProvider:   # 2C
 class CdfMeta:
     path: str; sha256: str; lab_id: str; injection_dt: str   # canonical naive isoformat(sep=" ")
     dt_source: str                                           # 'cdf' | 'mtime'
+    method_name: str                                         # detection_method_name, trimmed, basename, upper-cased; '' if absent
 
 @dataclass(frozen=True)
 class CsvRow:
@@ -161,7 +162,7 @@ class MatchReport:
     dup_sha: list[tuple[str, str]]      # (path, path) identical bytes within the folder
     no_injection_time: list[str]        # CDF paths that needed the mtime fallback
     mixed_rows: list[CsvRow]            # rows whose CDF lives outside this instrument's folder
-    stats: dict
+    stats: dict                         # includes 'method_names': {name: count} ('' = absent)
 
 def read_cdf_meta(path) -> CdfMeta: ...
 def read_results_csv(path) -> list[CsvRow]: ...

@@ -23,7 +23,8 @@ From Ryan:
 | # | Decision |
 |---|---|
 | D1 | Import all history into the hub, tagged by instrument. |
-| D2 | `GC2025.1/processed_cdf` (port 5560) is **GC-1**. `processed_cdfs2` (port 5570, from 2026-09-24) is **GC-2**. |
+| D2 | `GC2025.1/processed_cdf` (port 5560) is **GC-1**. Everything in `processed_cdfs2` is **GC-2**, including rows from June to September 2026 that predate the 5570 instance; Ryan confirmed on 2026-09-28 that the second GC existed before its instance did. |
+| D2b | **Non-conforming chromatograms** (e.g. D7096 gasoline runs on a D2887 instrument) are detected by the CDF's ChemStation method name (`detection_method_name`) and **stored but not processed** (status `other_method`). See "Method detection". |
 | D3 | The agent has a **tray icon** (status, restart, pause, log). The Instruments page mirrors it. The agent **self-updates from the hub** on start, on restart and hourly. |
 | D4 | Corrections come **from LEM, per instrument** (one `machine_uid` per GC). **The hub applies them** and records the values used. LEM's station module must not also apply them to GC results. |
 | D5 | Reprocessing keeps a sample's recorded corrections, and now also its blank, unless the operator explicitly asks for current ones. |
@@ -126,6 +127,7 @@ instruments(
   lem_machine_uid TEXT, correction_map TEXT,          -- 2C
   token_hash TEXT, token_issued_at TEXT,              -- 2B1
   export_path TEXT,                                   -- hub-side append-only CSV
+  method_map TEXT,                    -- JSON {chemstation_method_name_upper: hub_method}, e.g. {"SIMDISB.M":"D2887","SIMDISTB.M":"D2887"}
   created_at TEXT, updated_at TEXT)
 
 samples(
@@ -133,7 +135,8 @@ samples(
   instrument_id TEXT NOT NULL REFERENCES instruments(id),
   lab_id TEXT NOT NULL,
   injection_dt TEXT NOT NULL,         -- canonical: naive datetime.isoformat(sep=" "), exactly as the CSV holds it
-  injection_dt_source TEXT NOT NULL,  -- 'cdf'|'mtime'  (mtime = the sender's X-GC-Mtime, never the hub receive time)
+  injection_dt_source TEXT NOT NULL,
+  method_name TEXT,                   -- the CDF's detection_method_name, e.g. 'SIMDISB.M' ('' if absent)  -- 'cdf'|'mtime'  (mtime = the sender's X-GC-Mtime, never the hub receive time)
   cdf_sha256 TEXT UNIQUE,             -- unique across ALL instruments (I18); NULL only for result-only imports
   cdf_path TEXT,                      -- relative to the data dir; NULL only for result-only imports
   legacy_unverified INTEGER NOT NULL DEFAULT 0,  -- imported CSV result with no matching CDF
@@ -205,6 +208,11 @@ because the version is higher.
   when someone asks**.
 - `error`: processing failed. The message is shown and the sample can be
   reprocessed.
+- `other_method`: the CDF's method name isn't in the instrument's
+  `method_map` (e.g. a D7096 run). Stored, never processed, exported or
+  uploaded, and never deleted. Mapping the name later queues these samples.
+- `review_method`: the CDF has no method name. Held for an admin to
+  classify: map it, or mark it `other_method`.
 
 Rules:
 - "Calibration usable" means a calibration CDF **and** at least two usable
@@ -264,6 +272,34 @@ Rules:
   current revision to a **new** path. It is only used to start a clean
   file. Never point LEM at a fresh file without setting its tail offset to
   the end, or LEM re-reads all of history.
+
+### Method detection
+
+- **Identity comes from the CDF itself:** the global attribute
+  `detection_method_name` (seen values: `SIMDISB.M`, `SIMDISTB.M`).
+  Names are compared case-insensitively, after trimming, and after
+  stripping any directory part.
+- **Each instrument's `method_map`** maps method names to a hub method. A
+  new instrument gets `{"SIMDISB.M":"D2887","SIMDISTB.M":"D2887"}` by
+  default. The 2A1 spike and the 2D dry run confirm the real names.
+- **The worker checks the method before processing:**
+  - mapped → run that hub method's `compute`;
+  - unmapped → `other_method`;
+  - missing or empty → `review_method`.
+  - A sample is never guessed into D2887 from the shape of its
+    chromatogram.
+- **The Instruments page lists "methods seen"** (name, count, first and
+  last seen, mapped or not). Mapping a name queues its `other_method`
+  samples for processing. Unmapping never deletes results; existing
+  revisions stay.
+- **Blanks come only from D2887-mapped runs,** so a D7096 blank is never
+  subtracted from a D2887 sample.
+- **The history import applies the same rule:** unmapped history is
+  imported as `other_method` with its CSV rows kept as revisions, so
+  nothing is lost. The dry run reports a histogram of method names per
+  folder, so the maps can be set before the real import.
+- **The agent sends every CDF.** Classification happens only on the hub,
+  so the agent never needs updating when methods change.
 
 ### Processing per instrument
 
