@@ -3079,54 +3079,28 @@ def api_qbench_upload():
                     _emit_item(idx, lab_id, "error", msg="No standard")
                     continue
                 try:
-                    sample_p = _revision_cdf(sample_row, store.get_revision(sid, rev_no, db=hub_db),
-                                             hub_data)
+                    # The same analysis as the report export (both detection
+                    # channels, the saved range overlays or the item's
+                    # ranges, the revision's calibration anchors).
                     report_params = {
                         "lab_id": lab_id,
-                        "doc_name": item.get("sample_name", "GC Analysis"),
+                        "doc_name": item.get("sample_name") or "GC Analysis",
                         "standard_name": standard_name,
-                        "conclusion": item.get("conclusion", ""),
-                        "bullets": item.get("bullets", ""),
                         "overlay_standards": item.get("overlay_standards", []),
+                        "ranges": item.get("ranges"),
                     }
-                    comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
-                    std_path = comp_dir / f"{standard_name}.CDF"
-                    if not std_path.is_file():
-                        std_path = comp_dir / f"{standard_name}.cdf"
-                    if not std_path.is_file():
+                    for key in ("conclusion", "bullets"):   # empty → the generated text
+                        if item.get(key):
+                            report_params[key] = item[key]
+                    try:
+                        ar, ranges, ladder = _run_export_analysis(sample_row, report_params, conf,
+                                                                  hub_data, hub_db)
+                    except ValueError as exc:
                         fail_count += 1
-                        _emit_item(idx, lab_id, "error", msg=f"Standard '{standard_name}' not found")
+                        _emit_item(idx, lab_id, "error", msg=str(exc))
                         continue
-
-                    q = float(conf.get("analysis_quantile", 0.20))
-                    w = int(conf.get("analysis_window", 301))
-                    sig = float(conf.get("analysis_sigma", 34.0))
-                    tm = float(conf.get("analysis_thresh_marginal", 100))
-                    tmod = float(conf.get("analysis_thresh_moderate", 500))
-                    ts = float(conf.get("analysis_thresh_significant", 2000))
-
-                    t_s, y_s = distill.gc_xy_from_cdf(sample_p)
-                    t_st, y_st = distill.gc_xy_from_cdf(std_path)
-                    if len(t_s) != len(t_st) or not np.allclose(t_s, t_st, atol=1e-6):
-                        y_st = np.interp(t_s, t_st, y_st)
-                    trend_s = compute_trend_line(t_s, y_s, q, w, sig)
-                    trend_st = compute_trend_line(t_s, y_st, q, w, sig)
-                    diff = trend_s - trend_st
-                    cal_times, cal_carbons = _revision_ladder(sample_row, conf, hub_db, hub_data)
-                    segs = detect_deviation_segments(diff, t_s, tm, tmod, ts, cal_times, cal_carbons) if cal_times else []
-
-                    ar = {
-                        "sample_trend": {"x": t_s.tolist(), "y": trend_s.tolist()},
-                        "std_trend": {"x": t_s.tolist(), "y": trend_st.tolist()},
-                        "sample_raw": {"x": t_s.tolist(), "y": y_s.tolist()},
-                        "std_raw": {"x": t_s.tolist(), "y": y_st.tolist()},
-                        "difference": {"x": t_s.tolist(), "y": diff.tolist()},
-                        "segments": segs,
-                        "conclusion": report_params.get("conclusion", ""),
-                        "bullets": report_params.get("bullets", ""),
-                    }
-                    report_bytes = _generate_analysis_report_pdf(report_params, ar,
-                                                                 ladder=(cal_times, cal_carbons))
+                    report_bytes = _generate_analysis_report_pdf(report_params, ar, ranges=ranges,
+                                                                 ladder=ladder)
                     safe_id = _safe_filename(lab_id)
                     out_file = export_dir / f"{safe_id}_analysis.pdf"
                     out_file.write_bytes(report_bytes)
