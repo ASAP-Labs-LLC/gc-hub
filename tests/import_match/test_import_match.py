@@ -366,11 +366,13 @@ FOLDER = r"\\ASAPServer\Labsharedrive\Ryan C\GC Data\GC2025\GC2025.1\processed_c
 OTHER = r"\\ASAPServer\Labsharedrive\Ryan C\GC Data\GC2025\GC 2026.5 2887 Advanced analysis\webapp\processed_cdfs2"
 
 
-def mk_cdf(lab, dt, *, name=None, sha=None, source="cdf"):
+def mk_cdf(lab, dt, *, name=None, sha=None, source="cdf", legacy=None, method="SIMDISB.M"):
     name = name or f"{lab}_{dt[:10]}.CDF"
+    legacy = legacy or dt
     return im.CdfMeta(path=f"/local/copy/{name}", sha256=sha or hashlib.sha256(
         f"{lab}|{dt}|{name}".encode()).hexdigest(), lab_id=lab, injection_dt=dt,
-        dt_source=source)
+        dt_source=source, method_name=method, legacy_injection_dt=legacy,
+        raw_stamp="", v1_injection_dts=tuple(dict.fromkeys((legacy, dt))))
 
 
 _LINE = [1]
@@ -531,7 +533,137 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(len(rep.samples), 1)
         self.assertEqual(rep.samples[0].cdf.path, a.path)
         self.assertEqual(rep.samples[0].rows, [r])
-        self.assertEqual(rep.stats["key_collisions"], [(a.path, b.path)])
+        self.assertEqual(rep.key_collisions, [(a, b)])
+        self.assertEqual(rep.stats["collided_rows"], [r.line_no])
+
+    def test_collision_tie_break_prefers_the_source_file_basename(self) -> None:
+        a = mk_cdf("S", "2026-01-01 00:00:00", name="a.CDF")
+        b = mk_cdf("S", "2026-01-01 00:00:00", name="b.CDF")
+        r = mk_row("S", "2026-01-01 00:00:00", source=FOLDER + r"\B.cdf")
+        rep = im.match([a, b], [r], instrument_folder=FOLDER)
+        self.assertEqual(rep.samples[0].cdf.path, b.path)
+        self.assertEqual(rep.samples[0].rows, [r])
+        self.assertEqual(rep.key_collisions, [(b, a)])
+
+    # ── v1's misparsed injection time (spec "Injection time") ──────────────
+    def test_rows_match_on_the_v1_form_and_on_the_correct_form(self) -> None:
+        c = mk_cdf("40305", "2026-09-25 00:24:50", legacy="2026-09-25 02:45:00")
+        old = mk_row("40305", "2026-09-25 02:45:00", line=5)       # v1 on py >= 3.11
+        new = mk_row("40305", "2026-09-25 00:24:50", line=9)       # v1 on py < 3.11
+        rep = im.match([c], [new, old], instrument_folder=FOLDER)
+        self.assertEqual(len(rep.samples), 1)
+        s = rep.samples[0]
+        self.assertIs(s.cdf, c)
+        self.assertEqual([r.line_no for r in s.rows], [5, 9])       # CSV order
+        self.assertEqual(s.injection_dt, "2026-09-25 00:24:50")    # stored: correct
+        self.assertEqual(rep.stats["v1_misparsed_cdfs"], 1)
+        self.assertEqual(rep.stats["rows_matched_via_v1_form"], 1)
+        self.assertEqual(rep.unmatched_rows, [])
+
+    def test_a_row_matching_two_cdfs_is_a_collision(self) -> None:
+        # A's misparsed legacy string equals B's correct time.
+        a = mk_cdf("S", "2026-09-24 01:02:03", legacy="2026-09-24 10:20:00", name="a.CDF")
+        b = mk_cdf("S", "2026-09-24 10:20:00", name="b.CDF")
+        r = mk_row("S", "2026-09-24 10:20:00", source=FOLDER + r"\a.CDF", line=4)
+        rep = im.match([a, b], [r], instrument_folder=FOLDER)
+        s = by_key(rep)
+        self.assertEqual(s[("S", "2026-09-24 01:02:03")].rows, [r])   # Source File named a
+        self.assertEqual(s[("S", "2026-09-24 10:20:00")].rows, [])
+        self.assertEqual(rep.key_collisions, [(a, b)])
+        self.assertEqual(rep.stats["collided_rows"], [4])
+
+    # ── result-only samples carry the CSV's time ───────────────────────────
+    def test_sample_identity_fields(self) -> None:
+        c = mk_cdf(" L1 ", "2026-01-01 00:00:00", source="mtime")
+        r = mk_row("L2", "2026-01-02 00:00:00")
+        s = by_key(im.match([c], [r], instrument_folder=FOLDER))
+        cdf_s, csv_s = s[("L1", "2026-01-01 00:00:00")], s[("L2", "2026-01-02 00:00:00")]
+        self.assertEqual((cdf_s.lab_id, cdf_s.injection_dt, cdf_s.dt_source),
+                         (" L1 ", "2026-01-01 00:00:00", "mtime"))
+        self.assertEqual((csv_s.lab_id, csv_s.injection_dt, csv_s.dt_source),
+                         ("L2", "2026-01-02 00:00:00", "csv"))
+
+    # ── folders ─────────────────────────────────────────────────────────────
+    def test_instrument_folder_aliases(self) -> None:
+        unc = mk_row("A", "2026-01-01 00:00:01", source=FOLDER + r"\A.CDF")
+        mapped = mk_row("B", "2026-01-01 00:00:02", source=r"Z:\GC2025.1\processed_cdf\B.CDF")
+        other = mk_row("C", "2026-01-01 00:00:03", source=OTHER + r"\C.CDF")
+        rep = im.match([], [unc, mapped, other],
+                       instrument_folder=[FOLDER.lower() + "\\", "z:/GC2025.1/processed_cdf"])
+        self.assertEqual(rep.mixed_rows, [other])
+        by_name = im.match([], [unc, mapped, other], instrument_folder="processed_cdfs2")
+        self.assertEqual(by_name.mixed_rows, [unc, mapped])
+
+    def test_mixed_row_whose_key_matches_a_cdf_here_is_counted(self) -> None:
+        c = mk_cdf("A", "2026-01-01 00:00:01")
+        r = mk_row("A", "2026-01-01 00:00:01", source=OTHER + r"\A.CDF")
+        rep = im.match([c], [r], instrument_folder=FOLDER)
+        self.assertEqual(rep.mixed_rows, [r])
+        self.assertEqual(rep.samples[0].rows, [])
+        self.assertEqual(rep.stats["mixed_but_key_matches_here"], [r.line_no])
+
+    # ── diagnostics ─────────────────────────────────────────────────────────
+    def test_noncanonical_times_are_counted(self) -> None:
+        good = mk_row("A", "2026-01-01 00:00:01")
+        micro = mk_row("B", "2026-01-01 00:00:01.500000")
+        bad = mk_row("C", "01/02/2026 00:00")
+        st = im.match([], [good, micro, bad], instrument_folder=FOLDER).stats
+        self.assertEqual(st["rows_noncanonical_dt"]["count"], 1)
+        self.assertEqual(st["rows_noncanonical_dt"]["examples"], [[bad.line_no, "01/02/2026 00:00"]])
+
+    def test_timezone_is_recorded(self) -> None:
+        st = im.match([], [], instrument_folder=FOLDER).stats
+        self.assertIn("tzname", st["timezone"])
+        self.assertIsInstance(st["timezone"]["utc_offset_seconds"], int)
+
+    def test_near_misses(self) -> None:
+        c = mk_cdf("A", "2026-01-01 10:00:00")
+        rows = [mk_row("A", "2026-01-01 10:00:02", line=2),     # 2 s
+                mk_row("A", "2026-01-01 11:00:00", line=3),     # 1 h
+                mk_row("A", "2026-01-01 10:00:03", line=4),     # 3 s: not near
+                mk_row("A", "2026-01-01 10:30:00", line=5),     # 30 min: not near
+                mk_row("B", "2026-01-01 10:00:01", line=6)]     # other lab
+        st = im.match([c], rows, instrument_folder=FOLDER).stats
+        nm = st["near_misses"]
+        self.assertEqual(nm["count"], 2)
+        self.assertEqual([e["line_no"] for e in nm["examples"]], [2, 3])
+        self.assertEqual(nm["examples"][1]["delta_seconds"], 3600)
+
+    def test_rows_with_layout_problems_are_held(self) -> None:
+        c = mk_cdf("A", "2026-01-01 00:00:01")
+        ok = mk_row("A", "2026-01-01 00:00:01", line=2)
+        short = mk_row("A", "2026-01-01 00:00:01", line=3)
+        weird = mk_row("B", "2026-01-01 00:00:02", line=4)
+        issues = [{"line_no": 3, "kind": "short-row", "detail": ""},
+                  {"line_no": 4, "kind": "decode-error", "detail": ""},
+                  {"line_no": 2, "kind": "full-width-row-under-old-header", "detail": ""}]
+        rep = im.match([c], [ok, short, weird], instrument_folder=FOLDER, csv_issues=issues)
+        self.assertEqual(rep.held_rows, [short, weird])
+        self.assertEqual(rep.samples[0].rows, [ok])
+        self.assertEqual(rep.unmatched_rows, [])
+        self.assertEqual(rep.stats["held_rows"], 2)
+
+    def test_no_injection_time_lists_only_kept_cdfs(self) -> None:
+        a = mk_cdf("N", "2026-01-01 00:00:00.5", name="a.CDF", sha="cd" * 32, source="mtime")
+        b = mk_cdf("N", "2026-01-01 00:00:00.5", name="b.CDF", sha="cd" * 32, source="mtime")
+        rep = im.match([a, b], [], instrument_folder=FOLDER)
+        self.assertEqual(rep.no_injection_time, [a.path])
+        self.assertEqual(rep.stats["no_injection_time"], 1)
+
+    def test_dup_bytes_keep_the_path_a_row_names(self) -> None:
+        a = mk_cdf("S1", "2026-01-01 00:00:00", name="S1_a.CDF", sha="ef" * 32)
+        b = mk_cdf("S1", "2026-01-01 00:00:00", name="S1_b.CDF", sha="ef" * 32)
+        r = mk_row("S1", "2026-01-01 00:00:00", source=FOLDER + r"\S1_b.CDF")
+        rep = im.match([a, b], [r], instrument_folder=FOLDER)
+        self.assertEqual(rep.dup_sha, [(b.path, a.path)])
+        self.assertEqual(rep.samples[0].cdf.path, b.path)
+
+    def test_method_names_histogram(self) -> None:
+        cdfs = [mk_cdf("A", "2026-01-01 00:00:01", method="SIMDISB.M"),
+                mk_cdf("B", "2026-01-01 00:00:02", method="SIMDISB.M"),
+                mk_cdf("C", "2026-01-01 00:00:03", method="")]
+        st = im.match(cdfs, [], instrument_folder=FOLDER).stats
+        self.assertEqual(st["method_names"], {"SIMDISB.M": 2, "": 1})
 
     def test_output_is_deterministic_for_any_input_order(self) -> None:
         import random

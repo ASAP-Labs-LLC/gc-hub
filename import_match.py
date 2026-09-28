@@ -23,7 +23,8 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import asdict, dataclass
+import time
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -306,6 +307,23 @@ def read_results_csv(path) -> list[CsvRow]:
 class MatchedSample:
     cdf: CdfMeta | None         # None = result-only (legacy_unverified)
     rows: list[CsvRow]          # CSV order; last = current revision; [] = orphan CDF
+    # The sample's identity as the store gets it (derived, not passed):
+    lab_id: str = field(init=False)        # CDF sample name verbatim, or the CSV's lab ID
+    injection_dt: str = field(init=False)  # CDF: the CORRECT time; result-only: the CSV string
+    dt_source: str = field(init=False)     # 'cdf' | 'mtime' | 'csv' (result-only)
+
+    def __post_init__(self) -> None:
+        if self.cdf is not None:
+            self.lab_id = self.cdf.lab_id
+            self.injection_dt = self.cdf.injection_dt
+            self.dt_source = self.cdf.dt_source
+        elif self.rows:
+            self.lab_id = self.rows[0].lab_id
+            self.injection_dt = self.rows[0].injection_dt_raw
+            self.dt_source = "csv"
+        else:
+            self.lab_id = self.injection_dt = ""
+            self.dt_source = "csv"
 
 
 @dataclass
@@ -313,16 +331,29 @@ class MatchReport:
     samples: list[MatchedSample]
     unmatched_rows: list[CsvRow]    # also result-only samples above (unless keyless)
     dup_sha: list[tuple[str, str]]  # (kept path, duplicate path), identical bytes
-    no_injection_time: list[str]    # CDF paths that needed the mtime fallback
+    no_injection_time: list[str]    # kept CDFs whose correct time needed the mtime fallback
     mixed_rows: list[CsvRow]        # rows whose Source File is outside instrument_folder
     stats: dict
+    # (kept, other): two CDFs with one identity, or one CSV key matching both
+    key_collisions: list[tuple[CdfMeta, CdfMeta]] = field(default_factory=list)
+    # rows with a layout problem (short/long record, undecodable): never attached
+    held_rows: list[CsvRow] = field(default_factory=list)
+
+
+# CSV issues that make a row's cells untrustworthy: such rows are held.
+HOLDING_ISSUES = frozenset({"short-row", "long-row", "decode-error"})
+
+_CANON_DT = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{6})?$")
+_EXAMPLES = 20
+_NEAR_SECONDS = 2
+_NEAR_MAX_HOURS = 14
 
 
 def _norm_path(p: str) -> str:
     """Windows-style, case-insensitive form for folder comparison: the CSV
     holds UNC paths whose server name varies in case (``ASAPServer`` /
     ``asapserver``)."""
-    return p.strip().replace("/", "\\").rstrip("\\").casefold()
+    return (p or "").strip().replace("/", "\\").rstrip("\\").casefold()
 
 
 def _parent_dir(p: str) -> str:
@@ -330,131 +361,295 @@ def _parent_dir(p: str) -> str:
     return s.rsplit("\\", 1)[0] if "\\" in s else ""
 
 
-def _cdf_key(c: CdfMeta) -> tuple[str, str]:
-    return (c.lab_id.strip(), c.injection_dt)
+def _basename(p: str) -> str:
+    return _norm_path(p).rsplit("\\", 1)[-1]
+
+
+def _folder_aliases(instrument_folder) -> list[str]:
+    if not instrument_folder:
+        return []
+    items = [instrument_folder] if isinstance(instrument_folder, str) else list(instrument_folder)
+    return [n for n in (_norm_path(a) for a in items) if n]
+
+
+def _in_folder(source: str, aliases: list[str]) -> bool:
+    """True when ``source`` lies in one of the aliases. A full path alias
+    matches as a prefix; a bare folder name (no separator, no drive) matches
+    the file's immediate parent folder name."""
+    s = _norm_path(source)
+    parent = s.rsplit("\\", 1)[0] if "\\" in s else ""
+    for a in aliases:
+        if "\\" in a or ":" in a:
+            if s.startswith(a + "\\"):
+                return True
+        elif parent.rsplit("\\", 1)[-1] == a:
+            return True
+    return False
+
+
+def _identity(c: CdfMeta) -> tuple[str, str]:
+    return (normalise_lab_id(c.lab_id), c.injection_dt)
 
 
 def _sample_sort_key(s: MatchedSample):
     if s.cdf is not None:
-        return (s.cdf.injection_dt, s.cdf.lab_id.strip(), s.cdf.path, 0)
-    first = s.rows[0]
-    return (first.injection_dt_raw, first.lab_id, "", first.line_no)
+        return (s.injection_dt, normalise_lab_id(s.lab_id), s.cdf.path, 0)
+    return (s.injection_dt, s.lab_id, "", s.rows[0].line_no)
 
 
-def match(cdfs, rows, *, instrument_folder: str) -> MatchReport:
-    """Pair one instrument's CDFs with its CSV rows (see the module docstring
-    for the identity rule). Deterministic for any order of ``cdfs``; ``rows``
-    must be in CSV order (revision order comes from it).
+def _parse_canonical(s: str) -> datetime | None:
+    if not _CANON_DT.match(s or ""):
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
 
-    * identical bytes: the first path (sorted) is kept, the rest go to
-      ``dup_sha`` and are not samples;
-    * two different CDFs with one (lab ID, time) key: the first path is kept,
-      the other is listed in ``stats['key_collisions']`` and is not a sample
-      (the store's UNIQUE key would refuse it; the importer raises a conflict);
-    * a row whose ``Source File`` is set and not inside ``instrument_folder``
-      goes to ``mixed_rows`` only. An empty ``instrument_folder`` disables the
-      check;
-    * rows with no CDF become one result-only sample per (lab ID, time) and are
-      listed in ``unmatched_rows``; rows with an empty lab ID or time are
-      listed there but can't form a sample;
+
+def _timezone_info() -> dict:
+    offset = datetime.now().astimezone().utcoffset()
+    return {"tzname": list(time.tzname),
+            "utc_offset_seconds": int(offset.total_seconds()) if offset else 0,
+            "note": "mtime fallbacks are this machine's local wall-clock time"}
+
+
+def match(cdfs, rows, *, instrument_folder, csv_issues=None) -> MatchReport:
+    """Pair one instrument's CDFs with its CSV rows. Deterministic for any
+    order of ``cdfs``; ``rows`` must be in CSV order (revision order).
+
+    * **Identity rule.** A row attaches to a CDF when
+      ``normalise_lab_id`` of both are equal and the row's InjectionDateTime
+      equals any string v1 could have written for that CDF
+      (``v1_injection_dts``: the Python >= 3.11 misparse and the correct
+      form). ``Source File`` never attaches a row; its basename only breaks
+      ties between CDFs that already match by metadata.
+    * **Identical bytes:** one path is kept (the one a matching row's Source
+      File names, else the first sorted); the rest go to ``dup_sha``.
+    * **Two CDFs with one identity** (lab ID + correct time), or one CSV key
+      matching several CDFs: the same tie-break picks one; the pairs go to
+      ``key_collisions`` and the rows involved to ``stats['collided_rows']``.
+      A CDF that loses an identity collision is not a sample (the store's
+      UNIQUE key would refuse it).
+    * **Held rows:** rows with a ``HOLDING_ISSUES`` entry in ``csv_issues``
+      are never attached and never result-only.
+    * **Mixed rows:** a row whose Source File is set and not inside any alias
+      of ``instrument_folder`` (str or sequence; case-insensitive, ``/`` and
+      ``\\`` alike, trailing separator ignored; a bare folder name matches the
+      parent folder's name) goes to ``mixed_rows`` only. Empty disables it.
+    * Rows with no CDF become one result-only sample per (lab ID, time),
+      ``dt_source='csv'``, and are listed in ``unmatched_rows``; rows with an
+      empty lab ID or time are listed there but form no sample.
     * CDFs with no rows are orphan samples.
     """
-    folder = _norm_path(instrument_folder or "")
+    aliases = _folder_aliases(instrument_folder)
+    held_lines = {i.get("line_no") for i in (csv_issues or ())
+                  if i.get("kind") in HOLDING_ISSUES}
 
-    # 1. CDFs: dedupe identical bytes, then one CDF per key.
-    by_sha: dict[str, CdfMeta] = {}
-    dup_sha: list[tuple[str, str]] = []
-    by_key: dict[tuple[str, str], CdfMeta] = {}
-    collisions: list[tuple[str, str]] = []
-    for c in sorted(cdfs, key=lambda c: c.path):
-        kept = by_sha.get(c.sha256)
-        if kept is not None:
-            dup_sha.append((kept.path, c.path))
-            continue
-        by_sha[c.sha256] = c
-        key = _cdf_key(c)
-        if key in by_key:
-            collisions.append((by_key[key].path, c.path))
-            continue
-        by_key[key] = c
-    no_injection_time = [c.path for c in sorted(cdfs, key=lambda c: c.path)
-                         if c.dt_source == "mtime"]
-    labs_with_cdf = {k[0] for k in by_key}
-
-    # 2. Rows: split off other instruments' rows, group the rest by key.
-    mixed_rows: list[CsvRow] = []
-    groups: dict[tuple[str, str], list[CsvRow]] = {}
+    # 1. Rows: held, mixed, keyless, then grouped by key in CSV order.
+    held: list[CsvRow] = []
+    mixed: list[CsvRow] = []
     keyless: list[CsvRow] = []
-    rows_without_source = 0
+    groups: dict[tuple[str, str], list[CsvRow]] = {}
+    basenames: dict[tuple[str, str], set] = {}
+    rows_without_source = rows_in_folder = 0
     source_folders: dict[str, int] = {}
+    noncanonical: list[list] = []
+    noncanonical_n = 0
     for r in rows:
         if r.source_file:
             parent = _parent_dir(r.source_file)
             source_folders[parent] = source_folders.get(parent, 0) + 1
         else:
             rows_without_source += 1
-        if (folder and r.source_file
-                and not _norm_path(r.source_file).startswith(folder + "\\")):
-            mixed_rows.append(r)
+        if r.injection_dt_raw and not _CANON_DT.match(r.injection_dt_raw):
+            noncanonical_n += 1
+            if len(noncanonical) < _EXAMPLES:
+                noncanonical.append([r.line_no, r.injection_dt_raw])
+        if r.line_no in held_lines:
+            held.append(r)
             continue
-        if not r.lab_id or not r.injection_dt_raw:
+        if aliases and r.source_file:
+            if not _in_folder(r.source_file, aliases):
+                mixed.append(r)
+                continue
+            rows_in_folder += 1
+        key = (normalise_lab_id(r.lab_id), r.injection_dt_raw)
+        if not key[0] or not key[1]:
             keyless.append(r)
             continue
-        groups.setdefault((r.lab_id, r.injection_dt_raw), []).append(r)
+        groups.setdefault(key, []).append(r)
+        if r.source_file:
+            basenames.setdefault(key, set()).add(_basename(r.source_file))
 
-    # 3. Attach.
+    def names_for(c: CdfMeta) -> set:
+        lab = normalise_lab_id(c.lab_id)
+        out: set = set()
+        for s in _v1_strings(c):
+            out |= basenames.get((lab, s), set())
+        return out
+
+    def preferred(cands: list, names: set) -> CdfMeta:
+        for c in cands:
+            if _basename(c.path) in names:
+                return c
+        return cands[0]
+
+    ordered = sorted(cdfs, key=lambda c: c.path)
+
+    # 2. Identical bytes.
+    by_sha: dict[str, list[CdfMeta]] = {}
+    for c in ordered:
+        by_sha.setdefault(c.sha256, []).append(c)
+    dup_sha: list[tuple[str, str]] = []
+    unique: list[CdfMeta] = []
+    for grp in by_sha.values():
+        kept = preferred(grp, set().union(*(names_for(c) for c in grp)))
+        unique.append(kept)
+        dup_sha.extend((kept.path, c.path) for c in grp if c is not kept)
+    unique.sort(key=lambda c: c.path)
+    dup_sha.sort()
+
+    # 3. One CDF per identity.
+    by_identity: dict[tuple[str, str], list[CdfMeta]] = {}
+    for c in unique:
+        by_identity.setdefault(_identity(c), []).append(c)
+    key_collisions: list[tuple[CdfMeta, CdfMeta]] = []
+    collided_keys: set = set()
+    kept_cdfs: list[CdfMeta] = []
+    for grp in by_identity.values():
+        kept = preferred(grp, set().union(*(names_for(c) for c in grp)))
+        kept_cdfs.append(kept)
+        for c in grp:
+            if c is not kept:
+                key_collisions.append((kept, c))
+            lab = normalise_lab_id(c.lab_id)
+            if len(grp) > 1:
+                collided_keys.update((lab, s) for s in _v1_strings(c))
+    kept_cdfs.sort(key=lambda c: c.path)
+
+    # 4. Attach row groups through every v1 form.
+    index: dict[tuple[str, str], list[CdfMeta]] = {}
+    for c in kept_cdfs:
+        lab = normalise_lab_id(c.lab_id)
+        for s in _v1_strings(c):
+            index.setdefault((lab, s), []).append(c)
+    attached: dict[int, list[CsvRow]] = {}  # id(CdfMeta) -> rows
+    result_only: list[tuple[tuple[str, str], list[CsvRow]]] = []
+    for key, grp in groups.items():
+        cands = index.get(key, [])
+        if not cands:
+            result_only.append((key, grp))
+            continue
+        chosen = preferred(cands, basenames.get(key, set()))
+        if len(cands) > 1:
+            collided_keys.add(key)
+            for c in cands:
+                if c is not chosen and (chosen, c) not in key_collisions:
+                    key_collisions.append((chosen, c))
+        attached.setdefault(id(chosen), []).extend(grp)
+    collided_rows = sorted(r.line_no for key, grp in groups.items()
+                           if key in collided_keys for r in grp)
+
+    # 5. Samples.
     samples: list[MatchedSample] = []
-    unmatched_rows: list[CsvRow] = []
-    attached = orphans = result_only = rows_attached = revisions_extra = 0
-    for key, c in by_key.items():
-        grp = groups.pop(key, [])
+    n_attached = orphans = rows_attached = revisions_extra = via_v1 = 0
+    for c in kept_cdfs:
+        grp = sorted(attached.get(id(c), []), key=lambda r: r.line_no)
         samples.append(MatchedSample(cdf=c, rows=grp))
         if grp:
-            attached += 1
+            n_attached += 1
             rows_attached += len(grp)
             revisions_extra += len(grp) - 1
+            via_v1 += sum(1 for r in grp if r.injection_dt_raw != c.injection_dt)
         else:
             orphans += 1
+
+    cdfs_by_lab: dict[str, list[CdfMeta]] = {}
+    for c in kept_cdfs:
+        cdfs_by_lab.setdefault(normalise_lab_id(c.lab_id), []).append(c)
+    unmatched_rows: list[CsvRow] = []
     same_lab_other_time = 0
-    for key, grp in groups.items():
+    near: list[dict] = []
+    for key, grp in result_only:
         samples.append(MatchedSample(cdf=None, rows=grp))
-        result_only += 1
         revisions_extra += len(grp) - 1
         unmatched_rows.extend(grp)
-        if key[0] in labs_with_cdf:
+        others = cdfs_by_lab.get(key[0], [])
+        if others:
             same_lab_other_time += len(grp)
+        row_dt = _parse_canonical(key[1])
+        if row_dt is None:
+            continue
+        hit = None
+        for c in others:
+            for s in _v1_strings(c):
+                cdt = _parse_canonical(s)
+                if cdt is None:
+                    continue
+                delta = int(round(abs((cdt - row_dt).total_seconds())))
+                if (0 < delta <= _NEAR_SECONDS
+                        or (delta % 3600 == 0 and 0 < delta <= _NEAR_MAX_HOURS * 3600)):
+                    hit = (c, s, delta)
+                    break
+            if hit:
+                break
+        if hit:
+            for r in grp:
+                near.append({"line_no": r.line_no, "lab_id": r.lab_id,
+                             "csv_dt": r.injection_dt_raw, "cdf_dt": hit[1],
+                             "cdf_path": hit[0].path, "delta_seconds": hit[2]})
     unmatched_rows.extend(keyless)
     unmatched_rows.sort(key=lambda r: r.line_no)
-    # Not mixed and has a Source File: v1 said its CDF is in this folder, but
-    # no CDF there carries this (lab ID, time). Mostly mtime-derived times.
-    source_in_folder_unmatched = sum(1 for r in unmatched_rows if r.source_file)
+    near.sort(key=lambda e: e["line_no"])
     samples.sort(key=_sample_sort_key)
+
+    method_names: dict[str, int] = {}
+    for c in kept_cdfs:
+        method_names[c.method_name] = method_names.get(c.method_name, 0) + 1
+    misparsed = [c for c in kept_cdfs if (c.legacy_injection_dt or c.injection_dt) != c.injection_dt]
+    no_injection_time = [c.path for c in kept_cdfs if c.dt_source == "mtime"]
+    mixed_here = [r.line_no for r in mixed
+                  if (normalise_lab_id(r.lab_id), r.injection_dt_raw) in index]
 
     stats = {
         "cdfs": len(cdfs),
-        "cdfs_unique": len(by_sha),
+        "cdfs_unique": len(unique),
         "dup_sha": len(dup_sha),
-        "key_collisions": collisions,
+        "key_collisions": len(key_collisions),
+        "collided_rows": collided_rows,
         "no_injection_time": len(no_injection_time),
+        "v1_misparsed_cdfs": len(misparsed),
+        "v1_misparsed_examples": [[c.path, c.raw_stamp, c.legacy_injection_dt, c.injection_dt]
+                                  for c in misparsed[:_EXAMPLES]],
+        "method_names": dict(sorted(method_names.items(), key=lambda kv: (-kv[1], kv[0]))),
         "rows": len(rows),
         "samples": len(samples),
-        "attached_samples": attached,
+        "attached_samples": n_attached,
         "orphan_cdfs": orphans,
-        "result_only_samples": result_only,
+        "result_only_samples": len(result_only),
         "rows_attached": rows_attached,
+        "rows_matched_via_v1_form": via_v1,
         "revisions_extra": revisions_extra,
         "unmatched_rows": len(unmatched_rows),
         "rows_missing_key": len(keyless),
         "unmatched_same_lab_other_time": same_lab_other_time,
-        "unmatched_source_in_folder": source_in_folder_unmatched,
-        "mixed_rows": len(mixed_rows),
+        # Not mixed and has a Source File: v1 said its CDF is in this folder,
+        # but no CDF here carries this (lab ID, time).
+        "unmatched_source_in_folder": sum(1 for r in unmatched_rows if r.source_file),
+        "near_misses": {"count": len(near), "examples": near[:_EXAMPLES]},
+        "held_rows": len(held),
+        "mixed_rows": len(mixed),
+        "mixed_but_key_matches_here": mixed_here,
+        "rows_in_folder": rows_in_folder,
+        "mixed_warning": bool(rows) and len(mixed) * 2 >= len(rows) and rows_in_folder == 0,
         "rows_without_source_file": rows_without_source,
-        "source_folders": dict(sorted(source_folders.items(),
-                                      key=lambda kv: (-kv[1], kv[0]))),
+        "rows_noncanonical_dt": {"count": noncanonical_n, "examples": noncanonical},
+        "source_folders": dict(sorted(source_folders.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "timezone": _timezone_info(),
     }
-    return MatchReport(samples=samples, unmatched_rows=unmatched_rows,
-                       dup_sha=dup_sha, no_injection_time=no_injection_time,
-                       mixed_rows=mixed_rows, stats=stats)
+    return MatchReport(samples=samples, unmatched_rows=unmatched_rows, dup_sha=dup_sha,
+                       no_injection_time=no_injection_time, mixed_rows=mixed, stats=stats,
+                       key_collisions=key_collisions, held_rows=held)
 
 
 def read_cdf_meta(path) -> CdfMeta:
@@ -558,7 +753,7 @@ def format_summary(report: MatchReport, *, examples: int = 5) -> str:
         add(f"    injection time from CDF: {dts.get('cdf', 0)}; from file mtime: {dts.get('mtime', 0)}")
     add(f"  unreadable CDFs:           {len(st.get('cdf_errors', []))}")
     add(f"  identical bytes (dups):    {st['dup_sha']}")
-    add(f"  same key, different bytes: {len(st['key_collisions'])}")
+    add(f"  same key, different bytes: {st['key_collisions']}")
     add(f"  no injection time (mtime): {st['no_injection_time']}")
     add(f"  CSV rows:                  {st['rows']}")
     add(f"  samples:                   {st['samples']}")
@@ -597,8 +792,8 @@ def format_summary(report: MatchReport, *, examples: int = 5) -> str:
     section("Unreadable CDFs", st.get("cdf_errors", []), lambda e: f"{e[0]}: {e[1]}")
     section("Identical bytes (kept, duplicate)", report.dup_sha,
             lambda d: f"{d[0]}  ==  {d[1]}")
-    section("Same key, different bytes (kept, other)", st["key_collisions"],
-            lambda d: f"{d[0]}  vs  {d[1]}")
+    section("Same key, different bytes (kept, other)", report.key_collisions,
+            lambda d: f"{d[0].path}  vs  {d[1].path}")
     section("No injection time in the CDF (mtime used)", report.no_injection_time, str)
     section("CDF with no sample name (file stem used)", st.get("name_from_filename", []), str)
     section("Attached samples", [s for s in report.samples if s.cdf is not None and s.rows],
