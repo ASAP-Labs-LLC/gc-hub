@@ -9,7 +9,8 @@ Admin jobs (one at a time, in a background thread, polled status)::
 
     POST /api/admin/load-folder          {password, instrument, folder, backfill?}
          → 202 {job}; 400 bad folder; 404 unknown instrument; 409 a job is running
-    POST /api/admin/jobs/status          {password} → {job} (the current or last job)
+    POST /api/admin/jobs/status          {password} → {job} (the current or last job;
+         once it has finished, ``result: {summary}``)
     POST /api/admin/jobs/stop            {password} → {job}; asks the running job (of
          either kind) to stop between batches, by raising from its own progress
          callback (``jobs.load_folder``/``jobs.import_history`` both re-raise with
@@ -17,7 +18,8 @@ Admin jobs (one at a time, in a background thread, polled status)::
 
 ``job`` is ``{id, kind, state: running|done|failed|stopped, params, started_at,
 finished_at, progress: {phase, done, total, file}, counts: {outcome: n},
-recent: [{file, outcome, sample_id, message}], summary, error}``.
+recent: [{file, outcome, sample_id, message}], summary, result, error}``
+(``result`` is ``{summary}`` once a job that produced one has finished).
 ``jobs.load_folder.load_folder`` does the work (read-only on the folder,
 resumable, injection-time order); the running hub Worker processes what it
 submits. ``AdminJobs.start(kind, fn, params)`` is generic: the 2D history
@@ -28,8 +30,12 @@ sample is backfill and is never exported automatically, D11)::
 
     POST /api/admin/import-history/dry-run
          {password, instrument, processed_dir, results_csv?, aliases?, batch_size?}
-         → 200 {summary}; nothing is written. 400 bad folder/CSV/aliases; 404
-           unknown instrument.
+         → 202 {job} at once (v3.0.1: kind ``import-history-dry-run`` on the
+           same runner, one job at a time, stoppable; over a whole share folder
+           it runs for minutes and Cloudflare ends a request after 100 s);
+           the finished job carries ``result: {summary}``; nothing is written.
+           400 bad folder/CSV/aliases; 404 unknown instrument (both before the
+           job); 409 a job is running.
     POST /api/admin/import-history/start
          {password, instrument, processed_dir, results_csv?, aliases?, batch_size?,
           confirm: true}
