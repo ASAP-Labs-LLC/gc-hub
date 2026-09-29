@@ -115,7 +115,8 @@ def test_analysis_returns_the_same_items_text_and_windows(harness):
     assert body["windows"] == content["windows"]
     assert body["params_used"] == content["params_used"]
     assert body["conclusion"] == content["conclusion_generated"]
-    assert body["diff"]["x_range"] == [0, 6.5]
+    t0 = body["diff"]["x"][0]
+    assert body["diff"]["x_range"] == [t0, 6.5] == body["trend"]["x_range"]
     assert "report" not in body and "segments" not in body
     # the spike at 2.0 min is in the report and marked on the plot
     assert body["text"].startswith("• Spiky <b> (C9–C11): HIGHER than Base")
@@ -141,6 +142,7 @@ def test_pdf_footer_lists_parameters_ranges_and_version(harness):
     for path, pdf in harness["pdf_text"].items():
         assert "window 251" in pdf and "marginal ≥120" in pdf, (path, pdf[-1500:])
         assert "x-max 6.5 min" in pdf and "min width 0.05 min" in pdf, path
+        assert "spike max FWHM 0.2 min" in pdf and "spike dominance \u22650.6" in pdf, path
         assert "Spiky <b> C9–C11" in pdf and "Oil C20–C44" in pdf, path
         assert re.search(r"GC hub (dev|v\d)", pdf), path
 

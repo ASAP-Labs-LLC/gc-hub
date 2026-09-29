@@ -58,10 +58,37 @@
         return payload;
     }
 
+    /** The Analysis tab's range overlays from the settings, in the server's
+        order (analysis_core.resolve_report_ranges): a saved list is final,
+        even an empty one ("[]" = no ranges); nothing saved or unreadable →
+        the legacy Gas/Oil keys. Each gets a UI id. */
+    function overlaysFromSettings(settings) {
+        const s = settings || {};
+        let saved = s.analysis_range_overlays;
+        if (typeof saved === 'string' && saved.trim() !== '') {
+            try { saved = JSON.parse(saved); } catch (_) { saved = null; }
+        }
+        if (Array.isArray(saved)) {
+            return saved.map((r, i) => ({
+                id: i + 1, label: r.label, c_start: r.c_start, c_end: r.c_end,
+                color: r.color || '#3fb95044',
+            }));
+        }
+        const num = (v, d) => { const n = parseInt(v, 10); return Number.isFinite(n) ? n : d; };
+        return [
+            { id: 1, label: 'Gas', c_start: num(s.analysis_gas_c_start, 5),
+              c_end: num(s.analysis_gas_c_end, 11), color: '#3fb95044' },
+            { id: 2, label: 'Oil', c_start: num(s.analysis_oil_c_start, 20),
+              c_end: num(s.analysis_oil_c_end, 44), color: '#d2992244' },
+        ];
+    }
+
+    root.overlaysFromSettings = overlaysFromSettings;
     root.rangesForPayload = rangesForPayload;
     root.captureReportParams = captureReportParams;
     root.buildReportItemPayload = buildReportItemPayload;
     if (typeof module !== 'undefined' && module.exports) {
-        module.exports = { rangesForPayload, captureReportParams, buildReportItemPayload };
+        module.exports = { rangesForPayload, captureReportParams, buildReportItemPayload,
+            overlaysFromSettings };
     }
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -188,3 +188,25 @@ def test_export_modal_preview_is_read_only_and_queue_captures_params(page):
     assert item["params"]["thresh_marginal"] == 120
     assert [r["label"] for r in item["ranges"]] == ["Spiky", "Oil"]
     assert "bullets" not in info["payload"] and info["payload"]["thresh_marginal"] == 120
+
+
+def test_saved_empty_overlays_load_as_no_ranges(page):
+    """Phase 3 review (I6): a saved analysis_range_overlays of "[]" means no
+    ranges in the UI too, as on the server; nothing saved → Gas/Oil."""
+    drv, _ = page
+    drv.set_script_timeout(30)
+    got = drv.execute_async_script("""
+        const done = arguments[arguments.length - 1];
+        const realGet = apiGet;
+        const run = async (overlays) => {
+            apiGet = async (url) => {
+                const r = await realGet(url);
+                return url === '/api/settings' ? Object.assign({}, r,
+                    { analysis_range_overlays: overlays }) : r;
+            };
+            try { await loadSettings(); } finally { apiGet = realGet; }
+            return state.rangeOverlays.map(r => r.label);
+        };
+        (async () => done({ empty: await run('[]'), unset: await run('') }))();
+    """)
+    assert got == {"empty": [], "unset": ["Gas", "Oil"]}

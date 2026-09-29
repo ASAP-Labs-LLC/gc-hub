@@ -1,6 +1,7 @@
 // Report payload helpers: custom regions must ride along with every
 // export/queue payload so the final report can draw them.
-const { rangesForPayload, buildReportItemPayload, captureReportParams } =
+const { rangesForPayload, buildReportItemPayload, captureReportParams,
+        overlaysFromSettings } =
     require('../../static/js/report_payload.js');
 
 module.exports = (t) => {
@@ -81,4 +82,22 @@ module.exports = (t) => {
     // no params anywhere → none sent (server uses the saved defaults)
     const p6 = buildReportItemPayload(item);
     t.eq('window' in p6, false);
+
+    // ── overlaysFromSettings mirrors resolve_report_ranges' saved/legacy
+    // order: a saved list is final, even an empty one ("[]" = no ranges)
+    const savedTwo = { analysis_range_overlays: JSON.stringify([
+        { label: 'Gas', c_start: 5, c_end: 11, color: '#f0a50044' },
+        { label: 'Kero', c_start: 12, c_end: 18 }]) };
+    t.eq(overlaysFromSettings(savedTwo), [
+        { id: 1, label: 'Gas', c_start: 5, c_end: 11, color: '#f0a50044' },
+        { id: 2, label: 'Kero', c_start: 12, c_end: 18, color: '#3fb95044' }]);
+    t.eq(overlaysFromSettings({ analysis_range_overlays: '[]' }), []);
+    t.eq(overlaysFromSettings({ analysis_range_overlays: [] }), []);
+    // nothing saved, or unreadable → the legacy Gas/Oil keys
+    const legacy = overlaysFromSettings({ analysis_range_overlays: '',
+        analysis_gas_c_start: '6', analysis_gas_c_end: '12',
+        analysis_oil_c_start: '22', analysis_oil_c_end: '40' });
+    t.eq(legacy.map(r => [r.label, r.c_start, r.c_end]), [['Gas', 6, 12], ['Oil', 22, 40]]);
+    t.eq(overlaysFromSettings({ analysis_range_overlays: '{bad' }).map(r => [r.label, r.c_start, r.c_end]),
+        [['Gas', 5, 11], ['Oil', 20, 44]]);
 };

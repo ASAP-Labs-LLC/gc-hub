@@ -1109,7 +1109,9 @@ def _report_footer_lines(content: dict) -> list[str]:
         f"moderate ≥{p['thresh_moderate']:g}, significant ≥{p['thresh_significant']:g} "
         f"· x-max {p['x_max_min']:g} min · min width {p['min_width_min']:g} min "
         f"· merge gap {p['merge_gap_min']:g} min · spike min width "
-        f"{p['spike_min_width_min']:g} min · spike report ≥{p['spike_report_threshold']:g}")
+        f"{p['spike_min_width_min']:g} min · spike report ≥{p['spike_report_threshold']:g} "
+        f"· spike max FWHM {p['spike_max_fwhm_min']:g} min · spike dominance "
+        f"≥{p['spike_min_dominance']:g}")
     ranges = content.get("ranges") or []
     ranges_line = "Ranges: " + (", ".join(
         f"{r.get('label', 'Range')} C{min(int(r['c_start']), int(r['c_end']))}–"
@@ -2422,7 +2424,7 @@ def api_analysis():
             return _error(str(exc), 404 if "not found" in str(exc) else 400)
         series = content["series"]
         t_list = series["t"].tolist()
-        x_max = content["params_used"]["x_max_min"]
+        x_range = [float(series["t"][0]), content["params_used"]["x_max_min"]]
         cal_times, cal_carbons = content["ladder"]
         return jsonify({
             "sample_id": s["id"],
@@ -2431,9 +2433,9 @@ def api_analysis():
                 "sample_y": series["sample"].tolist(),
                 "standard_x": t_list,
                 "standard_y": series["standard"].tolist(),
-                "x_range": [0, x_max],
+                "x_range": x_range,
             },
-            "diff": {"x": t_list, "y": series["diff"].tolist(), "x_range": [0, x_max]},
+            "diff": {"x": t_list, "y": series["diff"].tolist(), "x_range": x_range},
             "items": content["items"],
             "text": content["text"],
             "windows": content["windows"],

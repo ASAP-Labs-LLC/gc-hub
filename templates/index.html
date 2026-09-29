@@ -868,10 +868,18 @@
           <input type="number" id="set-analysis-spike-width" step="0.005" min="0" max="0.5" style="max-width:100px;">
         </div>
         <div class="form-row">
+          <label for="set-analysis-spike-fwhm">Spike maximum width at half height (min)</label>
+          <input type="number" id="set-analysis-spike-fwhm" step="0.01" min="0" max="2" style="max-width:100px;">
+        </div>
+        <div class="form-row">
+          <label for="set-analysis-spike-dominance">Spike minimum dominance (0&ndash;1)</label>
+          <input type="number" id="set-analysis-spike-dominance" step="0.05" min="0" max="1" style="max-width:100px;">
+        </div>
+        <div class="form-row">
           <label for="set-analysis-spike-report">Spike report threshold (empty = moderate)</label>
           <input type="number" id="set-analysis-spike-report" step="10" min="0" style="max-width:100px;">
         </div>
-        <p style="font-size:11px; color:#7d8590; margin-top:4px;">One bullet per deviating range plus one for everything outside the ranges. A trend run counts when it is at least the minimum width above the marginal threshold; a sharp spike counts when it reaches the spike report threshold. Changing these needs the admin password.</p>
+        <p style="font-size:11px; color:#7d8590; margin-top:4px;">One bullet per deviating range plus one for everything outside the ranges. A trend run counts when it is at least the minimum width above the marginal threshold; a sharp peak counts when it reaches the spike report threshold, is no wider than the maximum width at half height, and its difference is at least the dominance fraction of the local peak (so a height difference of a peak both runs share is not a sharp peak). Changing these needs the admin password.</p>
       </div>
 
       <!-- Comparison standards list inside settings -->

@@ -344,30 +344,10 @@ async function loadSettings() {
         if (s.analysis_thresh_moderate) p.thresh_moderate = parseFloat(s.analysis_thresh_moderate);
         if (s.analysis_thresh_significant) p.thresh_significant = parseFloat(s.analysis_thresh_significant);
         if (s.analysis_x_max_min) p.x_max_min = parseFloat(s.analysis_x_max_min);
-        // Sync range overlays from settings
-        if (s.analysis_range_overlays) {
-            try {
-                const saved = typeof s.analysis_range_overlays === 'string'
-                    ? JSON.parse(s.analysis_range_overlays) : s.analysis_range_overlays;
-                if (Array.isArray(saved) && saved.length > 0) {
-                    state.rangeOverlays = saved.map((r, i) => ({
-                        id: i + 1, label: r.label, c_start: r.c_start, c_end: r.c_end,
-                        color: r.color || '#3fb95044'
-                    }));
-                    state.nextRangeId = state.rangeOverlays.length + 1;
-                }
-            } catch (_) { /* fall through to legacy keys */ }
-        } else {
-            // Legacy: only Gas/Oil by name
-            if (s.analysis_gas_c_start && s.analysis_gas_c_end) {
-                const gas = state.rangeOverlays.find(r => r.label === 'Gas');
-                if (gas) { gas.c_start = parseInt(s.analysis_gas_c_start); gas.c_end = parseInt(s.analysis_gas_c_end); }
-            }
-            if (s.analysis_oil_c_start && s.analysis_oil_c_end) {
-                const oil = state.rangeOverlays.find(r => r.label === 'Oil');
-                if (oil) { oil.c_start = parseInt(s.analysis_oil_c_start); oil.c_end = parseInt(s.analysis_oil_c_end); }
-            }
-        }
+        // Range overlays from settings, as the server resolves them
+        // ("[]" saved = no ranges; nothing saved = the legacy Gas/Oil keys)
+        state.rangeOverlays = overlaysFromSettings(s);
+        state.nextRangeId = state.rangeOverlays.length + 1;
         // Update UI inputs
         populateAnalysisParamInputs();
     } catch (e) {
@@ -1868,10 +1848,10 @@ function addRangeShapes(shapes, annotations, windows) {
     for (const w of (windows || [])) {
         if (!w.evaluable) continue;
         const t0 = w.t0, t1 = w.t1;
-        const overlay = state.rangeOverlays[w.index] || {};
+        const overlay = state.rangeOverlays[w.index] || {};   // fallback colour only
 
         // Parse color (stored as #RRGGBBAA)
-        const hex = (overlay.color || w.color || '#3fb95044').replace('#', '');
+        const hex = (w.color || overlay.color || '#3fb95044').replace('#', '');
         const r = parseInt(hex.slice(0, 2), 16);
         const g = parseInt(hex.slice(2, 4), 16);
         const b = parseInt(hex.slice(4, 6), 16);
@@ -3281,6 +3261,8 @@ function openSettingsModal() {
         'set-analysis-merge-gap': ['analysis_merge_gap_min', '0.10'],
         'set-analysis-spike-width': ['analysis_spike_min_width_min', '0.02'],
         'set-analysis-spike-report': ['analysis_spike_report_threshold', ''],
+        'set-analysis-spike-fwhm': ['analysis_spike_max_fwhm_min', '0.20'],
+        'set-analysis-spike-dominance': ['analysis_spike_min_dominance', '0.6'],
     };
     for (const [elId, [key, dflt]] of Object.entries(bfMap)) {
         const el = document.getElementById(elId);
@@ -3478,6 +3460,8 @@ async function saveSettings() {
         'set-analysis-min-width': 'analysis_min_width_min',
         'set-analysis-merge-gap': 'analysis_merge_gap_min',
         'set-analysis-spike-width': 'analysis_spike_min_width_min',
+        'set-analysis-spike-fwhm': 'analysis_spike_max_fwhm_min',
+        'set-analysis-spike-dominance': 'analysis_spike_min_dominance',
     };
     for (const [elId, key] of Object.entries(bfSaveMap)) {
         const el = document.getElementById(elId);
