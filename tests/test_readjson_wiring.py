@@ -13,9 +13,7 @@ RAW_JSON = re.compile(r"\.json\(\)")
 
 
 def _sources():
-    for p in sorted((ROOT / "static" / "js").glob("*.js")):
-        if p.name != "session.js":          # readJson lives there
-            yield p
+    yield from sorted((ROOT / "static" / "js").glob("*.js"))     # session.js too
     yield from sorted((ROOT / "templates").glob("*.html"))
 
 
@@ -33,6 +31,14 @@ def test_the_pages_that_parse_answers_use_read_json():
                 "static/js/instruments.js", "static/js/diagnostics.js", "static/js/comments.js",
                 "static/js/app.js", "templates/calibration.html"):
         assert "GCSession.readJson(" in (ROOT / rel).read_text(encoding="utf-8"), rel
+
+
+def test_session_js_check_parses_with_read_json():
+    """``checkSession`` (the SSE stream's onerror, ``whoami``) reads
+    ``/api/session`` through ``readJson`` too."""
+    src = (ROOT / "static" / "js" / "session.js").read_text(encoding="utf-8")
+    body = re.search(r"function checkSession\(.*?\n    \}\n", src, re.S).group(0)
+    assert "readJson(" in body, body
 
 
 def test_session_js_is_loaded_first_wherever_read_json_is_used():

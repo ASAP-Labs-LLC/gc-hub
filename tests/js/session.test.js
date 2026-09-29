@@ -4,11 +4,19 @@
 const S = require('../../static/js/session.js');
 
 // A synchronous thenable, so the wrapper can be tested without a runtime.
-function sync(value) { return { then(cb) { return sync(cb(value)); } }; }
-function resp(status, loginHeader) {
+// Like a Promise, a thenable returned from a callback is adopted (flattened).
+function sync(value) {
+    if (value && typeof value.then === 'function') return value;
+    return { then(cb) { return sync(cb(value)); } };
+}
+function resp(status, loginHeader, text, contentType) {
+    const body = text === undefined ? '{"name":"Ryan C","method":"password"}' : text;
+    const ct = contentType === undefined ? 'application/json' : contentType;
     return { status, ok: status >= 200 && status < 300,
-             headers: { get: (k) => (loginHeader && k === 'X-GC-Login-Required' ? '1' : null) },
-             json: () => ({ name: 'Ryan C', method: 'password' }) };
+             headers: { get: (k) => (loginHeader && k === 'X-GC-Login-Required' ? '1'
+                 : (k.toLowerCase() === 'content-type' ? ct : null)) },
+             text: () => sync(body),
+             json: () => { throw new Error('checkSession must parse with readJson'); } };
 }
 
 module.exports = (t) => {
@@ -63,6 +71,14 @@ module.exports = (t) => {
     S.checkSession(fake(200, false), () => { n++; }).then((s) => { who = s; });
     t.eq(n, 1);
     t.eq(who, { name: 'Ryan C', method: 'password' });
+    // parsed with readJson: a web page where /api/session was expected is no session
+    // (never "Unexpected token '<'")
+    const pageFetch = () => sync(resp(200, false, '<!DOCTYPE html><title>Just a moment...</title>',
+        'text/html'));
+    who = 'unset';
+    S.checkSession(pageFetch, () => { n++; }).then((s) => { who = s; });
+    t.eq(who, null);
+    t.eq(n, 1);
 
     readJsonTests(t);
 };
@@ -122,6 +138,18 @@ function readJsonTests(t) {
     // no headers object at all; an empty 204
     t.eq(read({ status: 500, text: () => sync('<html>') }).body, { error: page(500) });
     t.eq(read(mk(204, {}, '')), { status: 204, body: {} });
+
+    // JSON under another content type (or none) is still data, as long as it
+    // parses and is not a web page
+    t.eq(read(mk(200, { 'content-type': 'text/plain' }, '{"a":1}')), { status: 200, body: { a: 1 } });
+    t.eq(read(mk(200, {}, '{"a":1}')), { status: 200, body: { a: 1 } });
+    t.eq(read(mk(400, { 'content-type': 'text/html', 'x-gc-hub': '1' }, ' {"error":"x"}\n')).body,
+        { error: 'x' });
+    t.eq(read(mk(200, { 'content-type': 'text/plain' }, '[1,2]')).body, [1, 2]);
+    t.eq(read(mk(403, { 'content-type': 'text/plain', 'cf-ray': 'x' }, 'error code: 1020')).body,
+        { error: page(403, 'Cloudflare: error code: 1020') });
+    t.eq(read(mk(200, { 'content-type': 'text/html' }, '<html>{"a":1}</html>')).body, { error: page(200) });
+    t.eq(read(mk(500, { 'content-type': 'text/plain' }, '')).body, { error: page(500) });
 
     // the pure part is exported too
     t.eq(S.parseBody(418, hdrs({}), 'teapot'), { error: page(418) });
