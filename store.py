@@ -285,6 +285,11 @@ class SchemaError(RuntimeError):
 
 # ── schema ──────────────────────────────────────────────────────────────────
 
+def _sql_text(text: str) -> str:
+    """A SQL string literal (quotes doubled), for the seed INSERTs in MIGRATIONS."""
+    return "'" + text.replace("'", "''") + "'"
+
+
 # MIGRATIONS[i] takes user_version i to i + 1. Additive only: CREATE TABLE,
 # CREATE INDEX, ALTER TABLE ... ADD COLUMN. Never drop, rename or rewrite.
 MIGRATIONS: tuple[tuple[str, ...], ...] = (
@@ -502,7 +507,7 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         # are inserted exactly once, never again at start-up. Worded for a
         # report: QBench PDFs may reach customers. Timestamps in now_iso() form.
         *(f"""INSERT INTO comment_presets(text, sort, active, created_by, created_at, updated_at)
-              VALUES ('{text}', {sort}, 1, 'seed',
+              VALUES ({_sql_text(text)}, {sort}, 1, 'seed',
                       strftime('%Y-%m-%dT%H:%M:%f000+00:00', 'now'),
                       strftime('%Y-%m-%dT%H:%M:%f000+00:00', 'now'))"""
           for sort, text in enumerate((

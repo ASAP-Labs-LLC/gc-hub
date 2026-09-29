@@ -23,6 +23,8 @@ initials only.
 Limits: text ≤ ``MAX_COMMENT_TEXT`` (500) characters, at most
 ``MAX_ACTIVE_COMMENTS`` (100) non-deleted comments per sample; preset text ≤
 ``MAX_PRESET_TEXT`` (200), at most ``MAX_PRESETS`` (50) active presets.
+Texts lose C0 control characters (tab and newline kept); annotation times
+are 0–1000 min; ids are positive SQLite integers (else 400, never 404).
 
 Every refusal is a ``CommentError`` whose ``status`` is the HTTP status the
 route answers with (400 invalid, 404 unknown sample/comment/preset, 409 a
@@ -59,6 +61,9 @@ MAX_PRESET_TEXT = 200
 MAX_PRESETS = 50
 
 _INITIALS_RE = re.compile(r"^[A-Z]{1,4}$")
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f]")     # C0 controls except \t and \n
+MAX_MINUTES = 1000.0                                   # annotation span bounds, minutes
+MAX_ID = 2 ** 63 - 1                                   # SQLite INTEGER
 
 
 class CommentError(ValueError):
@@ -86,7 +91,7 @@ def _text(raw: Any, limit: int, what: str, *, allow_empty: bool = False) -> str:
         raw = ""
     if not isinstance(raw, str):
         raise CommentError(f"{what} must be text.")
-    value = raw.strip()
+    value = _CONTROL_RE.sub("", raw).strip()
     if not value and not allow_empty:
         raise CommentError(f"{what} is empty.")
     if len(value) > limit:
@@ -95,14 +100,15 @@ def _text(raw: Any, limit: int, what: str, *, allow_empty: bool = False) -> str:
 
 
 def _minutes(raw: Any, name: str) -> float:
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
-        raise CommentError(f"{name} must be a finite number of minutes.")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) \
+            or not 0 <= raw <= MAX_MINUTES:
+        raise CommentError(f"{name} must be a number of minutes from 0 to {MAX_MINUTES:g}.")
     return float(raw)
 
 
 def _int_id(raw: Any, name: str) -> int:
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        raise CommentError(f"{name} must be an integer.")
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= MAX_ID:
+        raise CommentError(f"{name} must be a positive integer id.")
     return raw
 
 
@@ -232,8 +238,20 @@ def for_report(sample_id: int, db=None) -> list[dict]:
             for r in store.sample_comments.list(sample_id, db=db)]
 
 
+def _finite(value: Any) -> Any:
+    """NaN/±inf → None, recursively (report parameters may carry them)."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: _finite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(v) for v in value]
+    return value
+
+
 def _json(value: Any) -> Optional[str]:
-    return None if value is None else json.dumps(value)
+    """Strict JSON (never NaN/Infinity): non-finite floats become null."""
+    return None if value is None else json.dumps(_finite(value), allow_nan=False)
 
 
 def log_report(sample_id: int, *, kind: str, revision: Optional[int] = None,

@@ -33,15 +33,20 @@ NEW_TABLES = ("comment_presets", "sample_comments", "report_log")
 
 
 def _v1_db(path: Path) -> Path:
-    """A database exactly as v2.0.0 left it: only migration step 1 applied."""
-    conn = store.open_db(path, create=True)
-    try:
-        with store.write_txn(conn):
-            for stmt in store.MIGRATIONS[0]:
-                conn.execute(stmt)
-            conn.execute("PRAGMA user_version = 1")
-    finally:
-        conn.close()
+    """A database built by v2.0.0's own store.py (the frozen copy), in a
+    subprocess: exactly what a v2.0.0 hub leaves behind."""
+    script = textwrap.dedent(f"""
+        import sys
+        sys.path.insert(0, {str(V200)!r})
+        import store
+        assert store.__file__.startswith({str(V200)!r}), store.__file__
+        assert store.migrate({str(path)!r}) == 1
+    """)
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                         cwd=path.parent, timeout=60)
+    assert out.returncode == 0, out.stderr
+    with store.connection(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
     return path
 
 
@@ -265,3 +270,8 @@ def test_report_log_helpers(db):
         store.report_log.add(sid, kind="email", db=db)
     with pytest.raises(ValueError):
         store.report_log.add(sid, kind="zip", colour="red", db=db)
+
+
+def test_seed_literals_are_quoted():
+    assert store._sql_text("it's") == "'it''s'"
+    assert store._sql_text("plain") == "'plain'"

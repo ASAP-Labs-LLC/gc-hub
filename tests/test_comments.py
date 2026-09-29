@@ -248,3 +248,46 @@ def test_reorder_must_name_every_preset(db):
     _err(lambda: comments.reorder_presets(ids + [99999], db=db), 400)
     _err(lambda: comments.reorder_presets(ids + ids[:1], db=db), 400)
     _err(lambda: comments.reorder_presets("1,2", db=db), 400)
+
+
+# ── bounds and sanitising (critic minors) ───────────────────────────────────
+
+@pytest.mark.parametrize("t0,t1", [(-0.1, 1.0), (1.0, 1000.5), (-5, -1), (1e308, 2e308)])
+def test_annotation_times_are_bounded(db, t0, t1):
+    sid = _sample(db)
+    _err(lambda: comments.add_comment(sid, initials="RB", text="x", t0=t0, t1=t1, db=db), 400)
+
+
+def test_annotation_times_at_the_bounds(db):
+    sid = _sample(db)
+    c = comments.add_comment(sid, initials="RB", text="x", t0=0, t1=1000, db=db)
+    assert (c["t0"], c["t1"]) == (0.0, 1000.0)
+
+
+@pytest.mark.parametrize("pid", [2 ** 70, -1, 0, 2 ** 63])
+def test_out_of_range_ids_are_400(db, pid):
+    sid = _sample(db)
+    _err(lambda: comments.add_comment(sid, initials="RB", preset_id=pid, db=db), 400)
+    _err(lambda: comments.update_preset(pid, text="x", db=db), 400)
+    _err(lambda: comments.set_preset_active(pid, False, db=db), 400)
+
+
+def test_control_characters_are_stripped(db):
+    sid = _sample(db)
+    c = comments.add_comment(sid, initials="RB", text="a\x00b\x1bc\n\td\r\x07", db=db)
+    assert c["text"] == "abc\n\td"
+    _err(lambda: comments.add_comment(sid, initials="RB", text="\x00\x01", db=db), 400)
+    p = comments.create_preset("P\x00reset\x1f", by="a", db=db)
+    assert p["text"] == "Preset"
+
+
+def test_log_report_turns_nan_into_null(db):
+    sid = _sample(db)
+    comments.log_report(sid, kind="zip", params={"q": float("nan"), "l": [float("inf"), 1.5]},
+                        windows=[{"t0": float("-inf")}], db=db)
+    row = store.report_log.list(sid, db=db)[0]
+
+    def strict(text):
+        return json.loads(text, parse_constant=lambda c: pytest.fail(f"non-JSON {c}"))
+    assert strict(row["params_json"]) == {"q": None, "l": [None, 1.5]}
+    assert strict(row["windows_json"]) == [{"t0": None}]
