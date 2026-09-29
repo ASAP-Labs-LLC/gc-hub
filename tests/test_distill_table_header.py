@@ -28,6 +28,15 @@ def test_app_js_builds_the_head_from_the_columns():
     assert "DistillView.tableHeader(columns)" in src
 
 
+def test_the_dashboard_d86_table_shows_what_is_stored_at_40_and_60():
+    """The Dashboard's D86 table used to print "—" at 40% and 60% whatever was
+    stored; the values now come from ``DistillView.dashboardD86`` (tested in
+    node), with a tooltip when there is none."""
+    src = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    assert "DistillView.dashboardD86(" in src
+    assert "(label === '40%' || label === '60%') ? '\\u2014'" not in src
+
+
 def test_distill_view_is_loaded_before_app_js():
     scripts = re.findall(r"js/([a-z_]+\.js)", _index())
     assert "distill_view.js" in scripts

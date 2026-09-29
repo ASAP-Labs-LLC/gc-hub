@@ -1016,15 +1016,12 @@ async function loadDashboardData(file) {
             for (const [csvKey, label] of Object.entries(d2887Map)) {
                 d2887[label] = csvD2887[csvKey] != null ? round2(csvD2887[csvKey]) : null;
             }
-            const d86Map = {"D86 IBP":"IBP","D86 T5":"5%","D86 T10":"10%","D86 T20":"20%","D86 T30":"30%","D86 T40":"40%","D86 T50":"50%","D86 T60":"60%","D86 T70":"70%","D86 T80":"80%","D86 T90":"90%","D86 T95":"95%","D86 FBP":"FBP"};
-            // Toggle picks between pre-calculated corrected/uncorrected sets from backend
-            const d86Source = state.correctedD86 ? csvD86 : (dcData.d86_uncorrected || {});
-            d86 = {};
-            for (const [csvKey, label] of Object.entries(d86Map)) {
-                d86[label] = d86Source[csvKey] != null ? round2(d86Source[csvKey]) : null;
-            }
-            if (d86["40%"] === undefined) d86["40%"] = null;
-            if (d86["60%"] === undefined) d86["60%"] = null;
+            // "Corrected D86" on: the stored (corrected) cells; off: the stored
+            // uncorrected conversion (or, for a revision that has none, the X4
+            // conversion of its stored D2887). 40%/60% whenever they exist.
+            d86 = DistillView.dashboardD86(
+                { d86: csvD86, d86_uncorrected: dcData.d86_uncorrected, d2887: csvD2887 },
+                state.correctedD86, convertToD86).values;
         } else {
             // Fallback: compute client-side (no blank, no EQM corrections)
             d2887 = computeD2887(dcData.percent, dcData.temperature);
@@ -1100,11 +1097,12 @@ function populateDashboardTables(d2887, d86, dcDiv) {
             const label = D86_LABELS[i];
             const temp = d86[label];
             const tr = document.createElement('tr');
-            // 40% and 60% have no D86 equation
-            const tempStr = (label === '40%' || label === '60%') ? '\u2014' : (temp != null ? temp.toFixed(2) : '\u2014');
-            tr.innerHTML = `<td>${escapeHtml(label)}</td><td>${tempStr}</td>`;
-            tr.style.cursor = 'pointer';
-            if (temp != null && label !== '40%' && label !== '60%') {
+            // 40% and 60% (no X4 equation) show the stored value when there is one
+            tr.innerHTML = `<td>${escapeHtml(label)}</td><td>${temp != null ? temp.toFixed(2) : '\u2014'}</td>`;
+            if (temp == null) {
+                tr.title = DistillView.missingNote(label);
+            } else {
+                tr.style.cursor = 'pointer';
                 tr.addEventListener('click', () => highlightDCPoint(dcDiv, PERCENT_LEVELS[i], temp, '#d29922'));
             }
             d86Body.appendChild(tr);
