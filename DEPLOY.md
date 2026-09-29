@@ -416,7 +416,9 @@ the lab network (no https redirect, the admin break-glass offered).
 
 - **SSL/TLS > Edge Certificates > Always Use HTTPS: on.** The hub also
   redirects plain `http://` through the tunnel to `https://` (308) and sends
-  HSTS, but `http://gc.asaplabs.net` must never be served.
+  HSTS, but `http://gc.asaplabs.net` must never be served. (The hub learns the
+  scheme from cloudflared's `X-Forwarded-Proto` or `CF-Visitor`; if neither
+  arrives, sign-in through the tunnel is refused with "Sign in over https".)
 - **The agents' WAF skip rule.** Agents call `/api/ingest` and `/api/agent/…`
   with their bearer token, not a browser; a Cloudflare challenge would stop
   them (the agent tray then says "Cloudflare blocked the agent: add the WAF

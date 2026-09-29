@@ -651,3 +651,20 @@ def test_active_sessions_list_has_no_token_hashes(env):
     rows = web_auth.active_sessions()
     assert len(rows) == 1 and rows[0]["name"] == "Ryan C"
     assert "token_hash" not in rows[0] and set(rows[0]) >= {"id", "method", "ip", "last_seen"}
+
+
+def test_no_redirect_loop_when_the_proxy_names_no_scheme(env):
+    """Only an explicit http from the proxy is redirected; with no scheme
+    header the request is served as not-https (no loop), and sign-in through
+    it is refused rather than setting a cookie without Secure."""
+    c = env["client"]
+    h = {"Host": "gc.asaplabs.net", "CF-Connecting-IP": "203.0.113.9", "CF-Ray": "x"}
+    r = c.get("/instruments", headers=h, environ_base=LOCAL)
+    assert r.status_code == 302 and r.headers["Location"].startswith("/login")
+    r = post(c, "/api/login", {"username": "ryan c", "password": "labpass-1"}, environ=LOCAL,
+             headers=h)
+    assert r.status_code == 403 and env["stub"].requests == []
+    ok = dict(h, **{"CF-Visitor": '{"scheme":"https"}'})
+    r = post(c, "/api/login", {"username": "ryan c", "password": "labpass-1"}, environ=LOCAL,
+             headers=ok)
+    assert r.status_code == 200 and cookie_of(r, "__Host-gc_session")

@@ -15,11 +15,12 @@ sending them is just a LAN client with odd headers.
 
 * ``client_ip()``   — ``CF-Connecting-IP`` (normalised) from a trusted proxy,
   else ``remote_addr``.
-* ``is_https()``    — the request is TLS, or ``X-Forwarded-Proto: https``
-  from a trusted proxy.
+* ``is_https()``    — the request is TLS, or a trusted proxy says https
+  (``X-Forwarded-Proto``, else ``CF-Visitor``); ``forwarded_scheme()`` is
+  what the proxy said (None when it said nothing: never guessed).
 * ``is_proxied()``  — "through Cloudflare": a trusted proxy peer that sent
-  any of ``CF-Connecting-IP``, ``CF-Ray``, ``X-Forwarded-For``,
-  ``Forwarded``, ``X-Forwarded-Proto``.
+  any of ``CF-Connecting-IP``, ``CF-Ray``, ``CF-Visitor``, ``CDN-Loop``,
+  ``X-Forwarded-For``, ``Forwarded``, ``X-Forwarded-Proto``.
 * ``is_local()``    — the server's own console: loopback peer, none of those
   headers at all, and a loopback ``Host`` (``localhost``/127.x/::1).
   Anything that came through Cloudflare is never local.
@@ -43,8 +44,8 @@ from typing import Any, Optional
 
 import paths
 
-PROXY_HEADERS = ("CF-Connecting-IP", "CF-Ray", "X-Forwarded-For", "Forwarded",
-                 "X-Forwarded-Proto")
+PROXY_HEADERS = ("CF-Connecting-IP", "CF-Ray", "CF-Visitor", "CDN-Loop", "X-Forwarded-For",
+                 "Forwarded", "X-Forwarded-Proto")
 ALLOWED_FETCH_SITES = frozenset({"same-origin", "none"})
 DEFAULT_PORTS = {"http": 80, "https": 443}
 
@@ -153,14 +154,30 @@ def client_ip(req=None) -> Optional[str]:
     return addr
 
 
+def forwarded_scheme(req=None) -> Optional[str]:
+    """The scheme a trusted proxy says the client used: ``X-Forwarded-Proto``
+    (first value), else Cloudflare's ``CF-Visitor: {"scheme": ...}``; None when
+    the peer isn't a trusted proxy or says nothing usable (never guessed)."""
+    req = _req(req)
+    if not is_trusted_proxy(req.remote_addr):
+        return None
+    proto = (req.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+    if proto in ("http", "https"):
+        return proto
+    raw = req.headers.get("CF-Visitor")
+    if raw:
+        try:
+            scheme = json.loads(raw).get("scheme")
+        except (ValueError, AttributeError):
+            scheme = None
+        if isinstance(scheme, str) and scheme.lower() in ("http", "https"):
+            return scheme.lower()
+    return None
+
+
 def is_https(req=None) -> bool:
     req = _req(req)
-    if req.is_secure:
-        return True
-    if not is_trusted_proxy(req.remote_addr):
-        return False
-    proto = (req.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
-    return proto == "https"
+    return bool(req.is_secure) or forwarded_scheme(req) == "https"
 
 
 def hostname(host: Any) -> Optional[str]:

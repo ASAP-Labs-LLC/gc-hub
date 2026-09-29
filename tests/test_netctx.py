@@ -230,3 +230,34 @@ def test_https_redirect_url():
     with ctx(LOOPBACK, {"Host": "gc.asaplabs.net", "CF-Ray": "x", "X-Forwarded-Proto": "http"},
              url="/instruments?x=1"):
         assert netctx.https_url() == "https://gc.asaplabs.net/instruments?x=1"
+
+
+# ── the forwarded scheme: X-Forwarded-Proto, else CF-Visitor; never guessed ──
+
+def test_cf_visitor_says_https_when_x_forwarded_proto_is_missing():
+    with ctx(LOOPBACK, {"Host": "gc.asaplabs.net", "CF-Ray": "x",
+                        "CF-Visitor": '{"scheme":"https"}'}):
+        assert netctx.forwarded_scheme() == "https" and netctx.is_https()
+    with ctx(LOOPBACK, {"Host": "gc.asaplabs.net", "CF-Ray": "x",
+                        "CF-Visitor": '{"scheme":"http"}'}):
+        assert netctx.forwarded_scheme() == "http" and not netctx.is_https()
+
+
+def test_an_unknown_forwarded_scheme_is_none_not_http():
+    """No scheme header at all: not https (no Secure cookie), but not known to
+    be http either, so the 308 rule can't loop."""
+    with ctx(LOOPBACK, {"Host": "gc.asaplabs.net", "CF-Ray": "x"}):
+        assert netctx.forwarded_scheme() is None and not netctx.is_https()
+    with ctx(LOOPBACK, {"Host": "gc.asaplabs.net", "CF-Ray": "x", "CF-Visitor": "garbage"}):
+        assert netctx.forwarded_scheme() is None
+
+
+def test_forwarded_scheme_is_ignored_from_an_untrusted_peer():
+    with ctx(LAN, {"X-Forwarded-Proto": "https", "CF-Visitor": '{"scheme":"https"}'}):
+        assert netctx.forwarded_scheme() is None and not netctx.is_https()
+
+
+@pytest.mark.parametrize("header", ["CF-Visitor", "CDN-Loop"])
+def test_more_cloudflare_headers_make_it_not_local(header):
+    with ctx(LOOPBACK, {"Host": "localhost:5560", header: "cloudflare"}):
+        assert not netctx.is_local() and netctx.is_proxied()

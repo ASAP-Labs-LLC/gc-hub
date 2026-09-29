@@ -373,9 +373,12 @@ def initials(name: Any) -> str:
 # ── the before_request hooks ────────────────────────────────────────────────
 
 def require_https():
-    """Through Cloudflare but not https: 308 to the https URL (every method).
-    Registered before every other before_request."""
-    if netctx.is_proxied() and not netctx.is_https():
+    """Through Cloudflare over plain http: 308 to the https URL (every method).
+    Only when the proxy *says* http (``netctx.forwarded_scheme``): with no
+    scheme header the request is served as not-https (no Secure cookie, and
+    sign-in refused) rather than redirected forever. Registered before every
+    other before_request."""
+    if netctx.is_proxied() and netctx.forwarded_scheme() == "http":
         return redirect(netctx.https_url(), 308)
     return None
 
