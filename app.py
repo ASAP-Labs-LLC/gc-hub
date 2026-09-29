@@ -220,6 +220,8 @@ app.register_blueprint(web_auth.bp)
 app.before_request(web_auth.require_https)
 app.after_request(web_auth.add_security_headers)
 app.context_processor(web_auth.template_context)
+import api_errors  # noqa: E402  (v3.1.0: every /api/ failure answers JSON {error, status, ref})
+api_errors.install(app)
 
 # ---------------------------------------------------------------------------
 # Global state
