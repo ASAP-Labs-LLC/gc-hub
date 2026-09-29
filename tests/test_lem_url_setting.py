@@ -44,7 +44,8 @@ def test_needs_the_admin_password(hub):
 
 @pytest.mark.parametrize("value", [
     "lem.asaplabs.net", "https://lem.asaplabs.net/api", "file:///etc/passwd",
-    "https://user:pw@lem", "", 5,
+    "https://user:pw@lem", "", 5, "http://127.0.0.1:8080", "http://localhost",
+    "http://169.254.169.254", "http://0",
 ])
 def test_bad_values_are_refused(hub, value):
     before = _conf(hub)

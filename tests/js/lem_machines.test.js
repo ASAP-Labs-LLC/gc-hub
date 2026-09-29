@@ -55,8 +55,17 @@ module.exports = (t) => {
     r = L.lemMachineOptions(Object.assign({}, live, { source: 'cached', age_seconds: 300, error: 'x' }), 'bf8e64b59f12');
     t.eq(r.selected, 1);
     t.eq(r.note, "LEM can't be reached; showing its list from 5 min ago.");
-    t.eq(L.lemMachineOptions(Object.assign({}, live, { source: 'cached', age_seconds: 20 }), '').note,
+    t.eq(L.lemMachineOptions(Object.assign({}, live, { source: 'cached', age_seconds: 20, error: 'x' }), '').note,
         "LEM can't be reached; showing its list from 1 min ago.");
+    // stale only because a refresh is in flight (no error): no warning
+    t.eq(L.lemMachineOptions(Object.assign({}, live, { source: 'cached', age_seconds: 70 }), '').note, null);
+
+    // ── the page keeps a good answer for the page load, never a failed one
+    t.eq(L.lemAnswerCacheable({ source: 'live', machines: [] }), true);
+    t.eq(L.lemAnswerCacheable({ source: 'cached', machines: [] }), true);
+    t.eq(L.lemAnswerCacheable({ source: 'unavailable', machines: [] }), false);
+    t.eq(L.lemAnswerCacheable(null), false);
+    t.eq(L.lemAnswerCacheable(undefined), false);
 
     // ── untrusted entries: only string uids, text never carries markup meaning
     r = L.lemMachineOptions({ source: 'live', machines: [null, { uid: 5, title: 'x' }, { title: 'no uid' },

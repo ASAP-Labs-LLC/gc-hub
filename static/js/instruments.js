@@ -147,15 +147,21 @@
     }
 
     // ── LEM machine dropdown (D10) ─────────────────────────────────────────
-    // One GET /api/lem/machines per page load (and per Refresh); the hub
-    // fetches from LEM and caches it. Titles and uids from LEM are untrusted:
-    // option texts are set with textContent (h's `text`).
+    // One GET /api/lem/machines per page load (and per Refresh) once it has
+    // given a list; a failed answer is not kept, so the next picker asks
+    // again. The hub fetches from LEM and caches it. Titles and uids from LEM
+    // are untrusted: option texts are set with textContent (h's `text`).
     let LEM_ANSWER = null;
     function lemMachines(refresh) {
         if (!LEM_ANSWER || refresh) {
-            LEM_ANSWER = getJSON('/api/lem/machines')
+            const pending = getJSON('/api/lem/machines')
                 .then(r => (r.status === 200 ? r.body : null))
-                .catch(() => null);
+                .catch(() => null)
+                .then(answer => {
+                    if (!L.lemAnswerCacheable(answer) && LEM_ANSWER === pending) LEM_ANSWER = null;
+                    return answer;
+                });
+            LEM_ANSWER = pending;
         }
         return LEM_ANSWER;
     }
@@ -593,8 +599,13 @@
     }
 
     // ── left column forms ──────────────────────────────────────────────────
-    const ADD_LEM = lemPicker('');
-    $('add-lem').appendChild(ADD_LEM.el);
+    // Rebuilt on Refresh (keeping what was chosen), like the edit form's.
+    let ADD_LEM = null;
+    function buildAddLem() {
+        ADD_LEM = lemPicker(ADD_LEM ? ADD_LEM.value() : '');
+        $('add-lem').replaceChildren(ADD_LEM.el);
+    }
+    buildAddLem();
 
     $('add-form').addEventListener('submit', async (ev) => {
         ev.preventDefault();
@@ -615,7 +626,7 @@
         if (r && r.status === 200) await afterChange(r.body.hub_url ? 'Hub URL set to ' + r.body.hub_url + '.' : 'Hub URL cleared.');
     });
 
-    $('btn-refresh').addEventListener('click', () => { lemMachines(true); loadList(true); });
+    $('btn-refresh').addEventListener('click', () => { lemMachines(true); buildAddLem(); loadList(true); });
 
     loadList(false);
 })();

@@ -6,6 +6,7 @@ concurrent callers sharing one fetch."""
 from __future__ import annotations
 
 import json
+import socket
 import sys
 import threading
 import time
@@ -253,8 +254,10 @@ def test_malformed_body_is_unavailable_and_never_cached(stub, mode, body):
     out = cache.get(stub.url)
     assert out["source"] == "unavailable" and out["machines"] == []
     _no_internals(out["error"], stub.url)
-    # the next call tries again (a failure is not cached as an answer)
+    # a failure is not cached as an answer: after the 30 s back-off the next
+    # call tries again
     stub.mode, stub.body = "good", GOOD
+    clock.t += lem_machines.RETRY_AFTER_FAILURE_SECONDS + 1
     assert cache.get(stub.url)["source"] == "live"
 
 
@@ -391,6 +394,34 @@ def test_resolve_url_env_wins_then_setting_then_default():
     assert lem_machines.resolve_url({"lem_url": "http://a/x"}, env={}) == "https://lem.asaplabs.net"
     assert lem_machines.resolve_url({"lem_url": "http://a:1"},
                                     env={"LEM_URL": "file:///etc"}) == "http://a:1"
+    # the setting may not name this machine or a link-local host; LEM_URL
+    # (set by whoever runs the hub) may
+    assert lem_machines.resolve_url({"lem_url": "http://127.0.0.1:8080"},
+                                    env={}) == "https://lem.asaplabs.net"
+    assert lem_machines.resolve_url({"lem_url": "http://a:1"},
+                                    env={"LEM_URL": "http://127.0.0.1:8080"}) == "http://127.0.0.1:8080"
+
+
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1", "http://127.0.0.1:8080", "http://127.1", "http://2130706433",
+    "http://0x7f.1", "http://localhost", "http://LOCALHOST:5560", "http://lem.localhost",
+    "http://0", "http://0.0.0.0", "http://169.254.169.254", "http://169.254.1.1:80",
+])
+def test_setting_refuses_local_hosts(url):
+    assert lem_machines.valid_url(url)          # well-formed ...
+    assert not lem_machines.valid_setting_url(url)   # ... but not for the setting
+
+
+@pytest.mark.parametrize("url", [
+    "https://lem.asaplabs.net", "http://10.0.0.5:8080", "http://192.168.1.20", "http://asapsv1",
+])
+def test_setting_accepts_lan_and_public_hosts(url):
+    assert lem_machines.valid_setting_url(url)
+
+
+def test_setting_validator_rejects_malformed():
+    assert not lem_machines.valid_setting_url("https://lem.asaplabs.net/x")
+    assert not lem_machines.valid_setting_url(None)
 
 
 def test_stdlib_only():
@@ -404,3 +435,259 @@ def test_stdlib_only():
             mods.add(node.module.split(".")[0])
     stdlib = set(sys.stdlib_module_names) | {"__future__", "version"}
     assert mods <= stdlib, mods - stdlib
+
+
+# ── a hard deadline (critic: trickling servers) ─────────────────────────────
+# Raw-socket servers that send one byte every 0.2 s: the socket timeout
+# resets on every byte, so only a real deadline ends the fetch.
+
+class RawServer:
+    def __init__(self, handler):
+        self.sock = socket.socket()
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(64)
+        self.url = f"http://127.0.0.1:{self.sock.getsockname()[1]}"
+        self.stop = threading.Event()
+        self.connections = 0
+        self.handler = handler
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                c, _ = self.sock.accept()
+            except OSError:
+                return
+            self.connections += 1
+            threading.Thread(target=self._serve, args=(c,), daemon=True).start()
+
+    def _serve(self, c):
+        try:
+            c.settimeout(5)
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                d = c.recv(4096)
+                if not d:
+                    return
+                buf += d
+            self.handler(self, c)
+        except OSError:
+            pass
+        finally:
+            c.close()
+
+    def trickle(self, c, piece):
+        while not self.stop.is_set():
+            c.sendall(piece)
+            time.sleep(0.2)
+
+    def close(self):
+        self.stop.set()
+        self.sock.close()
+
+
+def trickle_body(srv, c):
+    c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+              b"Content-Length: 100000\r\n\r\n")
+    srv.trickle(c, b" ")
+
+
+def trickle_chunked(srv, c):
+    c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+              b"Transfer-Encoding: chunked\r\n\r\n")
+    srv.trickle(c, b"1\r\n \r\n")
+
+
+def trickle_headers(srv, c):
+    c.sendall(b"HTTP/1.1 200 OK\r\n")
+    srv.trickle(c, b"X")
+
+
+def send_body(body: bytes, extra: bytes = b""):
+    def handler(srv, c):
+        c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n"
+                  % len(body) + extra + b"\r\n" + body)
+    return handler
+
+
+@pytest.fixture()
+def raw():
+    servers = []
+
+    def make(handler):
+        s = RawServer(handler)
+        servers.append(s)
+        return s
+    yield make
+    for s in servers:
+        s.close()
+
+
+TIMEOUT = 1.0
+MARGIN = 0.8
+TRICKLERS = pytest.mark.parametrize("handler", [trickle_body, trickle_chunked, trickle_headers],
+                                    ids=["body-content-length", "body-chunked", "headers"])
+
+
+@TRICKLERS
+def test_fetch_ends_within_the_timeout(raw, handler):
+    srv = raw(handler)
+    t0 = time.monotonic()
+    with pytest.raises(Exception):
+        lem_machines.fetch(srv.url, timeout=TIMEOUT)
+    assert time.monotonic() - t0 < TIMEOUT + MARGIN
+
+
+@TRICKLERS
+def test_cache_answers_within_the_timeout_and_is_not_stuck(raw, handler):
+    srv = raw(handler)
+    clock = Clock()
+    cache = lem_machines.MachineCache(timeout=TIMEOUT, clock=clock)
+    t0 = time.monotonic()
+    out = cache.get(srv.url)
+    assert time.monotonic() - t0 < TIMEOUT + MARGIN
+    assert out["source"] == "unavailable"
+    _no_internals(out["error"], srv.url)
+    # the stuck fetch no longer blocks anyone: within the back-off the answer
+    # is immediate; after it, a new fetch is tried (and ends in time too)
+    t0 = time.monotonic()
+    assert cache.get(srv.url)["source"] == "unavailable"
+    assert time.monotonic() - t0 < 0.2
+    clock.t += lem_machines.RETRY_AFTER_FAILURE_SECONDS + 1
+    t0 = time.monotonic()
+    assert cache.get(srv.url)["source"] == "unavailable"
+    assert time.monotonic() - t0 < TIMEOUT + MARGIN
+    assert srv.connections == 2
+
+
+def test_many_callers_behind_a_stuck_fetch_all_return_in_time(raw):
+    srv = raw(trickle_body)
+    cache = lem_machines.MachineCache(timeout=TIMEOUT)
+    times = []
+
+    def call():
+        t0 = time.monotonic()
+        cache.get(srv.url)
+        times.append(time.monotonic() - t0)
+
+    threads = [threading.Thread(target=call, daemon=True) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert len(times) == 20 and max(times) < TIMEOUT + MARGIN
+    assert srv.connections == 1
+
+
+def test_a_caller_for_another_url_does_not_wait_forever(raw, stub):
+    slow = raw(trickle_headers)
+    cache = lem_machines.MachineCache(timeout=TIMEOUT)
+    first = threading.Thread(target=cache.get, args=(slow.url,), daemon=True)
+    first.start()
+    time.sleep(0.1)                     # the slow fetch is in flight
+    t0 = time.monotonic()
+    out = cache.get(stub.url)
+    assert time.monotonic() - t0 < TIMEOUT + MARGIN + 0.5
+    assert out["source"] in ("live", "unavailable")
+    first.join(5)
+
+
+# ── stale while in flight; back-off after a failure ─────────────────────────
+
+def test_cached_answer_is_served_at_once_while_a_refresh_is_in_flight(stub):
+    clock = Clock()
+    cache = lem_machines.MachineCache(clock=clock)
+    assert cache.get(stub.url)["source"] == "live"
+    clock.t += 61
+    stub.delay = 0.6
+    refresher = threading.Thread(target=cache.get, args=(stub.url,), daemon=True)
+    refresher.start()
+    time.sleep(0.15)                    # the refresh is in flight
+    t0 = time.monotonic()
+    out = cache.get(stub.url)
+    assert time.monotonic() - t0 < 0.2
+    assert out["source"] == "cached" and len(out["machines"]) == 3
+    refresher.join(5)
+    assert stub.hits == 2
+
+
+def test_cached_answer_is_served_at_once_for_30_s_after_a_failure(stub):
+    clock = Clock()
+    cache = lem_machines.MachineCache(clock=clock)
+    cache.get(stub.url)
+    clock.t += 61
+    stub.mode = "500"
+    assert cache.get(stub.url)["source"] == "cached"
+    assert stub.hits == 2
+    clock.t += 29
+    out = cache.get(stub.url)
+    assert out["source"] == "cached" and out["error"] and stub.hits == 2
+    clock.t += 2
+    cache.get(stub.url)
+    assert stub.hits == 3
+
+
+def test_without_a_cache_a_failure_backs_off_for_30_s(stub):
+    clock = Clock()
+    cache = lem_machines.MachineCache(clock=clock)
+    stub.mode = "500"
+    assert cache.get(stub.url)["source"] == "unavailable"
+    stub.mode = "good"
+    clock.t += 29
+    out = cache.get(stub.url)
+    assert out["source"] == "unavailable" and out["error"] and stub.hits == 1
+    clock.t += 2
+    assert cache.get(stub.url)["source"] == "live" and stub.hits == 2
+
+
+# ── hostile payloads (critic) ───────────────────────────────────────────────
+
+@pytest.mark.parametrize("body", [b"[" * 200000, b'{"machines":' + b"[" * 200000],
+                         ids=["deep-array", "deep-machines"])
+def test_deeply_nested_json_could_not_be_read(raw, body):
+    srv = raw(send_body(body))
+    out = lem_machines.MachineCache().get(srv.url)
+    assert out["source"] == "unavailable"
+    assert out["error"] == lem_machines.ERR_UNREADABLE
+
+
+def test_the_list_is_capped(raw):
+    body = json.dumps({"machines": [{"machine_uid": "u%d" % i, "title": "t%05d" % i}
+                                    for i in range(3000)]}).encode()
+    srv = raw(send_body(body))
+    out = lem_machines.MachineCache().get(srv.url)
+    assert out["source"] == "live"
+    assert len(out["machines"]) == lem_machines.MAX_MACHINES == 500
+
+
+def test_control_format_and_surrogate_characters_are_stripped(raw):
+    title = "‮evil​\ud800 <b>x</b>\x00\x1bé \U0001F600"
+    body = json.dumps({"machines": [{"machine_uid": "x1", "title": title,
+                                     "status": "RE‍D\x07"}]}).encode()
+    srv = raw(send_body(body))
+    m = lem_machines.MachineCache().get(srv.url)["machines"][0]
+    assert m["title"] == "evil <b>x</b>é \U0001F600"
+    assert m["status"] == "RED"
+    m["title"].encode("utf-8")          # no lone surrogate left
+
+
+def test_short_body_is_a_failure(raw):
+    def handler(srv, c):
+        c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n{\"machines\": []}")
+    srv = raw(handler)
+    assert lem_machines.MachineCache().get(srv.url)["source"] == "unavailable"
+
+
+def test_no_proxy_is_used(stub, monkeypatch):
+    # a system proxy would see (or answer for) LEM's traffic; the hub goes direct
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.setenv("NO_PROXY", "")
+    assert lem_machines.MachineCache().get(stub.url)["source"] == "live"
+
+
+def test_tests_never_reach_the_real_lem():
+    import os
+    assert os.environ.get("LEM_URL") == "http://127.0.0.1:9"

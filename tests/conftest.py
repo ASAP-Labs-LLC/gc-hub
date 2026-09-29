@@ -50,8 +50,13 @@ atexit.register(shutil.rmtree, TEST_HOME, ignore_errors=True)
 # (the per-test fixture below runs too late).
 for _name in ("PORT", "GC_PORT", "GC_DATA_DIR", "GC_CAL_CDF"):
     os.environ.pop(_name, None)
+# No test reaches the real LEM (D10): LEM_URL wins over the lem_url setting,
+# so point it at a closed port for the whole session, booted hubs included
+# (they inherit os.environ). A test that needs LEM sets its own stub URL.
+LEM_OFFLINE_URL = "http://127.0.0.1:9"
+os.environ["LEM_URL"] = LEM_OFFLINE_URL
 
-_DEPLOY_ENV_VARS = ("PORT", "GC_PORT", "GC_DATA_DIR", "GC_CAL_CDF", "LEM_URL")
+_DEPLOY_ENV_VARS = ("PORT", "GC_PORT", "GC_DATA_DIR", "GC_CAL_CDF")
 
 # ── No silent skips where the deps are supposed to be there ──────────────
 # Tests that need numpy/netCDF4/flask/... skip when those are absent, which is

@@ -188,7 +188,7 @@
                 options.push({ text: 'Unknown machine (' + uid + ')', value: uid });
             }
             options.push(...listed);
-            if (answer.source === 'cached') {
+            if (answer.source === 'cached' && answer.error) {
                 const min = Math.max(1, Math.round((Number(answer.age_seconds) || 0) / 60));
                 note = "LEM can't be reached; showing its list from " + min + ' min ago.';
             }
@@ -196,6 +196,12 @@
         options.push({ text: 'Other…', value: '', other: true });
         const at = uid ? options.findIndex(o => !o.other && o.value === uid) : 0;
         return { options, selected: at < 0 ? 0 : at, note };
+    }
+
+    // Whether the page may reuse this answer for the rest of the page load:
+    // a list (live or stale), never a failure (the next picker asks again).
+    function lemAnswerCacheable(answer) {
+        return !!answer && typeof answer === 'object' && answer.source !== 'unavailable';
     }
 
     // The uid to save: the chosen option's, or the typed one for "Other…".
@@ -208,7 +214,7 @@
     const api = {
         SKEW_WARN_SECONDS, formatSkew, skewWarning, agentHealth, parseCorrections,
         liveSinceValue, liveSinceInput, liveSinceConfirm, localNow, installerOutcome, methodRows, orderStandards,
-        releaseSummary, calibrationBadge, lemMachineOptions, lemPickerValue,
+        releaseSummary, calibrationBadge, lemMachineOptions, lemAnswerCacheable, lemPickerValue,
     };
     root.InstrumentsLogic = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;

@@ -217,7 +217,7 @@ class LemUrlSettingTests(unittest.TestCase):
         src = (WEBAPP_DIR / "app.py").read_text(encoding="utf-8")
         fn = next(n for n in ast.walk(ast.parse(src))
                   if isinstance(n, ast.FunctionDef) and n.name == "api_save_settings")
-        self.assertIn("lem_machines.valid_url", ast.unparse(fn))
+        self.assertIn("lem_machines.valid_setting_url", ast.unparse(fn))
 
 
 if __name__ == "__main__":

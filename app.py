@@ -1555,9 +1555,9 @@ def api_save_settings():
         bad = analysis_core.invalid_analysis_settings(changed)
         if bad:
             return _error(f"{', '.join(bad)} must be a number \u2265 0", 400)
-        if "lem_url" in changed and not lem_machines.valid_url(changed["lem_url"]):
+        if "lem_url" in changed and not lem_machines.valid_setting_url(changed["lem_url"]):
             return _error("lem_url must be http(s)://host or http(s)://host:port "
-                          "(no path)", 400)
+                          "(no path), and not this machine or a link-local address", 400)
         if changed:
             # Flag rules and best-fit settings need no cache clearing:
             # sample_cache rows carry the fingerprint they were computed with.
