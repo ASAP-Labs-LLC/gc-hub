@@ -169,5 +169,36 @@ class NoPerInstanceSettingsTests(unittest.TestCase):
         self.assertFalse(hasattr(settings_mod, "instance"))
 
 
+class DeviationBulletSettingsTests(unittest.TestCase):
+    """Phase 3: the deviation-bullet settings are defaults, admin-gated, and
+    "Set as Default" (/api/save-analysis-defaults) saves them."""
+
+    NEW = {
+        "analysis_min_width_min": "0.05",
+        "analysis_merge_gap_min": "0.10",
+        "analysis_spike_report_threshold": "",   # empty = the moderate threshold
+    }
+
+    def test_defaults(self) -> None:
+        for key, value in self.NEW.items():
+            self.assertEqual(settings_mod.DEFAULTS.get(key), value, key)
+
+    def test_admin_gated(self) -> None:
+        for key in self.NEW:
+            self.assertIn(key, settings_mod.ADMIN_KEYS)
+            self.assertNotIn(key, settings_mod.OPERATOR_KEYS)
+
+    def test_save_analysis_defaults_saves_them(self) -> None:
+        import ast
+        src = (WEBAPP_DIR / "app.py").read_text(encoding="utf-8")
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "api_save_analysis_defaults")
+        names = {c.value for c in ast.walk(fn)
+                 if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+        for key in ("min_width_min", "merge_gap_min", "spike_report_threshold",
+                    "spike_min_width_min"):
+            self.assertIn(key, names)
+
+
 if __name__ == "__main__":
     unittest.main()

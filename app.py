@@ -1577,7 +1577,9 @@ def api_save_analysis_defaults():
         changes = {}
         # Trend line + thresholds
         for key in ("quantile", "window", "sigma", "thresh_marginal",
-                     "thresh_moderate", "thresh_significant", "x_max_min"):
+                     "thresh_moderate", "thresh_significant", "x_max_min",
+                     "min_width_min", "merge_gap_min", "spike_min_width_min",
+                     "spike_report_threshold"):
             if key in params:
                 changes[f"analysis_{key}"] = str(params[key])
         # Full range overlays as JSON
