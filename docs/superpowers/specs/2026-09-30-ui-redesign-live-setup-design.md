@@ -134,6 +134,25 @@ Older code must still start on this DB.
 - **`/setup` (Setup guide):** the same step cards for one instrument, with an instrument picker. It suits the first-time flow, with each step's explanation, primary button and blocker. "Add a new GC" starts at step 1.
 - **Admin actions** keep needing the admin password. Until the elevation work (v4.1), the page prompts for it and keeps it in a JS closure for 15 minutes, never in storage.
 
+## Sendable sample links (v3.1)
+
+Ryan: "have the samples create custom links so that the links are sendable, and could be opened from for example COA Reviewer".
+
+- **`/lab/<lab_id>`** (page, session): resolves a lab ID to its newest run.
+  - The newest run is the latest `injection_dt`, preferring final samples, across instruments.
+  - Several matches: open the newest; the page lists the others ("Other runs of 40329: GC-2 · Sep 28") to switch to.
+  - No match: a plain "No GC result for lab ID … yet" page with a link to search.
+  - Lab IDs are matched exactly, then case-insensitively. `/` is not allowed in lab IDs, and anything URL-encoded is decoded once.
+  - COA Reviewer and other apps link here, because they know lab IDs, not hub sample ids.
+- **`/samples/<sample_id>`**, **`/samples/<sample_id>/compare[?standard=<name>]`** and **`/samples/<sample_id>/data`** (pages, session): one exact run.
+  - v3.1: these open the classic main page with the sample selected and the matching tab (Dashboard / Analysis with the standard picked).
+  - v3.2+: the new Samples page takes over the same URLs, so shared links keep working.
+  - An unknown id gives the same friendly not-found page.
+- **Resolver API.** `GET /api/lab/<lab_id>` returns `{sample_id, runs:[{sample_id, instrument, injection_dt, status}]}` (session).
+- **Sign-in.** Links work from signed-out browsers: the gate's `/login?next=` already carries the path, and `safe_next` accepts these paths.
+- **"Copy link".** A "Copy link" action on every sample (classic: in the sample's context menu and the Dashboard header; new UI: in the sample header). It copies `<effective hub_url>/samples/<id>`, always the gc.asaplabs.net form, even when opened over the LAN, with a toast "Link copied".
+- **Out of scope.** A "View in GC Hub" link inside COA Reviewer is a COA change and needs Ryan's go-ahead separately.
+
 ## Later releases
 
 - **v3.2:** new Samples page, opt-in at `/next`; classic stays at `/`.
