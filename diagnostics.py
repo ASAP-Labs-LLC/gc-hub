@@ -178,14 +178,19 @@ APP_ROOT_FILES = ("VERSION", "current", "current.txt")
 # The only files read from the updater's folder besides updater.log; every
 # other (non-dot) file is listed by name and size.
 UPDATER_CONFIG_NAMES = ("config.json",)
-# A secret-looking key: one of these substrings, or one of these words (keys
-# are split on separators and camelCase: githubPat -> github, pat), or two
-# adjacent words making one (api + key).
-_SECRET_SUBSTRINGS = ("password", "passwd", "passphrase", "secret", "token", "credential",
-                      "apikey", "api_key", "api-key", "privatekey", "private_key",
-                      "setupcode", "setup_code", "setup-code", "authorization")
-_SECRET_WORDS = {"pat", "auth", "pwd", "pw", "pass", "cookie", "session", "private", "creds"}
-_SECRET_PAIRS = {"apikey", "privatekey", "setupcode", "accesskey", "secretkey"}
+# A secret-looking key. Keys are split into whole words (on separators and
+# camelCase: githubPat -> github, pat; SessionID -> session, id), so
+# ``secretary`` or ``private_notes`` never match. A strong word (or pair)
+# names a secret in any form; a weak word only as the key's last word and only
+# in a structured form (a JSON/dict key, ``key=value`` without spaces, an ini
+# line), never in ``key: value`` prose (``pass: 3 of 5``, ``auth: ok``).
+_STRONG_WORDS = {"password", "passwd", "passphrase", "secret", "secrets", "token", "tokens",
+                 "credential", "credentials", "apikey", "sessionid", "authorization",
+                 "privatekey", "clientsecret"}
+_STRONG_PAIRS = {("api", "key"), ("private", "key"), ("client", "secret"), ("session", "id"),
+                 ("secret", "key"), ("access", "key"), ("setup", "code"), ("access", "token"),
+                 ("refresh", "token"), ("auth", "token")}
+_WEAK_WORDS = {"pass", "pwd", "pw", "pat", "auth", "session", "creds", "cookie"}
 _NOT_SECRET_KEY = re.compile(r"(_at|At|_count|Count)$|^(has|is)[_A-Z]")
 EXCLUDED_NAMES = ("admin-setup-code.txt", "qbenchlogin.txt")
 EXCLUDED_NAME_RE = re.compile(r"^(\.qbench-.*|qbench.*\.json(\.corrupt-.*)?)$", re.IGNORECASE)
@@ -195,34 +200,74 @@ NOT_SECRET = {"pbkdf2_sha256", "pbkdf2", "sha256", "sha512", "sha1", "bcrypt", "
               "argon2", "argon2id", "true", "false", "null", "none"}
 
 
-def _json_kv(m):
+def _quoted_kv(m):
+    """``"key": "value"`` / ``'key': 'value'`` (JSON, Python dict reprs):
+    structured, so weak words count."""
+    if is_secret_key(m.group(2), structured=True) and m.group(5) != REDACTED:
+        return m.group(1) + m.group(2) + m.group(1) + m.group(3) + m.group(4) + REDACTED \
+            + m.group(4)
+    return m.group(0)
+
+
+def _ini_kv(m):
+    """``key = value`` alone on its line (ini/config): structured."""
+    value = m.group(4)
+    if value.strip("\"'") != REDACTED and is_secret_key(m.group(2), structured=True):
+        q = value[0] if len(value) > 1 and value[0] in "'\"" and value[-1] == value[0] else ""
+        return m.group(1) + m.group(2) + m.group(3) + q + REDACTED + q
+    return m.group(0)
+
+
+def _tight_kv(m):
+    """``key=value`` with no spaces (query strings, cookies, env): structured."""
+    if is_secret_key(m.group(1), structured=True):
+        value = m.group(2)
+        quote = value[0] if value[:1] in ("'", '"') else ""
+        return m.group(1) + "=" + quote + REDACTED + quote
+    return m.group(0)
+
+
+def _looks_like_prose(value: str) -> bool:
+    return bool(re.fullmatch(r"[a-z]+", value))
+
+
+def _loose_kv(m):
+    """``key: value`` / ``key = value`` in free text: strong keys only, and an
+    unquoted ``:`` value must look like a value, not a word of prose."""
     key, sep, value = m.group(1), m.group(2), m.group(3)
-    if is_secret_key(key) and value != REDACTED:
-        return f'"{key}"{sep}"{REDACTED}"'
-    return m.group(0)
+    if key.lower() == "authorization" or not is_secret_key(key, structured=False):
+        return m.group(0)                 # (the header has its own pattern, scheme kept)
+    quoted = value[:1] in ("'", '"')
+    if ":" in sep and not quoted and _looks_like_prose(value):
+        return m.group(0)
+    if quoted:
+        return key + sep + value[0] + REDACTED + value[0]
+    return key + sep + REDACTED
 
 
-def _plain_kv(m):
-    key = m.group(1)
-    if is_secret_key(key) and m.group(3) != REDACTED:
-        return m.group(1) + m.group(2) + REDACTED
-    return m.group(0)
-
+_KEY = r"[A-Za-z_][\w.-]{0,80}"
+_VALUE = r"""("[^"\n]*"|'[^'\n]*'|[^\s,;&"']+)"""
 
 PATTERNS = (
-    (re.compile(r"(Admin setup code:?\s*)[^\s(]+", re.IGNORECASE), r"\1" + REDACTED),
+    # a PEM private key, the whole block (to the end if it was cut off)
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*\Z)",
+                re.DOTALL), REDACTED),
+    (re.compile(r"(Admin setup code:?[ \t]*)[^\s(]+", re.IGNORECASE), r"\1" + REDACTED),
     (re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"), REDACTED),
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), REDACTED),
-    (re.compile(r"(Authorization:?\s*(?:token|Bearer|Basic)\s+)(?!\[REDACTED\])\S+",
+    (re.compile(r"(Authorization:?[ \t]*(?:token|Bearer|Basic)[ \t]+)(?!\[REDACTED\])\S+",
                 re.IGNORECASE), r"\1" + REDACTED),
-    (re.compile(r"(Bearer\s+)(?!\[REDACTED\])\S+", re.IGNORECASE), r"\1" + REDACTED),
+    (re.compile(r"(Bearer[ \t]+)(?!\[REDACTED\])\S+", re.IGNORECASE), r"\1" + REDACTED),
     # the password in a URL's userinfo: scheme://user:PASS@host
     (re.compile(r"(\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:)(?!\[REDACTED\])[^@\s/]+(@)"),
      r"\1" + REDACTED + r"\2"),
-    # "key": "value" (JSON) and key = value / key: value (ini, logs, query strings)
-    (re.compile(r'"([^"\\]{1,100})"(\s*:\s*)"((?:[^"\\]|\\.)*)"'), _json_kv),
-    (re.compile(r"(?<![\w.-])([A-Za-z_][\w.-]{0,80})(\s*[=:]\s*)(?![\s\"'\[{/\\])"
-                r"([^\s,;&\"']+)"), _plain_kv),
+    (re.compile(r"""(["'])([^"'\\\n]{1,100})\1([ \t]*:[ \t]*)(["'])((?:(?!\4)[^\\\n]|\\.)*)\4"""),
+     _quoted_kv),
+    (re.compile(r"(?m)^([ \t]*)(" + _KEY + r")([ \t]*=[ \t]*)(\S.*?)[ \t]*$"), _ini_kv),
+    (re.compile(r"(?<![\w.-])(" + _KEY + r")=(?!\[REDACTED\])" + _VALUE), _tight_kv),
+    # not in the log format's logger-name slot ("... [LEVEL] name: message")
+    (re.compile(r"(?<!\] )(?<![\w.-])(" + _KEY + r")([ \t]*[=:][ \t]*)(?![\[\"']?\[REDACTED\])"
+                + _VALUE), _loose_kv),
 )
 
 # Lower-case substrings at least one of which every PATTERNS match contains
@@ -230,7 +275,7 @@ PATTERNS = (
 PATTERN_HINTS = ("admin setup code", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
                  "bearer", "authorization", "://", "pass", "pwd", "pw", "pat", "auth", "secret",
                  "token", "credential", "api", "cookie", "session", "private", "setup", "creds",
-                 "key")
+                 "key", "-----begin")
 
 Progress = Optional[Callable[[dict], Any]]
 
@@ -410,19 +455,19 @@ def _key_words(key: str) -> list:
     return [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", key)]
 
 
-def is_secret_key(key: Any) -> bool:
-    """Whether a settings/config/JSON key names a secret (``githubPat``,
-    ``db_passwd``, ``apiKey``, ...) but not a path or a timestamp
-    (``export_path``, ``token_issued_at``)."""
+def is_secret_key(key: Any, structured: bool = True) -> bool:
+    """Whether a key names a secret (``apiKey``, ``db_passwd``, ``SessionID``;
+    ``githubPat``/``pwd``/``auth`` only when ``structured``) but not a path, a
+    timestamp or a count (``export_path``, ``token_issued_at``,
+    ``session_count``). See ``_STRONG_WORDS``."""
     if not isinstance(key, str) or not key or _NOT_SECRET_KEY.search(key):
         return False
-    low = key.lower()
-    if any(s in low for s in _SECRET_SUBSTRINGS):
-        return True
     words = _key_words(key)
-    if any(w in _SECRET_WORDS for w in words):
+    if any(w in _STRONG_WORDS for w in words):
         return True
-    return any(a + b in _SECRET_PAIRS for a, b in zip(words, words[1:]))
+    if any((a, b) in _STRONG_PAIRS for a, b in zip(words, words[1:])):
+        return True
+    return structured and bool(words) and words[-1] in _WEAK_WORDS
 
 
 def _qbench_store_paths() -> list:
@@ -526,11 +571,13 @@ class Secrets:
             return True
         return any(rx.search(text) for rx, _ in PATTERNS)
 
-    def redact(self, text: str) -> str:
+    def redact(self, text: str, patterns: bool = True) -> str:
+        """Known values, then (``patterns``) the shapes of unknown secrets."""
         if self._text is not None and self.in_text(text):
             text = self._text.sub(REDACTED, text)
-        for rx, repl in PATTERNS:
-            text = rx.sub(repl, text)
+        if patterns:
+            for rx, repl in PATTERNS:
+                text = rx.sub(repl, text)
         return text
 
     def in_text(self, text: str) -> bool:
@@ -739,11 +786,16 @@ class _Bundle:
         self._record(name, data=data)
         return len(data)
 
-    def add_text(self, name: str, text: str) -> int:
-        return self.add_bytes(name, redact_text(text, self.secrets).encode("utf-8"))
+    def add_text(self, name: str, text: str, *, patterns: bool = True) -> int:
+        """``patterns=False`` for a member of our own making with no values to
+        guess at (``environment.json``: its keys are env var names)."""
+        text = (redact_text(text, self.secrets) if patterns
+                else self.secrets.redact(text, patterns=False))
+        return self.add_bytes(name, text.encode("utf-8"))
 
-    def add_json(self, name: str, value: Any) -> int:
-        return self.add_text(name, json.dumps(value, indent=1, default=str, ensure_ascii=False))
+    def add_json(self, name: str, value: Any, *, patterns: bool = True) -> int:
+        return self.add_text(name, json.dumps(value, indent=1, default=str, ensure_ascii=False),
+                             patterns=patterns)
 
     def add_file(self, name: str, path: Path, *, text: bool, outside_ok: bool = False) -> int:
         """Add a file (redacting text; leaving out one that still holds a
@@ -1442,7 +1494,7 @@ def build_bundle(options: Any, *, data_dir, db, out_path, progress: Progress = N
                     b.event("updater")
                     _add_updater(b, data_dir)
                 if opts["environment"]:
-                    b.add_json("environment.json", environment_info())
+                    b.add_json("environment.json", environment_info(), patterns=False)
                 if opts["all_cdfs"]:
                     b.event("all_cdfs")
                     cdir = data_dir / "cdf"

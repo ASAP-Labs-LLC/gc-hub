@@ -1061,3 +1061,130 @@ def test_numeric_known_secrets_are_redacted(seeded):
         assert _hits(m, gone) == [], gone
     log = m["logs/app.log"].decode()
     assert "labuser" in log and "1310000" in log      # the username and data survive
+
+
+# ── round 4: fewer false positives, the remaining false negatives ───────────
+
+R = diagnostics.Secrets([])
+
+
+def test_key_names_are_whole_words():
+    strong = ("apiKey", "API_KEY", "client-secret", "accessToken", "refresh_token", "sessionid",
+              "sessionId", "SessionID", "x-api-key", "authToken", "dbPassword", "PASSWORD",
+              "clientSecret", "private_key", "passwd", "credentials", "secret")
+    for k in strong:
+        assert diagnostics.is_secret_key(k, structured=False), k
+    weak = ("pwd", "Pwd", "pass", "session", "pat", "githubPat", "pw", "auth", "creds")
+    for k in weak:
+        assert diagnostics.is_secret_key(k, structured=True), k
+        assert not diagnostics.is_secret_key(k, structured=False), k
+    never = ("export_path", "author", "author_ip", "path", "patch", "pattern", "keyboard",
+             "monkey", "passes", "bypass", "token_issued_at", "has_token", "session_count",
+             "authority", "compass", "sample_key", "key", "key_id", "auth_status",
+             "pw_changed_at", "spatial", "passage", "private_notes", "secretary")
+    for k in never:
+        assert not diagnostics.is_secret_key(k, structured=True), k
+
+
+@pytest.mark.parametrize("line", [
+    "2026-09-29 10:00:00,123 [WARNING] admin_auth: wrong admin password from 10.0.0.5",
+    "2026-09-29 10:00:00,123 [INFO] requests.auth: retrying with digest",
+    "2026-09-29 10:00:00,123 [INFO] qbench_secrets: store not found",
+    "pass: 3 of 5 passed", "session: 4 samples", "status: final, auth: ok", "pw: 12",
+    "pat: 7", "key: T50", "path=cdf/gc1/2026/09/S1.CDF", "pattern=D2887", "patch: v2.1",
+    "export_path: C:\\share\\gc1.csv", "author: RB", "Best Fit: Diesel #2, Fit Score: 0.93",
+    "Lab ID: 40304", "hub: auth refused for gc1: bad token", "token revoked for gc1",
+    "the secretary: Jane", "private_notes: see binder 4", "password: incorrect",
+])
+def test_prose_and_lab_data_survive(line):
+    assert R.redact(line) == line
+
+
+@pytest.mark.parametrize("line,gone", [
+    ("apiKey=AK1xxxxxxx", "AK1xxxxxxx"), ("API_KEY: AK2xxxxxxx", "AK2xxxxxxx"),
+    ("client-secret=CS1xxxxxxx", "CS1xxxxxxx"), ('"accessToken": "AT1xxxxxxx"', "AT1xxxxxxx"),
+    ("refresh_token=RT1xxxxxxx", "RT1xxxxxxx"), ("sessionid=SID1xxxxxx", "SID1xxxxxx"),
+    ("sessionid: SID2xxxxxx", "SID2xxxxxx"), ("pwd=PWD1xxxxxx", "PWD1xxxxxx"),
+    ('password="QUOTED1xxxx"', "QUOTED1xxxx"), ("password = 'QUOTED2xxxx'", "QUOTED2xxxx"),
+    ('password: "QUOTED3xxxx"', "QUOTED3xxxx"), ("passwd  =  SPACED1xxxx", "SPACED1xxxx"),
+    ('{"password":"JSON1xxxxx"}', "JSON1xxxxx"), ("{'password': 'PYREPR1xxxx'}", "PYREPR1xxxx"),
+    ("{'pat': 'PYREPR2xxxx'}", "PYREPR2xxxx"),
+    ("https://api.x/?access_token=QS1xxxxxxx&x=1", "QS1xxxxxxx"),
+    ("Cookie: sessionid=CK1xxxxxxx; path=/", "CK1xxxxxxx"),
+    ("Set-Cookie: session=CK2xxxxxxx", "CK2xxxxxxx"),
+    ("Authorization: Basic QkFTSUMxeHh4eA==", "QkFTSUMxeHh4eA=="),
+    ("  pass = INIPASSxyz", "INIPASSxyz"),
+    ("private_key = PKVALUExyz1", "PKVALUExyz1"),
+    ("-----BEGIN RSA PRIVATE KEY----- MIIEpemBODYxxxxxxx -----END RSA PRIVATE KEY-----",
+     "MIIEpemBODYxxxxxxx"),
+    ("private_key: -----BEGIN PRIVATE KEY-----\nPEMLINE2xxxxxx\nMORELINE3xxxx\n"
+     "-----END PRIVATE KEY-----\nafter", "PEMLINE2xxxxxx"),
+])
+def test_secret_forms_are_redacted(line, gone):
+    out = R.redact(line)
+    assert gone not in out and "[REDACTED]" in out, out
+
+
+def test_redaction_keeps_the_shape():
+    assert R.redact("Authorization: Basic QkFTSUMxeHh4eA==") == "Authorization: Basic [REDACTED]"
+    assert R.redact('password="QUOTED1xxxx"') == 'password="[REDACTED]"'
+
+
+def test_pem_block_is_redacted_whole():
+    text = ("before\n-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA1\nBBBB2\n"
+            "-----END OPENSSH PRIVATE KEY-----\nafter line\n")
+    out = R.redact(text)
+    assert "AAAA1" not in out and "BBBB2" not in out
+    assert out.startswith("before\n") and "after line" in out
+
+
+def test_the_separator_does_not_cross_newlines():
+    text = "password:\nnext line stays 1234\ntoken=\nalso stays 5678\n"
+    assert R.redact(text) == text
+
+
+def test_environment_json_says_set_not_redacted(seeded):
+    out, _ = seeded.build()
+    env = json.loads(_members(out)["environment.json"])["env"]
+    assert env["QBENCH_CLIENT_SECRET"] == "set" and env["QBENCH_CLIENT_ID"] == "set"
+
+
+def test_logger_names_survive_in_the_bundle(seeded):
+    with open(seeded.data / "app.log", "a", encoding="utf-8") as f:
+        f.write("2026-09-29 10:00:00,123 [WARNING] admin_auth: wrong admin password "
+                "from 10.0.0.5\n")
+    out, _ = seeded.build()
+    log = _members(out)["logs/app.log"].decode()
+    assert "admin_auth: wrong admin password from 10.0.0.5" in log
+
+
+def test_lab_data_survives_the_database_copy(seeded, tmp_path):
+    notes = {
+        seeded.error_id: "pass: 3 of 5, area 1310000, session: 4, auth: ok",
+    }
+    other = seeded.ids[("final", _iso(seeded.now - timedelta(days=2)), "check this one")][0]
+    notes[other] = '{"author": "RB", "export_path": "C:/share/gc1.csv", "key": "T50"}'
+    for sid, note in notes.items():
+        store.samples.update(sid, review_note=note, db=seeded.db)
+    # (the seeded bearer token in this sample's error is meant to be redacted)
+    store.samples.update(seeded.error_id, error="calibration failed at C12", db=seeded.db)
+    with store.connection(seeded.db) as conn:
+        conn.execute("UPDATE instruments SET export_path='C:/share/gc2.csv' WHERE id='gc2'")
+    live = sqlite3.connect(seeded.db)
+    try:
+        before = {t: live.execute(f'SELECT * FROM "{t}" ORDER BY rowid').fetchall()
+                  for t in ("samples", "conflicts", "sample_results", "export_rows",
+                            "import_runs", "report_log", "comment_presets")}
+    finally:
+        live.close()
+    out, _ = seeded.build()
+    copy = tmp_path / "copy.db"
+    copy.write_bytes(_members(out)["database/gc.db"])
+    conn = sqlite3.connect(copy)
+    try:
+        for t, rows in before.items():
+            assert conn.execute(f'SELECT * FROM "{t}" ORDER BY rowid').fetchall() == rows, t
+        assert conn.execute("SELECT export_path FROM instruments WHERE id='gc2'"
+                            ).fetchone()[0] == "C:/share/gc2.csv"
+    finally:
+        conn.close()
