@@ -1223,3 +1223,34 @@ def test_hub_control_stop_waits_for_a_diagnostics_bundle(tmp_path):
         assert reason not in hub_control.busy_reasons()
     finally:
         hub_control.reset()
+
+
+# ── the sign-in lane (auth/login): web_sessions and new env vars ────────────
+
+def test_any_token_hash_column_is_nulled_in_the_copy(seeded, tmp_path):
+    with store.connection(seeded.db) as conn:
+        conn.execute("CREATE TABLE web_sessions(id INTEGER PRIMARY KEY, name TEXT, "
+                     "token_hash TEXT UNIQUE, created_at TEXT)")
+        conn.execute("INSERT INTO web_sessions(name, token_hash, created_at) VALUES "
+                     "('Ryan', ?, '2026-09-29'), ('Ana', NULL, '2026-09-29')",
+                     (f"sess-{MARKER}-hash",))
+    out, _ = seeded.build()
+    members = _members(out)
+    _assert_no_marker(members)
+    copy = tmp_path / "copy.db"
+    copy.write_bytes(members["database/gc.db"])
+    conn = sqlite3.connect(copy)
+    try:
+        rows = conn.execute("SELECT name, token_hash FROM web_sessions ORDER BY id").fetchall()
+    finally:
+        conn.close()
+    assert rows == [("Ryan", None), ("Ana", None)]
+
+
+def test_labcore_and_lem_urls_are_reported_by_name(seeded, monkeypatch):
+    monkeypatch.setenv("LABCORE_URL", "https://labcore.example/x")
+    monkeypatch.delenv("LEM_URL", raising=False)
+    out, _ = seeded.build()
+    env = json.loads(_members(out)["environment.json"])["env"]
+    assert env["LABCORE_URL"] == "set" and env["LEM_URL"] == "unset"
+    assert b"labcore.example" not in _members(out)["environment.json"]

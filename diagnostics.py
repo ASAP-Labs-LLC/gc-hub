@@ -167,7 +167,7 @@ REDACTED = "[REDACTED]"
 TMP_DIRNAME = "diagnostics-tmp"
 ENV_NAMES = ("GC_DATA_DIR", "PORT", "GC_PORT", "GC_APP_ROOT", "GC_UPDATER_DIR",
              "QBENCH_STORE_PATH", "QBENCH_CLIENT_ID", "QBENCH_CLIENT_SECRET", "COA_DATA_DIR",
-             "APPDATA", "TEMP", "HOME", "USERPROFILE")
+             "APPDATA", "TEMP", "HOME", "USERPROFILE", "LABCORE_URL", "LEM_URL")
 
 # Written by the updater (coa-reviewer deploy/updater/updater.py) in the data
 # folder: read, never modified.
@@ -660,9 +660,10 @@ def known_secrets(data_dir: Path, db: Optional[Path], extra: Iterable[str] = ())
                 if is_secret_key(key) and value:
                     parts = _hash_parts(str(value))
                     (fragments if len(parts) == 2 else exact).extend(parts)
-            for (h,) in conn.execute("SELECT token_hash FROM instruments "
-                                     "WHERE token_hash IS NOT NULL AND token_hash != ''"):
-                exact.append(str(h))
+            for table in _token_hash_tables(conn):
+                for (h,) in conn.execute(f'SELECT token_hash FROM "{table}" '
+                                         "WHERE token_hash IS NOT NULL AND token_hash != ''"):
+                    exact.append(str(h))
         finally:
             conn.close()
     exact.extend(str(e) for e in extra if e)
@@ -967,7 +968,8 @@ def snapshot_db(db: Path, dest: Path, secrets: Secrets) -> None:
         for k in keys:
             if is_secret_key(k):
                 conn.execute("DELETE FROM settings_kv WHERE key=?", (k,))
-        conn.execute("UPDATE instruments SET token_hash=NULL")
+        for table in _token_hash_tables(conn):     # instruments, web_sessions, ...
+            conn.execute(f'UPDATE "{table}" SET token_hash = NULL')
 
         def scrub(value):
             return redact_text(value, secrets) if isinstance(value, str) else value
@@ -992,6 +994,19 @@ def snapshot_db(db: Path, dest: Path, secrets: Secrets) -> None:
         conn.execute("VACUUM")
     finally:
         conn.close()
+
+
+def _token_hash_tables(conn: sqlite3.Connection) -> list:
+    """Every table with a ``token_hash`` column (agent tokens in
+    ``instruments``, sign-in sessions in ``web_sessions``, and any added
+    later): its hashes are secrets and are nulled in the copy."""
+    out = []
+    for (t,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                             "AND name NOT LIKE 'sqlite_%'").fetchall():
+        cols = {r[1] for r in conn.execute(f'PRAGMA table_info("{t}")')}
+        if "token_hash" in cols:
+            out.append(t)
+    return out
 
 
 def _rows(conn: sqlite3.Connection, sql: str, args: tuple = ()) -> list:
