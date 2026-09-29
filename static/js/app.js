@@ -2232,6 +2232,8 @@ function _openAnnotationModal(regionDesc, t_start, t_end, trendDiv) {
         if (!Comments.requireInitials()) return; // keep the modal open
         busy = true;
         const text = (inputEl ? inputEl.value : '').trim();
+        // on the sample shown, whatever path selected it
+        await Comments.setSample(state.selectedSample ? state.selectedSample.sample_id : null);
         const saved = await Comments.add({ text, t0: t_start, t1: t_end });
         if (!saved) { busy = false; return; }    // refused: the modal stays open
         closeModal(modal);
