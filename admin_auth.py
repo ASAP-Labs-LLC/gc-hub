@@ -753,12 +753,6 @@ def _json_body():
     return body, None
 
 
-def _cross_site() -> bool:
-    """The app guard's rule (``netctx.is_cross_site``: one origin rule), kept
-    here so the setup route is same-origin whatever its path."""
-    return netctx.is_cross_site()
-
-
 @bp.after_app_request
 def _admin_refusal_message(response):
     """Give an admin route's 403 the real reason (not set up / throttled),
@@ -810,8 +804,9 @@ def _refuse_host():
 
 @bp.route("/api/admin/setup", methods=["POST"])
 def api_admin_setup():
-    if _cross_site():
-        return jsonify({"error": "Cross-site request refused"}), 403
+    refusal = netctx.cross_site_refusal()
+    if refusal:
+        return jsonify({"error": refusal}), 403
     refused = _refuse_host()
     if refused:
         return refused
@@ -834,8 +829,9 @@ def api_admin_setup():
 
 @bp.route("/api/admin/password", methods=["POST"])
 def api_admin_password():
-    if _cross_site():
-        return jsonify({"error": "Cross-site request refused"}), 403
+    refusal = netctx.cross_site_refusal()
+    if refusal:
+        return jsonify({"error": refusal}), 403
     body, err = _json_body()
     if err:
         return err

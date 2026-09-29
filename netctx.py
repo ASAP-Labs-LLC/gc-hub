@@ -242,6 +242,52 @@ def is_cross_site(req=None) -> bool:
     return mine is None or host_port(parts.netloc, parts.scheme) != mine
 
 
+CROSS_SITE_MESSAGE = "Cross-site request refused"
+
+
+def https_refusal_message(req=None) -> str:
+    """What to tell someone who reached the hub through the proxy without an
+    https scheme header: ``Sign in over https: open https://<Host>``."""
+    req = _req(req)
+    name = hostname(req.host) or "gc.asaplabs.net"
+    return f"Sign in over https: open https://{name}"
+
+
+def _only_the_scheme_differs(req) -> bool:
+    """Through a trusted proxy that named no scheme (so the hub takes the
+    request for http) and the browser's ``Origin`` is exactly
+    ``https://<this Host>``: not another site, just a missing header."""
+    if not is_proxied(req) or is_https(req) or forwarded_scheme(req) is not None:
+        return False
+    site = req.headers.get("Sec-Fetch-Site")
+    if site is not None and site.strip().lower() not in ALLOWED_FETCH_SITES:
+        return False
+    origin = req.headers.get("Origin")
+    if origin is None:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(origin.strip())
+    except ValueError:
+        return False
+    if parts.scheme != "https" or not parts.netloc:
+        return False
+    mine = host_port(req.host, "https")
+    return mine is not None and host_port(parts.netloc, "https") == mine
+
+
+def cross_site_refusal(req=None) -> Optional[str]:
+    """The cross-site guard's answer: None when the request may proceed, else
+    the message for its 403. A request through Cloudflare without an https
+    scheme header whose ``Origin`` is this host over https is told to use
+    https (``https_refusal_message``), not "Cross-site request refused"."""
+    req = _req(req)
+    if not is_cross_site(req):
+        return None
+    if _only_the_scheme_differs(req):
+        return https_refusal_message(req)
+    return CROSS_SITE_MESSAGE
+
+
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 def throttle_key(addr: Any) -> str:

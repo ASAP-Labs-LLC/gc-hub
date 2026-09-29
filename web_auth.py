@@ -41,7 +41,9 @@ https carry HSTS (``max-age=31536000``).
   LabLink sign-in exists. Checked by ``admin_auth.check`` (its own throttle).
   Session name ``Admin (break-glass)``, method ``admin``; changing the admin
   password revokes every ``admin`` session.
-* Through Cloudflare a sign-in over plain http is refused (403).
+* Through Cloudflare a sign-in over plain http is refused (403, "Sign in over https:
+  open https://<host>"; also what the cross-site guard says when the proxy
+  named no scheme and the browser's Origin is this host over https).
 * LabCore unreachable (``LabCoreUnavailable``) is 503 with
   ``labcore_unavailable: true``, and is not a failure for the throttle.
 
@@ -569,7 +571,7 @@ def _body():
 
 def _refuse_plain_http_through_tunnel():
     if netctx.is_proxied() and not netctx.is_https():
-        return _err("Sign in over https.", 403)
+        return _err(netctx.https_refusal_message(), 403)
     return None
 
 

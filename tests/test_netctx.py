@@ -216,6 +216,46 @@ def test_null_origin_and_no_headers():
         assert not netctx.is_cross_site()
 
 
+NO_SCHEME = {"Host": "gc.asaplabs.net", "CF-Connecting-IP": "203.0.113.9", "CF-Ray": "8c1d-DFW"}
+HTTPS_MESSAGE = "Sign in over https: open https://gc.asaplabs.net"
+
+
+def test_cross_site_refusal_names_the_https_address_when_the_proxy_named_no_scheme():
+    """Through Cloudflare with no X-Forwarded-Proto/CF-Visitor, the hub takes
+    the request for http; the browser's Origin is https://gc.asaplabs.net.
+    That isn't another site: say to use https (v3.1.0)."""
+    h = dict(NO_SCHEME, Origin="https://gc.asaplabs.net", **{"Sec-Fetch-Site": "same-origin"})
+    with ctx(LOOPBACK, h, method="POST"):
+        assert netctx.is_cross_site()
+        assert netctx.cross_site_refusal() == HTTPS_MESSAGE
+
+
+def test_cross_site_refusal_for_a_real_other_site_is_unchanged():
+    with ctx(LOOPBACK, dict(NO_SCHEME, Origin="https://evil.example"), method="POST"):
+        assert netctx.cross_site_refusal() == "Cross-site request refused"
+    with ctx(LOOPBACK, dict(TUNNEL_HEADERS, Origin="https://evil.example"), method="POST"):
+        assert netctx.cross_site_refusal() == "Cross-site request refused"
+    h = dict(NO_SCHEME, Origin="https://gc.asaplabs.net", **{"Sec-Fetch-Site": "cross-site"})
+    with ctx(LOOPBACK, h, method="POST"):
+        assert netctx.cross_site_refusal() == "Cross-site request refused"
+    # a LAN host sending Cloudflare headers is not a proxy: plain cross-site
+    with ctx(LAN, dict(NO_SCHEME, Origin="https://gc.asaplabs.net"), method="POST"):
+        assert netctx.cross_site_refusal() == "Cross-site request refused"
+
+
+def test_cross_site_refusal_is_none_when_same_origin():
+    h = dict(TUNNEL_HEADERS, Origin="https://gc.asaplabs.net", **{"Sec-Fetch-Site": "same-origin"})
+    with ctx(LOOPBACK, h, method="POST"):
+        assert netctx.cross_site_refusal() is None
+    with ctx(LAN, {"Host": "asapsv1:5560"}, method="POST"):
+        assert netctx.cross_site_refusal() is None
+
+
+def test_https_refusal_message_uses_the_requests_host():
+    with ctx(LOOPBACK, NO_SCHEME, method="POST"):
+        assert netctx.https_refusal_message() == HTTPS_MESSAGE
+
+
 # ── throttle keys and the https redirect ────────────────────────────────────
 
 def test_throttle_key_groups_ipv6_by_64():
