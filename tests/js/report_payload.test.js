@@ -1,6 +1,6 @@
 // Report payload helpers: custom regions must ride along with every
 // export/queue payload so the final report can draw them.
-const { rangesForPayload, buildReportItemPayload } =
+const { rangesForPayload, buildReportItemPayload, captureReportParams } =
     require('../../static/js/report_payload.js');
 
 module.exports = (t) => {
@@ -47,4 +47,38 @@ module.exports = (t) => {
     // no ranges anywhere → omit key entirely (backend uses saved defaults)
     const p3 = buildReportItemPayload(legacyItem);
     t.eq('ranges' in p3, false);
+
+    // ── Phase 3: bullets are computed on the server, never sent ──────────
+    t.eq('bullets' in payload, false);
+    t.eq('bullets' in p2, false);
+
+    // an item queued with every range removed sends `ranges: []` (= no
+    // ranges), not "missing" (= saved defaults) and not the fallback
+    const noRanges = buildReportItemPayload({ ...item, ranges: [] }, overlays);
+    t.eq(noRanges.ranges, []);
+
+    // captureReportParams: the operator's trend parameters, thresholds and
+    // graph limit, as numbers; nothing else
+    const live = { quantile: '0.25', window: 251, sigma: 20, thresh_marginal: 120,
+        thresh_moderate: 450, thresh_significant: 1800, x_max_min: 6.5, other: 'x' };
+    const captured = captureReportParams(live);
+    t.eq(captured, { quantile: 0.25, window: 251, sigma: 20, thresh_marginal: 120,
+        thresh_moderate: 450, thresh_significant: 1800, x_max_min: 6.5 });
+    t.eq(captureReportParams(null), {});
+    t.eq(captureReportParams({ window: 'abc', sigma: 3 }), { sigma: 3 });
+
+    // params captured at queue time ride along (flattened for the server)…
+    const queued = { ...item, params: captured };
+    const p4 = buildReportItemPayload(queued, overlays, { ...live, window: 999 });
+    t.eq(p4.window, 251);
+    t.eq(p4.thresh_marginal, 120);
+    t.eq(p4.x_max_min, 6.5);
+    t.eq('params' in p4, false);
+    // …and items queued before params were captured use the current ones
+    const p5 = buildReportItemPayload(item, overlays, live);
+    t.eq(p5.window, 251);
+    t.eq(p5.quantile, 0.25);
+    // no params anywhere → none sent (server uses the saved defaults)
+    const p6 = buildReportItemPayload(item);
+    t.eq('window' in p6, false);
 };
