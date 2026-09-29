@@ -24,6 +24,11 @@ order, and ``HubRuntime.stop()`` undoes it:
    ``PRUNE_DAYS`` (``store.jobs.prune_done``, once per day). A failed
    backup is notified once and retried after ``BACKUP_RETRY``.
 
+``HubRuntime.pause()``/``resume()`` stop and restart the Worker, exporter and
+maintenance threads while the runtime stays (the hub tray's "Pause
+processing", ``hub_control``); ``set_processing_paused`` persists the choice
+in ``settings_kv`` and ``start`` honours it (``paused=``).
+
 ``start_with_retry(start_fn)`` is how the app calls it: retried with backoff
 (``START_BACKOFF``), notified after ``START_NOTIFY_AFTER`` failures.
 ``background_busy(db)`` tells the auto-restart whether the Worker has work.

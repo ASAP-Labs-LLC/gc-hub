@@ -636,6 +636,91 @@ If Ryan approves copying a fix onto a share copy:
    unreachable, for example when the share or the GC PC's folder is offline.
    They work again once the folder is reachable; nothing needs restarting.
 
+## Hub tray on ASAPSV1
+
+The hub runs in the background under the updater (a scheduled task, launched
+with `DETACHED_PROCESS`, as SYSTEM or the updater's service account), so it
+has no window and no icon: a tray icon inside it would sit in session 0,
+where nobody sees it. The **hub tray** (`tray\hub_tray.pyw`, shipped in every
+release) is a separate small program for the admin logged on to ASAPSV1. It
+shows how the hub is doing and lets you pause it or stop it if it is slowing
+the server down. It talks to the hub at `http://127.0.0.1:5560` only.
+
+**Install (once, as the admin who uses ASAPSV1).** Log on to ASAPSV1 (RDP),
+open a command prompt (not elevated) and run, via the `current` junction so
+autostart follows every update:
+
+```
+C:\ASAPApps\gc\current\.venv\Scripts\pythonw.exe C:\ASAPApps\gc\current\tray\hub_tray.pyw --install
+```
+
+This registers the tray to start at **your** logon
+(`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value
+`ASAPLabs GC Hub Tray`) and starts it now. Only one tray runs per user (a
+second start exits). `--uninstall` removes the autostart (a running tray
+stays until *Exit tray*). The tray runs with the release's own `.venv`:
+`requirements.txt` pins `pystray` (Windows only) and `psutil`, next to the
+`Pillow` and `six` pins that were already there, so nothing else is
+installed. When the updater switches to a new release, the tray notices the
+new version and restarts itself from `current` (so the old release folder is
+not held open when the updater prunes it). Its log is
+`%LOCALAPPDATA%\ASAPLabs\gc-hub-tray.log`. Settings are optional: copy
+`tray\tray.example.json` to `%APPDATA%\ASAPLabs\gc-hub-tray.json` and keep
+only what you change (port, the updater's paths, the amber thresholds).
+
+**The icon.** Green: running. Amber: busy (the hub process has used more
+than half a CPU core for a whole minute, or more than 25 jobs are due) or
+processing is paused. Red: stopped or not answering. It polls
+`GET /api/hub/status` every 5 s (cheap: a few counts; it does not count as
+activity, so it never blocks the 3 AM restart). The same numbers are in
+`/healthz` under `hub`.
+
+**The menu (right-click).**
+
+| Item | What it does |
+|---|---|
+| Status line | Version · running/processing paused/stopped · CPU (share of one core) · RAM · jobs queued |
+| Open in browser | `http://localhost:5560` |
+| Pause processing / Resume processing | Stops (starts) the hub's background work: the Worker, the export to the results CSVs and the nightly maintenance. The web app keeps serving and the agents keep sending: new samples wait as *received* and are processed on Resume. It survives a restart (stored in `gc.db`) and a notification stays up in the app while paused. Admin password |
+| Restart (Restart & install vX) | Same as Settings > Restart: a plain restart, or installs the staged release |
+| Stop hub | Stops the hub completely (below). Admin password |
+| Start hub | Runs the updater's `resume` (below) |
+| Exit tray | Closes the icon only; the hub is not touched |
+
+The admin password is asked for when an action needs it and kept **in
+memory** until the tray exits (never on disk; set `remember_password` to
+false to be asked every time). Pause, Resume and Stop are refused from any
+other machine: they answer only on loopback (`127.0.0.1`/`::1`), with the
+admin password, as JSON.
+
+**Why Stop pauses the updater.** The updater restarts any app that stops
+serving within ~20 s (`supervise()`), so simply exiting would be undone. Stop
+therefore writes the updater's own hold, `C:\ASAPApps\gc\data\paused` (the
+file `updater.py pause --app gc` writes; the text says who stopped it and
+when), then stops the hub's threads and exits. A paused updater normally
+makes the hub start its own replacement when it restarts; an explicit Stop
+never does. While the file exists, the updater leaves gc alone (it still
+stages new releases, but does not switch or start them).
+
+**How Start works.** *Start hub* runs
+`updater.py resume --app gc --config C:\ASAPApps\updater\config.json` (with
+the release's Python; the updater needs nothing else), which deletes
+`paused`; the updater's next supervision pass (within ~20 s) starts the hub,
+and the icon turns green once it answers. The data folder and the updater
+are Administrators-only, so from an unelevated tray this usually needs
+elevation: the tray tries the command, then removing the file itself, and
+then offers to run the command as an administrator (a UAC prompt). By hand,
+from an elevated prompt:
+
+```
+"C:\Program Files\Python314\python.exe" C:\ASAPApps\updater\updater.py resume --app gc --config C:\ASAPApps\updater\config.json
+```
+
+(use the updater's own Python, see *Before you start*). The same caveat means
+an unelevated tray may show a stopped hub as "not responding" rather than
+"stopped (updater paused)": it cannot see the `paused` file; the menu offers
+Start hub either way.
+
 ## After setup
 
 - Everyday releases: [`RELEASING.md`](RELEASING.md).

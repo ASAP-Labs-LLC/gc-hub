@@ -138,6 +138,9 @@ def runtime_closure(root: Path) -> set:
     agent = root / "agent"
     files |= {f"agent/{rel}" for rel in _closure(agent, sorted(agent.glob("*.py"))
                                                     + sorted(agent.glob("*.pyw")))}
+    tray = root / "tray"          # the hub tray, run from the release on ASAPSV1
+    if tray.is_dir():
+        files |= {f"tray/{rel}" for rel in _closure(tray, sorted(tray.glob("*.pyw")))}
     return files
 
 
@@ -202,6 +205,8 @@ class PackageTests(unittest.TestCase):
                      "instruments_api.py", "instrument_admin.py", "standards.py",
                      "templates/instruments.html", "tools/parity_report.py", "agent/agent_main.py",
                      "agent/gc_agent/core.py", "agent/requirements-agent.txt",
+                     "hub_control.py", "tray/hub_tray.pyw", "tray/gc_tray/__init__.py",
+                     "tray/gc_tray/logic.py", "tray/gc_tray/ui.py", "tray/tray.example.json",
                      "templates/index.html", "templates/calibration.html",
                      "templates/hub_admin.html", "static/js/hub_admin.js",
                      "static/js/app.js", "static/css/style.css", "static/css/badge.css",
@@ -251,7 +256,8 @@ class PackageTests(unittest.TestCase):
                          "store.py", "pipeline.py", "exports.py", "methods/d2887.py",
                          "jobs/load_folder.py", "import_match.py", "tools/parity_report.py",
                          "analysis_core.py", "comments.py", "comments_api.py",
-                         "agent/agent_main.py", "agent/gc_agent/core.py"} <= closure, closure)
+                         "agent/agent_main.py", "agent/gc_agent/core.py", "hub_control.py",
+                         "tray/hub_tray.pyw", "tray/gc_tray/logic.py"} <= closure, closure)
         rel = self._rel()
         missing = sorted(m for m in closure if m not in rel)
         self.assertEqual(missing, [])
@@ -492,15 +498,20 @@ class RequirementsPinnedTests(unittest.TestCase):
                     "certifi", "reportlab", "tzdata"):
             self.assertIn(dep, names)
 
-    def test_the_hub_neither_pins_nor_imports_the_tray_packages(self):
-        # v2: run.pyw is gone; only the agent has a tray (it declares its
-        # own deps in agent/requirements-agent.txt). Pillow stays, pinned as
-        # reportlab/xhtml2pdf's dependency.
-        names = {_norm(n) for n, _v, _m in _requirements()}
-        self.assertFalse(names & {"pystray", "watchdog", "pyobjc-core", "python-xlib"}, names)
-        self.assertIn("pillow", names)
+    def test_the_hub_never_imports_the_tray_packages(self):
+        # v2: run.pyw is gone. The hub tray (tray/, 2026-09-29) runs with the
+        # release's .venv, so pystray is pinned again, but only for Windows
+        # (no Linux/macOS backends: python-xlib, pyobjc), and only tray/
+        # imports it; the hub process itself never does. Pillow stays,
+        # pinned as reportlab/xhtml2pdf's dependency.
+        reqs = {_norm(n): m for n, _v, m in _requirements()}
+        self.assertFalse(set(reqs) & {"watchdog", "pyobjc-core", "python-xlib"}, reqs)
+        self.assertIn("pystray", reqs)
+        self.assertIn('sys_platform == "win32"', reqs["pystray"])
+        self.assertIn("pillow", reqs)
+        self.assertIn("six", reqs)
         for rel in sorted(runtime_closure(ROOT)):
-            if rel.startswith("agent/"):
+            if rel.startswith(("agent/", "tray/")):
                 continue
             tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
@@ -641,20 +652,29 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("uses: ./.github/workflows/ci.yml", self.jobs["test"])
         self.assertRegex(self.jobs["publish"], r"needs: \[?test\b")
 
-    def test_publish_also_needs_the_exports_and_agent_suites(self):
-        # A red Windows export suite or GC-PC agent suite never releases either.
+    def test_publish_also_needs_the_exports_agent_and_tray_suites(self):
+        # A red Windows export suite, GC-PC agent suite or hub tray suite
+        # never releases either.
         self.assertIn("uses: ./.github/workflows/exports-ci.yml", self.jobs["exports"])
         self.assertIn("uses: ./.github/workflows/agent-ci.yml", self.jobs["agent"])
+        self.assertIn("uses: ./.github/workflows/tray-ci.yml", self.jobs["tray"])
         m = re.search(r"needs: \[([^\]]*)\]", self.jobs["publish"])
         self.assertIsNotNone(m, "publish must list its needs")
         self.assertEqual({n.strip() for n in m.group(1).split(",")},
-                         {"test", "exports", "agent"})
-        for name in ("exports-ci.yml", "agent-ci.yml"):
+                         {"test", "exports", "agent", "tray"})
+        for name in ("exports-ci.yml", "agent-ci.yml", "tray-ci.yml"):
             text = (WF / name).read_text()
             self.assertIn("workflow_call:", _top(text), name)
             self.assertRegex(_top(text), r"permissions:\s*\n\s+contents: read", name)
-        for job in ("exports", "agent"):
+        for job in ("exports", "agent", "tray"):
             self.assertNotIn("contents: write", self.jobs[job])
+
+    def test_the_tray_suite_runs_on_windows(self):
+        text = (WF / "tray-ci.yml").read_text()
+        self.assertIn("windows-latest", text)
+        self.assertIn("python-version: '3.14'", text)
+        self.assertIn("pytest tests/tray", text)
+        self.assertIn("persist-credentials: false", text)
 
     def test_write_token_only_in_publish(self):
         self.assertNotIn("contents: write", _top(self.wf))
