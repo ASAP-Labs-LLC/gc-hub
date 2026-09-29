@@ -36,6 +36,7 @@ import time
 import traceback
 import urllib.parse
 from datetime import datetime
+from html import escape as _esc
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
@@ -112,6 +113,17 @@ import hub
 import instruments
 import pipeline
 import store
+
+# Phase 4's comments module (the seam frozen in the phase 3+4 spec). Until it
+# merges, reports carry no comments and write no report_log rows; the
+# integrator removes this fallback. Only a missing `comments` module is
+# tolerated: an import error inside it still fails the start.
+try:
+    import comments as comments_mod
+except ModuleNotFoundError as _exc:
+    if _exc.name != "comments":
+        raise
+    comments_mod = None  # type: ignore[assignment]
 
 try:
     import qbench_pdf_uploader
@@ -1005,7 +1017,6 @@ from analysis_core import (  # noqa: E402
     merge_overlapping_segments,
     carbon_to_time,
     segment_carbon_range,
-    generate_conclusion,
 )
 
 
@@ -1072,311 +1083,108 @@ def _generate_comparison_html(
     return pio.to_html(fig, full_html=True)
 
 
-def _generate_analysis_report_pdf(
-    params: dict,
-    analysis_result: dict,
-    ranges: list[dict] | None = None,
-    ladder: tuple[list, list] | None = None,
-) -> bytes:
-    """Generate a styled PDF report matching the old desktop app's
-    ``_send_to_analysis_queue`` output 1:1.
-
-    Layout: two Plotly charts (chromatogram overlay + difference plot),
-    rendered as PNG, embedded in an HTML template with header/logo,
-    deviation bullets, conclusion, and footer — converted to PDF via
-    xhtml2pdf (replacing the desktop app's QPrinter).
-    """
-    # ── Extract parameters ────────────────────────────────────────────
-    doc_name = params.get("doc_name", "GC Analysis")
-    lab_id = params.get("lab_id", "")
-    conclusion = params.get("conclusion", analysis_result.get("conclusion", ""))
-    bullets_raw = params.get("bullets", analysis_result.get("bullets", ""))
-    std_name = params.get("standard_name", "Standard")
-    overlay_standards = params.get("overlay_standards", [])
-
-    sample_name = lab_id or "Sample"
-
-    date_display = datetime.now().strftime("%B %d, %Y")
-    datetime_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    # ── Load config & calibration ─────────────────────────────────────
-    conf = settings_mod.load_settings()
-    x_max_min = float(conf.get("analysis_x_max_min", 7.0))
-
-    # The sample revision's anchors when the caller has them (every hub
-    # route does); the configured calibration otherwise.
-    cal_times, cal_carbons = ladder if ladder is not None else distill.calibration_ladder(conf)
-
-    # ── Data arrays ───────────────────────────────────────────────────
-    t_common = np.array(analysis_result["sample_raw"]["x"])
-    std_raw = np.array(analysis_result["std_raw"]["y"])
-    smp_raw = np.array(analysis_result["sample_raw"]["y"])
-    diff = np.array(analysis_result["difference"]["y"])
-
-    # ── Region list (operator-defined; falls back to saved/legacy) ────
-    if ranges is None:
-        ranges = analysis_core.resolve_report_ranges(params.get("ranges"), conf)
-
-    # ── Calibration shapes + annotations (shared by both figures) ─────
-    cal_shapes: list[dict] = []
-    cal_annotations: list[dict] = []
-    for ci, peak_time in enumerate(cal_times):
+def _comment_line(c: dict, ladder) -> str:
+    """One comment as printed in a report (plain text; the HTML escapes it):
+    ``text (initials, date)``, or for an annotation ``text (Cx–Cy, a–b min;
+    initials, date)``. Initials only, never the IP."""
+    who = f"{c.get('initials') or '?'}, {str(c.get('created_at') or '')[:10]}"
+    t0, t1 = c.get("t0"), c.get("t1")
+    if t0 is None or t1 is None:
+        return f"{c.get('text', '')} ({who})"
+    span = f"{float(t0):.2f}–{float(t1):.2f} min"
+    if analysis_core._has_ladder(ladder):
         try:
-            tval = float(peak_time)
-        except Exception:
-            continue
-        cal_shapes.append(dict(
-            type="line", x0=tval, y0=0, x1=tval, y1=1,
-            xref="x", yref="paper",
-            line=dict(color="#e3b341", dash="dot", width=1),
-            layer="below",
-        ))
-        if ci < len(cal_carbons):
-            lbl = f"C{cal_carbons[ci]}"
-        else:
-            lbl = f"#{ci + 1}"
-        cal_annotations.append(dict(
-            x=tval, y=1.03, xref="x", yref="paper",
-            text=f"<b>{lbl}</b>", showarrow=False,
-            font=dict(color="#e3b341", size=14),
-            xanchor="center", yanchor="bottom",
-        ))
-
-    # ── Gas / Oil range rectangles + labels ───────────────────────────
-    range_shapes: list[dict] = []
-    range_poly_rects: list[dict] = []
-    range_annotations: list[dict] = []
-
-    def _c_to_time(c: int) -> "float | None":
-        if not cal_times:
-            return None
-        cn = np.array(cal_carbons, dtype=float)
-        ct = np.array(cal_times, dtype=float)
-        if len(cn) < 2:
-            return float(ct[0]) if len(ct) else None
-        if c <= cn[0]:
-            slope = (ct[1] - ct[0]) / (cn[1] - cn[0])
-            return float(max(0.0, ct[0] + slope * (c - cn[0])))
-        if c >= cn[-1]:
-            slope = (ct[-1] - ct[-2]) / (cn[-1] - cn[-2])
-            return float(ct[-1] + slope * (c - cn[-1]))
-        return float(np.interp(c, cn, ct))
-
-    _rgba = analysis_core.range_color_rgba
-    for rng in ranges:
-        c_start, c_end = int(rng["c_start"]), int(rng["c_end"])
-        color = rng.get("color", "#f0a500")
-        fill_col = _rgba(color, 0.12)
-        fill_poly = _rgba(color, 0.18)
-        line_poly = _rgba(color, 0.70)
-        line_col = _rgba(color, 0.55)
-        label_txt = f"{rng.get('label', 'Range')} C{c_start}\u2013C{c_end}"
-        t_lo = _c_to_time(c_start)
-        t_hi = _c_to_time(c_end)
-        if t_lo is not None and t_hi is not None and t_hi > t_lo:
-            range_shapes.append(dict(
-                type="rect", x0=t_lo, x1=t_hi, y0=0, y1=1,
-                xref="x", yref="paper",
-                fillcolor=fill_col,
-                line=dict(color=line_col, width=1, dash="dash"),
-                layer="below",
-            ))
-            range_poly_rects.append(dict(
-                t_lo=t_lo, t_hi=t_hi,
-                fill=fill_poly, border=line_poly,
-            ))
-            range_annotations.append(dict(
-                x=(t_lo + t_hi) / 2, y=0.98, xref="x", yref="paper",
-                text=f"<b>{label_txt}</b>", showarrow=False,
-                font=dict(color="#555555", size=18),
-                xanchor="center", yanchor="top",
-                bgcolor="rgba(255,255,255,0.75)", borderpad=2,
-            ))
-
-    all_shapes = range_shapes + cal_shapes
-    all_annotations = range_annotations + cal_annotations
-
-    # ── Chart styling constants (match old desktop app exactly) ───────
-    PLOT_W, PLOT_H, PLOT_H2 = 1400, 520, 480
-    BG = "#ffffff"
-    PLOT_BG = "#f7f7f7"
-    FG = "#2c2c2c"
-    GRID = "rgba(0,0,0,0.08)"
-    AXIS = dict(
-        title_font=dict(color=FG, size=22), tickfont=dict(color=FG, size=16),
-        linecolor="#cccccc", gridcolor=GRID, zeroline=False,
-    )
-
-    # ── Figure 1: raw chromatograms ──────────────────────────────────
-    fig1 = go.Figure()
-    fig1.add_trace(go.Scatter(
-        x=t_common.tolist(), y=std_raw.tolist(),
-        name=f"Standard: {std_name}",
-        mode="lines", line=dict(color="#888888", width=1),
-        hovertemplate="Time: %{x:.2f} min<br>Intensity: %{y:.0f}<extra></extra>",
-    ))
-    fig1.add_trace(go.Scatter(
-        x=t_common.tolist(), y=smp_raw.tolist(),
-        name=f"Sample: {sample_name}",
-        mode="lines", line=dict(color="#c0392b", width=1),
-        hovertemplate="Time: %{x:.2f} min<br>Intensity: %{y:.0f}<extra></extra>",
-    ))
-
-    # Overlay additional comparison standards
-    _ov_colors = ["#3498db", "#27ae60", "#8e44ad", "#e67e22", "#16a085"]
-    comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
-    for oi, ov_name in enumerate(overlay_standards):
-        try:
-            ov_path = comp_dir / f"{ov_name}.CDF"
-            if not ov_path.is_file():
-                ov_path = comp_dir / f"{ov_name}.cdf"
-            if not ov_path.is_file():
-                ov_path = Path(ov_name)
-            if not ov_path.is_file():
-                continue
-            try:
-                ox, oy = distill.gc_xy_from_cdf(ov_path)
-            except Exception:
-                _tr = distill.gc_trace_from_cdf(ov_path)
-                ox, oy = _tr.x, _tr.y
-            ox = np.array(ox, dtype=float)
-            oy = np.array(oy, dtype=float)
-            oy_i = np.interp(t_common, ox, oy)
-            fig1.add_trace(go.Scatter(
-                x=t_common.tolist(), y=oy_i.tolist(),
-                name=ov_path.stem,
-                mode="lines",
-                line=dict(color=_ov_colors[oi % len(_ov_colors)], width=1, dash="dot"),
-                hovertemplate="Time: %{x:.2f} min<br>Intensity: %{y:.0f}<extra></extra>",
-            ))
-        except Exception:
-            LOGGER.warning("Could not load overlay standard %s", ov_name)
-
-    fig1.update_layout(
-        template="none",
-        paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
-        font=dict(color=FG, size=18),
-        margin=dict(l=80, r=80, t=150, b=60),
-        legend=dict(
-            orientation="h", x=0.5, xanchor="center",
-            y=1.18, yanchor="bottom",
-            font=dict(size=14),
-            bgcolor="rgba(255,255,255,0.9)", bordercolor="#cccccc", borderwidth=1,
-        ),
-        shapes=all_shapes, annotations=all_annotations,
-        xaxis=dict(AXIS, title="Time (min)", range=[float(t_common[0]), x_max_min]),
-        yaxis=dict(AXIS, title="Intensity"),
-    )
-
-    # ── Figure 2: difference ─────────────────────────────────────────
-    diff_pos = np.where(diff > 0, diff, 0.0)
-    diff_neg = np.where(diff < 0, diff, 0.0)
-
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(
-        x=t_common.tolist(), y=diff_pos.tolist(), fill="tozeroy",
-        fillcolor="rgba(192,57,43,0.12)", line=dict(width=0),
-        showlegend=False, hoverinfo="skip",
-    ))
-    fig2.add_trace(go.Scatter(
-        x=t_common.tolist(), y=diff_neg.tolist(), fill="tozeroy",
-        fillcolor="rgba(52,152,219,0.12)", line=dict(width=0),
-        showlegend=False, hoverinfo="skip",
-    ))
-    fig2.add_trace(go.Scatter(
-        x=t_common.tolist(), y=diff.tolist(),
-        name="Difference (sample \u2212 std)",
-        mode="lines", line=dict(color="#c0392b", width=1.5),
-        hovertemplate="Time: %{x:.2f} min<br>Diff: %{y:.0f}<extra></extra>",
-    ))
-    fig2.add_hline(y=0, line=dict(color="#aaaaaa", width=1, dash="dash"))
-
-    _diff_ypad = float(np.max(np.abs(diff))) * 1.5 if len(diff) else 1.0
-    for pr in range_poly_rects:
-        xl, xh = pr["t_lo"], pr["t_hi"]
-        fig2.add_trace(go.Scatter(
-            x=[xl, xl, xh, xh, xl],
-            y=[-_diff_ypad, _diff_ypad, _diff_ypad, -_diff_ypad, -_diff_ypad],
-            fill="toself", fillcolor=pr["fill"],
-            line=dict(color=pr["border"], width=2),
-            mode="lines", showlegend=False, hoverinfo="skip",
-        ))
-    fig2.update_layout(
-        template="none",
-        paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
-        font=dict(color=FG, size=18),
-        margin=dict(l=80, r=80, t=130, b=60),
-        legend=dict(
-            orientation="h", x=0.5, xanchor="center",
-            y=1.18, yanchor="bottom",
-            font=dict(size=14),
-            bgcolor="rgba(255,255,255,0.9)", bordercolor="#cccccc", borderwidth=1,
-        ),
-        shapes=cal_shapes, annotations=all_annotations,
-        xaxis=dict(AXIS, title="Time (min)", range=[float(t_common[0]), x_max_min]),
-        yaxis=dict(AXIS, title="Difference (sample \u2212 std)"),
-    )
-
-    # ── Render figures to PNG bytes ───────────────────────────────────
-    try:
-        png1_bytes = fig1.to_image(format="png", width=PLOT_W, height=PLOT_H, scale=2)
-        png2_bytes = fig2.to_image(format="png", width=PLOT_W, height=PLOT_H2, scale=2)
-    except Exception as exc:
-        LOGGER.error("Chart render failed: %s", exc)
-        raise RuntimeError(f"Could not render Plotly charts: {exc}") from exc
-
-    img1_b64 = base64.b64encode(png1_bytes).decode("ascii")
-    img2_b64 = base64.b64encode(png2_bytes).decode("ascii")
-
-    # ── Logo (optional) ──────────────────────────────────────────────
-    logo_path = conf.get("analysis_report_logo", "").strip()
-    has_logo = False
-    logo_b64 = ""
-    if logo_path:
-        try:
-            logo_b64 = base64.b64encode(Path(logo_path).read_bytes()).decode("ascii")
-            has_logo = True
-        except Exception:
+            c0 = round(analysis_core.ladder_time_to_carbon(float(t0), ladder))
+            c1 = round(analysis_core.ladder_time_to_carbon(float(t1), ladder))
+            span = f"C{c0}–C{c1}, {span}"
+        except ValueError:
             pass
+    return f"{c.get('text', '')} ({span}; {who})"
 
-    # ── Bullets HTML ─────────────────────────────────────────────────
-    bullet_lines_final = [
-        l.strip().lstrip("\u2022").strip()
-        for l in (bullets_raw or "").splitlines()
-        if l.strip()
-    ]
-    if bullet_lines_final:
-        items = "".join(
-            f'<li style="margin-bottom:5px; color:#2c2c2c;">{b}</li>'
-            for b in bullet_lines_final
-        )
-        bullets_html = (
-            f'<ul style="margin:0; padding-left:20px; font-size:9pt;">{items}</ul>'
-        )
-    else:
-        bullets_html = (
-            '<p style="color:#888888; font-style:italic; margin:0; font-size:9pt;">'
-            "No deviations detected above the marginal threshold."
-            "</p>"
-        )
 
-    logo_cell_html = (
-        f'<img src="data:image/png;base64,{logo_b64}" height="56">'
-        if has_logo
-        else '<span style="color:#1c1c1c;">&#8203;</span>'
-    )
+def _report_footer_lines(content: dict) -> list[str]:
+    """The parameters, ranges and app version a report was computed with."""
+    p = content["params_used"]
+    params_line = (
+        f"Parameters: baseline quantile {p['quantile']:g} · window {p['window']} pts "
+        f"· smoothing {p['sigma']:g} pts · thresholds marginal ≥{p['thresh_marginal']:g}, "
+        f"moderate ≥{p['thresh_moderate']:g}, significant ≥{p['thresh_significant']:g} "
+        f"· x-max {p['x_max_min']:g} min · min width {p['min_width_min']:g} min "
+        f"· merge gap {p['merge_gap_min']:g} min · spike min width "
+        f"{p['spike_min_width_min']:g} min · spike report ≥{p['spike_report_threshold']:g} "
+        f"· spike max FWHM {p['spike_max_fwhm_min']:g} min · spike dominance "
+        f"≥{p['spike_min_dominance']:g}")
+    ranges = content.get("ranges") or []
+    ranges_line = "Ranges: " + (", ".join(
+        f"{r.get('label', 'Range')} C{min(int(r['c_start']), int(r['c_end']))}–"
+        f"C{max(int(r['c_start']), int(r['c_end']))}" for r in ranges) or "none")
+    return [params_line, ranges_line]
+
+
+def _report_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str,
+                 datetime_str: str, img1_b64: str, img2_b64: str, logo_b64: str,
+                 bullets_text: str, conclusion: str, comments: list[dict], ladder,
+                 footer_lines: list[str]) -> str:
+    """The analysis report page (1:1 with the old desktop template). Every
+    interpolated string is escaped: bullets, conclusion, lab ID, standard and
+    document names, range labels, comments."""
+    e = _esc
+    blocks = []
+    bullet_items: list[str] = []
+    for line in (bullets_text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("•"):
+            bullet_items.append(line.lstrip("•").strip())
+            continue
+        if bullet_items:
+            blocks.append(bullet_items)
+            bullet_items = []
+        blocks.append(line)
+    if bullet_items:
+        blocks.append(bullet_items)
+    parts = []
+    for b in blocks:
+        if isinstance(b, list):
+            lis = "".join(f'<li style="margin-bottom:5px; color:#2c2c2c;">{e(x)}</li>' for x in b)
+            parts.append(f'<ul style="margin:0; padding-left:20px; font-size:9pt;">{lis}</ul>')
+        else:
+            parts.append(f'<p style="margin:0 0 4px 0; font-size:9pt; color:#2c2c2c;">{e(b)}</p>')
+    bullets_html = "".join(parts) or (
+        '<p style="color:#888888; font-style:italic; margin:0; font-size:9pt;">'
+        f"{e(analysis_core.NO_DEVIATION)}</p>")
+
+    comments_section = ""
+    if comments:
+        lis = "".join(f'<li style="margin-bottom:4px; color:#2c2c2c;">{e(_comment_line(c, ladder))}</li>'
+                      for c in comments)
+        comments_section = f"""
+<!-- COMMENTS -->
+<table width="100%" cellspacing="0" cellpadding="0" style="margin-top:6px;">
+<tr><td style="background-color:#555555; padding:3px 10px; color:#ffffff; font-size:9pt; font-weight:bold; letter-spacing:0.5px;">
+  Comments
+</td></tr>
+</table>
+<table width="100%" cellspacing="0" cellpadding="0" style="margin-top:0;">
+<tr>
+  <td width="4" style="background-color:#888888;"></td>
+  <td style="background-color:#f8f8f8; padding:6px 12px 8px 12px; border:1px solid #e8e8e8; border-left:none;">
+    <ul style="margin:0; padding-left:20px; font-size:9pt;">{lis}</ul>
+  </td>
+</tr>
+</table>
+"""
+
+    logo_cell_html = (f'<img src="data:image/png;base64,{logo_b64}" height="56">' if logo_b64
+                      else '<span style="color:#1c1c1c;">&#8203;</span>')
     lab_id_html = (
-        f'<span style="font-size:9pt; font-weight:bold; color:#1c1c1c;">Lab ID:&nbsp;{lab_id}</span><br>'
-        if lab_id else ""
-    )
-    conc_html = (
-        conclusion.replace("\n", "<br>")
-        if conclusion
-        else '<em style="color:#888888;">No conclusion available.</em>'
-    )
-
-    # ── Assemble HTML (1:1 match with old desktop app template) ──────
-    html = f"""<!DOCTYPE HTML>
+        f'<span style="font-size:9pt; font-weight:bold; color:#1c1c1c;">Lab ID:&nbsp;{e(lab_id)}</span><br>'
+        if lab_id else "")
+    conc_html = (e(conclusion).replace("\n", "<br>") if conclusion
+                 else '<em style="color:#888888;">No conclusion available.</em>')
+    footer_html = "<br>".join(e(x) for x in footer_lines)
+    return f"""<!DOCTYPE HTML>
 <html><head><meta charset="utf-8"></head>
 <body style="font-family:'Segoe UI',Arial,sans-serif; color:#2c2c2c; background:#ffffff; margin:0; padding:0;">
 
@@ -1386,11 +1194,11 @@ def _generate_analysis_report_pdf(
 <tr>
   <td width="140" style="padding:8px 10px 8px 12px; vertical-align:middle;">{logo_cell_html}</td>
   <td style="padding:8px 6px; text-align:center; vertical-align:middle;">
-    <div style="font-size:13pt; font-weight:bold; color:#1c1c1c; letter-spacing:0.5px;">{doc_name}</div>
+    <div style="font-size:13pt; font-weight:bold; color:#1c1c1c; letter-spacing:0.5px;">{e(doc_name)}</div>
   </td>
   <td width="140" style="padding:8px 12px 8px 6px; text-align:right; vertical-align:middle;">
     {lab_id_html}
-    <span style="font-size:8pt; color:#555555;">{date_display}</span>
+    <span style="font-size:8pt; color:#555555;">{e(date_display)}</span>
   </td>
 </tr>
 </table>
@@ -1398,7 +1206,7 @@ def _generate_analysis_report_pdf(
 <!-- TREND PLOT -->
 <table width="100%" cellspacing="0" cellpadding="0" style="margin-top:8px;">
 <tr><td style="background-color:#c0392b; padding:3px 10px; color:#ffffff; font-size:9pt; font-weight:bold; letter-spacing:0.5px;">
-  GC Trend Analysis &mdash; Sample vs {std_name}
+  GC Trend Analysis &mdash; Sample vs {e(std_name)}
 </td></tr>
 </table>
 <table width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #dddddd; background-color:#ffffff; margin-top:0;">
@@ -1410,7 +1218,7 @@ def _generate_analysis_report_pdf(
 <!-- DIFFERENCE PLOT -->
 <table width="100%" cellspacing="0" cellpadding="0" style="margin-top:6px;">
 <tr><td style="background-color:#c0392b; padding:3px 10px; color:#ffffff; font-size:9pt; font-weight:bold; letter-spacing:0.5px;">
-  Difference Plot &mdash; Sample &minus; {std_name}
+  Difference Plot &mdash; Sample &minus; {e(std_name)}
 </td></tr>
 </table>
 <table width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #dddddd; background-color:#ffffff; margin-top:0;">
@@ -1433,7 +1241,7 @@ def _generate_analysis_report_pdf(
   </td>
 </tr>
 </table>
-
+{comments_section}
 <!-- CONCLUSION -->
 <table width="100%" cellspacing="0" cellpadding="0" style="margin-top:6px;">
 <tr><td style="background-color:#555555; padding:3px 10px; color:#ffffff; font-size:9pt; font-weight:bold; letter-spacing:0.5px;">
@@ -1452,18 +1260,197 @@ def _generate_analysis_report_pdf(
 <!-- FOOTER -->
 <table width="100%" cellspacing="0" cellpadding="0" style="margin-top:8px; border-top:1px solid #cccccc;">
 <tr><td style="padding-top:4px; text-align:center; font-size:7pt; color:#999999;">
-  Generated by GC Viewer &bull; {datetime_str}
+  {footer_html}<br>
+  Generated by GC hub {e(version.APP_VERSION)} &middot; {e(datetime_str)}
 </td></tr>
 </table>
 
 </body></html>"""
 
-    # ── Convert HTML to PDF ──────────────────────────────────────────
-    # Use xhtml2pdf (replaces QPrinter from the desktop app).
-    # Page: US Letter with 12mm margins — matching the old app exactly.
+
+def _report_figures(content: dict, sample_name: str, overlay_standards: list,
+                    conf: dict) -> tuple:
+    """The report's two charts (chromatogram overlay, difference) from the
+    report content: range boxes from its windows, the x-axis from its
+    parameters, ±threshold lines and the counted spikes on the difference."""
+    s = content["series"]
+    p = content["params_used"]
+    t_common = np.asarray(s["t"], dtype=float)
+    std_raw, smp_raw = np.asarray(s["standard"]), np.asarray(s["sample"])
+    diff = np.asarray(s["diff"], dtype=float)
+    std_name = content["standard_name"]
+    x_max_min = float(p["x_max_min"])
+    cal_times, cal_carbons = content["ladder"]
+
+    cal_shapes: list[dict] = []
+    cal_annotations: list[dict] = []
+    for ci, peak_time in enumerate(cal_times):
+        tval = float(peak_time)
+        cal_shapes.append(dict(type="line", x0=tval, y0=0, x1=tval, y1=1, xref="x", yref="paper",
+                               line=dict(color="#e3b341", dash="dot", width=1), layer="below"))
+        lbl = f"C{cal_carbons[ci]}" if ci < len(cal_carbons) else f"#{ci + 1}"
+        cal_annotations.append(dict(x=tval, y=1.03, xref="x", yref="paper", text=f"<b>{lbl}</b>",
+                                    showarrow=False, font=dict(color="#e3b341", size=14),
+                                    xanchor="center", yanchor="bottom"))
+
+    # Range boxes from the report's windows: the very windows the bullets used.
+    range_shapes: list[dict] = []
+    range_annotations: list[dict] = []
+    _rgba = analysis_core.range_color_rgba
+    for w in content["windows"]:
+        if not w["evaluable"]:
+            continue
+        color = w.get("color") or "#f0a500"
+        range_shapes.append(dict(
+            type="rect", x0=w["t0"], x1=w["t1"], y0=0, y1=1, xref="x", yref="paper",
+            fillcolor=_rgba(color, 0.12), line=dict(color=_rgba(color, 0.55), width=1, dash="dash"),
+            layer="below"))
+        range_annotations.append(dict(
+            x=(w["t0"] + w["t1"]) / 2, y=0.98, xref="x", yref="paper",
+            text=f"<b>{_esc(w['label'])} C{w['c_start']}–C{w['c_end']}</b>", showarrow=False,
+            font=dict(color="#555555", size=18), xanchor="center", yanchor="top",
+            bgcolor="rgba(255,255,255,0.75)", borderpad=2))
+
+    all_shapes = range_shapes + cal_shapes
+    all_annotations = range_annotations + cal_annotations
+
+    PLOT_BG, BG, FG = "#f7f7f7", "#ffffff", "#2c2c2c"
+    AXIS = dict(title_font=dict(color=FG, size=22), tickfont=dict(color=FG, size=16),
+                linecolor="#cccccc", gridcolor="rgba(0,0,0,0.08)", zeroline=False)
+    legend = dict(orientation="h", x=0.5, xanchor="center", y=1.18, yanchor="bottom",
+                  font=dict(size=14), bgcolor="rgba(255,255,255,0.9)", bordercolor="#cccccc",
+                  borderwidth=1)
+    hover = "Time: %{x:.2f} min<br>Intensity: %{y:.0f}<extra></extra>"
+
+    fig1 = go.Figure()
+    fig1.add_trace(go.Scatter(x=t_common.tolist(), y=std_raw.tolist(),
+                              name=f"Standard: {_esc(std_name)}", mode="lines",
+                              line=dict(color="#888888", width=1), hovertemplate=hover))
+    fig1.add_trace(go.Scatter(x=t_common.tolist(), y=smp_raw.tolist(),
+                              name=f"Sample: {_esc(sample_name)}", mode="lines",
+                              line=dict(color="#c0392b", width=1), hovertemplate=hover))
+    _ov_colors = ["#3498db", "#27ae60", "#8e44ad", "#e67e22", "#16a085"]
+    comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
+    for oi, ov_name in enumerate(overlay_standards or []):
+        try:
+            ov_path = comp_dir / f"{ov_name}.CDF"
+            if not ov_path.is_file():
+                ov_path = comp_dir / f"{ov_name}.cdf"
+            if not ov_path.is_file():
+                ov_path = Path(ov_name)
+            if not ov_path.is_file():
+                continue
+            try:
+                ox, oy = distill.gc_xy_from_cdf(ov_path)
+            except Exception:
+                _tr = distill.gc_trace_from_cdf(ov_path)
+                ox, oy = _tr.x, _tr.y
+            oy_i = np.interp(t_common, np.array(ox, dtype=float), np.array(oy, dtype=float))
+            fig1.add_trace(go.Scatter(
+                x=t_common.tolist(), y=oy_i.tolist(), name=_esc(ov_path.stem), mode="lines",
+                line=dict(color=_ov_colors[oi % len(_ov_colors)], width=1, dash="dot"),
+                hovertemplate=hover))
+        except Exception:
+            LOGGER.warning("Could not load overlay standard %s", ov_name)
+    fig1.update_layout(
+        template="none", paper_bgcolor=BG, plot_bgcolor=PLOT_BG, font=dict(color=FG, size=18),
+        margin=dict(l=80, r=80, t=150, b=60), legend=legend,
+        shapes=all_shapes, annotations=all_annotations,
+        xaxis=dict(AXIS, title="Time (min)", range=[float(t_common[0]), x_max_min]),
+        yaxis=dict(AXIS, title="Intensity"))
+
+    # Difference: ±thresholds (dotted) and the spikes the report counted.
+    shown = t_common <= x_max_min
+    spikes = content.get("spikes") or []
+    span = max([float(np.max(np.abs(diff[shown]))) if shown.any() else 0.0,
+                float(p["thresh_marginal"])] + [abs(float(x["value"])) for x in spikes])
+    y_lim = span * 1.15 or 1.0
+    fig2 = go.Figure()
+    fig2.add_trace(go.Scatter(x=t_common.tolist(), y=np.where(diff > 0, diff, 0.0).tolist(),
+                              fill="tozeroy", fillcolor="rgba(192,57,43,0.12)", line=dict(width=0),
+                              showlegend=False, hoverinfo="skip"))
+    fig2.add_trace(go.Scatter(x=t_common.tolist(), y=np.where(diff < 0, diff, 0.0).tolist(),
+                              fill="tozeroy", fillcolor="rgba(52,152,219,0.12)", line=dict(width=0),
+                              showlegend=False, hoverinfo="skip"))
+    fig2.add_trace(go.Scatter(x=t_common.tolist(), y=diff.tolist(),
+                              name="Difference (sample − std)", mode="lines",
+                              line=dict(color="#c0392b", width=1.5),
+                              hovertemplate="Time: %{x:.2f} min<br>Diff: %{y:.0f}<extra></extra>"))
+    if spikes:
+        fig2.add_trace(go.Scatter(
+            x=[x["t"] for x in spikes], y=[x["value"] for x in spikes], mode="markers",
+            name="Counted spikes (raw difference)",
+            marker=dict(symbol=["triangle-up" if x["sign"] > 0 else "triangle-down" for x in spikes],
+                        size=14, color="#1c1c1c", line=dict(color="#ffffff", width=1))))
+    thr_shapes = [dict(type="line", xref="paper", x0=0, x1=1, yref="y", y0=0, y1=0,
+                       line=dict(color="#aaaaaa", width=1, dash="dash"))]
+    thr_annotations = []
+    for level, name, color in ((p["thresh_marginal"], "marginal", "#888888"),
+                               (p["thresh_moderate"], "moderate", "#e67e22"),
+                               (p["thresh_significant"], "significant", "#c0392b")):
+        for sgn in (1, -1):
+            thr_shapes.append(dict(type="line", xref="paper", x0=0, x1=1, yref="y",
+                                   y0=sgn * level, y1=sgn * level,
+                                   line=dict(color=color, width=1, dash="dot")))
+        if level <= y_lim:
+            thr_annotations.append(dict(x=1.0, xref="paper", y=level, yref="y",
+                                        text=f"{name} ±{level:g}", showarrow=False,
+                                        xanchor="left", font=dict(color=color, size=12)))
+    fig2.update_layout(
+        template="none", paper_bgcolor=BG, plot_bgcolor=PLOT_BG, font=dict(color=FG, size=18),
+        margin=dict(l=80, r=150, t=130, b=60), legend=legend,
+        shapes=range_shapes + cal_shapes + thr_shapes,
+        annotations=all_annotations + thr_annotations,
+        xaxis=dict(AXIS, title="Time (min)", range=[float(t_common[0]), x_max_min]),
+        yaxis=dict(AXIS, title="Difference (sample − std)", range=[-y_lim, y_lim]))
+    return fig1, fig2
+
+
+def _generate_analysis_report_pdf(params: dict, content: dict, comments: list[dict]) -> bytes:
+    """The analysis report PDF from ``_report_content`` output (its only
+    analysis input: bullets, windows, parameters, conclusion) plus the
+    request's presentation fields (``doc_name``, ``lab_id`` — set by the
+    server from the sample —, ``overlay_standards`` and an operator-edited
+    ``conclusion``) and *comments* (``[{text, initials, created_at, t0,
+    t1}]``, rendered and escaped). Two Plotly charts rendered as PNG in the
+    old desktop template, converted with xhtml2pdf."""
+    doc_name = str(params.get("doc_name") or "GC Analysis")
+    lab_id = str(params.get("lab_id") or "")
+    conclusion = str(params.get("conclusion") or "").strip() or content["conclusion_generated"]
+    conf = settings_mod.load_settings()
+
+    fig1, fig2 = _report_figures(content, lab_id or "Sample",
+                                 params.get("overlay_standards") or [], conf)
+    PLOT_W, PLOT_H, PLOT_H2 = 1400, 520, 480
+    try:
+        png1_bytes = fig1.to_image(format="png", width=PLOT_W, height=PLOT_H, scale=2)
+        png2_bytes = fig2.to_image(format="png", width=PLOT_W, height=PLOT_H2, scale=2)
+    except Exception as exc:
+        LOGGER.error("Chart render failed: %s", exc)
+        raise RuntimeError(f"Could not render Plotly charts: {exc}") from exc
+
+    logo_b64 = ""
+    logo_path = conf.get("analysis_report_logo", "").strip()
+    if logo_path:
+        try:
+            logo_b64 = base64.b64encode(Path(logo_path).read_bytes()).decode("ascii")
+        except Exception:
+            pass
+
+    page = _report_html(
+        doc_name=doc_name, lab_id=lab_id, std_name=content["standard_name"],
+        date_display=datetime.now().strftime("%B %d, %Y"),
+        datetime_str=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        img1_b64=base64.b64encode(png1_bytes).decode("ascii"),
+        img2_b64=base64.b64encode(png2_bytes).decode("ascii"),
+        logo_b64=logo_b64, bullets_text=content["text"], conclusion=conclusion,
+        comments=comments or [], ladder=content["ladder"],
+        footer_lines=_report_footer_lines(content))
+
+    # xhtml2pdf (replaces QPrinter from the desktop app): US Letter, 12 mm margins.
     if xhtml2pdf_pisa is not None:
         pdf_buffer = io.BytesIO()
-        # Wrap HTML with @page CSS to match old QPrinter Letter + 12mm margins
+        body = page.split('<body', 1)[1].split('>', 1)[1].rsplit('</body>', 1)[0]
         styled_html = f"""<!DOCTYPE HTML>
 <html><head><meta charset="utf-8">
 <style>
@@ -1474,20 +1461,18 @@ def _generate_analysis_report_pdf(
 </style>
 </head>
 <body style="font-family:'Segoe UI',Arial,sans-serif; color:#2c2c2c; background:#ffffff; margin:0; padding:0;">
-{html.split('<body', 1)[1].split('>', 1)[1].rsplit('</body>', 1)[0]}
+{body}
 </body></html>"""
         status = xhtml2pdf_pisa.CreatePDF(styled_html, dest=pdf_buffer)
         if not status.err:
             return pdf_buffer.getvalue()
         LOGGER.warning("xhtml2pdf conversion had errors, falling back to PNG")
 
-    # Fallback: return first chart as PDF via kaleido
     LOGGER.warning("xhtml2pdf not available, falling back to kaleido single-chart PDF")
     try:
         return pio.to_image(fig1, format="pdf", width=1920, height=1080, scale=2)
     except Exception:
-        # Last resort: return the HTML itself
-        return html.encode("utf-8")
+        return page.encode("utf-8")
 
 
 # ===================================================================== #
@@ -1548,6 +1533,9 @@ def api_save_settings():
                           f"DEPLOY.md) or per instrument (Calibration and Instruments pages).", 400)
         if any(k in settings_mod.ADMIN_KEYS for k in changed) and not _check_admin(body):
             return _error("Best-fit and analysis defaults need the admin password", 403)
+        bad = analysis_core.invalid_analysis_settings(changed)
+        if bad:
+            return _error(f"{', '.join(bad)} must be a number \u2265 0", 400)
         if changed:
             # Flag rules and best-fit settings need no cache clearing:
             # sample_cache rows carry the fingerprint they were computed with.
@@ -1574,17 +1562,26 @@ def api_save_analysis_defaults():
             return err
         if not _check_admin(body):
             return _error("Incorrect password", 403)
-        params = body.get("params", {})
-        overlays = body.get("range_overlays", [])
+        params = body.get("params") or {}
         changes = {}
-        # Trend line + thresholds
+        # Trend line + thresholds + the deviation-bullet settings
         for key in ("quantile", "window", "sigma", "thresh_marginal",
-                     "thresh_moderate", "thresh_significant", "x_max_min"):
+                     "thresh_moderate", "thresh_significant", "x_max_min",
+                     "min_width_min", "merge_gap_min", "spike_min_width_min",
+                     "spike_report_threshold", "spike_max_fwhm_min", "spike_min_dominance"):
             if key in params:
-                changes[f"analysis_{key}"] = str(params[key])
-        # Full range overlays as JSON
-        changes["analysis_range_overlays"] = json.dumps(overlays)
-        settings_mod.update_settings(changes)
+                changes[f"analysis_{key}"] = "" if params[key] is None else str(params[key])
+        bad = analysis_core.invalid_analysis_settings(changes)
+        if bad:
+            return _error(f"{', '.join(bad)} must be a number \u2265 0", 400)
+        # The range overlays only when the request carries them ([] = none).
+        if "range_overlays" in body:
+            overlays = body.get("range_overlays")
+            if not isinstance(overlays, list):
+                return _error("range_overlays must be a list", 400)
+            changes["analysis_range_overlays"] = json.dumps(overlays)
+        if changes:
+            settings_mod.update_settings(changes)
         return jsonify({"ok": True})
     except Exception as exc:
         return _error(str(exc), 500)
@@ -2409,95 +2406,51 @@ def api_rename_comparison_standard():
 def api_analysis():
     """Sample-vs-standard trend analysis for one sample (``sample_id``): the
     CDF of its current revision, labelled with that revision's calibration
-    anchors."""
+    anchors. The same ``_report_content`` pass as every report export:
+    returns the bullets (``items`` and their ``text``), the range ``windows``
+    the UI draws, the counted ``spikes``, ``params_used`` and the generated
+    ``conclusion``."""
     body = request.get_json(force=True) or {}
     standard_name = str(body.get("standard_name") or "").strip()
     if body.get("sample_id") is None:
         return _error("sample_id is required")
     if not standard_name:
         return _error("standard_name is required")
-    data, db = _hub()
+    _data, db = _hub()
     s = _sample_or_404(body["sample_id"], db)
-    sample_p = _revision_cdf(s, store.get_revision(s["id"], db=db) if s["current_revision"] else None,
-                             data)
     try:
         conf = settings_mod.load_settings()
-
-        # Resolve standard CDF path
-        std_path = _standard_path(conf, standard_name)
-        if std_path is None:
-            return _error(f"Standard not found: {standard_name}", 404)
-
-        # Parameters with defaults from settings
-        quantile = float(body.get("quantile", conf.get("analysis_quantile", 0.20)))
-        window = int(body.get("window", conf.get("analysis_window", 301)))
-        sigma = float(body.get("sigma", conf.get("analysis_sigma", 34.0)))
-        thresh_marginal = float(body.get("thresh_marginal", conf.get("analysis_thresh_marginal", 100)))
-        thresh_moderate = float(body.get("thresh_moderate", conf.get("analysis_thresh_moderate", 500)))
-        thresh_significant = float(body.get("thresh_significant", conf.get("analysis_thresh_significant", 2000)))
-        # Dynamic ranges (replaces hardcoded gas/oil)
-        ranges_raw = body.get("ranges", [
-            {"label": "Gas", "c_start": 5, "c_end": 11},
-            {"label": "Oil", "c_start": 20, "c_end": 44},
-        ])
-        ranges = []
-        for r in ranges_raw:
-            ranges.append({
-                "label": str(r.get("label", "Range")),
-                "c_start": int(r.get("c_start", 5)),
-                "c_end": int(r.get("c_end", 15)),
-            })
-
-        t_common, y_sample, y_std_interp = _load_pair(sample_p, std_path)
-
-        # Calibration data for carbon mapping: the revision's anchors
-        cal_times, cal_carbons = _revision_ladder(s, conf, db, data)
-
-        # Trend difference + both detection channels (trend + raw-diff spikes)
-        spike_min_width = float(conf.get(
-            "analysis_spike_min_width_min",
-            analysis_core.DEFAULT_SPIKE_MIN_WIDTH_MIN,
-        ))
-        pair = analyze_pair(
-            t_common, y_sample, y_std_interp,
-            thresh_marginal=thresh_marginal,
-            thresh_moderate=thresh_moderate,
-            thresh_significant=thresh_significant,
-            quantile=quantile, window=window, sigma=sigma,
-            cal_times=cal_times, cal_carbons=cal_carbons,
-            spike_min_width_min=spike_min_width,
-        )
-        diff = pair["diff"]
-        segments = pair["segments"]
-
-        # Generate conclusion using dynamic ranges
-        conclusion, bullets = generate_conclusion(
-            segments, ranges, cal_times, cal_carbons,
-            standard_name=standard_name,
-        )
-
-        x_max = float(body.get("x_max_min", conf.get("analysis_x_max_min", 7.0)))
-        result = {
+        try:
+            content = _report_content(s, _report_request(body), conf, db)
+        except ValueError as exc:
+            return _error(str(exc), 404 if "not found" in str(exc) else 400)
+        series = content["series"]
+        t_list = series["t"].tolist()
+        x_range = [float(series["t"][0]), content["params_used"]["x_max_min"]]
+        cal_times, cal_carbons = content["ladder"]
+        return jsonify({
             "sample_id": s["id"],
             "trend": {
-                "sample_x": t_common.tolist(),
-                "sample_y": y_sample.tolist(),
-                "standard_x": t_common.tolist(),
-                "standard_y": y_std_interp.tolist(),
-                "x_range": [0, x_max],
+                "sample_x": t_list,
+                "sample_y": series["sample"].tolist(),
+                "standard_x": t_list,
+                "standard_y": series["standard"].tolist(),
+                "x_range": x_range,
             },
-            "diff": {
-                "x": t_common.tolist(),
-                "y": diff.tolist(),
-                "x_range": [0, x_max],
-            },
-            "segments": segments,
-            "conclusion": conclusion,
-            "report": bullets,
+            "diff": {"x": t_list, "y": series["diff"].tolist(), "x_range": x_range},
+            "items": content["items"],
+            "text": content["text"],
+            "windows": content["windows"],
+            "spikes": content["spikes"],
+            "ranges": content["ranges"],
+            "params_used": content["params_used"],
+            "conclusion": content["conclusion_generated"],
+            "standard_name": content["standard_name"],
             "cal_times": cal_times,
             "cal_carbons": cal_carbons,
-        }
-        return jsonify(result)
+        })
+    except SampleNotFound:
+        raise
     except Exception as exc:
         LOGGER.exception("Analysis failed")
         return _error(str(exc), 500)
@@ -2688,16 +2641,101 @@ def api_export_comparison():
         return _error(str(exc), 500)
 
 
-def _run_export_analysis(sample: dict, params: dict, conf: dict, data: Path, db):
-    """Shared analysis pass for the report export routes.
+#: The request fields a report is built from. ``bullets`` is deliberately not
+#: one of them: bullets are always computed on the server.
+_REPORT_PARAM_KEYS = ("quantile", "window", "sigma", "thresh_marginal", "thresh_moderate",
+                      "thresh_significant", "x_max_min")
 
-    Resolves the standard, runs both detection channels (trend + spike, same
-    as ``/api/analysis``) on the sample's current-revision CDF, and returns
-    ``(analysis_result, ranges, ladder)`` ready for
-    ``_generate_analysis_report_pdf``; the ladder is the revision's
-    calibration anchors. Raises ``ValueError`` with a user-facing message on
-    a missing standard, ``SampleNotFound`` on a missing CDF.
-    """
+
+def _report_request(src: dict) -> dict:
+    """The report fields of a request body, a ZIP item or a QBench queue item:
+    the standard, the operator's trend parameters, thresholds and graph
+    limit (top-level, or under ``params`` as a queue item captured them),
+    the ranges (``None`` when absent: saved defaults; ``[]``: no ranges),
+    the document name, overlay standards and an operator-edited conclusion.
+    Anything else, a client ``bullets`` string included, is dropped."""
+    src = src or {}
+    captured = src.get("params") if isinstance(src.get("params"), dict) else {}
+    out = {
+        "standard_name": str(src.get("standard_name") or "").strip(),
+        "doc_name": str(src.get("doc_name") or src.get("sample_name") or "GC Analysis"),
+        "conclusion": str(src.get("conclusion") or ""),
+        "overlay_standards": list(src.get("overlay_standards") or []),
+        "ranges": src.get("ranges") if isinstance(src.get("ranges"), list) else None,
+    }
+    for key in _REPORT_PARAM_KEYS:
+        value = src.get(key, captured.get(key))
+        if value is not None and value != "":
+            out[key] = value
+    return out
+
+
+def _comments_for_report(sample_id: int, db) -> list[dict]:
+    """The sample's report comments (``[{id, text, initials, created_at, t0,
+    t1}]``, non-deleted, time order) — phase 4's ``comments.for_report``;
+    ``[]`` until that module is present."""
+    if comments_mod is None:
+        return []
+    return [dict(c) for c in comments_mod.for_report(sample_id, db)]
+
+
+def _log_report(sample: dict, content: dict, params: dict, kind: str, pdf: bytes,
+                author_ip: Optional[str], db) -> None:
+    """One ``report_log`` row (phase 4's ``comments.log_report``) for a report
+    PDF: what was reported, with which parameters, ranges and comments. A
+    no-op until that module is present; a failure is logged, never raised
+    (the PDF has already been delivered or uploaded)."""
+    if comments_mod is None:
+        return
+    import hashlib
+    edited = bool(params.get("conclusion")) and \
+        params["conclusion"].strip() != content["conclusion_generated"]
+    try:
+        # comments.log_report(sample_id, *, kind, revision, standard_name,
+        # params, ranges, windows, bullets, bullets_text, conclusion,
+        # conclusion_edited, comment_ids, pdf_sha256, author_initials,
+        # author_ip, app_version, created_at, db) — phase 4 serialises.
+        comments_mod.log_report(
+            sample["id"],
+            kind=kind,
+            revision=sample.get("current_revision"),
+            standard_name=content["standard_name"],
+            params=content["params_used"],
+            ranges=content["ranges"],
+            windows=content["windows"],
+            bullets=content["items"],
+            bullets_text=content["text"],
+            conclusion=(params.get("conclusion") or "").strip() or content["conclusion_generated"],
+            conclusion_edited=edited,
+            comment_ids=[c["id"] for c in content["comments"]],
+            pdf_sha256=hashlib.sha256(pdf).hexdigest(),
+            author_initials=None,
+            author_ip=author_ip,
+            app_version=version.APP_VERSION,
+            db=db,
+        )
+    except TypeError:
+        # A seam mismatch with comments.log_report: a bug, loudly.
+        LOGGER.error("report_log seam mismatch: comments.log_report rejected the call "
+                     "for sample %s (%s)", sample.get("id"), kind, exc_info=True)
+    except Exception:
+        LOGGER.exception("Could not write the report_log row for sample %s (%s)",
+                         sample.get("id"), kind)
+
+
+def _report_content(sample: dict, params: dict, conf: dict, db) -> dict:
+    """The one analysis pass behind ``/api/analysis`` and every report export
+    (direct, queue/ZIP, QBench): the sample's current-revision CDF against
+    the standard, both detection channels, the ranges from
+    ``resolve_report_ranges`` (an explicit ``[]`` is no ranges), the
+    revision's calibration ladder, and the range-driven bullets.
+
+    Returns ``{items, text, conclusion_generated, windows, params_used,
+    comments, ranges, standard_name, ladder, spikes, series}`` (``series``:
+    the arrays the charts draw). ``ValueError`` with a user-facing message on
+    a missing standard or a bad parameter, ``SampleNotFound`` on a missing
+    CDF."""
+    data = paths.data_dir()
     standard_name = str(params.get("standard_name") or "").strip()
     if not standard_name:
         raise ValueError("standard_name is required")
@@ -2706,51 +2744,38 @@ def _run_export_analysis(sample: dict, params: dict, conf: dict, data: Path, db)
         raise ValueError(f"Standard not found: {standard_name}")
     sample_p = _revision_cdf(sample, store.get_revision(sample["id"], db=db)
                              if sample["current_revision"] else None, data)
-
-    quantile = float(params.get("quantile", conf.get("analysis_quantile", 0.20)))
-    window = int(params.get("window", conf.get("analysis_window", 301)))
-    sigma = float(params.get("sigma", conf.get("analysis_sigma", 34.0)))
-    thresh_marginal = float(params.get("thresh_marginal", conf.get("analysis_thresh_marginal", 100)))
-    thresh_moderate = float(params.get("thresh_moderate", conf.get("analysis_thresh_moderate", 500)))
-    thresh_significant = float(params.get("thresh_significant", conf.get("analysis_thresh_significant", 2000)))
+    params_used = analysis_core.report_params(params, conf)
     ranges = analysis_core.resolve_report_ranges(params.get("ranges"), conf)
-
-    t_common, y_sample, y_std_interp = _load_pair(sample_p, std_path)
-
     cal_times, cal_carbons = _revision_ladder(sample, conf, db, data)
+    ladder = ([float(x) for x in cal_times], [int(x) for x in cal_carbons])
 
-    spike_min_width = float(conf.get(
-        "analysis_spike_min_width_min",
-        analysis_core.DEFAULT_SPIKE_MIN_WIDTH_MIN,
-    ))
-    pair = analyze_pair(
-        t_common, y_sample, y_std_interp,
-        thresh_marginal=thresh_marginal,
-        thresh_moderate=thresh_moderate,
-        thresh_significant=thresh_significant,
-        quantile=quantile, window=window, sigma=sigma,
-        cal_times=cal_times, cal_carbons=cal_carbons,
-        spike_min_width_min=spike_min_width,
-    )
-    diff = pair["diff"]
-    segments = pair["segments"]
-
-    conclusion_text, bullets_text = generate_conclusion(
-        segments, ranges, cal_times, cal_carbons,
-        standard_name=standard_name,
-    )
-
-    analysis_result = {
-        "sample_trend": {"x": t_common.tolist(), "y": pair["trend_sample"].tolist()},
-        "std_trend": {"x": t_common.tolist(), "y": pair["trend_std"].tolist()},
-        "sample_raw": {"x": t_common.tolist(), "y": y_sample.tolist()},
-        "std_raw": {"x": t_common.tolist(), "y": y_std_interp.tolist()},
-        "difference": {"x": t_common.tolist(), "y": diff.tolist()},
-        "segments": segments,
-        "conclusion": params.get("conclusion") or conclusion_text,
-        "bullets": params.get("bullets") or bullets_text,
+    t, y_sample, y_std = _load_pair(sample_p, std_path)
+    out = analysis_core.analyze_report(t, y_sample, y_std, ranges=ranges, ladder=ladder,
+                                       params=params_used, standard_name=standard_name)
+    return {
+        "items": out["items"],
+        "text": out["text"],
+        "conclusion_generated": out["conclusion"],
+        "windows": out["windows"],
+        "params_used": params_used,
+        "comments": _comments_for_report(sample["id"], db),
+        "ranges": ranges,
+        "standard_name": standard_name,
+        "ladder": ladder,
+        "spikes": out["spikes"],
+        "series": {"t": np.asarray(t, dtype=float), "sample": np.asarray(y_sample),
+                   "standard": np.asarray(y_std), "diff": out["diff"],
+                   "spike_diff": out["spike_diff"]},
     }
-    return analysis_result, ranges, (cal_times, cal_carbons)
+
+
+def _build_report_pdf(sample: dict, params: dict, conf: dict, db) -> tuple[bytes, dict]:
+    """``(pdf_bytes, content)`` for one sample: ``_report_content`` is the
+    PDF's only analysis input; *params* supplies the presentation fields
+    (``lab_id`` is always the sample's own)."""
+    params = dict(params, lab_id=sample["lab_id"])
+    content = _report_content(sample, params, conf, db)
+    return _generate_analysis_report_pdf(params, content, content["comments"]), content
 
 
 @app.route("/api/export-analysis-report", methods=["POST"])
@@ -2758,23 +2783,21 @@ def api_export_analysis_report():
     body = request.get_json(force=True) or {}
     if body.get("sample_id") is None:
         return _error("sample_id is required")
-    data, db = _hub()
+    _data, db = _hub()
     s = _sample_or_404(body["sample_id"], db)
     try:
         if go is None or pio is None:
             return _error("Plotly/kaleido not installed", 500)
 
         conf = settings_mod.load_settings()
+        params = _report_request(body)
         try:
-            analysis_result, ranges, ladder = _run_export_analysis(s, body, conf, data, db)
+            report_bytes, content = _build_report_pdf(s, params, conf, db)
         except ValueError as exc:
             return _error(str(exc), 404 if "not found" in str(exc) else 400)
+        _log_report(s, content, params, "download", report_bytes, _who(), db)
 
-        params = dict(body, lab_id=s["lab_id"])
-        report_bytes = _generate_analysis_report_pdf(params, analysis_result, ranges=ranges,
-                                                     ladder=ladder)
-
-        doc_name = body.get("doc_name", "analysis_report")
+        doc_name = str(body.get("doc_name") or "analysis_report")
         filename = f"{_safe_filename(s['lab_id'])}_{_safe_filename(doc_name)}.pdf"
 
         return send_file(
@@ -2799,7 +2822,7 @@ def api_export_analysis_reports_zip():
     items = body.get("items", [])
     if not items:
         return _error("items list is required")
-    data, db = _hub()
+    _data, db = _hub()
     try:
         if go is None or pio is None:
             return _error("Plotly/kaleido not installed", 500)
@@ -2812,15 +2835,13 @@ def api_export_analysis_reports_zip():
             for item in items:
                 try:
                     s = _sample_or_404(item.get("sample_id"), db)
-                    analysis_result, ranges, ladder = _run_export_analysis(s, item, conf, data, db)
+                    params = _report_request(item)
+                    report_bytes, content = _build_report_pdf(s, params, conf, db)
                 except (ValueError, TypeError, SampleNotFound) as exc:
                     LOGGER.warning("Skipping ZIP item: %s", exc)
                     continue
-
-                params = dict(item, lab_id=s["lab_id"])
-                report_bytes = _generate_analysis_report_pdf(params, analysis_result, ranges=ranges,
-                                                             ladder=ladder)
-                doc_name = item.get("doc_name", "analysis_report")
+                _log_report(s, content, params, "zip", report_bytes, _who(), db)
+                doc_name = str(item.get("doc_name") or "analysis_report")
                 filename = f"{_safe_filename(s['lab_id'])}_{_safe_filename(doc_name)}.pdf"
                 zf.writestr(filename, report_bytes)
                 written += 1
@@ -2898,8 +2919,9 @@ def api_qbench_upload():
                             "error": "a result-only sample has no CDF to build the report from"})
         elif not store.samples.is_gated(sid, db=db):
             refused.append({"sample_id": sid, "lab_id": s["lab_id"], "error": _gate_reason(s)})
-        clean = {k: v for k, v in item.items() if k not in ("pdf_path", "sample_path", "lab_id")}
-        new_queue.append(dict(clean, sample_id=sid, lab_id=s["lab_id"]))
+        clean = {k: v for k, v in item.items()
+                 if k not in ("pdf_path", "sample_path", "lab_id", "bullets")}
+        new_queue.append(dict(clean, sample_id=sid, lab_id=s["lab_id"], _author_ip=_who()))
     if not new_queue:
         return _error("queue is required (list of {sample_id, standard_name})")
     if refused:
@@ -2972,6 +2994,13 @@ def api_qbench_upload():
 
     hub_data, hub_db = data, db
     item_revs: dict[int, Optional[int]] = {}   # queue index -> revision its PDF was built from
+    item_reports: dict[int, tuple] = {}        # queue index -> what its PDF reported (report_log)
+
+    def _uploaded(idx: int, item: dict) -> None:
+        _record_qbench_upload(item.get("sample_id"), item_revs.get(idx), hub_db)
+        if idx in item_reports:
+            row, content, rparams, pdf = item_reports[idx]
+            _log_report(row, content, rparams, "qbench", pdf, item.get("_author_ip"), hub_db)
 
     def _do_upload():
       login_fail_count = 0
@@ -3089,28 +3118,18 @@ def api_qbench_upload():
                     _emit_item(idx, lab_id, "error", msg="No standard")
                     continue
                 try:
-                    # The same analysis as the report export (both detection
-                    # channels, the saved range overlays or the item's
-                    # ranges, the revision's calibration anchors).
-                    report_params = {
-                        "lab_id": lab_id,
-                        "doc_name": item.get("sample_name") or "GC Analysis",
-                        "standard_name": standard_name,
-                        "overlay_standards": item.get("overlay_standards", []),
-                        "ranges": item.get("ranges"),
-                    }
-                    for key in ("conclusion", "bullets"):   # empty → the generated text
-                        if item.get(key):
-                            report_params[key] = item[key]
+                    # The same report as the direct and ZIP exports: the
+                    # item's captured trend parameters, thresholds, x-max
+                    # and ranges (_report_request), one _report_content pass.
+                    report_params = _report_request(item)
                     try:
-                        ar, ranges, ladder = _run_export_analysis(sample_row, report_params, conf,
-                                                                  hub_data, hub_db)
+                        report_bytes, content = _build_report_pdf(sample_row, report_params,
+                                                                  conf, hub_db)
                     except ValueError as exc:
                         fail_count += 1
                         _emit_item(idx, lab_id, "error", msg=str(exc))
                         continue
-                    report_bytes = _generate_analysis_report_pdf(report_params, ar, ranges=ranges,
-                                                                 ladder=ladder)
+                    item_reports[idx] = (sample_row, content, report_params, report_bytes)
                     safe_id = _safe_filename(lab_id)
                     out_file = export_dir / f"{safe_id}_analysis.pdf"
                     out_file.write_bytes(report_bytes)
@@ -3157,7 +3176,7 @@ def api_qbench_upload():
                     if result:
                         ok_count += 1
                         login_fail_count = 0
-                        _record_qbench_upload(item.get("sample_id"), item_revs.get(idx), hub_db)
+                        _uploaded(idx, item)
                         _emit_item(idx, lab_id, "ok", step=steps_per + 2, msg="Uploaded")
                         if not _creds_saved and username and password:
                             _save_qbench_credentials(username, password)
@@ -3220,8 +3239,7 @@ def api_qbench_upload():
                                 )
                                 if result:
                                     ok_count += 1
-                                    _record_qbench_upload(item.get("sample_id"),
-                                                          item_revs.get(idx), hub_db)
+                                    _uploaded(idx, item)
                                     _emit_item(idx, lab_id, "ok",
                                                step=steps_per + 2, msg="Uploaded")
                                     if not _creds_saved and username and password:

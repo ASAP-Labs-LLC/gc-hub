@@ -885,6 +885,36 @@
         <p style="font-size:11px; color:#7d8590; margin-top:4px;">Each parsed sample is compared to every comparison standard (amplitude-normalized, small retention shifts allowed). A score at or above the threshold names the fuel; otherwise a two-component blend is tried (&ldquo;Mix: A + B (80/20)&rdquo;), else the sample is labeled &ldquo;Mix&rdquo;. Results are written to the CSV and shown in sample lists.</p>
       </div>
 
+      <!-- Deviation bullets (admin) -->
+      <div style="margin-top:12px; border-top:1px solid #21262d; padding-top:10px;">
+        <span style="font-size:12px; font-weight:600; color:#c9d1d9; display:block; margin-bottom:6px;">Deviation Bullets</span>
+        <div class="form-row">
+          <label for="set-analysis-min-width">Minimum run width (min)</label>
+          <input type="number" id="set-analysis-min-width" step="0.01" min="0" max="1" style="max-width:100px;">
+        </div>
+        <div class="form-row">
+          <label for="set-analysis-merge-gap">Merge gap outside ranges (min)</label>
+          <input type="number" id="set-analysis-merge-gap" step="0.01" min="0" max="2" style="max-width:100px;">
+        </div>
+        <div class="form-row">
+          <label for="set-analysis-spike-width">Spike minimum width (min)</label>
+          <input type="number" id="set-analysis-spike-width" step="0.005" min="0" max="0.5" style="max-width:100px;">
+        </div>
+        <div class="form-row">
+          <label for="set-analysis-spike-fwhm">Spike maximum width at half height (min)</label>
+          <input type="number" id="set-analysis-spike-fwhm" step="0.01" min="0" max="2" style="max-width:100px;">
+        </div>
+        <div class="form-row">
+          <label for="set-analysis-spike-dominance">Spike minimum dominance (0&ndash;1)</label>
+          <input type="number" id="set-analysis-spike-dominance" step="0.05" min="0" max="1" style="max-width:100px;">
+        </div>
+        <div class="form-row">
+          <label for="set-analysis-spike-report">Spike report threshold (empty = moderate)</label>
+          <input type="number" id="set-analysis-spike-report" step="10" min="0" style="max-width:100px;">
+        </div>
+        <p style="font-size:11px; color:#7d8590; margin-top:4px;">One bullet per deviating range plus one for everything outside the ranges. A trend run counts when it is at least the minimum width above the marginal threshold; a sharp peak counts when it reaches the spike report threshold, is no wider than the maximum width at half height, and its difference is at least the dominance fraction of the local peak (so a height difference of a peak both runs share is not a sharp peak). Changing these needs the admin password.</p>
+      </div>
+
       <!-- Comparison standards list inside settings -->
       <div style="margin-top:12px; border-top:1px solid #21262d; padding-top:10px;">
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
@@ -988,8 +1018,8 @@
       </div>
 
       <div style="margin-top:10px;">
-        <label style="font-size:12px; color:#c9d1d9; font-weight:600; display:block; margin-bottom:4px;">Bullet Points</label>
-        <textarea id="export-bullets" rows="5" style="width:100%;" placeholder="Enter analysis bullet points..."></textarea>
+        <label for="export-bullets" style="font-size:12px; color:#c9d1d9; font-weight:600; display:block; margin-bottom:4px;">Bullet Points <span style="font-weight:400; color:#7d8590;">(computed from the parameters and ranges; read-only)</span></label>
+        <textarea id="export-bullets" rows="5" style="width:100%; opacity:0.85;" readonly></textarea>
       </div>
 
       <div style="margin-top:10px;">
