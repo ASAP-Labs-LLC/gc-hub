@@ -59,10 +59,26 @@ pending_since, refused, refused_detail, last_error}``. A refusal
 instrument 404. ``path`` must be an absolute ``.csv`` path in an existing
 folder.
 
+Diagnostics (``diagnostics.py``; one bundle at a time)::
+
+    POST /api/admin/diagnostics/estimate   {password}
+         → {options: [{key, label, default, bytes, files, note}]} (in
+           ``diagnostics.OPTION_KEYS`` order; cached a minute); 403 wrong password
+    POST /api/admin/diagnostics/bundle     {password, options?: {key: bool}}
+         → 200 {download, name, size, files, skipped}: the zip is built to a
+           temp file under ``<data>/diagnostics-tmp`` (the password given is
+           redacted from it too); 400 bad options; 409 another bundle is being
+           built; 507 not enough free disk (``diagnostics.check_disk``)
+    GET  /api/admin/diagnostics/download/<token>
+         → the zip (attachment, Cache-Control: no-store), streamed once and
+           deleted; the token is random, single-use and expires after 10
+           minutes (404 after that). No password: the POST that made it had one.
+
 ``GET /admin/hub`` is the small admin page (templates/hub_admin.html).
 """
 from __future__ import annotations
 
+import contextlib
 import itertools
 import logging
 import threading
@@ -71,8 +87,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, Response, jsonify, render_template, request
 
+import diagnostics
 import exports
 import paths
 import store
@@ -464,9 +481,127 @@ def api_admin_exports_write_fresh(instrument_id):
     return jsonify({"status": exp.status(instrument_id), "rows": rows})
 
 
+# ── diagnostics ─────────────────────────────────────────────────────────────
+
+DIAG_CHUNK = 1024 * 1024
+
+
+def _no_store(resp):
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@bp.route("/api/admin/diagnostics/estimate", methods=["POST"])
+def api_admin_diagnostics_estimate():
+    """Expected (uncompressed) size of each bundle option."""
+    _body, err = _admin()
+    if err:
+        return err
+    est = diagnostics.estimate(data_dir=paths.require_data_dir(), db=_db())
+    return _no_store(jsonify({"options": [dict(v, key=k) for k, v in est.items()]}))
+
+
+def _bundle_name() -> str:
+    import re
+    import socket
+    import version
+    import secrets as _secrets
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    raw = (f"gc-diagnostics-{socket.gethostname()}-{version.APP_VERSION}-{stamp}-"
+           f"{_secrets.token_hex(3)}")
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", raw)
+
+
+@bp.route("/api/admin/diagnostics/bundle", methods=["POST"])
+def api_admin_diagnostics_bundle():
+    """Build the diagnostics zip; answer a one-time download URL. The build
+    runs in this request's thread (the app keeps serving on its others) and
+    never takes the store's write lock; one build at a time."""
+    body, err = _admin()
+    if err:
+        return err
+    try:
+        options = diagnostics.normalize_options(body.get("options"))
+    except ValueError as exc:
+        return _err(str(exc), 400)
+    data_dir = paths.require_data_dir()
+    name = _bundle_name()
+    password = body.get("password")
+    try:
+        with diagnostics.exclusive():
+            tmp = diagnostics.cleanup_tmp(data_dir)
+            try:
+                diagnostics.check_disk(tmp, options, data_dir=data_dir, db=_db())
+            except diagnostics.NoSpace as exc:
+                return _err(str(exc), 507)
+            part = tmp / f"{name}.zip.part"
+            try:
+                import hub
+                manifest = diagnostics.build_bundle(
+                    options, data_dir=data_dir, db=_db(), out_path=part,
+                    who=f"admin@{_who()}", runtime=hub.running(),
+                    extra_secrets=[password] if isinstance(password, str) else [])
+                final = tmp / f"{name}.zip"
+                part.replace(final)
+            except Exception as exc:  # noqa: BLE001 - report it, never kill the hub
+                log.error("diagnostics bundle failed:\n%s", traceback.format_exc())
+                for leftover in (part, tmp / f"{name}.zip"):
+                    _unlink_quietly(leftover)
+                return _err(f"The diagnostics bundle failed: {type(exc).__name__}: {exc}", 500)
+            token = diagnostics.register_download(final, f"{name}.zip")
+    except diagnostics.Busy as exc:
+        return _err(str(exc), 409)
+    size = final.stat().st_size
+    log.warning("admin: diagnostics bundle %s (%d bytes, %d files, options %s) built for %s",
+                name, size, len(manifest.get("files", [])), options, _who())
+    return _no_store(jsonify({
+        "download": f"/api/admin/diagnostics/download/{token}", "name": f"{name}.zip",
+        "size": size, "files": len(manifest.get("files", [])),
+        "skipped": len(manifest.get("skipped", []))}))
+
+
+@bp.route("/api/admin/diagnostics/download/<token>", methods=["GET"])
+def api_admin_diagnostics_download(token):
+    """Stream a built bundle once, then delete it."""
+    d = diagnostics.claim_download(token)
+    if d is None:
+        return _err("Unknown or expired download; build the bundle again", 404)
+    path = Path(d["path"])
+    try:
+        fh = open(path, "rb")
+        size = path.stat().st_size
+    except OSError:
+        _unlink_quietly(path)
+        return _err("The bundle is gone; build it again", 404)
+    log.warning("admin: diagnostics bundle %s downloaded by %s", d["name"], _who())
+
+    def stream():
+        with diagnostics.streaming():
+            try:
+                for chunk in iter(lambda: fh.read(DIAG_CHUNK), b""):
+                    yield chunk
+            finally:
+                fh.close()
+                _unlink_quietly(path)
+
+    resp = Response(stream(), mimetype="application/zip", direct_passthrough=True, headers={
+        "Content-Disposition": f'attachment; filename="{d["name"]}"',
+        "Content-Length": str(size)})
+    resp.call_on_close(lambda: (fh.close(), _unlink_quietly(path)))
+    return _no_store(resp)
+
+
+def _unlink_quietly(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink()
+
+
 # ── the page ────────────────────────────────────────────────────────────────
 
 @bp.route("/admin/hub", methods=["GET"])
 def admin_hub_page():
     import version
-    return render_template("hub_admin.html", app_version=version.APP_VERSION)
+    diag_options = [{"key": k, "label": diagnostics.LABELS[k], "default": diagnostics.OPTIONS[k]}
+                    for k in diagnostics.OPTION_KEYS]
+    return render_template("hub_admin.html", app_version=version.APP_VERSION,
+                           diag_options=diag_options)

@@ -109,8 +109,46 @@
       <tbody id="exports"></tbody>
     </table>
   </div>
+
+  <div class="panel" id="diag-panel">
+    <h2>Diagnostics</h2>
+    <p>Download one zip with what is needed to debug this hub: version and runtime state, logs,
+      the store's tables, a copy of the database, export health, parity reports, calibration
+      files, the updater's log and state, and the CDFs of samples that are held or in error.
+      Secrets are left out or replaced by <code>[REDACTED]</code>: the admin password (and its
+      hash), agent tokens, the setup code, the QBench API credentials, the QBench web login
+      (<code>qbenchlogin.txt</code> on the share) and GitHub tokens. The hub keeps working while
+      it builds; one bundle at a time.</p>
+    <p class="warn">The database copy holds everything in the store, including soft-deleted
+      comments and the operators' IP addresses (internal lab addresses), as well as sample IDs,
+      results and CDFs. Treat the zip as lab data.</p>
+    <p><strong>To have Claude look at it:</strong> save the zip where Claude can read it (for
+      example the Downloads folder of the computer you run Claude Code on, or a folder you give
+      Claude access to), then tell Claude its path, e.g. <em>"debug the GC hub from
+      ~/Downloads/gc-diagnostics-&hellip;.zip"</em>. Don't email it or post it anywhere
+      public.</p>
+    <table>
+      <thead><tr><th></th><th>Include</th><th>Expected size</th></tr></thead>
+      <tbody id="diag-options">
+        {% for o in diag_options %}
+        <tr data-key="{{ o.key }}">
+          <td><input type="checkbox" id="diag-opt-{{ o.key }}" data-key="{{ o.key }}"
+                     {% if o.default %}checked{% endif %}></td>
+          <td><label for="diag-opt-{{ o.key }}">{{ o.label }}</label></td>
+          <td class="diag-size muted"></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p id="diag-total" class="muted" style="margin-top:8px"></p>
+    <p id="diag-warning" class="warn"></p>
+    <button id="btn-diag-estimate">Check sizes</button>
+    <button id="btn-diag-download">Download diagnostics</button>
+    <span id="diag-msg" role="status"></span>
+  </div>
 </main>
 <script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/diagnostics.js') }}?v=2"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>
