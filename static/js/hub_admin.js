@@ -207,13 +207,30 @@
   // carries the full list, which is re-rendered (inputs are set with .value,
   // labels with textContent: preset text is data, never markup).
 
+  let shownPresets = [];
+
+  // Unsaved edits in the list ({id: text}), so a reorder or (de)activation of
+  // another preset doesn't throw them away. A saved preset drops its own.
+  function unsavedEdits() {
+    const out = {};
+    document.querySelectorAll("#presets li").forEach((li) => {
+      const p = shownPresets.find((q) => String(q.id) === li.dataset.id);
+      const v = li.querySelector("input.preset-text").value;
+      if (p && v !== p.text) out[p.id] = v;
+    });
+    return out;
+  }
+
   async function presetCall(action, extra) {
+    const edits = unsavedEdits();
     const j = await call("/api/admin/comment-presets", Object.assign({action}, extra || {}));
-    renderPresets(j.presets || []);
+    if (action === "update" && extra) delete edits[extra.id];
+    renderPresets(j.presets || [], edits);
     return j;
   }
 
-  function renderPresets(presets) {
+  function renderPresets(presets, edits) {
+    shownPresets = presets;
     const ul = $("presets");
     ul.textContent = "";
     presets.forEach((p, i) => {
@@ -223,7 +240,7 @@
       input.type = "text";
       input.maxLength = 200;
       input.className = "preset-text";
-      input.value = p.text;
+      input.value = (edits && edits[p.id] !== undefined) ? edits[p.id] : p.text;
       li.appendChild(input);
       const btn = (label, cls, fn, disabled) => {
         const b = el("button", label, cls);
