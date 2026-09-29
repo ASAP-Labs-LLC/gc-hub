@@ -650,6 +650,9 @@ def _json_body():
     limit_json_body()
     if not request.is_json:
         return None, (jsonify({"error": "Expected Content-Type: application/json"}), 415)
+    raw = request.get_data(cache=True)   # RequestEntityTooLarge propagates (app-wide JSON 413)
+    if len(raw) >= MAX_JSON_BODY:  # a chunked body stops at the cap instead of raising (werkzeug 2.3+)
+        return None, (jsonify({"error": "The request body is too large."}), 413)
     body = get_json_object()
     if not isinstance(body, dict):
         return None, (jsonify({"error": "Expected a JSON object"}), 400)

@@ -48,6 +48,7 @@ from flask import (
     send_file,
     stream_with_context,
 )
+from werkzeug.exceptions import HTTPException
 
 # ---------------------------------------------------------------------------
 # Backend modules (already in the webapp/ folder)
@@ -734,6 +735,12 @@ def _admin_json_body():
     admin_auth.limit_json_body()     # 64 KiB, before anything reads the body (2B1 review I4)
     if not request.is_json:
         return None, _error("Expected Content-Type: application/json", 415)
+    try:
+        raw = request.get_data(cache=True)
+    except admin_auth.RequestEntityTooLarge:
+        return None, _error("The request body is too large.", 413)
+    if len(raw) >= admin_auth.MAX_JSON_BODY:   # a chunked body stops at the cap instead of
+        return None, _error("The request body is too large.", 413)  # raising (werkzeug 2.3+)
     try:
         body = request.get_json(silent=True)
     except RecursionError:                       # nested too deep (2B1 re-review G2)
@@ -1550,6 +1557,8 @@ def api_save_settings():
         if cal is not None:
             conf = dict(conf, calibration_cdf=cal)
         return jsonify(conf)
+    except HTTPException:
+        raise
     except Exception as exc:
         return _error(str(exc), 500)
 
