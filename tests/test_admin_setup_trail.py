@@ -11,6 +11,7 @@ gate, as app.py wires them).
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -59,17 +60,27 @@ def trail(caplog, path="/api/admin/setup"):
 # ── the character classes ───────────────────────────────────────────────────
 
 def test_password_classes_describe_without_revealing():
+    """The length only as a bucket (<12, 12-19, >=20), never the count."""
     s = admin_auth.password_classes("Abcdefgh12345!")
-    assert s.startswith("len 14,")
+    assert s.startswith("length 12-19,")
     assert "non-ASCII: no" in s and "lower: yes" in s and "upper: yes" in s
     assert "digit: yes" in s and "symbol: yes" in s and "whitespace: no" in s
-    assert "Abcdefgh" not in s
+    assert "Abcdefgh" not in s and "14" not in s
     s = admin_auth.password_classes("pa ss\twørd💥")
-    assert "len 11" in s and "whitespace: yes" in s and "non-ASCII: yes" in s
+    assert s.startswith("length <12,") and "whitespace: yes" in s and "non-ASCII: yes" in s
     assert "emoji/astral: yes" in s and "control: yes" in s     # the tab
+    assert "11" not in s
+    assert admin_auth.password_classes("x" * 11).startswith("length <12,")
+    assert admin_auth.password_classes("x" * 12).startswith("length 12-19,")
+    assert admin_auth.password_classes("x" * 19).startswith("length 12-19,")
+    assert admin_auth.password_classes("x" * 20).startswith("length >=20,")
+    assert admin_auth.password_classes("x" * 128).startswith("length >=20,")
     assert admin_auth.password_classes("\ud83d-lone-surrogate").count("unpaired surrogate: yes") == 1
     assert admin_auth.password_classes(None) == "missing"
     assert admin_auth.password_classes(12345678) == "not text (int)"
+
+
+NO_COUNT = re.compile(r"\blen \d")
 
 
 # ── setup ───────────────────────────────────────────────────────────────────
@@ -82,12 +93,13 @@ def test_setup_logs_the_outcome_and_classes_never_the_secrets(env, caplog):
         assert r.status_code == 403
         line = trail(caplog)
         assert "HTTP 403" in line and "setup code" in line
-        assert "10.0.0.25" in line and "len 16" in line and "non-ASCII: yes" in line
+        assert "10.0.0.25" in line and "length 12-19" in line and "non-ASCII: yes" in line
+        assert not NO_COUNT.search(line)
 
         r = post(c, "/api/admin/setup", {"password": "short", "setup_code": code})
         assert r.status_code == 400
         line = trail(caplog)
-        assert "HTTP 400" in line and "password rule" in line and "len 5" in line
+        assert "HTTP 400" in line and "password rule" in line and "length <12" in line
 
         r = post(c, "/api/admin/setup", {"password": SECRET_PW, "setup_code": code})
         assert r.status_code == 201
@@ -153,7 +165,12 @@ def test_password_change_logs_the_outcome_never_the_passwords(env, caplog):
                                             "new_password": SECRET_PW})
         assert r.status_code == 403
         line = trail(caplog, "/api/admin/password")
-        assert "HTTP 403" in line and "current password" in line and "len 16" in line
+        assert "HTTP 403" in line and "current password check" in line
+        assert "new password length 12-19" in line and "symbol: yes" in line
+        assert not NO_COUNT.search(line)
+        # nothing at all about the CURRENT password: not its length, not its classes
+        assert not re.search(r"current password (len|missing|not text|lower|;|,)", line), line
+        assert line.count("lower:") == 1
         r = post(c, "/api/admin/password", {"password": "first-password-1", "new_password": "x"})
         assert r.status_code == 400 and "password rule" in trail(caplog, "/api/admin/password")
         r = post(c, "/api/admin/password", {"password": "first-password-1",
@@ -163,3 +180,40 @@ def test_password_change_logs_the_outcome_never_the_passwords(env, caplog):
         assert "HTTP 200" in line and "ok" in line
     for secret in (SECRET_PW, "first-password-1", "not-the-password"):
         assert secret not in caplog.text
+
+
+def test_the_trail_names_a_413_for_what_it_is(env, caplog):
+    """A body over 64 KiB is refused while the route reads it (werkzeug's
+    413): the trail says so, not "failed inside the route"."""
+    c = env["client"]
+    admin_auth.ensure_setup_code(db=env["db"])
+    with caplog.at_level(logging.INFO):
+        r = c.post("/api/admin/setup", data=b"{" + b" " * 70000 + b"}", environ_base=LAN,
+                   headers={"Content-Type": "application/json"})
+        assert r.status_code == 413
+        line = trail(caplog)
+    assert "HTTP 413" in line and "the request body is over 64 KiB" in line, line
+    assert "failed inside the route" not in line
+
+
+def test_the_trail_escapes_request_derived_text(env, caplog, monkeypatch):
+    """The Host and the error text are request-derived: control characters in
+    them must not start a forged line in app.log."""
+    c = env["client"]
+    code = admin_auth.ensure_setup_code(db=env["db"])
+    forged = "2026-01-01 00:00:00 [ERROR] forged"
+
+    def bad_setup(*_a, **_k):
+        raise admin_auth.PasswordError("no\n" + forged + "\r\x1b[31m")
+    monkeypatch.setattr(admin_auth, "setup", bad_setup)
+    monkeypatch.setattr(admin_auth, "host_allowed", lambda *_a, **_k: True)
+    with caplog.at_level(logging.INFO):
+        r = post(c, "/api/admin/setup", {"password": SECRET_PW, "setup_code": code},
+                 headers={"Host": "10.0.0.5\x1b[2J"})
+        assert r.status_code == 400
+        line = trail(caplog)
+    for ch in ("\n", "\r", "\x1b"):
+        assert ch not in line, line
+    # (werkzeug already blanks a Host with control characters; it is escaped too)
+    assert "\\x0a" + forged in line and "[2J" not in line.split("Host", 1)[1].split(":", 1)[0]
+    assert not any(ln.startswith(forged) for ln in caplog.text.splitlines())

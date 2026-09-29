@@ -804,19 +804,31 @@ def _refuse_host():
 
 # ── the setup-path trail (v3.1.0) ───────────────────────────────────────────
 # One INFO line per POST to /api/admin/setup or /api/admin/password: the
-# outcome, which check refused, how the request arrived and the password's
-# character classes. Never the password, the setup code or the body. Written
-# after the request, so a refusal by the https redirect, the cross-site guard
-# or the session gate (before the route runs) leaves a line too.
+# outcome, which check refused, how the request arrived and the NEW password's
+# length bucket and character classes. Never the password, the setup code or
+# the body, and nothing at all about the current password. Written after the
+# request, so a refusal by the https redirect, the cross-site guard or the
+# session gate (before the route runs) leaves a line too. Request-derived text
+# (the Host, the error text) goes through ``netctx.log_safe``.
 
 TRAIL_PATHS = frozenset({"/api/admin/setup", "/api/admin/password"})
 BEFORE_THE_ROUTE = "refused before the route (https redirect, cross-site guard or session gate)"
+BODY_TOO_LARGE = "refused: the request body is over 64 KiB"
+
+
+def length_bucket(n: int) -> str:
+    """A password's length as a bucket, never the count: ``<12``, ``12-19``,
+    ``>=20``."""
+    if n < 12:
+        return "<12"
+    return "12-19" if n < 20 else ">=20"
 
 
 def password_classes(value: Any) -> str:
     """What kind of characters a password has, never what they are:
-    ``len 14, lower: yes, upper: no, digit: yes, symbol: yes, whitespace: no,
-    control: no, non-ASCII: no, emoji/astral: no, unpaired surrogate: no``."""
+    ``length 12-19, lower: yes, upper: no, digit: yes, symbol: yes,
+    whitespace: no, control: no, non-ASCII: no, emoji/astral: no, unpaired
+    surrogate: no``. The length only as a bucket (``length_bucket``)."""
     if value is None:
         return "missing"
     if not isinstance(value, str):
@@ -826,7 +838,7 @@ def password_classes(value: Any) -> str:
         return "yes" if flag else "no"
 
     return ", ".join([
-        f"len {len(value)}",
+        "length " + length_bucket(len(value)),
         "lower: " + yn(any(ch.islower() for ch in value)),
         "upper: " + yn(any(ch.isupper() for ch in value)),
         "digit: " + yn(any(ch.isdigit() for ch in value)),
@@ -852,17 +864,21 @@ def _log_trail(response):
     try:
         info = g.pop("admin_trail", None) or {}
         check = info.pop("check", None) or BEFORE_THE_ROUTE
+        if response.status_code == 413:     # werkzeug's, raised while the route read the body
+            check = BODY_TOO_LARGE
         error = None
         if response.is_json:
             body = response.get_json(silent=True)
             if isinstance(body, dict) and isinstance(body.get("error"), str):
-                error = body["error"][:200]
+                error = netctx.log_safe(body["error"][:200])
         what = "admin setup" if request.path.endswith("/setup") else "admin password change"
         classes = "; ".join(f"{k.replace('_', ' ')} {v}" for k, v in info.items())
-        log.info("%s (%s) from %s%s, https: %s, Host %r: HTTP %d, %s%s%s", what, request.path,
-                 netctx.client_ip(), " via Cloudflare" if netctx.is_proxied() else "",
-                 "yes" if netctx.is_https() else "no", request.host, response.status_code,
-                 check, f" ({error})" if error else "", f"; {classes}" if classes else "")
+        log.info("%s (%s) from %s%s, https: %s, Host '%s': HTTP %d, %s%s%s", what,
+                 netctx.log_safe(request.path), netctx.log_safe(netctx.client_ip()),
+                 " via Cloudflare" if netctx.is_proxied() else "",
+                 "yes" if netctx.is_https() else "no", netctx.log_safe(request.host),
+                 response.status_code, check, f" ({error})" if error else "",
+                 f"; {classes}" if classes else "")
     except Exception:  # noqa: BLE001 - never let the trail break the answer
         log.exception("could not log the admin setup trail")
     return response
@@ -914,12 +930,10 @@ def api_admin_password():
     if err:
         _trail("refused: the request body (a JSON object, 64 KiB)")
         return err
-    current = body.get("password")
-    _trail("failed inside the route", new_password=password_classes(body.get("new_password")),
-           current_password=(f"len {len(current)}" if isinstance(current, str)
-                             else password_classes(current)))
+    # the new password's length bucket and classes; nothing about the current one
+    _trail("failed inside the route", new_password=password_classes(body.get("new_password")))
     try:
-        change(current, body.get("new_password"))
+        change(body.get("password"), body.get("new_password"))
     except NoStore:
         _trail("refused: no store")
         return jsonify({"error": NO_STORE_MESSAGE}), 503
