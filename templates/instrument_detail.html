@@ -1,0 +1,71 @@
+{% extends "_layout.html" %}
+{% block title %}Instrument{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/gc_pages.css') }}?v=1">{% endblock %}
+{% block topbar %}
+  <nav class="crumbs" aria-label="Breadcrumb">
+    <a href="/instruments">Instruments</a><span class="sep ico ico-chev" aria-hidden="true"></span>
+    <b id="crumb-name">{{ instrument_id }}</b>
+  </nav>
+  <span class="spacer"></span>
+  <a class="btn btn-ghost btn-sm" id="open-guide" href="/setup?instrument={{ instrument_id|urlencode }}">Open the setup guide</a>
+  <button type="button" class="btn btn-sm" id="edit-details" data-testid="edit-details">Edit details</button>
+{% endblock %}
+{% block content %}
+<main class="content" id="main" data-testid="instrument-detail-page" data-instrument="{{ instrument_id }}">
+  <header class="page-head">
+    <h1 id="inst-name">{{ instrument_id }}</h1>
+    <div class="meta" id="inst-meta" data-testid="instrument-meta"></div>
+  </header>
+
+  <section class="card checklist" id="checklist" data-testid="setup-checklist" aria-labelledby="checklist-title">
+    <div class="bar">
+      <h2 id="checklist-title">Setup checklist</h2>
+      <span class="caption" id="checklist-count"></span>
+      <span class="spacer"></span>
+      <button type="button" class="btn btn-ghost btn-sm" id="checklist-toggle" hidden aria-expanded="false">Show the steps</button>
+    </div>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <section class="sec" id="agent" data-testid="section-agent">
+    <div class="about"><h2><span class="ico ico-signal" aria-hidden="true"></span>Agent</h2>
+      <p>The small program on the GC's computer that sends each finished run here. Its status updates by itself.</p></div>
+    <div class="body" id="agent-body"></div>
+  </section>
+  <section class="sec" id="calibration" data-testid="section-calibration">
+    <div class="about"><h2><span class="ico ico-target" aria-hidden="true"></span>Calibration</h2>
+      <p>Which n-alkane peak is which carbon number. D2887 needs this before any result is final.</p></div>
+    <div class="body" id="calibration-body"></div>
+  </section>
+  <section class="sec" id="corrections" data-testid="section-corrections">
+    <div class="about"><h2><span class="ico ico-thermo" aria-hidden="true"></span>Correction factors</h2>
+      <p>Added to the reported D86 temperatures (°C). Never enter them in LEM as well: they would apply twice.</p></div>
+    <div class="body" id="corrections-body"></div>
+  </section>
+  <section class="sec" id="export" data-testid="section-export">
+    <div class="about"><h2><span class="ico ico-file" aria-hidden="true"></span>Results file</h2>
+      <p>Final results are appended to this file, which LEM reads. Until the GC is live, runs are backfill and wait here until you release them.</p></div>
+    <div class="body" id="export-body"></div>
+  </section>
+  <section class="sec" id="methods" data-testid="section-methods">
+    <div class="about"><h2><span class="ico ico-flask" aria-hidden="true"></span>Methods</h2>
+      <p>Only mapped ChemStation methods are processed. A run is never guessed into D2887.</p></div>
+    <div class="body" id="methods-body"></div>
+  </section>
+  <section class="sec" id="backfill" data-testid="section-backfill">
+    <div class="about"><h2><span class="ico ico-inbox" aria-hidden="true"></span>Backfill</h2>
+      <p>Runs from before this GC went live. They are never written to the results file unless you release them.</p></div>
+    <div class="body" id="backfill-body"></div>
+  </section>
+  <section class="sec" id="conflicts" data-testid="section-conflicts">
+    <div class="about"><h2><span class="ico ico-doc" aria-hidden="true"></span>Conflicts</h2>
+      <p>The same sample arriving as a different file. Replacing keeps the old file.</p></div>
+    <div class="body" id="conflicts-body"></div>
+  </section>
+</main>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/instruments_logic.js') }}?v=4"></script>
+<script src="{{ url_for('static', filename='js/instrument_actions.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/instrument_detail.js') }}?v=1"></script>
+{% endblock %}

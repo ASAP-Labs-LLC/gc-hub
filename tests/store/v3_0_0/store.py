@@ -79,9 +79,6 @@ Instruments and corrections (D4b)::
     corrections.read(instrument_id, *, db) -> {values, updated_at, updated_by} | None
     corrections.set_all(conn, instrument_id, values, *, by, reason) -> int (cuts changed)
     corrections.audit(instrument_id, limit=100, *, db) -> list[dict]   # newest first
-    instrument_events.add(db, instrument_id, kind, *, by, detail=None, at=None) -> int  # v4
-    instrument_events.list(instrument_id=None, limit=100, *, db) -> list[dict]  # newest first
-    instrument_events.latest_by_kind(instrument_id, *, db) -> {kind: event}
 
 Exports (the ledger; file writing is exports.py)::
 
@@ -245,10 +242,6 @@ Conventions and decisions (where the spec left a choice)
   ``sample_comments.author_name``/``deleted_by_name`` and
   ``report_log.user_name``. v2.0.0 still starts on a v3 database — and then
   serves with no login at all (DEPLOY.md: pause the tunnel before a rollback).
-* **Schema v4** (v3.1, the setup guide) adds ``instrument_events``
-  (``instrument_id, kind, by, at, detail``; ``kind`` one of ``EVENT_KINDS``,
-  ``by`` = ``web_auth.actor()``, ``detail`` JSON). v3.0.0 (schema v3 code)
-  starts on a v4 database and ignores it (``tests/store/v3_0_0``).
 * **Rollback safety.** ``migrate`` on a database whose ``user_version`` is
   higher than ``len(MIGRATIONS)`` logs a warning and carries on. It raises
   ``SchemaError`` only if a table or column this code needs is missing.
@@ -287,12 +280,6 @@ REVISION_REASONS: tuple[str, ...] = (
     "processed", "reprocess", "import", "export-lims", "corrections-released", "replace",
 )
 GATE_SQL = "status='final' AND (backfill=0 OR released_at IS NOT NULL)"
-# instrument_events.kind (schema v4): the setup guide's "done by" and the
-# Instruments page's Activity feed. Written by the operation that did it.
-EVENT_KINDS: tuple[str, ...] = (
-    "created", "installer", "token_revoked", "calibration_cdf", "calibration_saved",
-    "corrections_saved", "method_mapped", "export_path", "export_adopted", "live_since",
-)
 
 Db = Union[None, str, os.PathLike, sqlite3.Connection]
 PathLike = Union[None, str, os.PathLike]
@@ -555,27 +542,8 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         "ALTER TABLE sample_comments ADD COLUMN deleted_by_name TEXT",
         "ALTER TABLE report_log ADD COLUMN user_name TEXT",
     ),
-    (  # v4 (v3.1, the setup guide): who did what to an instrument, and when
-        # No foreign key: an event row must never stop a migration or a restore.
-        """CREATE TABLE instrument_events(
-            id INTEGER PRIMARY KEY,
-            instrument_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            "by" TEXT,
-            at TEXT NOT NULL,
-            detail TEXT)""",
-        "CREATE INDEX instrument_events_inst ON instrument_events(instrument_id, id)",
-        "CREATE INDEX instrument_events_at ON instrument_events(at)",
-    ),
 )
 SCHEMA_VERSION = len(MIGRATIONS)
-# Indexes ``migrate`` ensures on every start, outside the numbered steps (no
-# ``user_version`` bump, no backup): additive, harmless to older code, and
-# nothing another branch's migration step has to be ordered against.
-ENSURED_INDEXES: tuple[str, ...] = (
-    # sendable links (v3.1): /lab/<lab_id>'s case-insensitive fallback
-    "CREATE INDEX IF NOT EXISTS samples_lab_nocase ON samples(lab_id COLLATE NOCASE)",
-)
 WEB_SESSION_METHODS: tuple[str, ...] = ("password", "card", "admin")
 WEB_SESSION_IDLE_SECONDS = 12 * 3600      # web_auth's idle limit
 WEB_SESSION_PRUNE_DAYS = 30               # Maintenance deletes sessions ended this long ago
@@ -642,8 +610,6 @@ REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
     "web_sessions": frozenset({
         "id", "token_hash", "name", "method", "created_at", "last_seen", "expires_at", "ip",
         "user_agent", "revoked_at"}),
-    # v4
-    "instrument_events": frozenset({"id", "instrument_id", "kind", "by", "at", "detail"}),
 }
 
 
@@ -913,9 +879,6 @@ def migrate(path: PathLike = None) -> int:
                 log.info("store: migrated to schema v%s", version + 1)
             version = conn.execute("PRAGMA user_version").fetchone()[0]
         _check_columns(conn)
-        with write_txn(conn):
-            for stmt in ENSURED_INDEXES:
-                conn.execute(stmt)
         return version
     finally:
         conn.close()
@@ -1191,15 +1154,8 @@ def _listify(v: Union[str, Sequence[Any]]) -> list:
 
 
 def _search_where(q, instrument, date_from, date_to, status, method_name, backfill,
-                  time_unverifiable=None, ids=None) -> tuple[str, list]:
+                  time_unverifiable=None) -> tuple[str, list]:
     where, args = [], []
-    if ids is not None:
-        idl = [int(i) for i in ids]
-        if idl:
-            where.append(f"id IN ({_in(idl)})")
-            args += idl
-        else:
-            where.append("0")               # an empty id list matches nothing
     if q:
         pat = f"%{_like_escape(str(q).strip())}%"
         where.append("(lab_id LIKE ? ESCAPE '\\' OR source_name LIKE ? ESCAPE '\\')")
@@ -1307,18 +1263,6 @@ class samples:  # noqa: N801
                 (instrument_id, lab_id, injection_dt)).fetchone())
 
     @staticmethod
-    def with_lab_id(lab_id: str, *, nocase: bool = False, db: Db = None) -> list[dict]:
-        """Every sample whose lab ID is ``lab_id`` (``nocase``: ASCII
-        case-insensitively; SQLite's NOCASE folds A–Z only), newest injection
-        first (ties: newest id). Indexed (``samples_lab`` /
-        ``samples_lab_nocase``), never a substring, no row limit."""
-        where = "lab_id = ? COLLATE NOCASE" if nocase else "lab_id = ?"
-        with connection(db) as conn:
-            return _rows(conn.execute(
-                f"SELECT * FROM samples WHERE {where} ORDER BY injection_dt DESC, id DESC",
-                (lab_id,)))
-
-    @staticmethod
     def find_by_legacy(instrument_id: str, lab_id: str, dt: str, *, db: Db = None) -> list[dict]:
         """Samples whose correct **or** v1 (legacy) injection time equals ``dt``.
 
@@ -1405,7 +1349,7 @@ class samples:  # noqa: N801
                status: Union[None, str, Sequence[str]] = None, limit: int = 100,
                offset: int = 0, *, method_name: Union[None, str, Sequence[str]] = None,
                backfill: Optional[bool] = None, time_unverifiable: Optional[bool] = None,
-               ids: Optional[Sequence[int]] = None, db: Db = None) -> list[dict]:
+               db: Db = None) -> list[dict]:
         """Filter samples, newest injection first (ties: newest id first).
 
         ``q``: case-insensitive substring of ``lab_id`` or ``source_name``
@@ -1413,10 +1357,9 @@ class samples:  # noqa: N801
         one value or a list. ``date_from``/``date_to`` are normalised with
         ``local_dt`` and compared with ``injection_dt``; a bare date
         ``date_to`` includes that whole day. ``backfill``: True/False/None.
-        ``ids``: only these sample ids (an empty list matches nothing).
         """
         where, args = _search_where(q, instrument, date_from, date_to, status, method_name, backfill,
-                                    time_unverifiable, ids)
+                                    time_unverifiable)
         with connection(db) as conn:
             return _rows(conn.execute(
                 f"SELECT * FROM samples{where} ORDER BY injection_dt DESC, id DESC LIMIT ? OFFSET ?",
@@ -1429,10 +1372,10 @@ class samples:  # noqa: N801
               status: Union[None, str, Sequence[str]] = None, *,
               method_name: Union[None, str, Sequence[str]] = None,
               backfill: Optional[bool] = None, time_unverifiable: Optional[bool] = None,
-              ids: Optional[Sequence[int]] = None, db: Db = None) -> int:
+              db: Db = None) -> int:
         """How many samples ``search`` would match without paging."""
         where, args = _search_where(q, instrument, date_from, date_to, status, method_name, backfill,
-                                    time_unverifiable, ids)
+                                    time_unverifiable)
         with connection(db) as conn:
             return int(conn.execute(f"SELECT COUNT(*) FROM samples{where}", args).fetchone()[0])
 
@@ -2090,55 +2033,3 @@ class web_sessions:  # noqa: N801
                 "OR expires_at < ? OR last_seen < ?",
                 (_ts(cutoff), _ts(cutoff), _ts(cutoff - timedelta(seconds=idle_seconds)))
             ).rowcount
-
-
-class instrument_events:  # noqa: N801
-    """Who did what to an instrument (schema v4): installer downloads, token
-    revokes, calibration and corrections saved, methods mapped, the export
-    path and ``live_since`` set. Append-only; ``detail`` is stored as JSON."""
-
-    @staticmethod
-    def add(db: Db, instrument_id: str, kind: str, *, by: Optional[str],
-            detail: Any = None, at: Optional[str] = None) -> int:
-        """Record one event; inside ``write_txn(conn)`` pass ``conn`` so it
-        commits (or rolls back) with the change it records."""
-        if kind not in EVENT_KINDS:
-            raise ValueError(f"unknown instrument event kind {kind!r}")
-        text = None if detail is None else json.dumps(detail, sort_keys=True)
-        with _writing(db) as conn:
-            cur = conn.execute(
-                'INSERT INTO instrument_events(instrument_id, kind, "by", at, detail) '
-                "VALUES (?, ?, ?, ?, ?)", (instrument_id, kind, by, at or now_iso(), text))
-            return int(cur.lastrowid)
-
-    @staticmethod
-    def _decode(r: dict) -> dict:
-        try:
-            r["detail"] = json.loads(r["detail"]) if r.get("detail") else None
-        except ValueError:
-            r["detail"] = None
-        return r
-
-    @staticmethod
-    def list(instrument_id: Optional[str] = None, limit: int = 100, *, db: Db = None) -> list[dict]:
-        """Newest first (by ``at``, then id)."""
-        limit = max(1, min(int(limit), 1000))
-        with connection(db) as conn:
-            if instrument_id is None:
-                rows = conn.execute("SELECT * FROM instrument_events ORDER BY at DESC, id DESC "
-                                    "LIMIT ?", (limit,))
-            else:
-                rows = conn.execute("SELECT * FROM instrument_events WHERE instrument_id=? "
-                                    "ORDER BY at DESC, id DESC LIMIT ?", (instrument_id, limit))
-            return [instrument_events._decode(r) for r in _rows(rows)]
-
-    @staticmethod
-    def latest_by_kind(instrument_id: str, *, db: Db = None) -> dict:
-        """``{kind: newest event of that kind}`` for one instrument."""
-        out: dict = {}
-        with connection(db) as conn:
-            for r in _rows(conn.execute(
-                    "SELECT * FROM instrument_events WHERE instrument_id=? "
-                    "ORDER BY at DESC, id DESC", (instrument_id,))):
-                out.setdefault(r["kind"], instrument_events._decode(r))
-        return out

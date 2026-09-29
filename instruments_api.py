@@ -10,7 +10,12 @@ are ``{error, ...}`` with 400/404/409 (``instrument_admin.AdminError``).
 
 Routes::
 
-    GET  /instruments                                        the page
+    GET  /instruments                                        the page (v3.1 design)
+    GET  /instruments/classic                                the 2A2 page (this release only)
+    GET  /instruments/<id>                                   one instrument (v3.1 design)
+    GET  /setup[?instrument=|new=1]                          the setup guide (v3.1)
+    GET  /api/instruments/activity[?limit=]                  the Activity feed (v3.1)
+    GET  /api/instruments/<id>/setup                         the eight setup steps (v3.1)
     GET  /api/instruments                                    every instrument + summary
     GET  /api/instruments/<id>                               one, with corrections/methods/export
     POST /api/admin/instruments                              {id, name, ...} create (201)
@@ -62,9 +67,11 @@ from flask import Blueprint, jsonify, render_template, request
 
 import admin_auth
 import ingest_api
+import instrument_activity
 import instrument_admin as ia
 import lem_machines
 import paths
+import setup_state
 import standards
 import store
 import version
@@ -151,7 +158,26 @@ def _counts(db) -> dict:
             "GROUP BY instrument_id")}
         corr = {r["instrument_id"]: r["n"] for r in conn.execute(
             "SELECT instrument_id, COUNT(*) AS n FROM instrument_corrections GROUP BY instrument_id")}
-    return {"status": out, "backfill": backfill, "conflicts": conflicts, "corrections": corr}
+        today = {r["instrument_id"]: r["n"] for r in conn.execute(
+            "SELECT instrument_id, COUNT(*) AS n FROM samples WHERE received_at >= ? "
+            "GROUP BY instrument_id", (_local_midnight_utc(),))}
+        pending = {r["instrument_id"]: r["n"] for r in conn.execute(
+            "SELECT instrument_id, COUNT(*) AS n FROM export_rows WHERE hub_appended_at IS NULL "
+            "GROUP BY instrument_id")}
+    return {"status": out, "backfill": backfill, "conflicts": conflicts, "corrections": corr,
+            "today": today, "export_pending": pending}
+
+
+# "Held" on the Instruments cards: samples waiting for something an admin fixes.
+HELD_STATUSES = ("awaiting_calibration", "pending_corrections", "other_method", "review_method")
+
+
+def _local_midnight_utc() -> str:
+    """Today's local midnight, as the store's UTC timestamp form (``received_at``)."""
+    from datetime import datetime, timezone
+    now = datetime.now().astimezone()
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
+        timezone.utc).isoformat(timespec="microseconds")
 
 
 def _summary(row: dict, conf: dict, db, counts: dict, agents: dict) -> dict:
@@ -167,12 +193,45 @@ def _summary(row: dict, conf: dict, db, counts: dict, agents: dict) -> dict:
     out["open_conflicts"] = counts["conflicts"].get(iid, 0)
     out["corrections_set"] = counts["corrections"].get(iid, 0) > 0
     out["agent"] = agents.get(iid)
+    # v3.1: the cards' numbers and "Step N of 8" / "Ready"
+    out["today"] = counts["today"].get(iid, 0)
+    out["held"] = sum(out["counts"].get(s, 0) for s in HELD_STATUSES)
+    out["export_pending"] = counts["export_pending"].get(iid, 0)
+    try:
+        st = setup_state.steps(row, setup_state.gather(iid, conf, db=db, data_dir=_data()))
+        out["setup"] = setup_state.summary(st)
+    except Exception:  # noqa: BLE001 - one bad row must not blank the page
+        log.exception("setup state for %s", iid)
+        out["setup"] = None
     return out
+
+
+# ── pages (v3.1: the new design; the 2A2 page stays at /instruments/classic) ──
+
+def _page(template: str, **extra):
+    return render_template(template, app_version=version.APP_VERSION, **extra)
 
 
 @bp.route("/instruments", methods=["GET"])
 def instruments_page():
+    return _page("instruments_home.html", nav="instruments")
+
+
+@bp.route("/instruments/classic", methods=["GET"])
+def instruments_classic_page():
     return render_template("instruments.html", app_version=version.APP_VERSION)
+
+
+@bp.route("/instruments/<iid>", methods=["GET"])
+def instrument_detail_page(iid):
+    if store.instruments.get(iid, db=_db()) is None:
+        return _page("instrument_missing.html", nav="instruments", instrument_id=iid), 404
+    return _page("instrument_detail.html", nav="instruments", instrument_id=iid)
+
+
+@bp.route("/setup", methods=["GET"])
+def setup_page():
+    return _page("setup_guide.html", nav="setup")
 
 
 @bp.route("/api/instruments", methods=["GET"])
@@ -190,6 +249,16 @@ def api_instruments():
         "agent_commands": list(ingest_api.AGENT_COMMANDS),
         "skew_warn_seconds": ia.SKEW_WARN_SECONDS,
     })
+
+
+@bp.route("/api/instruments/activity", methods=["GET"])
+def api_activity():
+    """The Activity feed: ``{entries: [...]}``, newest first (``instrument_activity``)."""
+    try:
+        limit = instrument_activity.clamp_limit(request.args.get("limit"))
+    except ValueError:
+        return _err("limit must be an integer")
+    return jsonify({"entries": instrument_activity.feed(limit, db=_db())})
 
 
 def _export_status(iid: str) -> dict:
@@ -218,6 +287,16 @@ def api_instrument(iid):
     })
 
 
+@bp.route("/api/instruments/<iid>/setup", methods=["GET"])
+def api_setup(iid):
+    """The setup guide's eight steps for one instrument (``setup_state``)."""
+    ia.get(iid, db=_db())
+    ex = _export_status(iid)
+    export = ex if "path" in ex else None
+    return jsonify(setup_state.for_instrument(iid, _conf(), db=_db(), data_dir=_data(),
+                                              export=export))
+
+
 # ── create / update / export ────────────────────────────────────────────────
 
 def _fields(body: dict) -> dict:
@@ -229,7 +308,7 @@ def api_create_instrument():
     body, err = _admin()
     if err:
         return err
-    row = ia.create(_fields(body), db=_db())
+    row = ia.create(_fields(body), db=_db(), by=_by())
     return jsonify({"instrument": row}), 201
 
 
@@ -238,7 +317,7 @@ def api_update_instrument(iid):
     body, err = _admin()
     if err:
         return err
-    row, warnings = ia.update(iid, _fields(body), db=_db())
+    row, warnings = ia.update(iid, _fields(body), db=_db(), by=_by())
     return jsonify({"instrument": row, "warnings": warnings})
 
 
@@ -247,7 +326,7 @@ def api_export_path(iid):
     body, err = _admin()
     if err:
         return err
-    return jsonify({"export": ia.set_export_path(iid, body.get("path"), _get_exporter())})
+    return jsonify({"export": ia.set_export_path(iid, body.get("path"), _get_exporter(), by=_by())})
 
 
 @bp.route("/api/admin/instruments/<iid>/export-adopt", methods=["POST"])
@@ -294,7 +373,7 @@ def api_calibration_cdf(iid):
     if err:
         return err
     st = ia.set_calibration_cdf(iid, _conf(), sample_id=body.get("sample_id"),
-                                path=body.get("path"), db=_db(), data_dir=_data())
+                                path=body.get("path"), db=_db(), data_dir=_data(), by=_by())
     return jsonify({"calibration": st})
 
 
@@ -304,7 +383,7 @@ def api_calibration_save(iid):
     if err:
         return err
     return jsonify(ia.save_calibration(iid, body.get("assignments"), body.get("sensitivity"),
-                                       _conf(), db=_db(), data_dir=_data()))
+                                       _conf(), db=_db(), data_dir=_data(), by=_by()))
 
 
 # ── corrections ─────────────────────────────────────────────────────────────
@@ -347,7 +426,7 @@ def api_methods_set(iid):
     if err:
         return err
     return jsonify(ia.set_method_mapping(iid, body.get("method_name"), body.get("hub_method"),
-                                         db=_db()))
+                                         db=_db(), by=_by()))
 
 
 @bp.route("/api/admin/instruments/<iid>/review-method", methods=["POST"])

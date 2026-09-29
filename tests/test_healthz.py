@@ -149,6 +149,20 @@ class ActivitySemanticsTests(unittest.TestCase):
         self.assertGreaterEqual(body["idle_seconds"], 1.1)
         self.assertEqual(body["active_sessions"], 0)
 
+    def test_a_background_refresh_does_not_count_as_activity(self):
+        """v3.1: the new pages' 5 s fallback poll (no live.js) sends
+        ``X-GC-Background: 1``; like /api/live it must not block the 3 AM
+        restart or the updater's idle deploy, nor keep a session alive."""
+        with tempfile.TemporaryDirectory() as t:
+            with booted(Path(t)) as (port, proc, data, home):
+                time.sleep(1.2)
+                for path in ("/api/instruments", "/api/agents", "/api/instruments/activity"):
+                    code, _ = get(port, path, headers={"X-GC-Background": "1"}, timeout=15)
+                    self.assertEqual(code, 200, path)
+                _, body = get(port, "/healthz")
+        self.assertGreaterEqual(body["idle_seconds"], 1.1)
+        self.assertEqual(body["active_sessions"], 0)
+
     def test_a_real_user_route_counts_as_activity(self):
         with tempfile.TemporaryDirectory() as t:
             with booted(Path(t)) as (port, proc, data, home):

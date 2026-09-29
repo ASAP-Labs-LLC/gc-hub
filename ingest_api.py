@@ -58,7 +58,7 @@ def new_token() -> str:
 
 
 def mint_token(instrument_id: str, *, db=None, token: Optional[str] = None,
-               require_no_token: bool = False) -> str:
+               require_no_token: bool = False, by: Optional[str] = None) -> str:
     """Store ``token`` (default: a new one) as ``instrument_id``'s token,
     revoking any previous one. With ``require_no_token``, raise
     ``TokenExists`` instead if the instrument already has one (checked in the
@@ -74,12 +74,14 @@ def mint_token(instrument_id: str, *, db=None, token: Optional[str] = None,
                 raise TokenExists(row.get("token_issued_at") or "")
             store.instruments.upsert({"id": instrument_id, "token_hash": token_hash(token),
                                       "token_issued_at": store.now_iso()}, db=conn)
+            store.instrument_events.add(conn, instrument_id, "installer", by=by,
+                                        detail={"replaced": bool(row.get("token_hash"))})
     log.warning("agent token minted for %s (any previous token is revoked)", instrument_id)
     live.publish("instrument", {"instrument_id": instrument_id})
     return token
 
 
-def revoke_token(instrument_id: str, *, db=None) -> None:
+def revoke_token(instrument_id: str, *, db=None, by: Optional[str] = None) -> None:
     """Remove the instrument's token: its agent is refused (401) until a new
     installer is downloaded."""
     with store.connection(_db(db)) as conn:
@@ -88,6 +90,7 @@ def revoke_token(instrument_id: str, *, db=None) -> None:
                 raise LookupError(f"unknown instrument {instrument_id!r}")
             store.instruments.upsert({"id": instrument_id, "token_hash": None,
                                       "token_issued_at": None}, db=conn)
+            store.instrument_events.add(conn, instrument_id, "token_revoked", by=by)
     log.warning("agent token revoked for %s", instrument_id)
     live.publish("instrument", {"instrument_id": instrument_id})
 
@@ -683,7 +686,7 @@ def api_admin_installer(instrument_id):
     token = new_token()                     # the zip is built before the hash is stored
     data = installer_zip(hub_url, token, pkg, hub_version(), lan_url(hub_url))
     try:
-        mint_token(instrument_id, token=token, require_no_token=not confirmed)
+        mint_token(instrument_id, token=token, require_no_token=not confirmed, by=_actor())
     except TokenExists:                     # minted by someone else meanwhile
         return needs_confirm
     except LookupError:
@@ -702,7 +705,7 @@ def api_admin_revoke_token(instrument_id):
     if err:
         return err
     try:
-        revoke_token(instrument_id)
+        revoke_token(instrument_id, by=_actor())
     except LookupError as exc:
         return _err(str(exc), 404)
     log.warning("agent token of %s revoked by %s", instrument_id, _actor())
