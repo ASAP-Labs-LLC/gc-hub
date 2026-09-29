@@ -31,6 +31,12 @@
     table{width:100%;border-collapse:collapse;font-size:13px}
     th,td{text-align:left;border-bottom:1px solid var(--line);padding:5px 6px;vertical-align:top}
     .err{color:var(--danger)} .ok{color:var(--green)} .muted{color:var(--muted)} .warn{color:var(--warn)}
+    ul.presets{list-style:none;margin:8px 0;padding:0}
+    ul.presets li{display:flex;gap:6px;align-items:center;border-bottom:1px solid var(--line);
+      padding:4px 0}
+    ul.presets li input.preset-text{flex:1}
+    ul.presets li.inactive input.preset-text{color:var(--muted);text-decoration:line-through}
+    ul.presets li button{margin:0;padding:3px 8px}
     pre{white-space:pre-wrap;background:var(--bg);border:1px solid var(--line);border-radius:6px;
       padding:8px;font-size:12px;max-height:240px;overflow:auto}
   </style>
@@ -81,6 +87,19 @@
   </div>
 
   <div class="panel">
+    <h2>Comment presets</h2>
+    <p>The one-click comments on the Analysis tab. Their text is copied into a sample's comment
+      when it is added (editing a preset later does not change existing comments), and comments
+      print in reports that may reach customers: word them for a report. At most 50 active,
+      200 characters each. Deactivated presets are kept and can be reactivated.</p>
+    <button id="btn-presets-load">Load presets</button>
+    <ul id="presets" class="presets"></ul>
+    <input id="preset-new-text" class="wide" type="text" maxlength="200"
+      placeholder="New preset text">
+    <button id="btn-preset-add">Add preset</button>
+  </div>
+
+  <div class="panel">
     <h2>Exports</h2>
     <p>Each instrument's results CSV (append-only; LEM tails it). A refused file is never
       written until it is adopted or the export is moved to another path. Never point LEM at
@@ -91,7 +110,7 @@
     </table>
   </div>
 </main>
-<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=2"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

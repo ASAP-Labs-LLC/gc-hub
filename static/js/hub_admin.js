@@ -129,6 +129,7 @@
       await refreshExports();
       await pollJob();
     } catch (e) { say(e.message, "err"); }
+    await loadPresets();
   }
 
   async function startLoad() {
@@ -201,6 +202,69 @@
     } catch (e) { say(e.message, "err"); }
   }
 
+  // ── comment presets (phase 4) ─────────────────────────────────────────
+  // One admin route, /api/admin/comment-presets {action, ...}; every answer
+  // carries the full list, which is re-rendered (inputs are set with .value,
+  // labels with textContent: preset text is data, never markup).
+
+  async function presetCall(action, extra) {
+    const j = await call("/api/admin/comment-presets", Object.assign({action}, extra || {}));
+    renderPresets(j.presets || []);
+    return j;
+  }
+
+  function renderPresets(presets) {
+    const ul = $("presets");
+    ul.textContent = "";
+    presets.forEach((p, i) => {
+      const li = el("li", null, p.active ? "" : "inactive");
+      li.dataset.id = String(p.id);
+      const input = document.createElement("input");
+      input.type = "text";
+      input.maxLength = 200;
+      input.className = "preset-text";
+      input.value = p.text;
+      li.appendChild(input);
+      const btn = (label, cls, fn, disabled) => {
+        const b = el("button", label, cls);
+        b.disabled = !!disabled;
+        b.addEventListener("click", () => fn().catch((e) => say(e.message, "err")));
+        li.appendChild(b);
+      };
+      btn("Save", "preset-save", async () => {
+        await presetCall("update", {id: p.id, text: input.value});
+        say("Preset saved", "ok");
+      });
+      btn("\u2191", "preset-up", () => move(presets, i, -1), i === 0);
+      btn("\u2193", "preset-down", () => move(presets, i, +1), i === presets.length - 1);
+      btn(p.active ? "Deactivate" : "Activate", "preset-toggle warn",
+          () => presetCall(p.active ? "deactivate" : "activate", {id: p.id}));
+      ul.appendChild(li);
+    });
+  }
+
+  function move(presets, i, delta) {
+    const ids = presets.map((p) => p.id);
+    const j = i + delta;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    return presetCall("reorder", {ids});
+  }
+
+  async function loadPresets() {
+    try { await presetCall("list"); } catch (e) { say(e.message, "err"); }
+  }
+
+  async function addPreset() {
+    const input = $("preset-new-text");
+    try {
+      await presetCall("create", {text: input.value});
+      input.value = "";
+      say("Preset added", "ok");
+    } catch (e) { say(e.message, "err"); }
+  }
+
+  $("btn-presets-load").addEventListener("click", loadPresets);
+  $("btn-preset-add").addEventListener("click", addPreset);
   $("btn-refresh").addEventListener("click", refresh);
   $("btn-load").addEventListener("click", startLoad);
   $("btn-ih-last").addEventListener("click", ihLastRun);
