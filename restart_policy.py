@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Mapping, Optional, Tuple
@@ -99,11 +100,35 @@ def may_respawn(data_dir: Path) -> bool:
     return True
 
 
+# An explicit Stop (hub_control's POST /api/admin/hub/stop, the hub tray's
+# "Stop hub") writes the updater's ``paused`` marker so nothing relaunches the
+# hub, then exits. ``paused`` normally means "respawn yourself" (below), so the
+# stop is recorded here first and wins over it: a stop never self-respawns.
+_stop_requested = threading.Event()
+
+
+def request_stop() -> None:
+    """Record that this process is stopping for good (no respawn, ever)."""
+    _stop_requested.set()
+
+
+def stop_requested() -> bool:
+    return _stop_requested.is_set()
+
+
+def _reset_stop_for_tests() -> None:
+    _stop_requested.clear()
+
+
 def should_respawn(data_dir: Path, env: Optional[Mapping[str, str]] = None) -> bool:
     """Whether a restart should spawn its own replacement before exiting:
     no — the updater relaunches us — except while it is ``paused`` (and not
     mid-switch, ``may_respawn``), when it supervises nothing and exiting
-    would leave the app down (coa-reviewer's _exit_for_updater)."""
+    would leave the app down (coa-reviewer's _exit_for_updater). Never after
+    an explicit stop (``request_stop``), which is what wrote ``paused``."""
+    if stop_requested():
+        logger.warning("Not respawning: the hub was stopped on purpose")
+        return False
     d = Path(data_dir)
     if not (d / "paused").exists() or (d / "switching").exists():
         return False
