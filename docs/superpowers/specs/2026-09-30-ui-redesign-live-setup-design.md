@@ -146,7 +146,7 @@ Older code must still start on this DB.
   - **Report queue sheet**, persisted in sessionStorage: Download all (ZIP), Upload to QBench (sign-in, progress, skip, stop, re-entering credentials), Remove, Clear.
   - "Add to queue" replaces "Send to QBench", with a toast naming the standard.
   - The Export report sheet, notification panel, Ctrl K palette and annotate popover must be mocked first.
-  - **Open question for Ryan:** Comparison Export (a sample against every standard, written to the server's export folder) is dropped unless he wants it.
+  - **Comparison Export is dropped.** Ryan (2026-09-30): "I do not use comparison export". Its button, `/api/export-comparison` and its help text go when classic is removed (v4.1); the new UI never offers it.
 - **v4.0 (MAJOR: the default UI changes how results are displayed):** the new UI at `/`, classic at `/classic` for one release.
 - **v4.1:**
   - Results page: key points by default, with All points remembered per browser;
