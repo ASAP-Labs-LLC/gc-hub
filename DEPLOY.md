@@ -359,6 +359,27 @@ Then continue with "Before cutover" below. What the admin pages do:
   standards per instrument, and the agent panel (status, clock skew, queue,
   last error, commands, *Download installer*, *Revoke token*).
 
+## Upgrading to v3 (deviation bullets and comments)
+
+v3.0.0 changes how analysis reports read (one bullet per deviating range,
+sharp-peak rules, comments); no D2887/D86 number or results CSV changes. Read
+the v3.0.0 release notes first. Nothing needs editing on the server:
+
+- On the first v3 start the database is migrated to schema v2 (three new
+  tables, nothing existing changed) after a copy to
+  `data\backups\pre-migrate-1-<time>.db`; `app.log` says so.
+- The four comment presets are seeded once; review or reword them on
+  **Hub admin > Comment presets** (admin password) before operators use
+  them, since QBench PDFs may reach customers.
+- The deviation-bullet thresholds were tuned on synthetic data. Before
+  relying on them, run the Analysis tab on a few real runs whose answer is
+  known and adjust Settings > **Deviation Bullets** (admin password) if
+  needed.
+- **Rollback** (`updater.py rollback --app gc`) to v2.0.0 is safe: it starts
+  on the migrated database, but its reports omit comments and use v2's
+  bullets, and it writes no `report_log` rows. Comments made under v3 are
+  kept and reappear after upgrading again.
+
 ## Before cutover (once, for both GCs)
 
 The spec's "Cutover runbook", steps 1 to 4, plus the parity check. Until a GC

@@ -34,7 +34,8 @@ modules and are skipped automatically if the dep is absent.
 | `test_analysis_bullets.py` | Phase 3 deviation bullets: `range_windows` (one carbon↔time conversion, extrapolation, clipping, not-evaluable), `report_params`, spikes, every rule of `build_deviation_report` and a golden string for every `render_bullets` template, the conclusion, the ranges + 1 bound. |
 | `test_bullets_regression.py` | `fixtures/diesel_pair.npz` (synthetic diesel pair on the real calibration axis, built by `fixtures/make_diesel_pair.py`): the old per-excursion text gave 29 bullets, the range-driven report ≤ ranges + 1; the same-product pair and its retention-shift/±50% variants report no deviation, diesel + 1/2/5% gasoline flags Gas only. |
 | `test_analysis_settings_routes.py` | Deviation-bullet admin settings are validated when saved (400, nothing written); Set as Default keeps the saved overlays unless sent. |
-| `test_report_content.py` | `app._report_content` is identical across `/api/analysis`, the direct export, the ZIP and the QBench PDF (`report_harness.py` drives all four in one app process in a subprocess, with fake `comments` and QBench uploader); PDFs print the computed bullets, never client ones; escaping, footer, `report_log` rows. |
+| `test_report_content.py` | `app._report_content` is identical across `/api/analysis`, the direct export, the ZIP and the QBench PDF (`report_harness.py` drives all four in one app process in a subprocess, with fake `comments` and QBench uploader); PDFs print the computed bullets, never client ones; escaping, footer, `report_log` rows; annotation comments print `text (Cx–Cy, a–b min; initials, date)` from the report's ladder; `comments` is a hard import. |
+| `test_ui_ladder_per_instrument.py` | Carbon labels per instrument: `/api/samples/<id>/trace` serves the (current or `?revision=`) revision's ladder; in headless Chrome, a gc2 sample whose anchors differ from gc1's is labelled with its own ladder on the dashboard, in the Chromatogram overlay (first visible trace's, named when traces disagree) and in the annotation modal; no `(i + 5)` fallback, no `/api/calibration` read. |
 | `test_ui_analysis_smoke.py` | Headless Chrome: range boxes from the analysis windows, threshold lines and spike markers, read-only bullets, queue items capture params and carry no bullets. |
 
 ## Not covered here
@@ -47,11 +48,12 @@ smoke test against a real sample.
 
 ## Frontend (JS) pure-logic tests
 
-Pure, DOM-free helpers in `static/js/selection.js` (multi-select range +
-selection-to-files resolution) are unit-tested under Node:
+Pure, DOM-free helpers in `static/js/` (`selection.js`, `report_payload.js`,
+`samples.js`, `flagrules.js`, `restart.js`, `qbench_api.js`,
+`instruments_logic.js`, `comments.js`, `ladder.js`) are unit-tested under Node:
 
 ```bash
-node tests/js/run.js        # requires Node; tests static/js/selection.js
+node tests/js/run.js        # requires Node
 ```
 
 The runner (`tests/js/run.js`) is zero-dependency (uses Node's `assert`). Keep
