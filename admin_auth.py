@@ -802,47 +802,134 @@ def _refuse_host():
                              "its own name or IP address."}), 403
 
 
+# ── the setup-path trail (v3.1.0) ───────────────────────────────────────────
+# One INFO line per POST to /api/admin/setup or /api/admin/password: the
+# outcome, which check refused, how the request arrived and the password's
+# character classes. Never the password, the setup code or the body. Written
+# after the request, so a refusal by the https redirect, the cross-site guard
+# or the session gate (before the route runs) leaves a line too.
+
+TRAIL_PATHS = frozenset({"/api/admin/setup", "/api/admin/password"})
+BEFORE_THE_ROUTE = "refused before the route (https redirect, cross-site guard or session gate)"
+
+
+def password_classes(value: Any) -> str:
+    """What kind of characters a password has, never what they are:
+    ``len 14, lower: yes, upper: no, digit: yes, symbol: yes, whitespace: no,
+    control: no, non-ASCII: no, emoji/astral: no, unpaired surrogate: no``."""
+    if value is None:
+        return "missing"
+    if not isinstance(value, str):
+        return f"not text ({type(value).__name__})"
+
+    def yn(flag: bool) -> str:
+        return "yes" if flag else "no"
+
+    return ", ".join([
+        f"len {len(value)}",
+        "lower: " + yn(any(ch.islower() for ch in value)),
+        "upper: " + yn(any(ch.isupper() for ch in value)),
+        "digit: " + yn(any(ch.isdigit() for ch in value)),
+        "symbol: " + yn(any(not ch.isalnum() and not ch.isspace() and ch.isprintable()
+                            for ch in value)),
+        "whitespace: " + yn(any(ch.isspace() for ch in value)),
+        "control: " + yn(any(ord(ch) < 32 or ord(ch) == 127 for ch in value)),
+        "non-ASCII: " + yn(any(ord(ch) > 127 for ch in value)),
+        "emoji/astral: " + yn(any(ord(ch) > 0xFFFF for ch in value)),
+        "unpaired surrogate: " + yn(any(0xD800 <= ord(ch) <= 0xDFFF for ch in value)),
+    ])
+
+
+def _trail(check: str, **classes) -> None:
+    """Remember what the route decided; ``_log_trail`` writes it."""
+    g.admin_trail = dict(g.get("admin_trail") or {}, check=check, **classes)
+
+
+@bp.after_app_request
+def _log_trail(response):
+    if request.method != "POST" or request.path not in TRAIL_PATHS:
+        return response
+    try:
+        info = g.pop("admin_trail", None) or {}
+        check = info.pop("check", None) or BEFORE_THE_ROUTE
+        error = None
+        if response.is_json:
+            body = response.get_json(silent=True)
+            if isinstance(body, dict) and isinstance(body.get("error"), str):
+                error = body["error"][:200]
+        what = "admin setup" if request.path.endswith("/setup") else "admin password change"
+        classes = "; ".join(f"{k.replace('_', ' ')} {v}" for k, v in info.items())
+        log.info("%s (%s) from %s%s, https: %s, Host %r: HTTP %d, %s%s%s", what, request.path,
+                 netctx.client_ip(), " via Cloudflare" if netctx.is_proxied() else "",
+                 "yes" if netctx.is_https() else "no", request.host, response.status_code,
+                 check, f" ({error})" if error else "", f"; {classes}" if classes else "")
+    except Exception:  # noqa: BLE001 - never let the trail break the answer
+        log.exception("could not log the admin setup trail")
+    return response
+
+
 @bp.route("/api/admin/setup", methods=["POST"])
 def api_admin_setup():
+    _trail("failed inside the route")
     refusal = netctx.cross_site_refusal()
     if refusal:
+        _trail("refused by the cross-site check")
         return jsonify({"error": refusal}), 403
     refused = _refuse_host()
     if refused:
+        _trail("refused by the host check")
         return refused
     body, err = _json_body()
     if err:
+        _trail("refused: the request body (a JSON object, 64 KiB)")
         return err
+    _trail("failed inside the route", password=password_classes(body.get("password")))
     try:
         setup(body.get("password"), body.get("setup_code"))
     except NoStore:
+        _trail("refused: no store")
         return jsonify({"error": NO_STORE_MESSAGE}), 503
     except AlreadySet:
+        _trail("refused: a password is already set")
         return jsonify({"error": "An admin password is already set. Change it with the "
                                  "current password instead."}), 409
     except SetupCodeError as exc:
+        _trail("refused by the setup code check")
         return jsonify({"error": str(exc)}), 403
     except PasswordError as exc:
+        _trail("refused by the password rule")
         return jsonify({"error": str(exc)}), 400
+    _trail("ok: password set")
     return jsonify({"ok": True}), 201
 
 
 @bp.route("/api/admin/password", methods=["POST"])
 def api_admin_password():
+    _trail("failed inside the route")
     refusal = netctx.cross_site_refusal()
     if refusal:
+        _trail("refused by the cross-site check")
         return jsonify({"error": refusal}), 403
     body, err = _json_body()
     if err:
+        _trail("refused: the request body (a JSON object, 64 KiB)")
         return err
+    current = body.get("password")
+    _trail("failed inside the route", new_password=password_classes(body.get("new_password")),
+           current_password=(f"len {len(current)}" if isinstance(current, str)
+                             else password_classes(current)))
     try:
-        change(body.get("password"), body.get("new_password"))
+        change(current, body.get("new_password"))
     except NoStore:
+        _trail("refused: no store")
         return jsonify({"error": NO_STORE_MESSAGE}), 503
     except WrongPassword as exc:
+        _trail("refused by the current password check")
         return jsonify({"error": str(exc)}), 403
     except PasswordError as exc:
+        _trail("refused by the password rule")
         return jsonify({"error": str(exc)}), 400
+    _trail("ok: password changed")
     revoked = []
     try:   # a new admin password ends every break-glass session
         import web_auth
