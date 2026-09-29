@@ -334,7 +334,15 @@ class AppUsesLadderTests(unittest.TestCase):
     def test_app_has_no_positional_n_alkane_pairing(self):
         src = self._app_src()
         self.assertNotIn("cal_carbons: list[int] = list(distill.N_ALKANE_CARBON)", src)
-        self.assertGreaterEqual(src.count("distill.calibration_ladder("), 4)
+        # Phase 2 T4: the analysis routes, both report exports and the QBench
+        # upload label ranges with the sample revision's calibration anchors
+        # (_revision_ladder), which falls back to distill.calibration_ladder.
+        # (T5: the QBench upload goes through _run_export_analysis, so the
+        # report path is one call: its definition, /api/analysis and
+        # _run_export_analysis.)
+        self.assertGreaterEqual(src.count("_revision_ladder("), 3)
+        self.assertGreaterEqual(src.count("_run_export_analysis("), 4)
+        self.assertIn("distill.calibration_ladder(", src)
 
     def test_app_has_no_leftover_length_slicing(self):
         src = self._app_src()
@@ -374,32 +382,34 @@ class ApiCalibrationRoutesTests(unittest.TestCase):
     def _function_source(cls, name: str) -> str:
         return ast.get_source_segment(cls._app_source_text(), cls._function_node(name))
 
-    def test_calibration_routes_resolve_cdf_via_active_calibration_path(self):
-        # GC_CAL_CDF must be honoured consistently: these three routes must
-        # resolve "the" calibration CDF through active_calibration_path,
-        # not by reading conf['calibration_cdf'] directly.
+    def test_calibration_routes_resolve_cdf_via_the_instrument_context(self):
+        # Phase 2 T4: the calibration is the gc1 instrument row's, merged by
+        # instruments.context (GC_CAL_CDF plays no part in the hub), resolved
+        # through active_calibration_path -- never conf['calibration_cdf'].
         for name in ("api_calibration", "api_calibration_save", "api_calibration_active"):
             with self.subTest(route=name):
                 src = self._function_source(name)
-                self.assertIn("distill.active_calibration_path(conf)", src)
+                self.assertIn("instruments.context(", src)
+                self.assertIn("distill.active_calibration_path(ctx, honour_env=False)", src)
                 self.assertNotIn('conf.get("calibration_cdf"', src)
 
     def test_save_route_validates_before_persisting(self):
         # api_calibration_save must call validate_assignments() before
-        # upsert_assignments() persists the (possibly bad) assignment list.
+        # store.instruments.upsert() persists the (possibly bad) list on the
+        # gc1 row.
         func = self._function_node("api_calibration_save")
         calls: list[tuple[int, str]] = []
         for node in ast.walk(func):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                if node.func.attr in ("validate_assignments", "upsert_assignments"):
+                if node.func.attr in ("validate_assignments", "upsert"):
                     calls.append((node.lineno, node.func.attr))
         calls.sort()
         names_in_order = [name for _, name in calls]
         self.assertIn("validate_assignments", names_in_order)
-        self.assertIn("upsert_assignments", names_in_order)
+        self.assertIn("upsert", names_in_order)
         self.assertLess(
             names_in_order.index("validate_assignments"),
-            names_in_order.index("upsert_assignments"),
+            names_in_order.index("upsert"),
         )
 
 

@@ -16,34 +16,29 @@ from pathlib import Path
 WEBAPP_DIR = Path(__file__).resolve().parent.parent
 
 # The distinct route paths the frontend consumes (── /api/settings serves
-# both GET and POST under one path). Sourced from the live, feature-complete
-# app.py at consolidation time.
+# both GET and POST under one path). Updated for phase 2 T4 (samples by
+# sample_id; scan/rebuild/refresh removed); tests/test_route_fates.py holds
+# the full fate of every route.
 EXPECTED_ROUTES = {
     "/",
     "/calibration",
     "/api/analysis",
     "/api/best-fit",
-    "/api/browse",
     "/api/calibration",
     "/api/calibration/active",
     "/api/comparison-standard",
     "/api/comparison-standard/<name>",
     "/api/comparison-standard/rename",
     "/api/comparison-standards",
-    "/api/distillation-curve",
     "/api/export-analysis-report",
     "/api/export-analysis-reports-zip",
     "/api/export-comparison",
     "/api/export-lims",
     "/api/export-pdf",
     "/api/files",
-    "/api/files/refresh",
-    "/api/library/reindex-times",
-    "/api/metadata/<path:filepath>",
     "/api/notifications",
     "/api/notifications/<notif_id>/dismiss",
     "/api/notifications/dismiss-all",
-    "/api/open-folder",
     "/api/qbench-api-credentials",
     "/api/qbench-cancel",
     "/api/qbench-credentials",
@@ -52,20 +47,17 @@ EXPECTED_ROUTES = {
     "/api/qbench-upload",
     "/api/qbench-upload-status",
     "/api/qbench-upload/stream",
-    "/api/rebuild-db",
     "/api/reprocess",
     "/api/reprocess/preview",
     "/api/reprocess/status",
     "/api/restart",
+    "/api/samples/<int:sample_id>/distillation-curve",
+    "/api/samples/<int:sample_id>/metadata",
+    "/api/samples/<int:sample_id>/trace",
     "/api/save-analysis-defaults",
-    "/api/scan",
-    "/api/scan/status",
-    "/api/scan/stream",
     "/api/server-status",
     "/api/settings",
-    "/api/stop-scan",
     "/api/table",
-    "/api/trace",
 }
 
 
@@ -130,8 +122,12 @@ class RouteSurfaceTests(unittest.TestCase):
         self.assertIn("POST", methods.get("/api/notifications/<notif_id>/dismiss", set()))
         self.assertIn("POST", methods.get("/api/notifications/dismiss-all", set()))
 
-    def test_library_reindex_is_post(self) -> None:
-        self.assertIn("POST", _route_methods().get("/api/library/reindex-times", set()))
+    def test_sample_routes_take_a_sample_id(self) -> None:
+        # Phase 2 T4: samples are addressed by id, never by file path.
+        methods = _route_methods()
+        for leaf in ("metadata", "trace", "distillation-curve"):
+            self.assertIn("GET", methods.get(f"/api/samples/<int:sample_id>/{leaf}", set()))
+        self.assertFalse([p for p in methods if "<path:" in p])
 
 
 def _app_run_call() -> ast.Call:
@@ -152,7 +148,7 @@ def _app_run_call() -> ast.Call:
 class PortBindingTests(unittest.TestCase):
     """The port must be resolvable per instance, never hardcoded.
 
-    AST-only: importing app.py starts the Looker and auto-restart threads.
+    AST-only: importing app.py starts the hub and auto-restart threads.
     """
 
     def test_app_run_has_no_hardcoded_port(self) -> None:
@@ -198,19 +194,15 @@ class DeployedModeFallbackTests(unittest.TestCase):
     In deployed mode ``cwd`` is the updater's immutable release folder, so a
     bare relative literal like ``conf.get("distill_output", "distill_results.csv")``
     would resolve inside it. These ``conf.get(key, ...)`` fallbacks are
-    mostly defensive (``conf`` usually comes from
-    ``settings_mod.load_settings()``, which always sets every ``DEFAULTS``
-    key) but at least one — ``looker.rebuild_database`` when
-    ``load_settings()`` raises — is genuinely reachable. All of them must
-    route through ``paths.py`` rather than a hardcoded literal.
+    defensive (``conf`` usually comes from ``settings_mod.load_settings()``,
+    which always sets every ``DEFAULTS`` key). All of them must route
+    through ``paths.py`` rather than a hardcoded literal.
 
-    AST-only: importing app.py starts the Looker and auto-restart threads;
-    distill.py/looker.py are cheap enough to parse the same way for
-    consistency and so a stray CRLF re-save never breaks this guard.
+    AST-only: importing app.py starts the hub's background threads.
     """
 
     # Every module with a ``conf.get(<state key>, ...)`` fallback.
-    STATE_PATH_MODULES = ("app.py", "distill.py", "looker.py")
+    STATE_PATH_MODULES = ("app.py", "distill.py")
 
     # Settings keys whose value is a filesystem location that must live
     # under GC_DATA_DIR when deployed (see paths.py).
@@ -274,29 +266,6 @@ class DeployedModeFallbackTests(unittest.TestCase):
                     "release folder when GC_DATA_DIR is set; route it through paths.py",
                 )
         self.assertGreater(checked, 0, "no conf.get(...) calls found for tracked state keys")
-
-    def test_dir_cache_path_uses_paths_module(self) -> None:
-        """``_DIR_CACHE_PATH`` must be assigned from ``paths.dir_cache_file()``.
-
-        Checked via the assignment's call target (module + attribute name)
-        rather than an exact source-text match, so reformatting the line
-        doesn't make this test a no-op.
-        """
-        tree = self._tree("app.py")
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Assign)
-                    and len(node.targets) == 1
-                    and isinstance(node.targets[0], ast.Name)
-                    and node.targets[0].id == "_DIR_CACHE_PATH"):
-                continue
-            value = node.value
-            self.assertIsInstance(value, ast.Call, "_DIR_CACHE_PATH must be assigned a call result")
-            self.assertIsInstance(value.func, ast.Attribute)
-            self.assertEqual(value.func.attr, "dir_cache_file")
-            self.assertIsInstance(value.func.value, ast.Name)
-            self.assertEqual(value.func.value.id, "paths")
-            return
-        self.fail("_DIR_CACHE_PATH assignment not found in app.py")
 
 
 if __name__ == "__main__":

@@ -266,7 +266,7 @@ def _api_lookup(
     def _call():
         try:
             # qbench_client.py is vendored alongside this module in webapp/,
-            # which run.pyw puts on sys.path — no external share path needed.
+            # the folder app.py runs from (on sys.path) — no external share path needed.
             from qbench_client import QBenchAPIClient  # type: ignore
             kwargs = {}
             if client_id:

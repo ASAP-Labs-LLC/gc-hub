@@ -30,15 +30,14 @@ except Exception:
 
 # Endpoints app.js hits on a timer, never from a click: loadNotifications()
 # polls every 30s for the life of a tab, and _waitForServerAndReload /
-# startScanStatusPolling / _pollReprocessStatus poll every 1-2s while a
-# restart/scan/reprocess is in flight. api_qbench_upload_status is the
+# _pollReprocessStatus poll every 1-2s while a restart/reprocess is in
+# flight (the scan-status poll went with the scan routes in phase 2 T4). api_qbench_upload_status is the
 # one-shot "reconnect to an in-progress upload" check init() makes on every
 # page load, alongside other init calls — but it (like the rest) is the app
 # checking on itself, not a person doing something, so it is excluded too.
 POLLING_ENDPOINTS = (
     "/api/notifications",
     "/api/server-status",
-    "/api/scan/status",
     "/api/reprocess/status",
     "/api/qbench-upload-status",
 )

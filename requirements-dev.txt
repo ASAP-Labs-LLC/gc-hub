@@ -3,3 +3,8 @@
 #     python -m pytest tests/        (needs pytest, below)
 #     python -m unittest discover -s tests   (stdlib only)
 pytest
+# The GC-PC agent's tray (tests/agent: install.pyw checks it is importable).
+# The hub itself no longer uses these; they left requirements.txt with run.pyw
+# in v2. Same versions the hub pinned until then.
+pystray==0.19.5
+Pillow==12.3.0

@@ -66,6 +66,20 @@ def send(port, path, data=b"", headers=None, method="POST", timeout=10.0):
         return code, None
 
 
+TEST_ADMIN_PASSWORD = "test-admin-pw"
+
+
+def setup_admin(port, data_dir, password=TEST_ADMIN_PASSWORD) -> str:
+    """Set the booted app's admin password through the first-use setup API
+    (2B1, D13: there is no default password), with the one-time code the app
+    wrote to ``<data_dir>/admin-setup-code.txt``. Returns the password."""
+    setup_code = (Path(data_dir) / "admin-setup-code.txt").read_text(encoding="utf-8").strip()
+    code, body = post(port, "/api/admin/setup", {"password": password, "setup_code": setup_code})
+    if code != 201:
+        raise RuntimeError(f"admin setup failed: {code} {body}")
+    return password
+
+
 def wait_for(predicate, timeout=20.0, interval=0.25) -> bool:
     """Poll ``predicate`` until it is truthy or ``timeout`` elapses."""
     deadline = time.time() + timeout
@@ -151,8 +165,8 @@ def booted(tmp: Path, *, args=("--no-tray",), cmd=None, extra_env=None, wait=60.
     """Launch app.py and yield ``(port, proc, data_dir, home_dir)`` once
     ``/healthz`` answers 200. The process is stopped on exit.
 
-    ``cmd`` overrides the whole command line (e.g. a runpy bootstrap like
-    ``run.pyw`` uses); by default it is ``python app.py *args``. A lost race
+    ``cmd`` overrides the whole command line; by default it is
+    ``python app.py *args``. A lost race
     for the probed port is retried once on a fresh port.
     """
     try:

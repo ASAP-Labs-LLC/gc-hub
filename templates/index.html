@@ -4,12 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GC Viewer &amp; Distillation Parser</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
 
   <!-- Plotly.js CDN -->
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 
   <!-- App stylesheet (cache-bust) -->
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=36">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=38">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=1">
 
   <!-- Inline critical layout styles (structural only; visual polish lives in style.css) -->
@@ -119,7 +120,6 @@
     .form-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
     .form-row label { min-width: 140px; font-size: 12px; color: #c9d1d9; flex-shrink: 0; }
     .form-row input, .form-row select { flex: 1; }
-    .form-row .browse-btn { padding: 5px 10px; }
 
     /* ── Log area ──────────────────────────────────────────────────── */
     .log-output { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 8px; font-family: "Cascadia Code", "Fira Code", "Consolas", monospace; font-size: 11px; color: #7d8590; white-space: pre-wrap; word-break: break-all; overflow-y: auto; max-height: 400px; min-height: 200px; }
@@ -250,13 +250,13 @@
       Settings
     </button>
     <button class="tb-btn" id="btn-calibration" title="Assign carbon numbers to calibration peaks" onclick="window.location.href='/calibration'">Calibration</button>
+    <button class="tb-btn" id="btn-instruments" title="Instruments: calibration, corrections, agents, backfill, conflicts" onclick="window.location.href='/instruments'">Instruments</button>
+    <button class="tb-btn" id="btn-hub-admin" title="Admin: load CDFs from a folder, export files" onclick="window.location.href='/admin/hub'">Hub admin</button>
     <button class="tb-btn" id="btn-export" title="Export current chromatogram to PDF">Export</button>
     <button class="tb-btn" id="btn-comparison-export" title="Export comparison charts">Comparison Export</button>
 
     <span class="tb-sep"></span>
 
-    <button class="tb-btn" id="btn-open-processed" title="Open Processed CDF folder">Open Processed Folder</button>
-    <button class="tb-btn" id="btn-open-watch" title="Open Watch folder">Open Watch Folder</button>
 
     <span class="tb-sep"></span>
 
@@ -264,14 +264,11 @@
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3a5 5 0 1 0 4.546 2.914.75.75 0 1 1 1.36-.636A6.5 6.5 0 1 1 8 1.5v2A.75.75 0 0 1 6.75 4L9.25.75A.75.75 0 0 1 10.5 1.5l-2.5 3z"/></svg>
       Refresh
     </button>
-    <button class="tb-btn" id="btn-scan" title="Scan watch folder and parse new CDFs">Scan &amp; Parse</button>
     <button class="tb-btn" id="btn-reprocess" title="Re-process specific Lab IDs">Re-process</button>
-    <button class="tb-btn" id="btn-rebuild-db" title="Rebuild distillation database from scratch">Rebuild DB</button>
 
     <span class="tb-sep"></span>
 
     <button class="tb-btn" id="btn-help" title="Help">Help</button>
-    <button class="tb-btn danger" id="btn-stop" title="Emergency stop current scan">Stop Scan</button>
     <button class="tb-btn" id="btn-restart-server" title="Restart the server process (auto-restarts daily at 3 AM if idle)">Restart Server</button>
 
     <span class="tb-sep"></span>
@@ -299,7 +296,11 @@
       </div>
     </div>
 
+    <select id="instrument-filter" title="Show one instrument's samples (remembered in this browser)" style="flex-shrink:0; margin:0 6px 0 0; font-size:11px; padding:2px 4px; background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:6px;">
+      <option value="">All instruments</option>
+    </select>
     <input type="text" class="search-input" id="universal-search" placeholder="Search samples..." style="width:220px; min-width:150px; flex-shrink:0; margin:0; margin-bottom:0; font-size:11px; padding:3px 8px;">
+    <span id="search-count" style="font-size:10px; color:#7d8590; margin-left:6px; white-space:nowrap;"></span>
 
     <!-- Persistent upload progress indicator (hidden until an upload starts) -->
     <div id="upload-indicator" style="display:none; margin-left:auto; align-items:center; gap:6px; padding:2px 10px; background:#161b22; border:1px solid #30363d; border-radius:12px; font-size:11px; cursor:pointer; white-space:nowrap;" title="Click to open upload modal">
@@ -370,6 +371,7 @@
         <div class="panel accent-blue">
           <div class="panel-header">
             <span class="dash-quadrant-header">Chromatogram</span>
+            <span class="dash-sample-meta" id="dash-sample-meta"></span>
           </div>
           <div class="panel-body" style="padding:0;">
             <div id="dash-chrom-plot" class="plot-container"></div>
@@ -764,12 +766,6 @@
   <!-- Persistent status bar -->
   <div id="status-bar">
     <div id="status-scan-info" style="flex:1;">Ready</div>
-    <div id="status-scan-bar-wrap" style="flex:1; max-width:300px; display:none;">
-      <div style="height:6px; background:#21262d; border-radius:3px; overflow:hidden;">
-        <div id="status-scan-bar-fill" style="width:0%; height:100%; background:linear-gradient(90deg,#1f6feb,#58a6ff); border-radius:3px; transition:width .3s;"></div>
-      </div>
-    </div>
-    <div id="status-scan-counts" style="font-size:10px; color:#7d8590;"></div>
   </div>
 
 </div><!-- /app-shell -->
@@ -789,38 +785,31 @@
     <div class="modal-body">
       <div class="form-row">
         <label for="set-watch-dir">Watch directory</label>
-        <input type="text" id="set-watch-dir">
-        <button class="btn btn-secondary browse-btn" data-browse="set-watch-dir" data-type="dir">Browse</button>
+        <input type="text" id="set-watch-dir" readonly title="Set on the server (settings.json); see DEPLOY.md">
       </div>
       <div class="form-row">
         <label for="set-processed-dir">Processed CDF directory</label>
-        <input type="text" id="set-processed-dir">
-        <button class="btn btn-secondary browse-btn" data-browse="set-processed-dir" data-type="dir">Browse</button>
+        <input type="text" id="set-processed-dir" readonly title="Set on the server (settings.json); see DEPLOY.md">
       </div>
       <div class="form-row">
         <label for="set-distill-output">Distill CSV path</label>
-        <input type="text" id="set-distill-output">
-        <button class="btn btn-secondary browse-btn" data-browse="set-distill-output" data-type="file">Browse</button>
+        <input type="text" id="set-distill-output" readonly title="Set on the server (settings.json); see DEPLOY.md">
       </div>
       <div class="form-row">
         <label for="set-calibration-cdf">Calibration CDF</label>
-        <input type="text" id="set-calibration-cdf">
-        <button class="btn btn-secondary browse-btn" data-browse="set-calibration-cdf" data-type="file">Browse</button>
+        <input type="text" id="set-calibration-cdf" readonly title="Per instrument: set it on the Calibration page (admin)">
       </div>
       <div class="form-row">
         <label for="set-export-folder">Export folder</label>
-        <input type="text" id="set-export-folder">
-        <button class="btn btn-secondary browse-btn" data-browse="set-export-folder" data-type="dir">Browse</button>
+        <input type="text" id="set-export-folder" readonly title="Set on the server (settings.json); see DEPLOY.md">
       </div>
       <div class="form-row">
         <label for="set-correction-factors">Correction factors JSON</label>
-        <input type="text" id="set-correction-factors">
-        <button class="btn btn-secondary browse-btn" data-browse="set-correction-factors" data-type="file">Browse</button>
+        <input type="text" id="set-correction-factors" readonly title="Seeds GC-1 once at first start; the hub's corrections are edited per instrument (admin)">
       </div>
       <div class="form-row">
         <label for="set-comparison-dir">Comparison standards dir</label>
-        <input type="text" id="set-comparison-dir">
-        <button class="btn btn-secondary browse-btn" data-browse="set-comparison-dir" data-type="dir">Browse</button>
+        <input type="text" id="set-comparison-dir" readonly title="Set on the server (settings.json); see DEPLOY.md">
       </div>
       <div class="form-row">
         <label for="set-series-colors">Series colors (CSS)</label>
@@ -828,8 +817,7 @@
       </div>
       <div class="form-row">
         <label for="set-report-logo">Report logo path</label>
-        <input type="text" id="set-report-logo">
-        <button class="btn btn-secondary browse-btn" data-browse="set-report-logo" data-type="file">Browse</button>
+        <input type="text" id="set-report-logo" readonly title="Set on the server (settings.json); see DEPLOY.md">
       </div>
 
       <!-- Sample Flag Rules (generalizes Early High-Signal Detection) -->
@@ -864,20 +852,10 @@
         <p style="font-size:11px; color:#7d8590; margin-top:4px;">Each parsed sample is compared to every comparison standard (amplitude-normalized, small retention shifts allowed). A score at or above the threshold names the fuel; otherwise a two-component blend is tried (&ldquo;Mix: A + B (80/20)&rdquo;), else the sample is labeled &ldquo;Mix&rdquo;. Results are written to the CSV and shown in sample lists.</p>
       </div>
 
-      <!-- Library maintenance -->
-      <div style="margin-top:12px; border-top:1px solid #21262d; padding-top:10px;">
-        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
-          <span style="font-size:12px; font-weight:600; color:#c9d1d9;">Sample library</span>
-          <button class="btn btn-secondary" id="btn-reindex-times" style="font-size:11px; padding:2px 8px;">Re-derive injection times &amp; reorder</button>
-        </div>
-        <p style="font-size:11px; color:#7d8590; margin:0;">Re-reads each sample's run time from its CDF and re-sorts the library into true chronological (run) order. Runs in the background; results appear in notifications. Does not change distillation results.</p>
-      </div>
-
       <!-- Comparison standards list inside settings -->
       <div style="margin-top:12px; border-top:1px solid #21262d; padding-top:10px;">
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
           <span style="font-size:12px; font-weight:600; color:#c9d1d9;">Comparison Standards</span>
-          <button class="btn btn-secondary" id="btn-settings-add-standard" style="font-size:11px; padding:2px 8px;">+ Add</button>
         </div>
         <ul class="file-list" id="settings-standards-list" style="max-height:140px; overflow-y:auto; background:#0d1117; border:1px solid #21262d; border-radius:6px; padding:4px;">
           <!-- populated by app.js -->
@@ -913,24 +891,6 @@
   </div>
 </div>
 
-<!-- ── 2. Log Modal ─────────────────────────────────────────────────── -->
-<div class="modal-overlay" id="modal-log">
-  <div class="modal wide">
-    <div class="modal-header">
-      <h2>Scan &amp; Parse Log</h2>
-      <button class="modal-close" data-dismiss="modal">&times;</button>
-    </div>
-    <div class="modal-body">
-      <div class="log-output" id="log-output"></div>
-    </div>
-    <div class="modal-footer">
-      <span class="status-label" id="log-status">Waiting...</span>
-      <button class="btn btn-danger" id="btn-log-stop">Stop</button>
-      <button class="btn btn-secondary" data-dismiss="modal">Close</button>
-    </div>
-  </div>
-</div>
-
 <!-- ── 3. Reprocess Modal ───────────────────────────────────────────── -->
 <div class="modal-overlay" id="modal-reprocess">
   <div class="modal">
@@ -944,6 +904,13 @@
         (e.g. <code>34562 to 34569</code>, <code>34562-34569</code>, <code>34562:34569</code>).
         Matching samples are shown below before you re-process.
       </p>
+      <label for="reprocess-instrument" style="display:flex; align-items:center; gap:6px; font-size:12px; margin-bottom:6px;">
+        Instrument
+        <select id="reprocess-instrument" style="font-size:12px; padding:2px 4px; background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:6px;">
+          <option value="">Choose…</option>
+        </select>
+        <span style="color:#7d8590;">(lab IDs are resolved on this instrument)</span>
+      </label>
       <textarea id="reprocess-ids" rows="4" style="width:100%;" placeholder="e.g. 34562&#10;34570, 34571&#10;34580 to 34590"></textarea>
 
       <div id="reprocess-preview" style="margin-top:10px; font-size:12px;">
@@ -1074,7 +1041,7 @@
       <p style="margin-top:8px;"><strong>Distillation Data</strong> (Advanced) &mdash; Browse the full distillation results table. Click column headers to sort. Use the search bar to filter rows.</p>
       <p style="margin-top:8px;"><strong>Distillation Curve</strong> (Advanced) &mdash; Click samples to overlay their distillation curves for visual comparison.</p>
       <p style="margin-top:8px;"><strong>Analysis</strong> &mdash; Select a sample and comparison standards, adjust trend parameters and thresholds, then click <em>Run Analysis</em>. The trend and difference plots show deviations from expected baselines. The deviation report summarizes findings. Use the queue to batch multiple analyses for QBench export.</p>
-      <p style="margin-top:12px;"><strong>Scan &amp; Parse</strong> &mdash; Scans the watch folder for new CDF files, copies them to the processed folder, parses chromatographic data, and calculates D2887/D86 distillation temperatures.</p>
+      <p style="margin-top:12px;"><strong>Sample status</strong> &mdash; New CDFs are processed automatically. A sample that is not finished shows a badge (e.g. <em>Awaiting calibration</em>, <em>Pending corrections</em>, <em>Other method</em>); hover it for the reason. &#9201; marks an injection time corrected from the old parser's misreading. Only final samples can be exported to LIMS or uploaded to QBench.</p>
       <p style="margin-top:8px;"><strong>Corrected D86</strong> &mdash; When checked, applies EQM correction factors from the configured JSON file to D86 distillation values.</p>
       <p style="margin-top:8px;"><strong>Keyboard shortcuts:</strong></p>
       <ul style="margin-left:18px; margin-top:4px;">
@@ -1106,11 +1073,12 @@
      APP SCRIPT
      ================================================================== -->
 <script src="{{ url_for('static', filename='js/selection.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/report_payload.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/report_payload.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/samples.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=44"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=47"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

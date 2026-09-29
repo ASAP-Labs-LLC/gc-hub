@@ -2,10 +2,11 @@
 restart→switch handshake (``restart_update``, copied verbatim from
 coa-reviewer).
 
-Under the updater (GC_DATA_DIR set) the updater supervises the port and
-relaunches within ~20 s, so the app must only EXIT — spawning its own
-replacement would race the updater for the port. Legacy (share) mode keeps
-the historic spawn-then-exit, but never while a switch is under way.
+The hub always runs under the updater (v2: GC_DATA_DIR is required), which
+supervises the port and relaunches within ~20 s, so the app must only EXIT —
+spawning its own replacement would race the updater for the port. The one
+exception is a *paused* updater, which supervises nothing: then the app
+spawns its replacement, but never while a switch is under way.
 
 The watcher (``await_switch``) is ported from coa-reviewer's app.py
 (``_await_switch`` and friends). Whatever the updater does, the person who
@@ -23,7 +24,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Callable, Mapping, Optional, Tuple
@@ -58,9 +58,9 @@ MANUAL_RESTART_MIN_UPTIME_SECONDS = 300
 
 
 def restart_mode(env: Optional[Mapping[str, str]] = None) -> str:
-    """``"exit"`` under the updater, ``"respawn"`` in legacy mode."""
-    env = os.environ if env is None else env
-    return "exit" if (env.get("GC_DATA_DIR") or "").strip() else "respawn"
+    """Always ``"exit"``: the hub runs under the updater (v2 has no
+    self-respawning legacy mode). ``env`` is accepted for compatibility."""
+    return "exit"
 
 
 def switch_request_fresh(data_dir: Path, now: Optional[float] = None) -> bool:
@@ -100,18 +100,15 @@ def may_respawn(data_dir: Path) -> bool:
 
 
 def should_respawn(data_dir: Path, env: Optional[Mapping[str, str]] = None) -> bool:
-    """Whether a restart should spawn its own replacement before exiting.
-
-    Legacy: yes, unless a switch is under way (``may_respawn``). Under the
-    updater: no — it relaunches us — except while it is ``paused`` (and not
-    mid-switch), when it supervises nothing and exiting would leave the app
-    down (coa-reviewer's _exit_for_updater)."""
+    """Whether a restart should spawn its own replacement before exiting:
+    no — the updater relaunches us — except while it is ``paused`` (and not
+    mid-switch, ``may_respawn``), when it supervises nothing and exiting
+    would leave the app down (coa-reviewer's _exit_for_updater)."""
     d = Path(data_dir)
-    if restart_mode(env) == "exit":
-        if not (d / "paused").exists() or (d / "switching").exists():
-            return False
-        logger.warning("The updater is paused and will not restart the app — "
-                       "restarting it ourselves")
+    if not (d / "paused").exists() or (d / "switching").exists():
+        return False
+    logger.warning("The updater is paused and will not restart the app — "
+                   "restarting it ourselves")
     return may_respawn(d)
 
 
@@ -120,23 +117,16 @@ CREATE_NEW_PROCESS_GROUP = 0x00000200
 CREATE_NO_WINDOW = 0x08000000
 
 
-def respawn_command(executable: str, argv, *, deployed: bool, app_dir: Path, cwd: str,
+def respawn_command(executable: str, argv, *, cwd: str,
                     windows: bool) -> Tuple[list, str, int]:
-    """``(args, cwd, creationflags)`` for a self-spawned replacement.
-
-    Deployed (only ever while the updater is paused): run ``app.py``
-    relative to the current directory — the updater's ``current`` junction —
-    so the replacement runs whatever the junction points at, with no console
-    window, as coa-reviewer does. Legacy: the app's own folder, absolute.
-    ``argv[0]`` is dropped (run.pyw's runpy bootstrap leaves it as ``-c``)."""
-    flags_tail = list(argv[1:])
-    if deployed:
-        args, where = [executable, "app.py", *flags_tail], cwd
-        flags = (CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP) if windows else 0
-    else:
-        args, where = [executable, str(Path(app_dir) / "app.py"), *flags_tail], str(app_dir)
-        flags = CREATE_NEW_PROCESS_GROUP if windows else 0
-    return args, where, flags
+    """``(args, cwd, creationflags)`` for a self-spawned replacement (only
+    ever while the updater is paused): run ``app.py`` relative to the current
+    directory — the updater's ``current`` junction — so the replacement runs
+    whatever the junction points at, with no console window, as coa-reviewer
+    does. ``argv[0]`` is dropped (the replacement always runs ``app.py``)."""
+    args = [executable, "app.py", *list(argv[1:])]
+    flags = (CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP) if windows else 0
+    return args, cwd, flags
 
 
 def should_auto_restart(*, hour: int, today: str, done_today: Optional[str],
@@ -158,7 +148,7 @@ def manual_restart_wait(mode: str, uptime_seconds: float) -> Optional[int]:
 
 def decide(data_dir: Optional[Path], current_version: str) -> Tuple[str, Optional[str]]:
     """``("switch", tag)`` when a newer healthy release is staged, else
-    ``("restart", None)``. Legacy mode (no data dir) never switches."""
+    ``("restart", None)``. No data dir (never in v2) never switches."""
     if data_dir is None:
         return "restart", None
     tag = restart_update.staged_update(data_dir, current_version)

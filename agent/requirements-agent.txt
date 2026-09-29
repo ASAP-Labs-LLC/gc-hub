@@ -1,0 +1,5 @@
+# Informational only: the agent never runs pip. install.pyw checks these are
+# already importable (run.pyw needs them too, so the GC PCs have them).
+# Python 3.9 or newer.
+pystray
+Pillow

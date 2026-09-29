@@ -400,17 +400,11 @@ class CalibrationCacheInvalidationTests(unittest.TestCase):
         try:
             with distill._CAL_LOCK:
                 distill._CAL_CACHE.clear()
-            with mock.patch.object(
-                distill, "_get_settings", return_value=conf_with([5, 6, 7, 8])
-            ):
-                f1 = distill._calibration_function(Path(p))
-                v1 = float(f1(np.array([1.0]))[0])      # rt 1.0 -> C5 -> 36 °C
+            f1 = distill._calibration_function(Path(p), conf_with([5, 6, 7, 8]))
+            v1 = float(f1(np.array([1.0]))[0])      # rt 1.0 -> C5 -> 36 °C
             # Change assignments WITHOUT clearing the cache manually.
-            with mock.patch.object(
-                distill, "_get_settings", return_value=conf_with([20, 24, 28, 32])
-            ):
-                f2 = distill._calibration_function(Path(p))
-                v2 = float(f2(np.array([1.0]))[0])      # rt 1.0 -> C20 -> 344 °C
+            f2 = distill._calibration_function(Path(p), conf_with([20, 24, 28, 32]))
+            v2 = float(f2(np.array([1.0]))[0])      # rt 1.0 -> C20 -> 344 °C
         finally:
             os.unlink(p)
 
@@ -483,13 +477,10 @@ class BuildCalibrationBranchTests(unittest.TestCase):
             {"rt": 9.0, "ignore": True},
         ]})
         with mock.patch.object(
-            distill, "_get_settings",
-            return_value={"calibration_assignments": raw},
-        ), mock.patch.object(
             distill, "_read_cdf",
             side_effect=AssertionError("must not read CDF when assignments exist"),
         ):
-            cal = distill._build_calibration(Path(path))
+            cal = distill._build_calibration(Path(path), {"calibration_assignments": raw})
         np.testing.assert_allclose(
             cal(np.array([1.0, 2.0, 3.0, 4.0])),
             [36.0, 69.0, 98.0, 126.0], atol=1e-6,
@@ -499,16 +490,11 @@ class BuildCalibrationBranchTests(unittest.TestCase):
         # End-to-end regression for the reported dashboard outage: 2 saved
         # carbons must yield a usable calibration, not raise.
         import json
-        from unittest import mock
         path = "/data/cal.CDF"
         raw = json.dumps({str(Path(path).resolve()): [
             {"rt": 1.0, "carbon": 5}, {"rt": 3.0, "carbon": 7},
         ]})
-        with mock.patch.object(
-            distill, "_get_settings",
-            return_value={"calibration_assignments": raw},
-        ):
-            cal = distill._build_calibration(Path(path))
+        cal = distill._build_calibration(Path(path), {"calibration_assignments": raw})
         np.testing.assert_allclose(cal(np.array([1.0, 3.0])), [36.0, 98.0], atol=1e-6)
 
     def test_falls_back_to_autodetect_when_anchor_build_fails(self) -> None:
@@ -533,9 +519,6 @@ class BuildCalibrationBranchTests(unittest.TestCase):
             return real_builder(rt, bp)   # the auto-detect fallback — let it work
 
         with mock.patch.object(
-            distill, "_get_settings",
-            return_value={"calibration_assignments": raw},
-        ), mock.patch.object(
             distill, "build_calibration_from_anchors", side_effect=builder,
         ), mock.patch.object(
             distill, "_read_cdf", return_value=(t, np.zeros(100)),
@@ -543,7 +526,7 @@ class BuildCalibrationBranchTests(unittest.TestCase):
             distill, "_detect_nalkane_peaks", return_value=detected,
         ):
             # Must not raise — falls back to auto-detected sequential calibration.
-            cal = distill._build_calibration(Path(path))
+            cal = distill._build_calibration(Path(path), {"calibration_assignments": raw})
         self.assertTrue(callable(cal))
 
     def test_falls_back_to_sequential_when_no_assignments(self) -> None:
@@ -554,14 +537,11 @@ class BuildCalibrationBranchTests(unittest.TestCase):
         # 5 peaks -> C5..C9 sequentially (cubic spline needs >= 4 anchors)
         detected = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         with mock.patch.object(
-            distill, "_get_settings",
-            return_value={"calibration_assignments": ""},
-        ), mock.patch.object(
             distill, "_read_cdf", return_value=(t, y),
         ), mock.patch.object(
             distill, "_detect_nalkane_peaks", return_value=detected,
         ):
-            cal = distill._build_calibration(Path("/data/cal.CDF"))
+            cal = distill._build_calibration(Path("/data/cal.CDF"), {"calibration_assignments": ""})
         # Sequential zip: detected peaks map to the first N reference BPs.
         np.testing.assert_allclose(
             cal(detected), distill.N_ALKANE_BP[:5], atol=1e-6

@@ -1610,6 +1610,81 @@ tbody tr.selected td.col-d2887 {
   flex-shrink: 0;
 }
 
+/* Sample status badge (non-final samples; tooltip = hold reason) */
+.status-badge {
+  font-size: 9px;
+  line-height: 1.4;
+  color: #e3b341;
+  background: rgba(210, 153, 34, 0.15);
+  border: 1px solid rgba(210, 153, 34, 0.45);
+  border-radius: 8px;
+  padding: 0 6px;
+  margin-left: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.status-badge.status-error {
+  color: #ff7b72;
+  background: rgba(248, 81, 73, 0.15);
+  border-color: rgba(248, 81, 73, 0.45);
+}
+.status-badge.status-other_method,
+.status-badge.status-raw_only,
+.status-badge.status-backfill {
+  color: #8b949e;
+  background: rgba(139, 148, 158, 0.12);
+  border-color: rgba(139, 148, 158, 0.4);
+}
+
+.status-badge.status-review {
+  color: #d2a8ff;
+  background: rgba(163, 113, 247, 0.15);
+  border-color: rgba(163, 113, 247, 0.45);
+  cursor: help;
+}
+
+/* The sample's instrument (two instruments can hold the same lab ID) */
+.instrument-badge {
+  font-size: 9px;
+  line-height: 1.4;
+  color: #7ee2b8;
+  background: rgba(46, 160, 67, 0.12);
+  border: 1px solid rgba(46, 160, 67, 0.4);
+  border-radius: 8px;
+  padding: 0 6px;
+  margin-left: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* The dashboard's selected-sample line (instrument + review note) */
+.dash-sample-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  font-weight: normal;
+  min-width: 0;
+  overflow: hidden;
+}
+.dash-sample-meta .review-note {
+  font-size: 10px;
+  color: #d2a8ff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: help;
+}
+
+/* Injection time corrected from v1's misparsed stamp */
+.time-corrected-mark {
+  font-size: 10px;
+  color: #8b949e;
+  margin-left: 4px;
+  flex-shrink: 0;
+  cursor: help;
+}
+
 /* File item name within li */
 .file-list li .file-item-name {
   flex: 1;

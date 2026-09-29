@@ -46,22 +46,31 @@ const CONVERSION_REL = {
    1. APPLICATION STATE
    =================================================================== */
 
+// How many samples the lists load (newest first); search filters within them.
+const FILES_PAGE_LIMIT = 5000;
+
 const state = {
     settings: {},
-    files: [],
+    files: [],              // /api/files samples: {sample_id, uid, lab_id, name, status, ...}
+    filesTotal: 0,
+    instruments: [],        // instrument ids (/api/files, then /api/instruments)
+    instrumentNames: {},    // {id: name} from /api/instruments, for badges and labels
+    searchResult: null,     // {q, samples, total}: a server search beyond the loaded page
+    listInstrument: null,   // the toolbar's instrument select (null = all); sent with the
+                            // page load and every server search; remembered per browser
+    listStatus: null,       // status filter sent with a server search (no UI control yet)
     selectedFile: null,
     selectedUids: new Set(),   // multi-selection (shift / ctrl-cmd)
     selectionAnchor: null,     // last plainly-clicked uid (range anchor)
-    traces: [],             // [{path, name, visible, color, x, y}]
-    dcTraces: [],           // [{path, name, visible, color, percent, temperature}]
+    traces: [],             // [{sample_id, name, visible, color, x, y}]
+    dcTraces: [],           // [{sample_id, name, visible, color, percent, temperature}]
     tableData: { columns: [], rows: [] },
     calibration: { peak_times: [], carbon_numbers: [], boiling_points: [] },
     comparisonStandards: [],
     analysisResult: null,
-    analysisQueue: [],      // [{lab_id, sample_name, pdf_path, added_at}]
+    analysisQueue: [],      // [{sample_id, lab_id, sample_name, standard_name, added_at, ...}]
     advancedViewsVisible: false,
     correctedD86: false,
-    scanning: false,
     analysisParams: {
         quantile: 0.20, window: 301, sigma: 34.0,
         thresh_marginal: 100, thresh_moderate: 500, thresh_significant: 2000,
@@ -121,11 +130,7 @@ function formatDateTime(iso) {
     }
 }
 
-function escapeHtml(str) {
-    const el = document.createElement('span');
-    el.textContent = str;
-    return el.innerHTML;
-}
+// escapeHtml comes from samples.js (escapes quotes too, for attribute contexts).
 
 function seriesColor(index) {
     const hue = (index * 137.508) % 360;
@@ -281,8 +286,30 @@ async function api(method, url, body, extra) {
 }
 
 async function apiGet(url) { return api('GET', url); }
+
+/** POST that may answer with ``{refused: [{sample_id, error}]}`` (409): the
+    thrown Error then names the refused samples. */
+async function apiPostRefusable(url, what, body) {
+    const resp = await fetch(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const j = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+        throw new Error((j.refused && j.refused.length)
+            ? refusalSummary(what, j.refused, state.files)
+            : (j.error || `API error ${resp.status}`));
+    }
+    return j;
+}
 async function apiPost(url, body) { return api('POST', url, body); }
 async function apiDelete(url) { return api('DELETE', url); }
+
+/** Ask for the admin password for one action (null if cancelled). */
+function adminPassword(what) {
+    const pw = window.prompt(`Admin password to ${what}:`);
+    return pw ? pw : null;
+}
 
 /** Download a blob response (for PDF/file exports). */
 async function downloadBlob(resp, fallbackName) {
@@ -351,27 +378,94 @@ async function loadSettings() {
 
 async function loadFiles() {
     try {
-        state.files = await apiGet('/api/files');
-        console.log('[GC Viewer] Loaded', state.files.length, 'files');
+        // The sample list is a store query (newest first); the lists filter
+        // the loaded page client-side as before.
+        const url = filesUrl({ instrument: state.listInstrument }, FILES_PAGE_LIMIT);
+        const res = await apiGet(url);
+        state.files = res.samples || [];
+        state.filesTotal = res.total || state.files.length;
+        if (res.instruments && res.instruments.length) state.instruments = res.instruments;
+        console.log('[GC Viewer] Loaded', state.files.length, 'of', state.filesTotal, 'samples');
         renderAllFileLists();
-        // If the cache returned empty but we expect files, retry after a short delay
-        // (the background cache builder may not have finished yet)
-        if (state.files.length === 0) {
+        // Flags/best-fit still being computed in the background: refetch once.
+        if (res.cache_pending > 0 && !state._filesRefetchPending) {
+            state._filesRefetchPending = true;
             setTimeout(async () => {
+                state._filesRefetchPending = false;
                 try {
-                    const retry = await apiGet('/api/files');
-                    if (retry.length > 0) {
-                        state.files = retry;
-                        renderAllFileLists();
-                        showNotification(`Loaded ${retry.length} samples`, 'success');
-                    }
+                    const retry = await apiGet(filesUrl({ instrument: state.listInstrument },
+                                                        FILES_PAGE_LIMIT));
+                    state.files = retry.samples || [];
+                    state.filesTotal = retry.total || state.files.length;
+                    renderAllFileLists();
                 } catch (_) { /* silent retry */ }
             }, 5000);
         }
     } catch (e) {
         console.error('Failed to load files:', e);
-        showNotification('Failed to load file list: ' + e.message, 'error');
+        showNotification('Failed to load sample list: ' + e.message, 'error');
     }
+}
+
+// The toolbar's instrument filter, remembered per browser. localStorage can
+// throw (private windows, blocked storage): the filter then just isn't kept.
+const INSTRUMENT_FILTER_KEY = 'gc-hub.listInstrument';
+
+function readSavedInstrumentFilter() {
+    try { return window.localStorage.getItem(INSTRUMENT_FILTER_KEY); } catch (_) { return null; }
+}
+
+function saveInstrumentFilter(value) {
+    try {
+        if (value) window.localStorage.setItem(INSTRUMENT_FILTER_KEY, value);
+        else window.localStorage.removeItem(INSTRUMENT_FILTER_KEY);
+    } catch (_) { /* not remembered */ }
+}
+
+/** Instrument names for the badges, and the filter select's options. */
+async function loadInstruments() {
+    let list = [];
+    try {
+        const res = await apiGet('/api/instruments');
+        list = (res.instruments || []).map(i => ({ id: i.id, name: i.name }));
+    } catch (e) {
+        console.error('Failed to load instruments:', e);
+        list = (state.instruments || []).map(id => ({ id, name: id }));
+    }
+    if (list.length) state.instruments = list.map(i => i.id);
+    state.instrumentNames = Object.fromEntries(list.map(i => [i.id, i.name || i.id]));
+    const restored = restoreInstrumentFilter(state.listInstrument, state.instruments);
+    if (restored !== state.listInstrument) {
+        state.listInstrument = restored;
+        saveInstrumentFilter(restored);
+        state.searchResult = null;
+        await loadFiles();
+    }
+    renderInstrumentFilter(list);
+    renderAllFileLists();
+}
+
+function renderInstrumentFilter(list) {
+    const sel = document.getElementById('instrument-filter');
+    if (!sel) return;
+    sel.innerHTML = '';
+    for (const opt of instrumentFilterOptions(list)) {
+        const o = document.createElement('option');
+        o.value = opt.value;
+        o.textContent = opt.text;
+        sel.appendChild(o);
+    }
+    sel.value = state.listInstrument || '';
+}
+
+async function onInstrumentFilterChange() {
+    const sel = document.getElementById('instrument-filter');
+    state.listInstrument = (sel && sel.value) || null;
+    saveInstrumentFilter(state.listInstrument);
+    state.searchResult = null;
+    await loadFiles();
+    const q = (document.getElementById('universal-search')?.value || '').trim();
+    if (needsServerSearch(q, state.filesTotal, state.files.length)) _serverSearch(q);
 }
 
 async function loadCalibration() {
@@ -402,10 +496,7 @@ async function loadComparisonStandards() {
 }
 
 async function refreshAll() {
-    // Trigger a background file cache rebuild on the server
-    try { apiPost('/api/files/refresh'); } catch (_) { /* fire-and-forget */ }
-    // Short delay to let the rebuild start, then fetch
-    await new Promise(r => setTimeout(r, 500));
+    // The sample list is a live store query: just fetch everything again.
     await Promise.all([
         loadFiles(),
         loadTableData(),
@@ -472,8 +563,10 @@ function renderFileList(containerId, files, mode) {
     const searchEl = document.getElementById('universal-search');
     const filter = searchEl ? searchEl.value.toLowerCase() : '';
 
-    let filtered = files.filter(f =>
-        f.name.toLowerCase().includes(filter) ||
+    // The instrument filter (the server already applied it; this also covers
+    // a list fetched before the filter changed).
+    let filtered = filterByInstrument(files, state.listInstrument).filter(f =>
+        (f.name || '').toLowerCase().includes(filter) ||
         (f.display_name || '').toLowerCase().includes(filter));
 
     // Apply early-signal filter if active
@@ -484,11 +577,11 @@ function renderFileList(containerId, files, mode) {
     container.innerHTML = '';
     for (const file of filtered) {
         const item = document.createElement('li');
-        item.dataset.path = file.path;
+        item.dataset.sampleId = file.sample_id;
         item.dataset.name = file.name;
-        // uid distinguishes re-runs that share a name (and possibly a path),
-        // so each injection selects independently.
-        item.dataset.uid = file.uid || file.path;
+        // uid (= the sample id) distinguishes re-runs that share a name, so
+        // each injection selects independently.
+        item.dataset.uid = sampleUid(file);
 
         // One colored tag per matched flag rule (early_signal kept as the
         // legacy any-flag bool for styling)
@@ -510,6 +603,36 @@ function renderFileList(containerId, files, mode) {
         nameSpan.textContent = file.display_name || file.name;
         item.appendChild(nameSpan);
 
+        // The sample's instrument: the same lab ID can come from two GCs
+        const ib = instrumentBadge(file, state.instrumentNames);
+        if (ib) {
+            const span = document.createElement('span');
+            span.className = ib.cls;
+            span.textContent = ib.text;
+            span.title = ib.title;
+            item.appendChild(span);
+        }
+
+        // Injection time corrected from v1's misparsed stamp
+        const tcTitle = timeCorrectedTitle(file);
+        if (tcTitle) {
+            const tc = document.createElement('span');
+            tc.className = 'time-corrected-mark';
+            tc.textContent = '⏱';
+            tc.title = tcTitle;
+            item.appendChild(tc);
+        }
+
+        // Not-final samples: a status badge whose tooltip is the hold reason
+        const badge = statusBadge(file);
+        if (badge) {
+            const sb = document.createElement('span');
+            sb.className = badge.cls;
+            sb.textContent = badge.text;
+            sb.title = badge.title;
+            item.appendChild(sb);
+        }
+
         // Fuel-type best-fit badge
         if (file.best_fit && file.best_fit.label) {
             const bf = document.createElement('span');
@@ -521,8 +644,8 @@ function renderFileList(containerId, files, mode) {
 
         // Highlight if currently selected (universal selection). Compare by
         // uid so one re-run highlights without lighting up its siblings.
-        const fileUid = file.uid || file.path;
-        const selUid = state.selectedFile && (state.selectedFile.uid || state.selectedFile.path);
+        const fileUid = sampleUid(file);
+        const selUid = state.selectedFile && sampleUid(state.selectedFile);
         if (selUid && selUid === fileUid) {
             item.classList.add('selected');
         }
@@ -555,10 +678,44 @@ function renderFileList(containerId, files, mode) {
 }
 
 function renderAllFileLists() {
-    renderFileList('dash-file-list', state.files, 'dashboard');
-    renderFileList('chrom-file-list', state.files, 'chrom');
-    renderFileList('dcurve-file-list', state.files, 'dc');
-    renderFileList('analysis-sample-list', state.files, 'analysis');
+    // A server search result replaces the loaded page while its query is in
+    // the search box (the page holds only the newest FILES_PAGE_LIMIT).
+    const q = (document.getElementById('universal-search')?.value || '').trim();
+    const sr = state.searchResult;
+    const useSearch = sr && sr.q === q && q !== '';
+    const files = useSearch ? sr.samples : state.files;
+    renderFileList('dash-file-list', files, 'dashboard');
+    renderFileList('chrom-file-list', files, 'chrom');
+    renderFileList('dcurve-file-list', files, 'dc');
+    renderFileList('analysis-sample-list', files, 'analysis');
+    const countEl = document.getElementById('search-count');
+    if (countEl) {
+        countEl.textContent = useSearch ? countLabel(sr.samples.length, sr.total)
+                                        : countLabel(state.files.length, state.filesTotal);
+    }
+}
+
+/** Search box changed: filter the loaded page at once and, when the server
+    holds more samples than were loaded, ask it (debounced) and show that. */
+let _searchSeq = 0;
+const _serverSearch = debounce(async (q) => {
+    const seq = ++_searchSeq;
+    try {
+        const res = await apiGet(filesUrl({ q, instrument: state.listInstrument,
+                                            status: state.listStatus }, FILES_PAGE_LIMIT));
+        if (seq !== _searchSeq) return;                 // a newer search is under way
+        state.searchResult = { q, samples: res.samples || [], total: res.total || 0 };
+        renderAllFileLists();
+    } catch (e) {
+        console.error('Search failed:', e);
+    }
+}, 300);
+
+function onSearchInput() {
+    const q = (document.getElementById('universal-search')?.value || '').trim();
+    if (state.searchResult && state.searchResult.q !== q) state.searchResult = null;
+    renderAllFileLists();
+    if (needsServerSearch(q, state.filesTotal, state.files.length)) _serverSearch(q);
 }
 
 function toggleEarlySignalFilter() {
@@ -575,7 +732,7 @@ function orderedUidsForContainer(containerEl) {
 }
 
 function onFileClick(file, mode, itemEl, ev) {
-    const uid = file.uid || file.path;
+    const uid = sampleUid(file);
     const container = itemEl.parentElement;
 
     // Ctrl/Cmd-click — toggle one item in the multi-selection; no load action.
@@ -683,27 +840,22 @@ function showContextMenu(e, file) {
                                             : 'Reprocess sample';
         newReproc.addEventListener('click', async () => {
             removeContextMenu();
-            // Batch-aware: act on the whole multi-selection, else the clicked one.
-            // Prefer exact CDF paths so daily-QC samples that share a Lab ID
-            // reprocess the run the user actually selected, not the newest one.
+            // Batch-aware: act on the whole multi-selection, else the clicked
+            // one. Samples are addressed by id, so re-runs that share a Lab ID
+            // reprocess exactly the injection the user selected.
             const files = selectionFilesOr(state.files, state.selectedUids, file);
-            const paths = [];
-            const samples = [];
-            for (const f of files) {
-                if (f.path && f.path !== f.name) paths.push(f.path);
-                else {
-                    const sid = (f.name || '').replace(/\.CDF$/i, '').trim();
-                    if (sid) samples.push(sid);
-                }
-            }
-            if (!paths.length && !samples.length) {
-                showNotification('No sample ID available for this file', 'error');
+            const sample_ids = sampleIdsOf(files);
+            if (!sample_ids.length) {
+                showNotification('No sample selected', 'error');
                 return;
             }
             try {
-                const result = await apiPost('/api/reprocess', { paths, samples });
-                _showReprocessToast(files.length, result.pending || 0);
-                _pollReprocessStatus();
+                const result = await apiPost('/api/reprocess', { sample_ids });
+                if (result.refused && result.refused.length) {
+                    showNotification(refusalSummary('Not reprocessed', result.refused, state.files), 'error');
+                }
+                _showReprocessToast(result.count, 0);
+                _pollReprocessStatus(result.sample_ids || []);
             } catch (err) {
                 showNotification('Reprocess failed: ' + err.message, 'error');
             }
@@ -719,7 +871,9 @@ function showContextMenu(e, file) {
             const name = prompt('Enter a name for this comparison standard:', file.name.replace(/\.CDF$/i, ''));
             if (!name) return;
             try {
-                await apiPost('/api/comparison-standard', { source_path: file.path, name });
+                const password = adminPassword('save a comparison standard');
+                if (!password) return;
+                await apiPost('/api/comparison-standard', { sample_id: file.sample_id, name, password });
                 showNotification(`Saved comparison standard: ${name}`, 'success');
                 await loadComparisonStandards();
             } catch (err) {
@@ -742,26 +896,29 @@ function showContextMenu(e, file) {
                                             : 'Export to LIMS';
         newLims.addEventListener('click', async () => {
             removeContextMenu();
-            // Export sends the selection down the SAME tunnel as reprocess
-            // ({paths, samples}); the backend computes + appends a CSV row each.
+            // Export re-sends each sample's current result (a new revision
+            // and export row; nothing is recomputed). The server refuses any
+            // sample that isn't final, or is unreleased backfill.
             const files = selectionFilesOr(state.files, state.selectedUids, file);
-            const paths = [];
-            const samples = [];
-            for (const f of files) {
-                if (f.path && f.path !== f.name) paths.push(f.path);
-                else {
-                    const sid = (f.name || '').replace(/\.CDF$/i, '').trim();
-                    if (sid) samples.push(sid);
-                }
-            }
-            if (!paths.length && !samples.length) {
-                showNotification('No sample ID available for this file', 'error');
+            const sample_ids = sampleIdsOf(files);
+            if (!sample_ids.length) {
+                showNotification('No sample selected', 'error');
                 return;
             }
             try {
-                const result = await apiPost('/api/export-lims', { paths, samples });
-                showNotification(`Exporting ${result.count} sample(s) to LIMS…`, 'info');
-                _pollReprocessStatus();
+                const resp = await fetch('/api/export-lims', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sample_ids }),
+                });
+                const result = await resp.json().catch(() => ({}));
+                if (!resp.ok && !(result.refused && result.refused.length)) {
+                    throw new Error(result.error || `API error ${resp.status}`);
+                }
+                const exported = (result.exported || []).length;
+                if (exported) showNotification(`Exported ${exported} sample(s) to LIMS`, 'success');
+                if (result.refused && result.refused.length) {
+                    showNotification(refusalSummary('Not exported', result.refused, state.files), 'error');
+                }
             } catch (err) {
                 showNotification('Export to LIMS failed: ' + err.message, 'error');
             }
@@ -787,9 +944,35 @@ function removeContextMenu() {
    9. DASHBOARD
    =================================================================== */
 
+/** The dashboard's selected-sample line: its instrument and any review note
+    (a late blank, an unverifiable import match). textContent only. */
+function renderDashSampleMeta(file) {
+    const el = document.getElementById('dash-sample-meta');
+    if (!el) return;
+    el.textContent = '';
+    if (!file) return;
+    const ib = instrumentBadge(file, state.instrumentNames);
+    if (ib) {
+        const span = document.createElement('span');
+        span.className = ib.cls;
+        span.textContent = ib.text;
+        span.title = ib.title;
+        el.appendChild(span);
+    }
+    const note = reviewNoteTitle(file);
+    if (note) {
+        const span = document.createElement('span');
+        span.className = 'review-note';
+        span.textContent = note;
+        span.title = note;
+        el.appendChild(span);
+    }
+}
+
 async function loadDashboardData(file) {
     const chromDiv = document.getElementById('dash-chrom-plot');
     const dcDiv = document.getElementById('dash-distill-plot');
+    renderDashSampleMeta(file);
 
     // Show loading spinners on all 4 dashboard quadrants
     document.querySelectorAll('#dash-grid .panel').forEach(p => _setLoading(p, true));
@@ -798,8 +981,11 @@ async function loadDashboardData(file) {
         // Fetch both in parallel, but keep them independent: a failure in the
         // distillation curve must NOT blank the chromatogram (and vice versa).
         const [traceRes, dcRes] = await Promise.allSettled([
-            apiGet(`/api/trace?path=${encodeURIComponent(file.path)}`),
-            apiGet(`/api/distillation-curve?path=${encodeURIComponent(file.path)}`),
+            apiGet(`/api/samples/${file.sample_id}/trace`),
+            // A sample with no revision (held) has no curve: don't ask.
+            curveFetchable(file)
+                ? apiGet(`/api/samples/${file.sample_id}/distillation-curve`)
+                : Promise.reject(new Error('no result yet')),
         ]);
 
         // -- Chromatogram plot (renders even if the distillation curve failed) --
@@ -813,7 +999,7 @@ async function loadDashboardData(file) {
             y: traceData.y,
             type: 'scatter',
             mode: 'lines',
-            name: traceData.name || file.name,
+            name: traceLabel(file, state.instrumentNames),
             line: { color: '#58a6ff', width: 1.5 },
         }];
         // Add calibration overlays
@@ -834,7 +1020,7 @@ async function loadDashboardData(file) {
             }
         }
         Plotly.react(chromDiv, chromTraces, basePlotlyLayout({
-            title: { text: file.name, font: { size: 14 } },
+            title: { text: traceLabel(file, state.instrumentNames), font: { size: 14 } },
             xaxis: { title: 'Time (min)', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
             yaxis: { title: 'Intensity', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
             shapes: calShapes,
@@ -843,14 +1029,21 @@ async function loadDashboardData(file) {
         }   // end chromatogram block
 
         // -- Distillation Curve plot (independent of the chromatogram) --
-        if (dcRes.status === 'rejected') {
+        const holdBadge = statusBadge(file);
+        if (dcRes.status === 'rejected' && !curveFetchable(file)) {
+            // Not processed (held): no result to show — say why instead.
+            Plotly.purge(dcDiv);
+            populateDashboardTables({}, {}, dcDiv);
+            if (holdBadge) showNotification(`${file.name}: ${holdBadge.text} — ${holdBadge.title}`, 'info');
+        } else if (dcRes.status === 'rejected') {
             console.error('Distillation curve load error:', dcRes.reason);
             showNotification('Distillation curve failed: ' + (dcRes.reason?.message || dcRes.reason), 'error');
         } else {
         const dcData = dcRes.value;
-        // Use authoritative D2887/D86 from CSV (computed with proper blank
-        // subtraction and corrections) when available.  Fall back to
-        // client-side computation only if the CSV lookup misses.
+        // The numbers are the sample's stored revision (computed with its
+        // recorded blank, calibration and corrections), never recomputed
+        // here. Client-side computation is only a fallback for a revision
+        // that holds none.
         let d2887, d86;
         const csvD2887 = dcData.d2887 || {};
         const csvD86   = dcData.d86   || {};
@@ -904,7 +1097,7 @@ async function loadDashboardData(file) {
             },
         ];
         Plotly.react(dcDiv, dcTraces, basePlotlyLayout({
-            title: { text: 'Distillation Curve', font: { size: 14 } },
+            title: { text: 'Distillation Curve — ' + traceLabel(file, state.instrumentNames), font: { size: 14 } },
             xaxis: { title: 'Recovery (%)', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
             yaxis: { title: 'Temperature (\u00B0C)', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
         }), PLOTLY_CONFIG);
@@ -993,16 +1186,16 @@ function highlightDCPoint(dcDiv, pct, temp, ringColor) {
 
 async function addChromatogramTrace(file) {
     // Check if already added
-    if (state.traces.find(t => t.path === file.path)) {
+    if (state.traces.find(t => t.sample_id === file.sample_id)) {
         showNotification('Trace already on chart', 'info');
         return;
     }
     try {
-        const data = await apiGet(`/api/trace?path=${encodeURIComponent(file.path)}`);
+        const data = await apiGet(`/api/samples/${file.sample_id}/trace`);
         const color = seriesColor(state.traces.length);
         state.traces.push({
-            path: file.path,
-            name: data.name || file.name,
+            sample_id: file.sample_id,
+            name: traceLabel(file, state.instrumentNames),
             visible: true,
             color,
             x: data.x,
@@ -1255,16 +1448,21 @@ function renderDistillTable() {
    =================================================================== */
 
 async function addDCTrace(file) {
-    if (state.dcTraces.find(t => t.path === file.path)) {
+    if (state.dcTraces.find(t => t.sample_id === file.sample_id)) {
         showNotification('Curve already on chart', 'info');
         return;
     }
+    if (!curveFetchable(file)) {
+        const b = statusBadge(file);
+        showNotification(`${file.name} has no result yet` + (b ? ` (${b.text}: ${b.title})` : ''), 'info');
+        return;
+    }
     try {
-        const data = await apiGet(`/api/distillation-curve?path=${encodeURIComponent(file.path)}`);
+        const data = await apiGet(`/api/samples/${file.sample_id}/distillation-curve`);
         const color = seriesColor(state.dcTraces.length);
         state.dcTraces.push({
-            path: file.path,
-            name: file.name,
+            sample_id: file.sample_id,
+            name: traceLabel(file, state.instrumentNames),
             visible: true,
             color,
             percent: data.percent,
@@ -1405,9 +1603,9 @@ async function autoSelectBestFitStandard(file) {
     }
     if (panel) panel.innerHTML = '<span style="color:#7d8590;">Best fit: computing…</span>';
     try {
-        const res = await apiPost('/api/best-fit', { path: file.path });
+        const res = await apiPost('/api/best-fit', { sample_id: file.sample_id });
         // Ignore stale responses after the user clicked another sample
-        if (!state.selectedSample || state.selectedSample.path !== file.path) return;
+        if (!state.selectedSample || state.selectedSample.sample_id !== file.sample_id) return;
         state.bestFit = res;
         renderBestFitPanel(res);
         if (!state.standardPinned && res.best_standard) {
@@ -1470,7 +1668,9 @@ function showStandardContextMenu(e, std) {
             const newName = prompt(`Rename "${std.name}" to:`, std.name);
             if (!newName || newName === std.name) return;
             try {
-                await apiPost('/api/comparison-standard/rename', { old_name: std.name, new_name: newName });
+                const password = adminPassword('rename a comparison standard');
+                if (!password) return;
+                await apiPost('/api/comparison-standard/rename', { old_name: std.name, new_name: newName, password });
                 showNotification(`Renamed to: ${newName}`, 'success');
                 if (state.selectedStandard && state.selectedStandard.name === std.name) {
                     state.selectedStandard.name = newName;
@@ -1491,7 +1691,9 @@ function showStandardContextMenu(e, std) {
             removeContextMenu();
             if (!confirm(`Delete comparison standard "${std.name}"?`)) return;
             try {
-                await apiDelete(`/api/comparison-standard/${encodeURIComponent(std.name)}`);
+                const password = adminPassword('delete a comparison standard');
+                if (!password) return;
+                await api('DELETE', `/api/comparison-standard/${encodeURIComponent(std.name)}`, { password });
                 showNotification(`Deleted standard: ${std.name}`, 'success');
                 if (state.selectedStandard && state.selectedStandard.name === std.name) {
                     state.selectedStandard = null;
@@ -1751,7 +1953,7 @@ async function runAnalysis() {
     _setAnalysisLoading(true);
 
     const body = {
-        sample_path: state.selectedSample.path,
+        sample_id: state.selectedSample.sample_id,
         standard_name: state.selectedStandard.name,
         ...state.analysisParams,
         ranges: state.rangeOverlays.map(r => ({
@@ -2158,7 +2360,10 @@ function addToAnalysisQueue() {
         const idx = state._editingQueueIdx;
         const item = state.analysisQueue[idx];
         // Update with current analysis state
-        item.sample_path = state.selectedSample?.path || item.sample_path;
+        if (state.selectedSample) {
+            item.sample_id = state.selectedSample.sample_id;
+            item.lab_id = state.selectedSample.lab_id || item.lab_id;
+        }
         item.standard_name = state.selectedStandard?.name || item.standard_name;
         item.bullets = state._lastReportBullets || item.bullets;
         item.annotations = annotationData.map(a => ({...a}));  // save current annotations
@@ -2187,11 +2392,11 @@ function openAnalysisExportModal() {
     const bulletsInput = document.getElementById('export-bullets');
     const conclusionInput = document.getElementById('export-conclusion');
 
-    // Lab ID = everything before the first underscore (matches desktop app logic)
-    // e.g. "32815_04202026.CDF" → "32815"
+    // The Lab ID is the sample's, from the store: the server uploads to the
+    // QBench sample of that Lab ID, so it isn't editable here.
     if (labIdInput) {
-        const raw = state.selectedSample ? state.selectedSample.name.replace(/\.CDF$/i, '') : '';
-        labIdInput.value = raw.includes('_') ? raw.split('_')[0] : raw;
+        labIdInput.value = state.selectedSample ? (state.selectedSample.lab_id || state.selectedSample.name) : '';
+        labIdInput.readOnly = true;
     }
     if (docNameInput) docNameInput.value = 'GC Analysis';
 
@@ -2251,14 +2456,13 @@ function confirmAddToQueue() {
     state.analysisQueue.push({
         lab_id: labId,
         sample_name: sampleName,
-        sample_path: state.selectedSample?.path || '',
+        sample_id: state.selectedSample ? state.selectedSample.sample_id : null,
         standard_name: state.selectedStandard?.name || '',
         bullets,
         conclusion,
         overlay_standards: overlayStds,
         ranges: rangesForPayload(state.rangeOverlays),  // capture regions at queue time
         annotations: annotationData.map(a => ({...a})),  // deep copy
-        pdf_path: '',
         added_at: new Date().toISOString(),
     });
 
@@ -2295,7 +2499,7 @@ function renderAnalysisQueue() {
             container.querySelectorAll('.queue-item.active').forEach(el => el.classList.remove('active'));
             row.classList.add('active');
             // Grey-out sample in the sample list (staged, not confirmed)
-            _stageAnalysisSample(item.sample_path);
+            _stageAnalysisSample(item.sample_id);
         });
 
         row.querySelector('.qi-remove').addEventListener('click', (e) => {
@@ -2310,8 +2514,8 @@ function renderAnalysisQueue() {
 /** Restore analysis context from a queued item so user can edit details. */
 function _restoreQueueItem(item, idx) {
     // Set the selected sample/standard from the queue item
-    if (item.sample_path) {
-        const file = state.files.find(f => f.path === item.sample_path);
+    if (item.sample_id != null) {
+        const file = state.files.find(f => f.sample_id === item.sample_id);
         if (file) state.selectedSample = file;
     }
     if (item.standard_name) {
@@ -2375,13 +2579,13 @@ function _updateQueueButton(editing) {
 }
 
 /** Grey-highlight the sample in the analysis sample list (staged state). */
-function _stageAnalysisSample(samplePath) {
+function _stageAnalysisSample(sampleId) {
     const list = document.getElementById('analysis-sample-list');
     if (!list) return;
     list.querySelectorAll('li.selected').forEach(el => el.classList.remove('selected'));
     list.querySelectorAll('li.staged').forEach(el => el.classList.remove('staged'));
-    if (samplePath) {
-        const item = list.querySelector(`li[data-path="${CSS.escape(samplePath)}"]`);
+    if (sampleId != null) {
+        const item = list.querySelector(`li[data-sample-id="${CSS.escape(String(sampleId))}"]`);
         if (item) item.classList.add('staged');
     }
 }
@@ -2494,7 +2698,9 @@ async function startQBenchUpload() {
         if (startBtn) startBtn.disabled = true;
         if (stopBtn) stopBtn.disabled = false;
 
-        const resp = await apiPost('/api/qbench-upload', {
+        // The server refuses the whole queue (409, nothing queued) if any
+        // sample isn't final or is unreleased backfill.
+        const resp = await apiPostRefusable('/api/qbench-upload', 'Not uploaded', {
             queue: state.analysisQueue,
             username,
             password,
@@ -3181,7 +3387,9 @@ function renderSettingsStandards() {
         li.querySelector('.range-delete').addEventListener('click', async () => {
             if (!confirm(`Remove standard "${std.name}"?`)) return;
             try {
-                await apiDelete('/api/comparison-standard/' + encodeURIComponent(std.name));
+                const password = adminPassword('delete a comparison standard');
+                if (!password) return;
+                await api('DELETE', '/api/comparison-standard/' + encodeURIComponent(std.name), { password });
                 await loadComparisonStandards();
                 renderSettingsStandards();
                 showNotification(`Removed: ${std.name}`, 'success');
@@ -3193,68 +3401,22 @@ function renderSettingsStandards() {
     }
 }
 
-async function browseAndAddStandard() {
-    try {
-        const result = await apiPost('/api/browse', {
-            type: 'file', title: 'Select CDF file for comparison standard',
-        });
-        if (!result.path) return;
-        const defaultName = result.path.split(/[/\\]/).pop().replace(/\.cdf$/i, '');
-        const name = prompt('Name for this comparison standard:', defaultName);
-        if (!name) return;
-        await apiPost('/api/comparison-standard', { source_path: result.path, name });
-        await loadComparisonStandards();
-        renderSettingsStandards();
-        showNotification(`Added standard: ${name}`, 'success');
-    } catch (e) {
-        showNotification('Failed: ' + e.message, 'error');
-    }
-}
-
-async function browseForPath(inputId, type) {
-    const inputEl = document.getElementById(inputId);
-    if (!inputEl) return;
-    const current = inputEl.value || '';
-    try {
-        const result = await apiPost('/api/browse', {
-            type: type || 'dir',
-            title: 'Select ' + (type === 'file' ? 'File' : 'Folder'),
-            initial: current,
-        });
-        if (result.path) {
-            inputEl.value = result.path;
-        }
-    } catch (e) {
-        showNotification('Browse failed: ' + e.message, 'error');
-    }
-}
-
 async function saveSettings() {
-    const fieldsMap = {
-        'set-watch-dir': 'watch_dir',
-        'set-processed-dir': 'processed_cdf_dir',
-        'set-distill-output': 'distill_output',
-        'set-calibration-cdf': 'calibration_cdf',
-        'set-export-folder': 'export_folder',
-        'set-comparison-dir': 'comparison_defaults_dir',
-        'set-correction-factors': 'correction_factors_json',
-        'set-series-colors': 'series_colors',
-        'set-report-logo': 'analysis_report_logo',
-    };
-
-    const newSettings = { ...state.settings };
-    for (const [elId, key] of Object.entries(fieldsMap)) {
-        const el = document.getElementById(elId);
-        if (el) newSettings[key] = el.value;
-    }
+    // v2 (T5 review C1): only operator keys save freely; best-fit needs the
+    // admin password; paths, calibration and corrections are read-only here.
+    // The Analysis tab's defaults are saved by "Set as Default" (admin).
+    const body = {};
+    const colors = document.getElementById('set-series-colors');
+    if (colors) body.series_colors = colors.value;
 
     // Flag rules (replaces the legacy early-signal fields)
     const flagRules = readFlagRulesFromDOM();
-    if (flagRules !== null) newSettings.sample_flag_rules = JSON.stringify(flagRules);
+    if (flagRules !== null) body.sample_flag_rules = JSON.stringify(flagRules);
 
-    // Best-fit settings
+    // Best-fit settings: an export column, so admin only
+    const bf = {};
     const bfEnabled = document.getElementById('set-bestfit-enabled');
-    if (bfEnabled) newSettings.bestfit_enabled = bfEnabled.checked ? 'true' : 'false';
+    if (bfEnabled) bf.bestfit_enabled = bfEnabled.checked ? 'true' : 'false';
     const bfSaveMap = {
         'set-bestfit-threshold': 'bestfit_threshold',
         'set-bestfit-shift': 'bestfit_shift_tolerance_min',
@@ -3262,31 +3424,21 @@ async function saveSettings() {
     };
     for (const [elId, key] of Object.entries(bfSaveMap)) {
         const el = document.getElementById(elId);
-        if (el && el.value !== '') newSettings[key] = el.value;
+        if (el && el.value !== '') bf[key] = el.value;
+    }
+    const bfChanged = Object.entries(bf).some(
+        ([k, v]) => String(v) !== String(state.settings[k] == null ? '' : state.settings[k]));
+    if (bfChanged) {
+        const password = adminPassword('change the best-fit settings');
+        if (!password) { showNotification('Best-fit settings not saved (no admin password)', 'info'); }
+        else { Object.assign(body, bf); body.password = password; }
     }
 
-    // Also persist current analysis params to settings
-    const p = state.analysisParams;
-    newSettings.analysis_quantile = String(p.quantile);
-    newSettings.analysis_window = String(p.window);
-    newSettings.analysis_sigma = String(p.sigma);
-    newSettings.analysis_thresh_marginal = String(p.thresh_marginal);
-    newSettings.analysis_thresh_moderate = String(p.thresh_moderate);
-    newSettings.analysis_thresh_significant = String(p.thresh_significant);
-    newSettings.analysis_x_max_min = String(p.x_max_min);
-    // Save range overlays
-    const gas = state.rangeOverlays.find(r => r.label === 'Gas');
-    const oil = state.rangeOverlays.find(r => r.label === 'Oil');
-    if (gas) { newSettings.analysis_gas_c_start = String(gas.c_start); newSettings.analysis_gas_c_end = String(gas.c_end); }
-    if (oil) { newSettings.analysis_oil_c_start = String(oil.c_start); newSettings.analysis_oil_c_end = String(oil.c_end); }
-
     try {
-        const saved = await apiPost('/api/settings', newSettings);
-        state.settings = newSettings;
+        const saved = await apiPost('/api/settings', body);
+        state.settings = saved;
         closeAllModals();
         showNotification('Settings saved — refreshing data...', 'success');
-        // e.g. "Watch folder is not set or not found — watcher idle"
-        if (saved && saved.warning) showNotification(saved.warning, 'warning');
         await refreshAll();
         showNotification('Data refreshed with new settings', 'success');
     } catch (e) {
@@ -3295,232 +3447,45 @@ async function saveSettings() {
 }
 
 /* ===================================================================
-   17. SCAN & LOG MODAL
-   =================================================================== */
-
-let scanSSE = null;
-
-function openLogModal(title) {
-    const modal = document.getElementById('modal-log');
-    if (!modal) return;
-    const titleEl = modal.querySelector('.modal-header h2');
-    if (titleEl) titleEl.textContent = title || 'Log';
-    const logBody = document.getElementById('log-output');
-    if (logBody) logBody.textContent = '';
-    // Reset status
-    const statusEl = document.getElementById('log-status');
-    if (statusEl) statusEl.textContent = 'Waiting...';
-    openModal(modal);
-}
-
-function appendLog(msg) {
-    const logBody = document.getElementById('log-output');
-    if (!logBody) return;
-    logBody.textContent += msg + '\n';
-    logBody.scrollTop = logBody.scrollHeight;
-}
-
-function updateScanProgress(data) {
-    // Update log modal status
-    const statusEl = document.getElementById('log-status');
-    // Update persistent status bar
-    const barInfo = document.getElementById('status-scan-info');
-    const barWrap = document.getElementById('status-scan-bar-wrap');
-    const barFill = document.getElementById('status-scan-bar-fill');
-    const barCounts = document.getElementById('status-scan-counts');
-
-    if (data.type === 'total') {
-        const msg = data.new > 0
-            ? `Found ${data.total} CDF files (${data.already} done, ${data.new} new)`
-            : `All ${data.total} files already processed`;
-        if (statusEl) statusEl.innerHTML = `<b>${msg}</b>`;
-        if (barInfo) barInfo.innerHTML = data.new > 0
-            ? `<span style="color:#58a6ff;">Scanning:</span> ${data.new} new files`
-            : `<span style="color:#3fb950;">Up to date</span>`;
-        if (barWrap) barWrap.style.display = data.new > 0 ? '' : 'none';
-        if (barFill) barFill.style.width = '0%';
-        if (barCounts) barCounts.textContent = '';
-    } else if (data.type === 'progress') {
-        const pct = Math.round((data.current / data.total) * 100);
-        const batchInfo = data.total_batches > 1 ? `Batch ${data.batch}/${data.total_batches}` : '';
-        // Log modal
-        if (statusEl) statusEl.innerHTML = `
-            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                <span style="min-width:60px; font-weight:600;">${pct}%</span>
-                <div style="flex:1; min-width:100px; height:8px; background:#21262d; border-radius:4px; overflow:hidden;">
-                    <div style="width:${pct}%; height:100%; background:linear-gradient(90deg,#1f6feb,#58a6ff); border-radius:4px; transition:width .3s;"></div>
-                </div>
-                <span style="font-size:10px; color:#7d8590;">${batchInfo}</span>
-            </div>
-            <div style="font-size:10px; color:#7d8590; margin-top:2px;">
-                ${data.processed} processed · ${data.skipped} existing · ${data.errors} errors
-            </div>
-        `;
-        // Status bar
-        if (barInfo) barInfo.innerHTML = `<span style="color:#58a6ff;">Processing:</span> ${pct}% ${batchInfo}`;
-        if (barWrap) barWrap.style.display = '';
-        if (barFill) barFill.style.width = pct + '%';
-        if (barCounts) barCounts.textContent = `${data.processed} new · ${data.skipped} existing · ${data.errors} err`;
-    } else if (data.type === 'done') {
-        if (statusEl) statusEl.innerHTML = `<span style="color:#3fb950; font-weight:600;">Complete</span> — ${data.processed} processed, ${data.skipped} skipped, ${data.errors} errors`;
-        if (barInfo) barInfo.innerHTML = `<span style="color:#3fb950;">Scan complete</span> — ${data.processed} processed`;
-        if (barWrap) barWrap.style.display = 'none';
-        if (barCounts) barCounts.textContent = '';
-        state.scanning = false;
-        updateScanButtons();
-        refreshAll();
-    } else if (data.type === 'stopped') {
-        if (statusEl) statusEl.innerHTML = `<span style="color:#d29922; font-weight:600;">Stopped</span> — ${data.processed} processed, ${data.skipped} skipped`;
-        if (barInfo) barInfo.innerHTML = `<span style="color:#d29922;">Scan stopped</span>`;
-        if (barWrap) barWrap.style.display = 'none';
-        if (barCounts) barCounts.textContent = '';
-        state.scanning = false;
-        updateScanButtons();
-        refreshAll();
-    } else if (data.type === 'error') {
-        if (statusEl) statusEl.innerHTML = `<span style="color:#f85149;">Error:</span> ${escapeHtml(data.message || '')}`;
-        if (barInfo) barInfo.innerHTML = `<span style="color:#f85149;">Scan error</span>`;
-        if (barWrap) barWrap.style.display = 'none';
-        state.scanning = false;
-        updateScanButtons();
-    }
-}
-
-function connectSSE(url) {
-    disconnectSSE();
-    scanSSE = new EventSource(url);
-    scanSSE.onmessage = (e) => {
-        const raw = e.data;
-        // Try parsing as JSON (structured progress), fallback to plain text log
-        try {
-            const data = JSON.parse(raw);
-            if (data.type) {
-                updateScanProgress(data);
-                return;
-            }
-        } catch (_) { /* not JSON, treat as log text */ }
-        appendLog(raw);
-    };
-    scanSSE.onerror = () => {
-        disconnectSSE();
-        if (state.scanning) {
-            state.scanning = false;
-            updateScanButtons();
-            refreshAll();
-        }
-    };
-}
-
-function disconnectSSE() {
-    if (scanSSE) {
-        scanSSE.close();
-        scanSSE = null;
-    }
-}
-
-async function startScan(silent) {
-    if (state.scanning) return;
-    state.scanning = true;
-    updateScanButtons();
-    try {
-        await apiPost('/api/scan');
-        if (!silent) openLogModal('Scan & Parse');
-        connectSSE('/api/scan/stream');
-        // Also start polling for status updates (more reliable than SSE alone)
-        startScanStatusPolling();
-    } catch (e) {
-        state.scanning = false;
-        updateScanButtons();
-        if (!silent) showNotification('Failed to start scan: ' + e.message, 'error');
-    }
-}
-
-async function stopScan() {
-    try {
-        await apiPost('/api/stop-scan');
-        appendLog('--- Stop requested ---');
-        // Close SSE + polling immediately so they don't hold connections
-        disconnectSSE();
-        stopScanStatusPolling();
-        state.scanning = false;
-        updateScanButtons();
-        const barInfo = document.getElementById('status-scan-info');
-        if (barInfo) barInfo.innerHTML = '<span style="color:#d29922;">Stopped</span>';
-        showNotification('Scan stopped', 'info');
-        // Refresh file list so processed samples appear
-        await refreshAll();
-    } catch (e) {
-        showNotification('Failed to stop scan: ' + e.message, 'error');
-    }
-}
-
-function updateScanButtons() {
-    const scanBtn = document.getElementById('btn-scan');
-    const stopBtn = document.getElementById('btn-stop');
-    if (scanBtn) scanBtn.disabled = state.scanning;
-    if (stopBtn) stopBtn.disabled = !state.scanning;
-}
-
-// Poll /api/scan/status every 2s for progress (works even if SSE drops)
-let _scanPollTimer = null;
-function startScanStatusPolling() {
-    stopScanStatusPolling();
-    _scanPollTimer = setInterval(async () => {
-        try {
-            const st = await apiGet('/api/scan/status');
-            if (st.phase === 'processing' || st.phase === 'scanning') {
-                state.scanning = true;
-                updateScanButtons();
-                // Update the log status bar
-                if (st.phase === 'processing' && st.total > 0) {
-                    const pct = Math.round(((st.already + st.processed + st.errors) / st.total) * 100);
-                    updateScanProgress({
-                        type: 'progress',
-                        current: st.already + st.processed + st.errors,
-                        total: st.total,
-                        batch: st.current_batch,
-                        total_batches: st.total_batches,
-                        processed: st.processed,
-                        skipped: st.already,
-                        errors: st.errors,
-                        file: st.current_file || '',
-                        status: 'ok',
-                    });
-                }
-            } else if (st.phase === 'done' || st.phase === 'idle' || st.phase === 'stopped') {
-                if (state.scanning) {
-                    state.scanning = false;
-                    updateScanButtons();
-                    refreshAll();
-                }
-                if (st.phase !== 'idle') {
-                    stopScanStatusPolling();
-                }
-            }
-        } catch (_) { /* ignore polling errors */ }
-    }, 2000);
-}
-
-function stopScanStatusPolling() {
-    if (_scanPollTimer) {
-        clearInterval(_scanPollTimer);
-        _scanPollTimer = null;
-    }
-}
-
-/* ===================================================================
    18. REPROCESS MODAL
    =================================================================== */
 
-// Holds the latest preview so Confirm reprocesses exactly what was shown.
-let _reprocessPreview = { matched: [], missing: [] };
+// Holds the latest preview so Confirm reprocesses exactly what was shown
+// (sample_ids: the latest injection of each matched Lab ID).
+let _reprocessPreview = { matched: [], missing: [], sample_ids: [] };
+
+/** The instrument a typed Lab-ID selection applies to: the modal's picker
+    (required: two instruments can hold the same lab ID). */
+function reprocessInstrument() {
+    const sel = document.getElementById('reprocess-instrument');
+    return (sel && sel.value) || '';
+}
+
+function renderReprocessInstrumentPicker() {
+    const sel = document.getElementById('reprocess-instrument');
+    if (!sel) return;
+    sel.innerHTML = '';
+    const ids = state.instruments || [];
+    const choose = document.createElement('option');
+    choose.value = '';
+    choose.textContent = 'Choose…';
+    sel.appendChild(choose);
+    for (const id of ids) {
+        const o = document.createElement('option');
+        o.value = id;
+        o.textContent = instrumentName(id, state.instrumentNames);
+        sel.appendChild(o);
+    }
+    sel.value = reprocessDefaultInstrument(ids, state.listInstrument);
+}
 
 function openReprocessModal() {
     const modal = document.getElementById('modal-reprocess');
     if (!modal) return;
     const input = document.getElementById('reprocess-ids');
     if (input) input.value = '';
-    _reprocessPreview = { matched: [], missing: [] };
+    renderReprocessInstrumentPicker();
+    _reprocessPreview = { matched: [], missing: [], sample_ids: [] };
     renderReprocessPreview();
     openModal(modal);
 }
@@ -3532,20 +3497,28 @@ async function previewReprocess() {
     if (!input) return;
     const query = input.value.trim();
     if (!query) {
-        _reprocessPreview = { matched: [], missing: [] };
+        _reprocessPreview = { matched: [], missing: [], sample_ids: [] };
         renderReprocessPreview();
         return;
     }
+    const instrument = reprocessInstrument();
+    const instErr = reprocessInstrumentError(instrument);
+    if (instErr) {
+        _reprocessPreview = { matched: [], missing: [], sample_ids: [] };
+        renderReprocessPreview(instErr);
+        return;
+    }
     try {
-        const result = await apiPost('/api/reprocess/preview', { query });
+        const result = await apiPost('/api/reprocess/preview', { query, instrument });
         if (result && result.error) {
-            _reprocessPreview = { matched: [], missing: [] };
+            _reprocessPreview = { matched: [], missing: [], sample_ids: [] };
             renderReprocessPreview(result.error);
             return;
         }
         _reprocessPreview = {
             matched: result.matched || [],
             missing: result.missing || [],
+            sample_ids: result.sample_ids || [],
         };
         renderReprocessPreview();
     } catch (e) {
@@ -3609,22 +3582,24 @@ function renderReprocessPreview(errorMsg) {
 }
 
 async function submitReprocess() {
-    const { matched, missing } = _reprocessPreview;
-    if (!matched.length) {
+    const { matched, missing, sample_ids } = _reprocessPreview;
+    if (!sample_ids.length) {
         showNotification('No matching samples to re-process', 'info');
         return;
     }
     closeAllModals();
 
     try {
-        const result = await apiPost('/api/reprocess', { samples: matched, missing });
-        const pending = result.pending || 0;
+        const result = await apiPost('/api/reprocess', { sample_ids, missing });
+        if (result.refused && result.refused.length) {
+            showNotification(refusalSummary('Not reprocessed', result.refused, state.files), 'error');
+        }
 
         // Show a persistent toast in top-right (not a full modal)
-        _showReprocessToast(matched.length, pending);
+        _showReprocessToast(result.count || matched.length, 0);
 
-        // Poll for completion via SSE
-        _pollReprocessStatus();
+        // Poll the queued samples until their jobs are done
+        _pollReprocessStatus(result.sample_ids || []);
 
         // Missing IDs were logged server-side — refresh the tray.
         if (missing.length) loadNotifications();
@@ -3718,18 +3693,6 @@ async function dismissAllNotifications() {
     } catch (_) { /* ignore */ }
 }
 
-/** Settings: re-derive injection times from CDFs and reorder the library. */
-async function reindexLibraryTimes() {
-    try {
-        await apiPost('/api/library/reindex-times');
-        showNotification('Reordering library in the background — check notifications', 'info');
-        // Pick up the completion notification shortly after.
-        setTimeout(loadNotifications, 3000);
-    } catch (e) {
-        showNotification('Reorder failed to start: ' + e.message, 'error');
-    }
-}
-
 /** Show a persistent, dismissable toast for reprocess progress. */
 function _showReprocessToast(count, pending) {
     // Remove any existing reprocess toast
@@ -3764,20 +3727,21 @@ function _showReprocessToast(count, pending) {
     toast.querySelector('#reprocess-toast-close').addEventListener('click', () => toast.remove());
 }
 
-/** Poll reprocess status and update the persistent toast. */
-function _pollReprocessStatus() {
+/** Poll the reprocess status of *sampleIds* and update the persistent toast. */
+function _pollReprocessStatus(sampleIds) {
+    const ids = (sampleIds || []).join(',');
     const _timer = setInterval(async () => {
         const toast = document.getElementById('reprocess-toast');
         if (!toast) { clearInterval(_timer); return; }
 
         try {
-            const st = await apiGet('/api/reprocess/status');
+            const st = await apiGet(`/api/reprocess/status?sample_ids=${encodeURIComponent(ids)}`);
             const titleEl = toast.querySelector('#reprocess-toast-title');
             const barEl = toast.querySelector('#reprocess-toast-bar');
             const detailEl = toast.querySelector('#reprocess-toast-detail');
             const closeBtn = toast.querySelector('#reprocess-toast-close');
 
-            if (st.phase === 'processing' || st.phase === 'scanning') {
+            if (st.phase === 'processing') {
                 if (titleEl) titleEl.textContent = 'Reprocessing...';
                 if (st.total > 0 && barEl) {
                     const pct = Math.round(((st.processed + st.errors) / st.total) * 100);
@@ -3811,25 +3775,6 @@ function _pollReprocessStatus() {
             }
         } catch (_) { /* ignore */ }
     }, 1500);
-}
-
-/* ===================================================================
-   19. REBUILD DATABASE
-   =================================================================== */
-
-async function rebuildDatabase() {
-    if (!confirm('This will clear the distillation database and rebuild from scratch. A backup of the CSV will be created. Continue?')) {
-        return;
-    }
-
-    try {
-        await apiPost('/api/rebuild-db');
-        openLogModal('Rebuild Database');
-        connectSSE('/api/scan/stream');
-        showNotification('Database rebuild started', 'info');
-    } catch (e) {
-        showNotification('Rebuild failed: ' + e.message, 'error');
-    }
 }
 
 /* ===================================================================
@@ -3958,7 +3903,7 @@ async function exportPDF() {
         return;
     }
     try {
-        const resp = await api('POST', '/api/export-pdf', { path: state.selectedFile.path });
+        const resp = await api('POST', '/api/export-pdf', { sample_id: state.selectedFile.sample_id });
         await downloadBlob(resp, 'export.pdf');
         showNotification('PDF exported', 'success');
     } catch (e) {
@@ -3967,23 +3912,20 @@ async function exportPDF() {
 }
 
 async function exportComparison() {
-    // Gather all selected/loaded chromatogram paths
-    const paths = [];
-    if (state.selectedFile) paths.push(state.selectedFile.path);
-    // Also include any traces on the chromatogram overlay
+    // Gather the selected sample and every chromatogram on the overlay
+    const ids = [];
+    if (state.selectedFile) ids.push(state.selectedFile.sample_id);
     for (const tr of state.traces) {
-        if (!paths.includes(tr.path)) paths.push(tr.path);
+        if (!ids.includes(tr.sample_id)) ids.push(tr.sample_id);
     }
-    if (paths.length === 0) {
+    if (ids.length === 0) {
         showNotification('Select a sample first (Dashboard or Chromatograms tab)', 'info');
         return;
     }
     try {
-        const result = await apiPost('/api/export-comparison', { sample_paths: paths });
+        const result = await apiPost('/api/export-comparison', { sample_ids: ids });
         if (result && result.files && result.files.length > 0) {
             showNotification(`Comparison exported: ${result.files.length} file(s)`, 'success');
-            // Open the export folder
-            try { await apiGet(`/api/open-folder?path=${encodeURIComponent(state.settings.export_folder || '')}`); } catch (_) { /* ignore */ }
         } else {
             showNotification('No files were generated', 'info');
         }
@@ -4004,15 +3946,14 @@ async function exportAnalysisReport() {
 
     const conclusion = document.getElementById('analysis-conclusion')?.value || '';
     const bullets = document.getElementById('analysis-report-text')?.textContent || '';
-    const rawName = state.selectedSample.name.replace(/\.CDF$/i, '');
-    const labId = rawName.includes('_') ? rawName.split('_')[0] : rawName;
+    const labId = state.selectedSample.lab_id || state.selectedSample.name;
 
     // Gather overlay standards
     const overlayStds = state.comparisonStandards.map(s => s.path);
 
     try {
         const resp = await api('POST', '/api/export-analysis-report', {
-            sample_path: state.selectedSample.path,
+            sample_id: state.selectedSample.sample_id,
             standard_name: state.selectedStandard.name,
             conclusion,
             bullets,
@@ -4032,33 +3973,6 @@ async function exportAnalysisReport() {
 /* ===================================================================
    21. FOLDER OPEN
    =================================================================== */
-
-async function openProcessedFolder() {
-    try {
-        const dir = state.settings.processed_cdf_dir || '';
-        await apiGet(`/api/open-folder?path=${encodeURIComponent(dir)}`);
-    } catch (e) {
-        showNotification('Failed to open folder: ' + e.message, 'error');
-    }
-}
-
-async function openWatchFolder() {
-    try {
-        const dir = state.settings.watch_dir || '';
-        await apiGet(`/api/open-folder?path=${encodeURIComponent(dir)}`);
-    } catch (e) {
-        showNotification('Failed to open folder: ' + e.message, 'error');
-    }
-}
-
-async function openExportFolder() {
-    try {
-        const dir = state.settings.export_folder || '';
-        await apiGet(`/api/open-folder?path=${encodeURIComponent(dir)}`);
-    } catch (e) {
-        showNotification('Failed to open folder: ' + e.message, 'error');
-    }
-}
 
 /* ===================================================================
    22. HELP MODAL
@@ -4120,14 +4034,8 @@ function setupEventListeners() {
         'btn-settings': openSettingsModal,
         'btn-export': exportPDF,
         'btn-comparison-export': exportComparison,
-        'btn-open-processed': openProcessedFolder,
-        'btn-open-watch': openWatchFolder,
         'btn-refresh': () => refreshAll(),
-        'btn-scan': startScan,
-        'btn-stop': stopScan,
-        'btn-log-stop': stopScan,
         'btn-reprocess': openReprocessModal,
-        'btn-rebuild-db': rebuildDatabase,
         'btn-help': openHelpModal,
         'btn-restart-server': restartServer,
         'btn-restart': restartServer,
@@ -4162,7 +4070,6 @@ function setupEventListeners() {
         'btn-notif-tray': () => toggleNotifPanel(),
         'btn-notif-dismiss-all': dismissAllNotifications,
         // Settings: library reorder
-        'btn-reindex-times': reindexLibraryTimes,
         // Analysis export modal (Export PDF button inside the modal)
         'btn-export-pdf': confirmAddToQueue,
         // QBench modal
@@ -4186,7 +4093,7 @@ function setupEventListeners() {
     // Universal search input — syncs across all file lists
     const universalSearch = document.getElementById('universal-search');
     if (universalSearch) {
-        universalSearch.addEventListener('input', debounce(() => renderAllFileLists(), 150));
+        universalSearch.addEventListener('input', debounce(onSearchInput, 150));
     }
 
     // Reprocess query — live preview of matching samples
@@ -4194,6 +4101,12 @@ function setupEventListeners() {
     if (reprocInput) {
         reprocInput.addEventListener('input', debounce(() => previewReprocess(), 250));
     }
+    const reprocInst = document.getElementById('reprocess-instrument');
+    if (reprocInst) reprocInst.addEventListener('change', () => previewReprocess());
+
+    // Instrument filter (remembered per browser)
+    const instFilter = document.getElementById('instrument-filter');
+    if (instFilter) instFilter.addEventListener('change', () => onInstrumentFilterChange());
 
     // Close the notification panel when clicking outside it
     document.addEventListener('click', (e) => {
@@ -4230,23 +4143,8 @@ function setupEventListeners() {
     // Initialize tooltips for info buttons
     initParamTooltips();
 
-    // Browse buttons in settings modal
-    document.querySelectorAll('.browse-btn[data-browse]').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const inputId = btn.dataset.browse;
-            const type = btn.dataset.type || 'dir';
-            browseForPath(inputId, type);
-        });
-    });
-
-    // "Add" button in settings comparison standards
-    const addStdBtn = document.getElementById('btn-settings-add-standard');
-    if (addStdBtn) {
-        addStdBtn.addEventListener('click', () => {
-            // Just open a native browse to pick a CDF file, then save as standard
-            browseAndAddStandard();
-        });
-    }
+    // (v2: no server-side Browse; paths are set on the server. Standards are
+    // added from a sample's context menu, "Set as comparison standard".)
 
     // Modal close handlers
     setupModalCloseHandlers();
@@ -4300,11 +4198,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Hide advanced tabs initially
     updateAdvancedViewsVisibility();
 
-    // Update scan button states
-    updateScanButtons();
-
     // Render empty queue
     renderAnalysisQueue();
+
+    // The instrument filter this browser used last (checked against the
+    // instruments once they are loaded).
+    state.listInstrument = restoreInstrumentFilter(readSavedInstrumentFilter(), []);
 
     // Load all data in parallel
     try {
@@ -4315,6 +4214,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             loadComparisonStandards(),
             loadTableData(),
         ]);
+        // Names for the instrument badges and the filter (after the list, so
+        // a remembered instrument that no longer exists is dropped cleanly).
+        await loadInstruments();
     } catch (e) {
         console.error('Initialization error:', e);
         showNotification('Some data failed to load on startup', 'error');
@@ -4336,7 +4238,4 @@ document.addEventListener('DOMContentLoaded', async () => {
             _updateUploadIndicator('progress', 'Upload in progress…', 0);
         }
     } catch (_) { /* ignore */ }
-
-    // Auto-scan on startup (silent — no modal, just background processing)
-    setTimeout(() => startScan(true), 2000);
 });

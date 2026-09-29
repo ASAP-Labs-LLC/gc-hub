@@ -1,0 +1,50 @@
+name: Agent CI
+
+# The GC-PC push agent (agent/) runs on the GC PCs' own Python, which may be
+# as old as 3.9, on Windows. Its suite is stdlib + pytest (+ pystray/Pillow,
+# which the installer checks for), so it runs without the hub's pinned
+# requirements and on interpreters the hub itself does not support.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  agent-tests:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            python-version: '3.9'
+          - os: ubuntu-24.04
+            python-version: '3.14'
+          - os: windows-latest
+            python-version: '3.9'
+          - os: windows-latest
+            python-version: '3.14'
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test dependencies
+        run: python -m pip install pytest pystray Pillow
+
+      - name: Agent tests
+        run: python -m pytest tests/agent -q -rs

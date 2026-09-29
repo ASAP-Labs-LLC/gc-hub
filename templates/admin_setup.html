@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin password setup</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=1">
+  <style>
+    :root{
+      --bg:#0d1117; --panel:#161b22; --line:#30363d; --line2:#21262d;
+      --txt:#e6edf3; --muted:#7d8590; --accent:#388bfd; --green:#3fb950; --danger:#f85149;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;min-height:100%;background:var(--bg);color:var(--txt);
+      font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    a{color:var(--accent)}
+    main{max-width:440px;margin:64px auto;padding:0 16px}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:22px}
+    h1{font-size:18px;margin:0 0 6px}
+    p{color:var(--muted);margin:0 0 16px}
+    label{display:block;font-size:12px;color:var(--muted);margin:12px 0 4px}
+    input{width:100%;background:var(--bg);color:var(--txt);border:1px solid var(--line);
+      border-radius:6px;padding:8px 10px;font:inherit}
+    input:focus{outline:none;border-color:var(--accent)}
+    button{margin-top:18px;width:100%;background:var(--green);border:0;color:#0d1117;
+      font-weight:600;border-radius:6px;padding:9px;font:inherit;cursor:pointer}
+    button:disabled{opacity:.5;cursor:default}
+    #msg{margin-top:14px;min-height:1.5em}
+    #msg.ok{color:var(--green)} #msg.err{color:var(--danger)}
+  </style>
+</head>
+<body>
+<main>
+  <div class="panel">
+    <h1>Admin password</h1>
+    {% if is_set %}
+      <p>An admin password is already set on this hub. It can be changed only with the
+        current password. <a href="/">Back to the app</a></p>
+    {% elif is_set is none %}
+      <p>This hub has no data folder (GC_DATA_DIR), so there is nowhere to keep an admin password.</p>
+    {% else %}
+      <p>Set the password that protects admin actions: saving defaults, credentials,
+        instrument settings and agent installers. There is no default password; until
+        this is set, admin actions are refused.</p>
+      <p>First use needs the one-time <strong>setup code</strong>. It is in
+        <code>{{ code_file }}</code> in the hub's data folder on the server
+        (C:\ASAPApps\gc\data on ASAPSV1), and in a WARNING line of <code>app.log</code>
+        in the same folder.</p>
+      <form id="setup" autocomplete="off">
+        <label for="code">Setup code</label>
+        <input id="code" type="text" required autocomplete="off" spellcheck="false">
+        <label for="pw">New password (at least {{ min_length }} characters)</label>
+        <input id="pw" type="password" minlength="{{ min_length }}" required autocomplete="new-password">
+        <label for="pw2">Repeat it</label>
+        <input id="pw2" type="password" minlength="{{ min_length }}" required autocomplete="new-password">
+        <button type="submit" id="go">Set admin password</button>
+        <div id="msg" role="status"></div>
+      </form>
+    {% endif %}
+  </div>
+</main>
+<div id="app-version" aria-hidden="true">{{ app_version }}</div>
+{% if not is_set and is_set is not none %}
+<script>
+  (function () {
+    var form = document.getElementById("setup");
+    var msg = document.getElementById("msg");
+    function say(text, ok) { msg.textContent = text; msg.className = ok ? "ok" : "err"; }
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var pw = document.getElementById("pw").value;
+      if (pw !== document.getElementById("pw2").value) { say("The two passwords differ.", false); return; }
+      var btn = document.getElementById("go");
+      btn.disabled = true;
+      fetch("/api/admin/setup", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({password: pw, setup_code: document.getElementById("code").value.trim()})
+      }).then(function (r) {
+        return r.json().then(function (b) { return {status: r.status, body: b}; });
+      }).then(function (res) {
+        if (res.status === 201) {
+          say("Admin password set. You can close this page.", true);
+          form.querySelectorAll("input").forEach(function (i) { i.value = ""; i.disabled = true; });
+        } else {
+          say((res.body && res.body.error) || ("HTTP " + res.status), false);
+          btn.disabled = false;
+        }
+      }).catch(function (e) { say(String(e), false); btn.disabled = false; });
+    });
+  })();
+</script>
+{% endif %}
+</body>
+</html>
