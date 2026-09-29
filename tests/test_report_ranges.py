@@ -47,6 +47,20 @@ def test_saved_overlays_used_when_no_explicit():
     assert ranges[1]["c_start"] == 12
 
 
+def test_explicit_empty_list_means_no_ranges():
+    """Phase 3: `[]` (the operator removed every range) is not "missing": it
+    means no ranges on every path, not the saved or legacy Gas/Oil."""
+    conf = dict(LEGACY_CONF, analysis_range_overlays=json.dumps(
+        [{"label": "Saved", "c_start": 6, "c_end": 12}]))
+    assert resolve_report_ranges([], conf) == []
+    assert [r["label"] for r in resolve_report_ranges(None, conf)] == ["Saved"]
+
+
+def test_saved_empty_list_means_no_ranges():
+    conf = dict(LEGACY_CONF, analysis_range_overlays="[]")
+    assert resolve_report_ranges(None, conf) == []
+
+
 def test_legacy_gas_oil_fallback():
     ranges = resolve_report_ranges(None, dict(LEGACY_CONF))
     assert [r["label"] for r in ranges] == ["Gas", "Oil"]

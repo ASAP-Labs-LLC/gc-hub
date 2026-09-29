@@ -57,6 +57,8 @@ def test_old_per_excursion_text_gave_dozens_of_bullets():
 def test_range_driven_report_is_bounded(ranges):
     t, ys, ystd, ladder = _load()
     resolved = ac.resolve_report_ranges(ranges, {})
+    if ranges == []:
+        assert resolved == []
     out = ac.analyze_report(t, ys, ystd, ranges=resolved, ladder=ladder,
                             params=ac.report_params({}, DEFAULT_CONF), standard_name="Diesel")
     lines = out["text"].splitlines()

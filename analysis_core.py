@@ -295,7 +295,9 @@ def resolve_report_ranges(body_ranges, conf: dict) -> list[dict]:
 
     Order: explicit *body_ranges* (from the request) → saved overlay defaults
     (``analysis_range_overlays`` JSON in settings) → legacy Gas/Oil settings.
-    Every returned entry has ``label``, ``c_start``, ``c_end``, ``color``.
+    An explicit list is final even when empty: ``[]`` means no ranges; only a
+    missing value (``None``) falls back. Every returned entry has ``label``,
+    ``c_start``, ``c_end``, ``color``.
     """
     import json as _json
 
@@ -314,18 +316,18 @@ def resolve_report_ranges(body_ranges, conf: dict) -> list[dict]:
                 continue
         return out
 
-    if body_ranges:
-        cleaned = _clean(body_ranges)
-        if cleaned:
-            return cleaned
+    # An explicit list, even an empty one, is the answer: `[]` means "no
+    # ranges" (the operator removed them all), on every path. Only a missing
+    # key (None) falls back.
+    if isinstance(body_ranges, list):
+        return _clean(body_ranges)
 
     saved = conf.get("analysis_range_overlays", "")
     if saved:
         try:
             raw = _json.loads(saved) if isinstance(saved, str) else saved
-            cleaned = _clean(raw)
-            if cleaned:
-                return cleaned
+            if isinstance(raw, list):
+                return _clean(raw)
         except Exception:
             pass
 
