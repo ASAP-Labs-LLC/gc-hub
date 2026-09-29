@@ -1,0 +1,34 @@
+"""The Distillation Data table's header comes from /api/table's ``columns``
+(v3.1.0), never a hard-coded list: the old template put D86 IBP…FBP before
+2887 IBP…FBP while the rows follow ``distill.CSV_HEADER`` (2887 first), so
+every D86 header sat over a D2887 value. The alignment itself is tested in
+``tests/js/distill_view.test.js``; this pins the wiring. Source only.
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _index() -> str:
+    return (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+
+
+def test_the_distill_table_head_is_not_hard_coded():
+    m = re.search(r'<table class="data-table" id="distill-table">(.*?)</table>', _index(), re.S)
+    assert m, "distill-table not found"
+    thead = re.search(r"<thead[^>]*>(.*?)</thead>", m.group(1), re.S).group(1)
+    assert "<th" not in thead, "the header is built from /api/table's columns"
+
+
+def test_app_js_builds_the_head_from_the_columns():
+    src = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    assert "DistillView.tableHeader(columns)" in src
+
+
+def test_distill_view_is_loaded_before_app_js():
+    scripts = re.findall(r"js/([a-z_]+\.js)", _index())
+    assert "distill_view.js" in scripts
+    assert scripts.index("distill_view.js") < scripts.index("app.js")

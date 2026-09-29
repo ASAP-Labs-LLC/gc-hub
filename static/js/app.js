@@ -1303,18 +1303,21 @@ function renderDistillTable() {
         });
     }
 
-    // Update header sort indicators on the existing table
+    // The header is built from the same `columns` as the rows (CSV order), so
+    // every header sits over its own value; the sorted column gets an arrow.
     const tableEl = document.getElementById('distill-table');
     if (!tableEl) return;
-    const thead = tableEl.querySelector('thead');
-    if (thead) {
-        thead.querySelectorAll('th').forEach((th, ci) => {
-            // Update sort arrow
-            const col = th.dataset.col || columns[ci] || '';
-            const arrow = tableSortCol === ci ? (tableSortAsc ? ' \u25B2' : ' \u25BC') : '';
-            th.textContent = col + arrow;
-        });
-    }
+    let thead = tableEl.querySelector('thead');
+    if (!thead) { thead = document.createElement('thead'); tableEl.prepend(thead); }
+    const headRow = document.createElement('tr');
+    DistillView.tableHeader(columns).forEach((cell, ci) => {
+        const th = document.createElement('th');
+        if (cell.cls) th.className = cell.cls;
+        th.dataset.col = cell.col;
+        th.textContent = DistillView.headerText(cell, ci, tableSortCol, tableSortAsc);
+        headRow.appendChild(th);
+    });
+    thead.replaceChildren(headRow);
 
     // Build tbody rows
     const tbody = document.getElementById('distill-table-body') || tableEl.querySelector('tbody');
@@ -1363,15 +1366,8 @@ function renderDistillTable() {
         const tr = document.createElement('tr');
         row.forEach((cell, ci) => {
             const td = document.createElement('td');
-            const colName = columns[ci] || '';
-            // Apply column group class
-            if (COL_GROUP_META.includes(colName)) {
-                td.className = 'col-meta';
-            } else if (colName.startsWith('D86') || colName.includes('D86')) {
-                td.className = 'col-d86';
-            } else if (colName.startsWith('2887') || colName.includes('2887')) {
-                td.className = 'col-d2887';
-            }
+            const cls = DistillView.columnClass(columns[ci]);   // the same group as its header
+            if (cls) td.className = cls;
             td.textContent = cell != null ? String(cell) : '';
             tr.appendChild(td);
         });
