@@ -62,6 +62,7 @@ from flask import Blueprint, jsonify, request
 
 import admin_auth
 import hub
+import netctx
 import paths
 import restart_policy
 import store
@@ -583,6 +584,12 @@ def _guard():
     """``(by, body, None)`` or ``(None, None, error response)``: loopback
     client, loopback Host, same-origin, JSON ≤ 64 KiB, admin password."""
     addr = request.remote_addr
+    if netctx.via_proxy():
+        # cloudflared forwards from loopback: a tunnel request is never local
+        _log_limited(("proxied", netctx.client_ip()), logging.WARNING,
+                     "hub_control: refused %s %s from %s (through a proxy)",
+                     request.method, request.path, netctx.client_ip())
+        return None, None, _err(LOOPBACK_ONLY_MESSAGE, 403)
     if not is_loopback(addr):
         _log_limited(("refused", addr), logging.WARNING,
                      "hub_control: refused %s %s from %s (not loopback)",
@@ -592,6 +599,8 @@ def _guard():
         _log_limited(("host", request.host), logging.WARNING,
                      "hub_control: refused %s %s with Host %r (not loopback)",
                      request.method, request.path, request.host)
+        return None, None, _err(LOOPBACK_ONLY_MESSAGE, 403)
+    if not netctx.is_local():       # the whole rule, in one place (belt and braces)
         return None, None, _err(LOOPBACK_ONLY_MESSAGE, 403)
     if admin_auth._cross_site():
         return None, None, _err("Cross-site request refused", 403)

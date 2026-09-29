@@ -173,8 +173,14 @@ def read_install_json(src):
     return url.rstrip("/"), tok.strip()
 
 
+# Cloudflare (https://gc.asaplabs.net) refuses urllib's default User-Agent
+# with 403 "error code: 1010"; the package version isn't known yet here.
+USER_AGENT = "gc-agent/installer"
+
+
 def _http_get(url, token):
-    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token,
+                                               "User-Agent": USER_AGENT})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with opener.open(req, timeout=120) as r:

@@ -199,6 +199,7 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BODY
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # disable static file caching in dev
 
 import admin_auth  # noqa: E402  (2B1: admin password + /admin/setup)
+import netctx  # noqa: E402  (the Cloudflare tunnel: client IP, https, local console)
 import ingest_api  # noqa: E402  (2B1: the agent API, contract §1)
 import hub_admin  # noqa: E402  (2A1 T5: folder-loader job, export admin)
 app.register_blueprint(admin_auth.bp)
@@ -662,7 +663,7 @@ def _revision_ladder(sample: dict, conf: dict, db, data: Path,
 
 
 def _who() -> str:
-    return request.remote_addr or "unknown"
+    return netctx.client_ip() or "unknown"
 
 
 def _gate_reason(s: dict) -> str:
@@ -705,36 +706,10 @@ def _check_admin(body) -> bool:
 # pass. DNS rebinding is not covered (see the spec's Open items).
 
 _STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-_ALLOWED_FETCH_SITES = frozenset({"same-origin", "none"})
-_DEFAULT_PORTS = {"http": 80, "https": 443}
-
-
-def _host_port(netloc: str, scheme: str):
-    """``(hostname, port)`` from a ``host[:port]`` string, or None."""
-    try:
-        parts = urllib.parse.urlsplit(f"{scheme}://{netloc}")
-        host = (parts.hostname or "").lower()
-        port = parts.port or _DEFAULT_PORTS.get(scheme)
-    except ValueError:
-        return None
-    return (host, port) if host else None
-
-
 def _is_cross_site_request() -> bool:
-    site = request.headers.get("Sec-Fetch-Site")
-    if site is not None and site.strip().lower() not in _ALLOWED_FETCH_SITES:
-        return True
-    origin = request.headers.get("Origin")
-    if origin is not None:
-        try:
-            parts = urllib.parse.urlsplit(origin.strip())
-        except ValueError:
-            return True
-        if parts.scheme not in _DEFAULT_PORTS or not parts.netloc:
-            return True  # includes the opaque origin "null"
-        mine = _host_port(request.host, request.scheme)
-        return mine is None or _host_port(parts.netloc, parts.scheme) != mine
-    return False
+    """The shared rule (``netctx.is_cross_site``): behind the Cloudflare
+    tunnel the browser's scheme is https (X-Forwarded-Proto from loopback)."""
+    return netctx.is_cross_site()
 
 
 @app.before_request
@@ -745,7 +720,7 @@ def _refuse_cross_site_writes():
     if request.method in _STATE_CHANGING_METHODS and request.path.startswith("/api/") \
             and _is_cross_site_request():
         LOGGER.warning("Refused cross-site %s %s from %s (Origin %r, Sec-Fetch-Site %r)",
-                       request.method, request.path, request.remote_addr,
+                       request.method, request.path, netctx.client_ip(),
                        request.headers.get("Origin"), request.headers.get("Sec-Fetch-Site"))
         return jsonify({"error": "Cross-site request refused"}), 403
     return None

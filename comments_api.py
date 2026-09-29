@@ -38,6 +38,7 @@ from flask import Blueprint, jsonify, request
 
 import admin_auth
 import comments
+import netctx
 import paths
 import store
 
@@ -59,7 +60,7 @@ def _refused(exc: comments.CommentError):
 
 
 def _ip():
-    return request.remote_addr
+    return netctx.client_ip()
 
 
 @bp.route("/api/samples/<int:sample_id>/comments", methods=["GET", "POST"])

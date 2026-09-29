@@ -119,7 +119,7 @@ class Agent:
             return
         self.cfg = cfg
         self.cfg_error = None
-        self.client = HubClient(cfg["hub_url"], cfg["token"])
+        self.client = HubClient(cfg["hub_url"], cfg["token"], version=self.version)
         self.sender.config_changed(self.client)
         self.hb_problem = None
         mp = cfg.get("results_mirror_path") or ""

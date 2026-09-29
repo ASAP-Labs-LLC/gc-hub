@@ -30,6 +30,7 @@ from flask import Blueprint, Response, jsonify, request
 
 import admin_auth
 import distill
+import netctx
 import paths
 import pipeline
 import store
@@ -592,7 +593,17 @@ def derived_hub_url() -> Optional[str]:
     """The request's own address as the hub URL, or ``None`` when it can't be
     trusted for an agent on another PC: a loopback address (the admin is on
     the server itself) or a name that isn't this machine's (a rebinding or a
-    proxy). Then the admin must set the hub URL first (I5)."""
+    proxy). Then the admin must set the hub URL first (I5).
+
+    Through the Cloudflare tunnel (``netctx``) the only trusted name is a
+    ``PUBLIC_HOSTS`` one over https (``https://gc.asaplabs.net``); any other
+    request from the loopback proxy never derives a URL from its Host."""
+    public = netctx.public_host()
+    if public is not None:
+        return "https://" + public
+    if netctx.is_local() or (netctx.is_loopback_addr(request.remote_addr)
+                             and netctx.via_proxy()):
+        return None
     name = admin_auth._hostname(request.host)
     if name is None:
         return None
@@ -660,7 +671,7 @@ def api_admin_installer(instrument_id):
     except LookupError:
         return _err(f"unknown instrument {instrument_id!r}", 404)
     log.warning("agent installer downloaded for %s by %s (hub_url %s)", instrument_id,
-                request.remote_addr, hub_url)
+                netctx.client_ip(), hub_url)
     return Response(data, mimetype="application/zip", headers={
         "Content-Disposition": f'attachment; filename="gc-agent-installer-{instrument_id}.zip"',
         "Cache-Control": "no-store", "X-GC-Hub-URL": hub_url})

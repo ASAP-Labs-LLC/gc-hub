@@ -246,6 +246,19 @@ def _is_loopback(client: Optional[str]) -> bool:
         return False
 
 
+def _request_is_local() -> bool:
+    """Inside a request: ``netctx.is_local()`` (a tunnel request comes from
+    loopback too, and is never the server's console). Outside one (tools,
+    tests calling ``check`` directly) the client address alone decides."""
+    try:
+        from flask import has_request_context
+        if has_request_context():
+            return netctx.is_local()
+    except ImportError:  # pragma: no cover - flask is a hub dependency
+        pass
+    return True
+
+
 class _Throttle:
     MAX_CLIENTS = 1000
 
@@ -269,7 +282,7 @@ class _Throttle:
         with self._lock:
             now = _clock()
             self._prune(now)
-            local = _is_loopback(client)
+            local = _is_loopback(client) and _request_is_local()
             if not local and len(self._global) >= GLOBAL_FAILURE_BUDGET:
                 wait = self._global[0][0] + GLOBAL_WINDOW_SECONDS - now
                 return None, max(wait, 1.0), (f"Too many wrong admin passwords on this hub. "
@@ -569,7 +582,7 @@ def check_admin_body(body: Any, *, db=None, client: Optional[str] = None) -> boo
         from flask import g, has_request_context, request
         in_request = has_request_context()
         if in_request and client is None:
-            client = request.remote_addr
+            client = netctx.client_ip()
     except ImportError:  # pragma: no cover - flask is a hub dependency
         pass
     res = check(supplied, client, db=db)
@@ -582,6 +595,8 @@ def check_admin_body(body: Any, *, db=None, client: Optional[str] = None) -> boo
 
 from flask import Blueprint, g, jsonify, render_template, request  # noqa: E402
 from werkzeug.exceptions import RequestEntityTooLarge  # noqa: E402
+
+import netctx  # noqa: E402  (needs flask, like the routes below)
 
 bp = Blueprint("admin_auth", __name__)
 
@@ -660,19 +675,10 @@ def _json_body():
 
 
 def _cross_site() -> bool:
-    """Same rule as app's guard (which already covers /api/), kept here so the
-    setup route is same-origin whatever its path."""
-    site = (request.headers.get("Sec-Fetch-Site") or "").strip().lower()
-    if site and site not in ("same-origin", "none"):
-        return True
-    origin = request.headers.get("Origin")
-    if origin is not None:
-        try:
-            parts = urllib.parse.urlsplit(origin.strip())
-        except ValueError:
-            return True
-        return parts.scheme not in ("http", "https") or parts.netloc.lower() != request.host.lower()
-    return False
+    """app's guard rule (``netctx.is_cross_site``, which already covers
+    /api/), applied here too so the setup route is same-origin whatever its
+    path. Behind the tunnel the browser's scheme is https."""
+    return netctx.is_cross_site()
 
 
 @bp.after_app_request
@@ -705,10 +711,10 @@ def admin_setup_page():
 
 
 def _refuse_host():
-    if host_allowed(request.host):
+    if host_allowed(request.host) or netctx.public_host() is not None:
         return None
     log.warning("refused %s from %s: Host %r is not this hub", request.path,
-                request.remote_addr, request.host)
+                netctx.client_ip(), request.host)
     return jsonify({"error": "This request's Host is not this hub's address. Open the hub by "
                              "its own name or IP address."}), 403
 
@@ -724,7 +730,7 @@ def api_admin_setup():
     if err:
         return err
     try:
-        setup(body.get("password"), body.get("setup_code"), client=request.remote_addr)
+        setup(body.get("password"), body.get("setup_code"), client=netctx.client_ip())
     except NoStore:
         return jsonify({"error": NO_STORE_MESSAGE}), 503
     except AlreadySet:
@@ -745,7 +751,7 @@ def api_admin_password():
     if err:
         return err
     try:
-        change(body.get("password"), body.get("new_password"), client=request.remote_addr)
+        change(body.get("password"), body.get("new_password"), client=netctx.client_ip())
     except NoStore:
         return jsonify({"error": NO_STORE_MESSAGE}), 503
     except WrongPassword as exc:

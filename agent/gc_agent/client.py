@@ -1,6 +1,9 @@
 """The agent's side of the hub HTTP contract (§1), stdlib urllib only.
 
-Every request carries ``Authorization: Bearer <token>`` and no ``Origin``.
+Every request carries ``Authorization: Bearer <token>``,
+``User-Agent: gc-agent/<version>`` and no ``Origin``. (Cloudflare, in front
+of https://gc.asaplabs.net, refuses urllib's default ``Python-urllib``
+User-Agent with 403 "error code: 1010".)
 HTTP error statuses come back as a HubResponse; only transport failures
 (refused, reset, timeout, DNS) raise NetworkError. Proxies are ignored: the
 hub is on the LAN.
@@ -43,15 +46,21 @@ class HubResponse:
         return "HubResponse(%d, %r)" % (self.status, self.json)
 
 
+def user_agent(version):
+    return "gc-agent/%s" % (version or "dev")
+
+
 class HubClient:
-    def __init__(self, hub_url, token, timeout=DEFAULT_TIMEOUT):
+    def __init__(self, hub_url, token, timeout=DEFAULT_TIMEOUT, version="dev"):
         self.hub_url = hub_url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        self.user_agent = user_agent(version)
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def _request(self, method, path, body=None, headers=None, timeout=None):
-        h = {"Authorization": "Bearer " + self.token, "Accept": "application/json"}
+        h = {"Authorization": "Bearer " + self.token, "Accept": "application/json",
+             "User-Agent": self.user_agent}
         h.update(headers or {})
         req = urllib.request.Request(self.hub_url + path, data=body, headers=h, method=method)
         try:

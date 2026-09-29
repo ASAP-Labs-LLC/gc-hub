@@ -62,6 +62,7 @@ from flask import Blueprint, jsonify, render_template, request
 import admin_auth
 import ingest_api
 import instrument_admin as ia
+import netctx
 import paths
 import standards
 import store
@@ -110,7 +111,7 @@ def _comp_dir(conf: Optional[dict] = None) -> Path:
 
 
 def _by() -> str:
-    return f"admin@{request.remote_addr or '?'}"
+    return f"admin@{netctx.client_ip() or '?'}"
 
 
 def _err(message: str, status: int = 400, **extra):

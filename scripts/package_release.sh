@@ -120,7 +120,7 @@ for f in app.py requirements.txt VERSION DEPLOY.md RELEASING.md \
          tools/load_folder.py tools/parity_report.py tools/import_dry_run.py \
          agent/build_package.py agent/requirements-agent.txt \
          agent/launcher.pyw agent/install.pyw agent/gc_agent/__init__.py \
-         hub_control.py tray/hub_tray.pyw tray/tray.example.json tray/gc_tray/__init__.py \
+         hub_control.py netctx.py tray/hub_tray.pyw tray/tray.example.json tray/gc_tray/__init__.py \
          tray/gc_tray/main.py tray/gc_tray/logic.py tray/gc_tray/ui.py \
          tray/gc_tray/client.py tray/gc_tray/controller.py tray/gc_tray/winsys.py; do
   if [ ! -e "$STAGE/$f" ]; then echo "MISSING from package: $f" >&2; missing=1; fi

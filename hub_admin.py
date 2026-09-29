@@ -91,6 +91,7 @@ from flask import Blueprint, Response, jsonify, render_template, request
 
 import diagnostics
 import exports
+import netctx
 import paths
 import store
 
@@ -215,7 +216,7 @@ def _db() -> Path:
 
 
 def _who() -> str:
-    return request.remote_addr or "unknown"
+    return netctx.client_ip() or "unknown"
 
 
 # ── admin jobs ──────────────────────────────────────────────────────────────

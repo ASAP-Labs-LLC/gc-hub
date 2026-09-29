@@ -380,6 +380,24 @@ the v3.0.0 release notes first. Nothing needs editing on the server:
   bullets, and it writes no `report_log` rows. Comments made under v3 are
   kept and reappear after upgrading again.
 
+### Behind the Cloudflare tunnel (https://gc.asaplabs.net)
+
+From v3.0.0 the hub also works at https://gc.asaplabs.net: `cloudflared` on
+ASAPSV1 forwards that name to `http://localhost:5560`. The hub treats only
+**loopback** as a trusted proxy (`netctx.py`): from 127.0.0.1 it believes
+`CF-Connecting-IP` (the real client, used for the admin-password throttle and
+logs) and `X-Forwarded-Proto: https` (so the browser's `https://gc.asaplabs.net`
+origin passes the cross-site guard); from any other address those headers are
+ignored. Setup accepts `Host: gc.asaplabs.net` only over https, a request
+carrying any forwarding header is never "the server's own console" (it spends
+the hub-wide password budget, and the hub tray's pause/stop routes always
+answer 403 through the tunnel), and an installer downloaded through the tunnel
+with no hub URL set points agents at `https://gc.asaplabs.net`. **There is no
+sign-in yet** (v3.1): anyone who reaches the address can use the operator
+actions (admin actions still need the admin password). Agents send
+`User-Agent: gc-agent/<version>` because Cloudflare refuses urllib's default
+with 403 "error code: 1010".
+
 ## Before cutover (once, for both GCs)
 
 The spec's "Cutover runbook", steps 1 to 4, plus the parity check. Until a GC
