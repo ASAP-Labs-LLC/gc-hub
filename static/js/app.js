@@ -514,12 +514,14 @@ function convertToD86(d2887) {
         const tCurr = d2887[pCurr];
         const tNext = d2887[pNext];
         if (tPrev == null || tCurr == null || tNext == null) continue;
-        d86[cut] = round2(a0 + a1 * tPrev + a2 * tCurr + a3 * tNext);
+        // rounded like distill._round2 (Python's round), so the numbers match the hub's
+        d86[cut] = DistillView.pyRound2(a0 + a1 * tPrev + a2 * tCurr + a3 * tNext);
     }
-    // 40% and 60% have no D86 equation
+    // 40% and 60% have no D86 equation: the midpoints of 30/50 and 50/70, as
+    // distill.x4_midpoints does
     d86["40%"] = null;
     d86["60%"] = null;
-    return d86;
+    return DistillView.x4Midpoints(d86);
 }
 
 /* ===================================================================
@@ -1004,7 +1006,7 @@ async function loadDashboardData(file) {
         // recorded blank, calibration and corrections), never recomputed
         // here. Client-side computation is only a fallback for a revision
         // that holds none.
-        let d2887, d86;
+        let d2887, d86, d86Notes = null;
         const csvD2887 = dcData.d2887 || {};
         const csvD86   = dcData.d86   || {};
         const hasCSV = Object.keys(csvD2887).length > 0;
@@ -1019,9 +1021,11 @@ async function loadDashboardData(file) {
             // "Corrected D86" on: the stored (corrected) cells; off: the stored
             // uncorrected conversion (or, for a revision that has none, the X4
             // conversion of its stored D2887). 40%/60% whenever they exist.
-            d86 = DistillView.dashboardD86(
+            const view = DistillView.dashboardD86(
                 { d86: csvD86, d86_uncorrected: dcData.d86_uncorrected, d2887: csvD2887 },
-                state.correctedD86, convertToD86).values;
+                state.correctedD86, convertToD86);
+            d86 = view.values;
+            d86Notes = view.notes;       // tooltips: why a cell is empty; 40%/60% midpoints
         } else {
             // Fallback: compute client-side (no blank, no EQM corrections)
             d2887 = computeD2887(dcData.percent, dcData.temperature);
@@ -1060,7 +1064,7 @@ async function loadDashboardData(file) {
         }), PLOTLY_CONFIG);
 
         // -- Populate D2887 and D86 tables --
-        populateDashboardTables(d2887, d86, dcDiv);
+        populateDashboardTables(d2887, d86, dcDiv, d86Notes);
         }   // end distillation curve block
 
     } catch (e) {
@@ -1071,7 +1075,7 @@ async function loadDashboardData(file) {
     }
 }
 
-function populateDashboardTables(d2887, d86, dcDiv) {
+function populateDashboardTables(d2887, d86, dcDiv, d86Notes) {
     // D2887 Table — target the <tbody> inside the table
     const d2887Table = document.getElementById('dash-d2887-table');
     const d2887Body = d2887Table ? (d2887Table.querySelector('tbody') || d2887Table) : null;
@@ -1099,9 +1103,10 @@ function populateDashboardTables(d2887, d86, dcDiv) {
             const tr = document.createElement('tr');
             // 40% and 60% (no X4 equation) show the stored value when there is one
             tr.innerHTML = `<td>${escapeHtml(label)}</td><td>${temp != null ? temp.toFixed(2) : '\u2014'}</td>`;
-            if (temp == null) {
-                tr.title = DistillView.missingNote(label);
-            } else {
+            const note = (d86Notes && d86Notes[label])
+                || (temp == null ? DistillView.missingNote(label) : null);
+            if (note) tr.title = note;
+            if (temp != null) {
                 tr.style.cursor = 'pointer';
                 tr.addEventListener('click', () => highlightDCPoint(dcDiv, PERCENT_LEVELS[i], temp, '#d29922'));
             }

@@ -37,6 +37,22 @@ def test_the_dashboard_d86_table_shows_what_is_stored_at_40_and_60():
     assert "(label === '40%' || label === '60%') ? '\\u2014'" not in src
 
 
+def test_the_dashboard_d86_cells_get_the_notes_as_tooltips():
+    """``dashboardD86``'s notes (why a cell is empty; that 40%/60% are
+    uncorrected midpoints) reach the cells' tooltips, not only for "—"."""
+    src = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    assert "d86Notes = view.notes" in src
+    assert "populateDashboardTables(d2887, d86, dcDiv, d86Notes)" in src
+    assert "d86Notes[label]" in src
+
+
+def test_convert_to_d86_rounds_like_python_and_fills_40_60():
+    src = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    body = src[src.index("function convertToD86(d2887) {"):]
+    body = body[:body.index("\n}\n")]
+    assert "DistillView.pyRound2(" in body and "DistillView.x4Midpoints(d86)" in body
+
+
 def test_distill_view_is_loaded_before_app_js():
     scripts = re.findall(r"js/([a-z_]+\.js)", _index())
     assert "distill_view.js" in scripts
