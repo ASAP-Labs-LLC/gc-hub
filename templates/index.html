@@ -390,6 +390,7 @@
           <div class="panel-header">
             <span class="dash-quadrant-header">Chromatogram</span>
             <span class="dash-sample-meta" id="dash-sample-meta"></span>
+            <button class="btn btn-secondary" id="btn-copy-link" data-testid="copy-link" title="Copy a link to the selected sample (opens from COA Reviewer, email or chat)" style="font-size:10px; padding:2px 8px; margin-left:6px;">Copy link</button>
           </div>
           <div class="panel-body" style="padding:0;">
             <div id="dash-chrom-plot" class="plot-container"></div>
@@ -1099,6 +1100,7 @@
   <div class="ctx-item" id="ctx-set-standard">Set as comparison standard</div>
   <div class="ctx-item" id="ctx-reprocess">Reprocess sample</div>
   <div class="ctx-item" id="ctx-export-lims">Export to LIMS</div>
+  <div class="ctx-item" id="ctx-copy-link">Copy link</div>
   <div class="ctx-item" id="ctx-rename-standard">Rename standard</div>
   <div class="ctx-item" id="ctx-remove-standard">Remove standard</div>
 </div>
@@ -1117,6 +1119,7 @@
 <script src="{{ url_for('static', filename='js/comments.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/ladder.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/distill_view.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/deeplink.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/app.js') }}?v=54"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->

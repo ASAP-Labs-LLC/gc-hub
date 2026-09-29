@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>No GC result</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=2">
+  <script src="{{ url_for('static', filename='js/session.js') }}?v=1"></script>
+  <style>
+    body { margin: 0; background: #0d1117; color: #e6edf3;
+           font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    main { max-width: 520px; margin: 18vh auto 0; padding: 0 16px; }
+    h1 { font-size: 20px; font-weight: 600; margin: 0 0 8px; }
+    p { color: #9da7b3; margin: 0 0 16px; }
+    a.btn { display: inline-block; padding: 6px 14px; border: 1px solid #30363d; border-radius: 6px;
+            color: #e6edf3; text-decoration: none; background: #21262d; margin-right: 8px; }
+    a.btn:hover { border-color: #58a6ff; }
+  </style>
+</head>
+<body>
+  <main data-testid="link-not-found">
+    {% if lab_id is not none %}
+    <h1>No GC result for lab ID {{ lab_id }} yet</h1>
+    <p>The hub has no run of this lab ID. It appears here once its CDF arrives and is processed.</p>
+    <a class="btn" href="/?q={{ lab_id | urlencode | replace('/', '%2F') }}">Search the samples</a>
+    {% else %}
+    <h1>No GC result #{{ sample_id }}</h1>
+    <p>This sample does not exist on the hub. The link may be from another hub or mistyped.</p>
+    {% endif %}
+    <a class="btn" href="/">Open the sample list</a>
+  </main>
+
+  <!-- Which build is running, bottom-right. Same string /healthz reports. -->
+  <div id="app-version" aria-hidden="true">{{ app_version }}</div>
+  {% include "_signed_in.html" %}
+</body>
+</html>

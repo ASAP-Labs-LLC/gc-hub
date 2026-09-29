@@ -1,0 +1,314 @@
+/* Sendable sample links (v3.1): what a link URL opens on the classic page,
+   and "Copy link". Pure helpers first (window globals + module.exports, node
+   tested in tests/js/deeplink.test.js), then a thin browser hook:
+
+     /lab/<lab_id>                         the lab ID's newest run (GET /api/lab/<id>),
+                                           with its other runs listed on the Dashboard
+     /samples/<id>                         that run, Dashboard
+     /samples/<id>/compare[?standard=<n>]  that run, Analysis (the standard picked)
+     /samples/<id>/data                    that run, Distillation Data
+     /?q=<text>                            the sample search (the not-found page's link)
+
+   app.js calls DeepLink.start() once, after the sample list first loads, and
+   DeepLink.wireContextItem(file) from the sample context menu. A copied link is
+   <hub_url>/samples/<id>, hub_url from GET /api/session (the configured hub,
+   https://gc.asaplabs.net by default), never location.origin: a link copied
+   over the LAN must still open from anywhere. The DOM is built with
+   textContent only (lab IDs and instrument names are untrusted). */
+(function (root) {
+    const DEFAULT_HUB_URL = 'https://gc.asaplabs.net';
+    const TABS = { dashboard: 'tab-dashboard', analysis: 'tab-analysis', data: 'tab-distilldata' };
+    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    function _decodeOnce(s) {
+        try { return decodeURIComponent(s); } catch (_) { return s; }
+    }
+
+    function _query(search, key) {
+        const qs = String(search || '').replace(/^\?/, '');
+        for (const part of qs.split('&')) {
+            const eq = part.indexOf('=');
+            const k = eq < 0 ? part : part.slice(0, eq);
+            if (_decodeOnce(k.replace(/\+/g, ' ')) !== key) continue;
+            const v = eq < 0 ? '' : _decodeOnce(part.slice(eq + 1).replace(/\+/g, ' '));
+            return v.trim() === '' ? null : v;
+        }
+        return null;
+    }
+
+    /** What the URL asks to open, or null: {kind: 'lab', labId} |
+        {kind: 'sample', sampleId, tab, standard} | {kind: 'search', q}.
+        ``pathname`` is as the browser keeps it (encoded): decoded once. */
+    function parseLocation(pathname, search) {
+        const path = String(pathname || '').replace(/\/+$/, '');
+        let m = /^\/lab\/([^/]+)$/.exec(path);
+        if (m) return { kind: 'lab', labId: _decodeOnce(m[1]) };
+        m = /^\/samples\/([1-9][0-9]*)(?:\/(compare|data))?$/.exec(path);
+        if (m) {
+            const tab = m[2] === 'compare' ? 'analysis' : (m[2] === 'data' ? 'data' : 'dashboard');
+            return { kind: 'sample', sampleId: Number(m[1]), tab,
+                     standard: tab === 'analysis' ? _query(search, 'standard') : null };
+        }
+        if (path === '' && pathname) {
+            const q = _query(search, 'q');
+            if (q !== null) return { kind: 'search', q };
+        }
+        return null;
+    }
+
+    function tabId(tab) { return TABS[tab] || TABS.dashboard; }
+    function isAdvancedTab(tab) { return tab === 'data'; }
+
+    /** The link to copy for a sample: always the hub's address. */
+    function sampleLink(hubUrl, sampleId) {
+        const base = String(hubUrl || '').replace(/\/+$/, '') || DEFAULT_HUB_URL;
+        return `${base}/samples/${sampleId}`;
+    }
+
+    /** The link from GET /api/session's answer. ``loc`` is deliberately
+        ignored: the page's own origin (a LAN address) is never used. */
+    function linkFromSession(session, sampleId, loc) {
+        return sampleLink(session && session.hub_url, sampleId);
+    }
+
+    function labApiUrl(labId) { return '/api/lab/' + encodeURIComponent(labId); }
+
+    /** "GC-2 · Sep 28 15:30" for a run. */
+    function runLabel(run) {
+        const inst = (run && (run.instrument_name || run.instrument)) || '?';
+        const dt = String((run && run.injection_dt) || '');
+        const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(dt);
+        const when = m ? `${MONTHS[Number(m[2]) - 1] || m[2]} ${Number(m[3])} ${m[4]}:${m[5]}` : dt;
+        return `${inst} · ${when}`;
+    }
+
+    /** The runs of a resolved lab ID other than the one opened. */
+    function otherRuns(resolved) {
+        if (!resolved || !Array.isArray(resolved.runs)) return [];
+        return resolved.runs.filter(r => r.sample_id !== resolved.sample_id).map(r => ({
+            sample_id: r.sample_id, href: `/samples/${r.sample_id}`, label: runLabel(r),
+            status: r.status,
+        }));
+    }
+
+    function otherRunsTitle(labId) { return `Other runs of ${labId}:`; }
+
+    /** ?standard=: exact name, else case-insensitive, else null. */
+    function findStandard(standards, name) {
+        const list = Array.isArray(standards) ? standards : [];
+        const want = String(name || '');
+        return list.find(s => s && s.name === want)
+            || list.find(s => s && String(s.name).toLowerCase() === want.toLowerCase())
+            || null;
+    }
+
+    function findFile(files, sampleId) {
+        const id = Number(sampleId);
+        return (Array.isArray(files) ? files : []).find(f => f && Number(f.sample_id) === id) || null;
+    }
+
+    const pure = {
+        DEFAULT_HUB_URL, parseLocation, tabId, isAdvancedTab, sampleLink, linkFromSession,
+        labApiUrl, runLabel, otherRuns, otherRunsTitle, findStandard, findFile,
+    };
+
+    if (typeof module !== 'undefined' && module.exports) {
+        module.exports = pure;
+        return;
+    }
+
+    /* ── the browser hook (uses app.js's globals: state, switchTab, …) ── */
+
+    let _session = null;
+
+    async function _hubUrl() {
+        if (!_session) {
+            try {
+                const r = await fetch('/api/session', { cache: 'no-store' });
+                if (r.ok) _session = await r.json();
+            } catch (_) { /* the default below */ }
+        }
+        return (_session && _session.hub_url) || DEFAULT_HUB_URL;
+    }
+
+    function _notify(msg, type) {
+        if (typeof showNotification === 'function') showNotification(msg, type);
+    }
+
+    async function _copyText(text) {
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+                return true;
+            }
+        } catch (_) { /* fall back */ }
+        // Plain http over the LAN has no async clipboard.
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+        ta.remove();
+        return ok;
+    }
+
+    async function copyLink(file) {
+        if (!file || file.sample_id == null) {
+            _notify('Select a sample first', 'error');
+            return null;
+        }
+        const url = linkFromSession({ hub_url: await _hubUrl() }, file.sample_id);
+        api.lastCopied = url;
+        if (await _copyText(url)) _notify('Link copied', 'success');
+        else window.prompt('Copy this link:', url);
+        return url;
+    }
+
+    /** The sample context menu's "Copy link" (called by showContextMenu). */
+    function wireContextItem(file) {
+        const item = document.getElementById('ctx-copy-link');
+        if (!item) return;
+        const fresh = item.cloneNode(true);
+        item.replaceWith(fresh);
+        fresh.style.display = '';
+        fresh.addEventListener('click', () => {
+            if (typeof removeContextMenu === 'function') removeContextMenu();
+            copyLink(file);
+        });
+    }
+
+    function _renderOtherRuns(resolved) {
+        const old = document.getElementById('deeplink-runs');
+        if (old) old.remove();
+        const runs = otherRuns(resolved);
+        const grid = document.getElementById('dash-grid');
+        if (!runs.length || !grid) return;
+        const box = document.createElement('div');
+        box.id = 'deeplink-runs';
+        box.dataset.testid = 'other-runs';
+        box.style.cssText = 'font-size:12px;color:#9da7b3;padding:4px 8px;';
+        const title = document.createElement('span');
+        title.textContent = otherRunsTitle(resolved.lab_id) + ' ';
+        box.appendChild(title);
+        runs.forEach((r, i) => {
+            if (i) box.appendChild(document.createTextNode(', '));
+            const a = document.createElement('a');
+            a.href = r.href;
+            a.textContent = r.label + (r.status && r.status !== 'final' ? ` (${r.status})` : '');
+            a.style.color = '#58a6ff';
+            box.appendChild(a);
+        });
+        grid.parentElement.insertBefore(box, grid);
+    }
+
+    async function _json(url) {
+        const r = await fetch(url, { cache: 'no-store' });
+        const body = await r.json().catch(() => ({}));
+        return { ok: r.ok, body };
+    }
+
+    /** Make ``file`` the one selected sample, as a plain click would. */
+    function _select(file) {
+        const uid = typeof sampleUid === 'function' ? sampleUid(file) : String(file.sample_id);
+        state.selectedUids = new Set([uid]);
+        state.selectionAnchor = uid;
+        state.selectedFile = file;
+        state.selectedSample = file;
+        const label = document.getElementById('analysis-sample-label');
+        if (label) label.textContent = file.name;
+    }
+
+    /** The sample's row, loading it (by its lab ID, every instrument) when the
+        list's page or instrument filter leaves it out. */
+    async function _fileFor(sampleId, labId) {
+        const file = findFile(state.files, sampleId);
+        if (file && (!state.listInstrument || file.instrument === state.listInstrument)) return file;
+        if (!labId) {
+            const meta = await _json(`/api/samples/${sampleId}/metadata`);
+            labId = meta.ok ? meta.body.lab_id : null;
+        }
+        if (!labId) return null;
+        const res = await _json(filesUrl({ q: labId }, 500));
+        const found = res.ok ? findFile(res.body.samples, sampleId) : null;
+        if (!found) return null;
+        state.listInstrument = null;              // this view only; not remembered
+        const sel = document.getElementById('instrument-filter');
+        if (sel) sel.value = '';
+        const search = document.getElementById('universal-search');
+        if (search) search.value = labId;
+        state.searchResult = { q: labId, samples: res.body.samples || [], total: res.body.total || 0 };
+        return found;
+    }
+
+    async function _open(target) {
+        if (target.kind === 'search') {
+            const search = document.getElementById('universal-search');
+            if (search) search.value = target.q;
+            if (typeof onSearchInput === 'function') onSearchInput();
+            return;
+        }
+        let sampleId = target.sampleId;
+        let resolved = null;
+        if (target.kind === 'lab') {
+            const res = await _json(labApiUrl(target.labId));
+            if (!res.ok) {
+                _notify(`No GC result for lab ID ${target.labId} yet`, 'error');
+                return;
+            }
+            resolved = res.body;
+            sampleId = resolved.sample_id;
+        }
+        const file = await _fileFor(sampleId, resolved && resolved.lab_id);
+        if (!file) {
+            _notify(`Sample #${sampleId} could not be found`, 'error');
+            return;
+        }
+        _select(file);
+        if (resolved) _renderOtherRuns(resolved);
+        const tab = target.tab || 'dashboard';
+        if (tab === 'analysis') {
+            const std = target.standard ? findStandard(state.comparisonStandards, target.standard) : null;
+            if (target.standard && !std) _notify(`No comparison standard named ${target.standard}`, 'error');
+            if (std) {
+                state.selectedStandard = std;
+                state.standardPinned = true;
+                if (typeof renderComparisonStandards === 'function') renderComparisonStandards();
+            } else {
+                state.standardPinned = false;
+                if (typeof autoSelectBestFitStandard === 'function') autoSelectBestFitStandard(file);
+            }
+        }
+        if (isAdvancedTab(tab) && !state.advancedViewsVisible && typeof toggleAdvancedViews === 'function') {
+            toggleAdvancedViews();
+        }
+        const idx = Array.from(document.querySelectorAll('.tab-btn'))
+            .findIndex(b => b.dataset.tab === tabId(tab));
+        switchTab(idx < 0 ? 0 : idx);     // re-renders the lists and loads the tab
+        const row = document.querySelector('.tab-pane.active li.selected');
+        if (row && row.scrollIntoView) row.scrollIntoView({ block: 'center' });
+    }
+
+    /** Called once by app.js after the sample list first loads. */
+    async function start() {
+        const btn = document.getElementById('btn-copy-link');
+        if (btn) btn.addEventListener('click', () => copyLink(state.selectedFile));
+        _hubUrl();                                  // warm: copying stays in the click
+        const target = parseLocation(location.pathname, location.search);
+        if (!target) return;
+        try {
+            await _open(target);
+        } catch (e) {
+            console.error('[deeplink]', e);
+            _notify('Could not open the linked sample: ' + e.message, 'error');
+        }
+        api.applied = target;
+    }
+
+    const api = Object.assign({}, pure, { start, copyLink, wireContextItem,
+                                          lastCopied: null, applied: null });
+    root.DeepLink = api;
+})(typeof window !== 'undefined' ? window : globalThis);

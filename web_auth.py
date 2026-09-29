@@ -66,7 +66,7 @@ cached in memory for 30 s (revoking clears the cache). ``last_seen`` is kept
 in memory and written by a background refresher at most once a minute per
 session, and only for activity (``note_seen``, called by the app's activity
 tracker, which skips its non-activity paths). Sign out is ``POST
-/api/logout``. ``GET /api/session`` → ``{name, method}`` (or the gate's 401).
+/api/logout``. ``GET /api/session`` → ``{name, method, hub_url}`` (or the gate's 401).
 
 **Logging**: a sign-in logs the name, method and client address; a failed
 one logs the address, the method and ``sha256(username)[:8]`` — never the
@@ -763,7 +763,10 @@ def api_session():
     s = current_user()
     if s is None:           # the gate refuses first; kept for safety
         return _login_required()
-    return jsonify({"name": s["name"], "method": s["method"]})
+    # hub_url: the address a copied sample link uses (always the configured
+    # hub, never this request's origin; sendable links, v3.1)
+    return jsonify({"name": s["name"], "method": s["method"],
+                    "hub_url": admin_auth.effective_hub_url()})
 
 
 @bp.route(LOGIN_PATH, methods=["GET"])

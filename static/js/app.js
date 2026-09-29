@@ -1109,6 +1109,9 @@ function showContextMenu(e, file) {
         });
     }
 
+    // "Copy link" (static/js/deeplink.js): <hub_url>/samples/<id>
+    if (typeof DeepLink !== 'undefined') DeepLink.wireContextItem(file);
+
     // Remove on click elsewhere
     const handler = (ev) => {
         if (!menu.contains(ev.target)) {
@@ -1813,6 +1816,8 @@ function showStandardContextMenu(e, std) {
     if (reprocItem) reprocItem.style.display = 'none';
     const limsItem = document.getElementById('ctx-export-lims');
     if (limsItem) limsItem.style.display = 'none';
+    const copyItem = document.getElementById('ctx-copy-link');
+    if (copyItem) copyItem.style.display = 'none';
 
     // Show rename + remove options
     const renameItem = document.getElementById('ctx-rename-standard');
@@ -4453,6 +4458,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.error('Initialization error:', e);
         showNotification('Some data failed to load on startup', 'error');
     }
+
+    // Sendable links (/lab/<id>, /samples/<id>[/compare|/data]): select the
+    // linked sample and tab once the list is loaded (static/js/deeplink.js).
+    if (typeof DeepLink !== 'undefined') DeepLink.start();
 
     showNotification('GC Viewer ready', 'success');
 
