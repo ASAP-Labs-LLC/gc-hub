@@ -1188,3 +1188,38 @@ def test_lab_data_survives_the_database_copy(seeded, tmp_path):
                             ).fetchone()[0] == "C:/share/gc2.csv"
     finally:
         conn.close()
+
+
+# ── integration with hub_control (the tray lane) ───────────────────────────
+
+def test_status_snapshot_comes_from_hub_control(seeded):
+    import hub_control
+    hub_control.reset()
+    try:
+        out, manifest = seeded.build()
+    finally:
+        hub_control.reset()
+    snap = manifest["status_snapshot"]
+    assert snap["available"] is True, snap
+    for key in ("cpu_percent", "rss_bytes", "uptime_seconds", "processing_paused",
+                "updater_paused", "queue"):
+        assert key in snap, key
+    assert b"processing_paused" in _members(out)["summary.txt"]
+
+
+def test_hub_control_stop_waits_for_a_diagnostics_bundle(tmp_path):
+    import hub_control
+    reason = "a diagnostics bundle is being built"
+    hub_control.reset()
+    try:
+        assert reason not in hub_control.busy_reasons()
+        with diagnostics.exclusive():
+            assert reason in hub_control.busy_reasons()
+        waiting = tmp_path / "b.zip"
+        waiting.write_bytes(b"x")
+        token = diagnostics.register_download(waiting, "b.zip")
+        assert reason in hub_control.busy_reasons()          # waiting to be downloaded
+        diagnostics.claim_download(token)
+        assert reason not in hub_control.busy_reasons()
+    finally:
+        hub_control.reset()
