@@ -102,11 +102,15 @@ SPEC_COLUMNS = {
                         "updated_at"},
     "sample_comments": {"id", "sample_id", "revision", "text", "preset_id", "source", "t0", "t1",
                         "author_initials", "author_ip", "created_at", "deleted_at",
-                        "deleted_by_initials", "deleted_by_ip"},
+                        "deleted_by_initials", "deleted_by_ip",
+                        "author_name", "deleted_by_name"},           # + v3
     "report_log": {"id", "sample_id", "revision", "kind", "standard_name", "params_json",
                    "ranges_json", "windows_json", "bullets_json", "bullets_text", "conclusion",
                    "conclusion_edited", "comment_ids_json", "app_version", "pdf_sha256",
-                   "created_at", "author_initials", "author_ip"},
+                   "created_at", "author_initials", "author_ip", "user_name"},   # + v3
+    # schema v3 (sign-in): browser sessions
+    "web_sessions": {"id", "token_hash", "name", "method", "created_at", "last_seen",
+                     "expires_at", "ip", "user_agent", "revoked_at"},
 }
 
 
