@@ -2220,7 +2220,6 @@ function _openAnnotationModal(regionDesc, t_start, t_end, trendDiv, sampleId) {
 
     async function _save() {
         if (busy) return;                        // one POST per save
-        if (!Comments.requireInitials()) return; // keep the modal open
         const current = state.selectedSample ? state.selectedSample.sample_id : null;
         if (sampleId == null || current !== sampleId) {
             // Drawn on one sample, another is selected now: never save it there
@@ -2946,6 +2945,9 @@ function connectUploadSSE() {
     };
     uploadSSE.onerror = () => {
         if (uploadSSE) { uploadSSE.close(); uploadSSE = null; }
+        // An EventSource can't see a 401: ask /api/session, which sends the
+        // page to /login when the session has ended (session.js).
+        if (window.GCSession && window.GCSession.check) window.GCSession.check();
         const startBtn = document.getElementById('btn-qbench-start');
         if (startBtn) { startBtn.disabled = false; startBtn.textContent = 'Start Upload'; }
         _updateUploadIndicator('error', 'Upload connection lost');

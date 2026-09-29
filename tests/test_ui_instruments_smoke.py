@@ -27,7 +27,7 @@ pytest.importorskip("netCDF4")
 webdriver = pytest.importorskip("selenium.webdriver")
 
 import store  # noqa: E402
-from bootapp import booted  # noqa: E402
+from bootapp import browser_sign_in, booted  # noqa: E402
 from hub_boot import SIMDIS, build_hub  # noqa: E402
 
 PLOTLY_STUB = """
@@ -91,6 +91,7 @@ def test_two_instruments_same_lab_id_are_distinguishable_and_filterable(tmp_path
 
     with booted(tmp_path) as (port, _proc, _data, _home):
         drv = _driver()
+        browser_sign_in(drv, port)
         try:
             drv.get(f"http://127.0.0.1:{port}/")
             assert _wait(lambda: len(_rows(drv)) >= 8), _rows(drv)

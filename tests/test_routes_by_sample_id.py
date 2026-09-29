@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover
 
 pytestmark = pytest.mark.skipif(not HAVE_DEPS, reason="needs flask, netCDF4, scipy")
 
-from bootapp import booted, get, post, send, wait_for  # noqa: E402
+from bootapp import get_text, booted, get, post, send, wait_for  # noqa: E402
 
 UNKNOWN = 999999
 
@@ -629,12 +629,12 @@ def test_server_search_with_filters(hub_app):
 def test_index_has_no_scan_controls_and_loads_the_sample_helpers(hub_app):
     import urllib.request
     port, _hub, _ = hub_app
-    html = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read().decode()
+    html = get_text(port, "/")
     for gone in ('id="btn-scan"', 'id="btn-stop"', 'id="btn-rebuild-db"', 'id="btn-reindex-times"',
                  'id="modal-log"'):
         assert gone not in html, gone
     assert html.index("js/samples.js") < html.index("js/app.js")
-    js = urllib.request.urlopen(f"http://127.0.0.1:{port}/static/js/app.js", timeout=5).read().decode()
+    js = get_text(port, "/static/js/app.js")
     for gone in ("/api/scan", "/api/rebuild-db", "/api/library/reindex-times", "/api/files/refresh",
                  "/api/trace?", "/api/distillation-curve?", "sample_path", "pdf_path"):
         assert gone not in js, gone

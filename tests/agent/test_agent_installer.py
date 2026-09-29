@@ -253,3 +253,113 @@ def test_missing_tray_deps_stop_the_install(tmp_path, capsys):
 def test_autostart_command_quotes_paths():
     cmd = INSTALL.autostart_command("C:\\Py 3\\pythonw.exe", "C:\\Users\\a b\\gc-agent")
     assert cmd == '"C:\\Py 3\\pythonw.exe" "C:\\Users\\a b\\gc-agent\\launcher.pyw"'
+
+
+# ── over the internet (spec D5, amendments 3 and 16) ─────────────────────
+
+def _closed_port():
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _with_lan(src, **extra):
+    d = json.loads((src / "install.json").read_text())
+    d.update(extra)
+    (src / "install.json").write_text(json.dumps(d))
+
+
+def test_lan_url_from_install_json_goes_into_agent_json(tmp_path):
+    src, _ = _download(tmp_path, hub_url="https://gc.asaplabs.net")
+    _with_lan(src, lan_url="http://asapsv1:5560/")
+    home, _, _ = _home(tmp_path, None)
+    root = tmp_path / "root"
+    r = _run(src, root, home)
+    assert r.returncode == 0, r.stdout + r.stderr
+    cfg = json.loads((root / "agent.json").read_text())
+    assert cfg["hub_url"] == "https://gc.asaplabs.net" and cfg["lan_url"] == "http://asapsv1:5560"
+
+
+@pytest.mark.parametrize("lan", [None, "absent"])
+def test_no_lan_url_in_install_json_clears_it(tmp_path, lan):
+    src, _ = _download(tmp_path)
+    if lan is None:
+        _with_lan(src, lan_url=None)
+    home, _, _ = _home(tmp_path, None)
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "agent.json").write_text(json.dumps({"hub_url": "http://old:5560", "token": "x",
+                                                 "lan_url": "http://stale:5560"}))
+    assert _run(src, root, home).returncode == 0
+    assert json.loads((root / "agent.json").read_text())["lan_url"] == ""
+
+
+def test_bad_lan_url_in_install_json_is_refused(tmp_path):
+    src, _ = _download(tmp_path)
+    _with_lan(src, lan_url="asapsv1:5560")
+    home, _, _ = _home(tmp_path, None)
+    r = _run(src, tmp_path / "root", home)
+    assert r.returncode != 0 and "lan_url" in (r.stdout + r.stderr)
+
+
+def test_running_agent_gets_the_lan_url_updated_in_place(tmp_path):
+    src, _ = _download(tmp_path)
+    home, _, _ = _home(tmp_path, None)
+    root = tmp_path / "root"
+    assert _run(src, root, home).returncode == 0
+    (src / "install.json").write_text(json.dumps({"hub_url": "https://gc.asaplabs.net",
+                                                  "token": "tok-NEW",
+                                                  "lan_url": "http://asapsv1:5560"}))
+    launcher = INSTALL._load_module(AGENT / "launcher.pyw", "gc_launcher_lan")
+    held = launcher.acquire_single_instance(str(root))
+    try:
+        r = _run(src, root, home)
+    finally:
+        held.release()
+    assert r.returncode == 0, r.stdout + r.stderr
+    cfg = json.loads((root / "agent.json").read_text())
+    assert cfg["lan_url"] == "http://asapsv1:5560" and cfg["token"] == "tok-NEW"
+
+
+def test_download_names_itself_to_cloudflare(tmp_path, hub):
+    zp = tmp_path / "pkg.zip"
+    BUILDER.build(AGENT, "v7.0.0", zp)
+    hub.package_version, hub.package_zip = "v7.0.0", zp.read_bytes()
+    src, _ = _download(tmp_path, hub_url=hub.url, token=hub.token, package=False)
+    home, _, _ = _home(tmp_path)
+    assert _run(src, tmp_path / "root", home).returncode == 0
+    agents = {r.header("User-Agent") for r in hub.requests}
+    assert agents == {INSTALL.USER_AGENT} and INSTALL.USER_AGENT == "gc-agent/installer"
+
+
+def test_download_falls_back_to_the_lan_url_after_a_network_error(tmp_path, hub):
+    zp = tmp_path / "pkg.zip"
+    sha = BUILDER.build(AGENT, "v7.0.0", zp)
+    hub.package_version, hub.package_zip = "v7.0.0", zp.read_bytes()
+    src, _ = _download(tmp_path, hub_url="http://127.0.0.1:%d" % _closed_port(),
+                       token=hub.token, package=False)
+    _with_lan(src, lan_url=hub.url)
+    home, _, _ = _home(tmp_path)
+    r = _run(src, tmp_path / "root", home)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tmp_path / "root" / "versions" / "v7.0.0" / "PACKAGE_SHA256").read_text().strip() \
+        == sha
+
+
+def test_a_cloudflare_block_is_named_and_does_not_fall_back(tmp_path, hub):
+    other = type(hub)(token=hub.token).start()
+    try:
+        hub.raw_script.append((403, {"cf-mitigated": "challenge", "Content-Type": "text/html"},
+                               b"<html>Just a moment...</html>"))
+        src, _ = _download(tmp_path, hub_url=hub.url, token=hub.token, package=False)
+        _with_lan(src, lan_url=other.url)
+        home, _, _ = _home(tmp_path)
+        r = _run(src, tmp_path / "root", home)
+        assert r.returncode != 0
+        assert "Cloudflare blocked the agent" in r.stdout + r.stderr
+        assert other.requests == []
+    finally:
+        other.stop()

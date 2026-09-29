@@ -280,6 +280,61 @@
     } catch (e) { say(e.message, "err"); }
   }
 
+  // ── hub address and sessions ──
+  async function saveHubUrl() {
+    try {
+      const j = await call("/api/admin/hub-url", {hub_url: $("hub-url").value.trim()});
+      $("hub-url-effective").textContent = j.effective || j.hub_url || "https://gc.asaplabs.net";
+      say("Hub address saved: " + $("hub-url-effective").textContent, "ok");
+    } catch (e) { say(e.message, "err"); }
+  }
+
+  function renderSessions(rows) {
+    const tb = $("sessions");
+    tb.textContent = "";
+    for (const s of rows || []) {
+      const tr = document.createElement("tr");
+      for (const v of [s.name, s.method, s.ip || "", (s.last_seen || "").replace("T", " ").slice(0, 19)]) {
+        const td = document.createElement("td");
+        td.textContent = v;
+        tr.appendChild(td);
+      }
+      const td = document.createElement("td");
+      const one = document.createElement("button");
+      one.textContent = "Revoke";
+      one.className = "warn";
+      one.addEventListener("click", () => sessionCall("revoke", {id: s.id}));
+      const all = document.createElement("button");
+      all.textContent = "Revoke all for this name";
+      all.className = "warn";
+      all.addEventListener("click", () => {
+        if (confirm("Sign out every session of " + s.name + "?")) sessionCall("revoke-name", {name: s.name});
+      });
+      td.appendChild(one);
+      td.appendChild(all);
+      tr.appendChild(td);
+      tb.appendChild(tr);
+    }
+    if (!rows || !rows.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 5;
+      td.textContent = "No active sessions.";
+      tr.appendChild(td);
+      tb.appendChild(tr);
+    }
+  }
+
+  async function sessionCall(action, extra) {
+    try {
+      const j = await call("/api/admin/sessions", Object.assign({action}, extra || {}));
+      renderSessions(j.sessions);
+      if (action !== "list") say("Done", "ok");
+    } catch (e) { say(e.message, "err"); }
+  }
+
+  $("btn-hub-url").addEventListener("click", saveHubUrl);
+  $("btn-sessions").addEventListener("click", () => sessionCall("list"));
   $("btn-presets-load").addEventListener("click", loadPresets);
   $("btn-preset-add").addEventListener("click", addPreset);
   $("btn-refresh").addEventListener("click", refresh);

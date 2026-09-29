@@ -9,6 +9,7 @@ from . import util
 
 DEFAULTS = {
     "hub_url": "",
+    "lan_url": "",       # optional: tried only after a network/TLS error on hub_url
     "token": "",
     "watch_dir": "",
     "include_subdirs": True,
@@ -40,6 +41,12 @@ def validate(raw):
     if not isinstance(url, str) or not (url.startswith("http://") or url.startswith("https://")) \
             or len(url) <= len("http://"):
         bad.append("hub_url (must start with http:// or https://)")
+    lan = cfg["lan_url"]
+    if lan is None:
+        lan = cfg["lan_url"] = ""
+    if not isinstance(lan, str) or (lan and (not lan.startswith(("http://", "https://"))
+                                            or len(lan) <= len("http://"))):
+        bad.append("lan_url (must be empty or start with http:// or https://)")
     if not isinstance(cfg["token"], str) or not cfg["token"].strip():
         bad.append("token (missing)")
     for key in ("watch_dir", "results_mirror_path", "python"):
@@ -55,6 +62,7 @@ def validate(raw):
     if bad:
         raise ConfigError("agent.json: bad " + "; ".join(bad))
     cfg["hub_url"] = cfg["hub_url"].rstrip("/")
+    cfg["lan_url"] = cfg["lan_url"].strip().rstrip("/")
     cfg["token"] = cfg["token"].strip()
     if cfg["watch_dir"].strip():
         cfg["watch_dir"] = os.path.normpath(cfg["watch_dir"].strip())

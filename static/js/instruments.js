@@ -84,6 +84,8 @@
         const form = $('hub-url-form');
         const hubInput = form && form.elements.namedItem('hub_url');
         if (hubInput && document.activeElement !== hubInput) hubInput.value = STATE.hubUrl || '';
+        const eff = $('hub-url-effective');
+        if (eff) eff.textContent = body.hub_url_effective || '';
         renderList();
         const want = keepSelection ? STATE.selected : (new URLSearchParams(location.search).get('instrument')
             || (STATE.list[0] && STATE.list[0].id));
@@ -303,9 +305,6 @@
             await afterChange('Installer downloaded. It holds the new token: copy it to the GC PC and run install.pyw.');
         } else if (out.kind === 'confirm') {
             if (confirm(out.message)) await installer(id, true);
-        } else if (out.kind === 'needs_hub_url') {
-            flash(out.message + ' Set it under "Hub URL for installers" (left).', 'err');
-            $('hub-url-box').open = true;
         } else {
             flash(out.message, 'err');
         }
@@ -623,7 +622,7 @@
     $('hub-url-form').addEventListener('submit', async (ev) => {
         ev.preventDefault();
         const r = await adminPost('/api/admin/hub-url', { hub_url: ev.target.elements.namedItem('hub_url').value.trim() });
-        if (r && r.status === 200) await afterChange(r.body.hub_url ? 'Hub URL set to ' + r.body.hub_url + '.' : 'Hub URL cleared.');
+        if (r && r.status === 200) await afterChange(r.body.hub_url ? 'Hub URL set to ' + r.body.hub_url + '.' : 'Hub URL cleared: installers use ' + (r.body.effective || 'https://gc.asaplabs.net') + '.');
     });
 
     $('btn-refresh').addEventListener('click', () => { lemMachines(true); buildAddLem(); loadList(true); });

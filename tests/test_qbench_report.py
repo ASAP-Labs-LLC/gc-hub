@@ -57,7 +57,7 @@ def test_the_shared_analysis_reports_a_spike_in_a_saved_overlay():
 
     import cdf_fixtures as fx
     import hub_boot
-    from bootapp import booted, wait_for
+    from bootapp import cookie_header, booted, wait_for
 
     tmp = Path(tempfile.mkdtemp(prefix="gc-t5-qb-"))
     try:
@@ -79,7 +79,8 @@ def test_the_shared_analysis_reports_a_spike_in_a_saved_overlay():
             req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/api/export-analysis-report",
                 data=json.dumps({"sample_id": hub.ids["final"], "standard_name": "Base"}).encode(),
-                method="POST", headers={"Content-Type": "application/json"})
+                method="POST", headers={"Content-Type": "application/json",
+                                        **cookie_header(port)})
             with urllib.request.urlopen(req, timeout=120) as r:
                 pdf = r.read()
         text = "\n".join(p.extract_text() or "" for p in pypdf.PdfReader(io.BytesIO(pdf)).pages)

@@ -83,7 +83,7 @@ def test_bundle_then_one_time_download(client):
         members = {n: z.read(n) for n in z.namelist()}
     assert _hits(members, MARKER) == []
     assert _hits(members, PW) == []
-    assert manifest["who"] == "admin@127.0.0.1"
+    assert manifest["who"] == "127.0.0.1"    # no session on this bare app: the address alone
     assert manifest["options"]["all_cdfs"] is True
     # single use, and the file is gone once streamed
     assert c.get(j["download"]).status_code == 404

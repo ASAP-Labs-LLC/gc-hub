@@ -55,47 +55,61 @@ def test_bad_initials_are_refused(raw):
     _err(lambda: comments.normalize_initials(raw), 400)
 
 
+# rev 2: the signed-in name decides the initials; the client's are ignored
+@pytest.mark.parametrize("name,ini", [
+    ("Ryan C", "RC"), ("ryan brown", "RB"), ("Jane Doe-Smith", "JDS"), ("jdoe", "J"),
+    ("Admin (break-glass)", "ABG"), ("Anna Maria de la Cruz", "AMDL"), ("O'Neil", "ON"),
+    ("Élodie Ünal", "EU"),
+    ("123", "X"), ("", "X"), (None, "X"), ("  --  ", "X"),
+])
+def test_initials_from_name(name, ini):
+    got = comments.initials_from_name(name)
+    assert got == ini
+    assert comments._INITIALS_RE.match(got)
+
+
 # ── adding ──────────────────────────────────────────────────────────────────
 
 def test_free_comment(db):
     sid = _sample(db, anchors=ANCHORS)
-    c = comments.add_comment(sid, initials="rb", text="  Looks odd  ", author_ip="10.0.0.5", db=db)
+    c = comments.add_comment(sid, author_name="ryan brown", text="  Looks odd  ", author_ip="10.0.0.5", db=db)
     assert c["text"] == "Looks odd" and c["source"] == "free" and c["initials"] == "RB"
     assert c["revision"] == 1 and c["t0"] is None and c["t1"] is None
     assert "author_ip" not in c and "ip" not in json.dumps(c)
     row = store.sample_comments.get(c["id"], db=db)
     assert row["author_ip"] == "10.0.0.5" and row["author_initials"] == "RB"
+    assert row["author_name"] == "ryan brown" and c["name"] == "ryan brown"
 
 
 def test_unknown_sample_is_404(db):
-    _err(lambda: comments.add_comment(424242, initials="RB", text="x", db=db), 404)
+    _err(lambda: comments.add_comment(424242, author_name="Ryan Brown", text="x", db=db), 404)
 
 
 def test_text_limits(db):
     sid = _sample(db)
-    assert comments.add_comment(sid, initials="RB", text="x" * 500, db=db)["text"] == "x" * 500
-    _err(lambda: comments.add_comment(sid, initials="RB", text="x" * 501, db=db), 400)
-    _err(lambda: comments.add_comment(sid, initials="RB", text="   ", db=db), 400)
-    _err(lambda: comments.add_comment(sid, initials="RB", db=db), 400)
-    _err(lambda: comments.add_comment(sid, initials="RB", text=["x"], db=db), 400)
-    _err(lambda: comments.add_comment(sid, initials="", text="x", db=db), 400)
+    assert comments.add_comment(sid, author_name="Ryan Brown", text="x" * 500, db=db)["text"] == "x" * 500
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", text="x" * 501, db=db), 400)
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", text="   ", db=db), 400)
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", db=db), 400)
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", text=["x"], db=db), 400)
+    _err(lambda: comments.add_comment(sid, author_name="", text="x", db=db), 400)
 
 
 def test_at_most_100_active_comments(db):
     sid = _sample(db)
     first = None
     for i in range(100):
-        c = comments.add_comment(sid, initials="RB", text=f"c{i}", db=db)
+        c = comments.add_comment(sid, author_name="Ryan Brown", text=f"c{i}", db=db)
         first = first or c
-    _err(lambda: comments.add_comment(sid, initials="RB", text="one too many", db=db), 409)
-    comments.delete_comment(sid, first["id"], initials="RB", db=db)   # deleted ones don't count
-    assert comments.add_comment(sid, initials="RB", text="fits again", db=db)
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", text="one too many", db=db), 409)
+    comments.delete_comment(sid, first["id"], author_name="Ryan Brown", db=db)   # deleted ones don't count
+    assert comments.add_comment(sid, author_name="Ryan Brown", text="fits again", db=db)
 
 
 def test_preset_text_is_copied(db):
     sid = _sample(db)
     preset = store.comment_presets.list(db=db)[1]
-    c = comments.add_comment(sid, initials="JD", preset_id=preset["id"], db=db)
+    c = comments.add_comment(sid, author_name="Jane Doe", preset_id=preset["id"], db=db)
     assert c["text"] == preset["text"] and c["source"] == "preset" and c["preset_id"] == preset["id"]
     comments.update_preset(preset["id"], text="Edited later", db=db)
     assert comments.list_comments(sid, db=db)[0]["text"] == preset["text"]
@@ -104,34 +118,34 @@ def test_preset_text_is_copied(db):
 def test_preset_refusals(db):
     sid = _sample(db)
     p = store.comment_presets.list(db=db)[0]
-    _err(lambda: comments.add_comment(sid, initials="RB", preset_id=99999, db=db), 404)
-    _err(lambda: comments.add_comment(sid, initials="RB", preset_id=p["id"], text="x", db=db), 400)
-    _err(lambda: comments.add_comment(sid, initials="RB", preset_id=True, db=db), 400)
-    _err(lambda: comments.add_comment(sid, initials="RB", preset_id=p["id"], t0=1, t1=2, db=db),
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", preset_id=99999, db=db), 404)
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", preset_id=p["id"], text="x", db=db), 400)
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", preset_id=True, db=db), 400)
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", preset_id=p["id"], t0=1, t1=2, db=db),
          400)
     comments.set_preset_active(p["id"], False, db=db)
-    _err(lambda: comments.add_comment(sid, initials="RB", preset_id=p["id"], db=db), 400)
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", preset_id=p["id"], db=db), 400)
 
 
 def test_annotation_comment(db):
     sid = _sample(db, anchors=ANCHORS)
-    c = comments.add_comment(sid, initials="RB", text="Hump", t0=2.5, t1=1.5, db=db)
+    c = comments.add_comment(sid, author_name="Ryan Brown", text="Hump", t0=2.5, t1=1.5, db=db)
     assert c["source"] == "annotation" and (c["t0"], c["t1"]) == (1.5, 2.5)
     assert c["text"] == "Hump"
 
 
 def test_annotation_default_text_uses_the_revision_ladder(db):
     sid = _sample(db, anchors=ANCHORS)
-    c = comments.add_comment(sid, initials="RB", text="", t0=1.5, t1=2.5, db=db)
+    c = comments.add_comment(sid, author_name="Ryan Brown", text="", t0=1.5, t1=2.5, db=db)
     assert c["text"] == "Marked region C11–C13"
     # beyond the ladder: linear extrapolation from the end pairs
-    c = comments.add_comment(sid, initials="RB", t0=3.0, t1=4.0, db=db)
+    c = comments.add_comment(sid, author_name="Ryan Brown", t0=3.0, t1=4.0, db=db)
     assert c["text"] == "Marked region C14–C16"
 
 
 def test_annotation_default_text_without_a_ladder(db):
     sid = _sample(db)                                   # no revision, no anchors
-    c = comments.add_comment(sid, initials="RB", t0=1.234, t1=1.5, db=db)
+    c = comments.add_comment(sid, author_name="Ryan Brown", t0=1.234, t1=1.5, db=db)
     assert c["text"] == "Marked region 1.23–1.50 min"
 
 
@@ -139,30 +153,31 @@ def test_annotation_default_text_without_a_ladder(db):
                                    (1.0, float("inf")), (True, 2.0), (1.0, 1.0)])
 def test_bad_annotation_spans(db, t0, t1):
     sid = _sample(db)
-    _err(lambda: comments.add_comment(sid, initials="RB", text="x", t0=t0, t1=t1, db=db), 400)
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", text="x", t0=t0, t1=t1, db=db), 400)
 
 
 # ── deleting ────────────────────────────────────────────────────────────────
 
 def test_delete_is_soft_and_recorded(db):
     sid = _sample(db)
-    c = comments.add_comment(sid, initials="RB", text="x", author_ip="10.0.0.5", db=db)
-    out = comments.delete_comment(sid, c["id"], initials="jd", author_ip="10.0.0.9", db=db)
+    c = comments.add_comment(sid, author_name="Ryan Brown", text="x", author_ip="10.0.0.5", db=db)
+    out = comments.delete_comment(sid, c["id"], author_name="jane doe", author_ip="10.0.0.9", db=db)
     assert out["id"] == c["id"]
     row = store.sample_comments.get(c["id"], db=db)
     assert row["deleted_at"] and row["deleted_by_initials"] == "JD"
+    assert row["deleted_by_name"] == "jane doe"
     assert row["deleted_by_ip"] == "10.0.0.9" and row["text"] == "x"
     assert comments.list_comments(sid, db=db) == []
-    _err(lambda: comments.delete_comment(sid, c["id"], initials="JD", db=db), 409)
+    _err(lambda: comments.delete_comment(sid, c["id"], author_name="Jane Doe", db=db), 409)
 
 
 def test_delete_refusals(db):
     sid = _sample(db)
     other = _sample(db, lab_id="40400")
-    c = comments.add_comment(sid, initials="RB", text="x", db=db)
-    _err(lambda: comments.delete_comment(other, c["id"], initials="RB", db=db), 404)
-    _err(lambda: comments.delete_comment(sid, 99999, initials="RB", db=db), 404)
-    _err(lambda: comments.delete_comment(sid, c["id"], initials="", db=db), 400)
+    c = comments.add_comment(sid, author_name="Ryan Brown", text="x", db=db)
+    _err(lambda: comments.delete_comment(other, c["id"], author_name="Ryan Brown", db=db), 404)
+    _err(lambda: comments.delete_comment(sid, 99999, author_name="Ryan Brown", db=db), 404)
+    _err(lambda: comments.delete_comment(sid, c["id"], author_name="", db=db), 400)
     assert len(comments.list_comments(sid, db=db)) == 1
 
 
@@ -170,15 +185,17 @@ def test_delete_refusals(db):
 
 def test_for_report_shape(db):
     sid = _sample(db, anchors=ANCHORS)
-    a = comments.add_comment(sid, initials="RB", text="first <img src=x>", author_ip="1.2.3.4",
+    a = comments.add_comment(sid, author_name="Ryan Brown", text="first <img src=x>", author_ip="1.2.3.4",
                              db=db)
-    b = comments.add_comment(sid, initials="JD", text="span", t0=1.0, t1=2.0, db=db)
-    d = comments.add_comment(sid, initials="JD", text="gone", db=db)
-    comments.delete_comment(sid, d["id"], initials="JD", db=db)
+    b = comments.add_comment(sid, author_name="Jane Doe", text="span", t0=1.0, t1=2.0, db=db)
+    d = comments.add_comment(sid, author_name="Jane Doe", text="gone", db=db)
+    comments.delete_comment(sid, d["id"], author_name="Jane Doe", db=db)
     rows = comments.for_report(sid, db)
-    assert [set(r) for r in rows] == [{"id", "text", "initials", "created_at", "t0", "t1"}] * 2
+    assert [set(r) for r in rows] == [{"id", "text", "initials", "author_name", "created_at",
+                                       "t0", "t1"}] * 2
     assert [r["id"] for r in rows] == [a["id"], b["id"]]              # time order, no deleted
     assert rows[0] == {"id": a["id"], "text": "first <img src=x>", "initials": "RB",
+                       "author_name": "Ryan Brown",
                        "created_at": a["created_at"], "t0": None, "t1": None}
     assert (rows[1]["t0"], rows[1]["t1"]) == (1.0, 2.0)
     assert "1.2.3.4" not in json.dumps(rows)
@@ -195,7 +212,7 @@ def test_log_report_writes_the_spec_fields(db):
         windows=[{"label": "Gas", "t0": 0.4, "t1": 1.2}], bullets=[{"kind": "none"}],
         bullets_text="No deviations above the marginal threshold.", conclusion="Fine.",
         conclusion_edited=True, comment_ids=[3, 4], pdf_sha256="ab" * 32,
-        author_initials="rb", author_ip="10.0.0.5", db=db)
+        user_name="Ryan Brown", author_ip="10.0.0.5", db=db)
     row = store.report_log.list(sid, db=db)[0]
     assert row["id"] == rid and row["kind"] == "qbench" and row["revision"] == 1
     assert json.loads(row["params_json"]) == {"quantile": 0.2, "window": 301}
@@ -205,6 +222,7 @@ def test_log_report_writes_the_spec_fields(db):
     assert json.loads(row["comment_ids_json"]) == [3, 4]
     assert row["conclusion_edited"] == 1 and row["bullets_text"].startswith("No deviations")
     assert row["author_initials"] == "RB" and row["author_ip"] == "10.0.0.5"
+    assert row["user_name"] == "Ryan Brown"
     assert row["app_version"] and row["created_at"]
     with pytest.raises(ValueError):
         comments.log_report(sid, kind="email", db=db)
@@ -255,28 +273,28 @@ def test_reorder_must_name_every_preset(db):
 @pytest.mark.parametrize("t0,t1", [(-0.1, 1.0), (1.0, 1000.5), (-5, -1), (1e308, 2e308)])
 def test_annotation_times_are_bounded(db, t0, t1):
     sid = _sample(db)
-    _err(lambda: comments.add_comment(sid, initials="RB", text="x", t0=t0, t1=t1, db=db), 400)
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", text="x", t0=t0, t1=t1, db=db), 400)
 
 
 def test_annotation_times_at_the_bounds(db):
     sid = _sample(db)
-    c = comments.add_comment(sid, initials="RB", text="x", t0=0, t1=1000, db=db)
+    c = comments.add_comment(sid, author_name="Ryan Brown", text="x", t0=0, t1=1000, db=db)
     assert (c["t0"], c["t1"]) == (0.0, 1000.0)
 
 
 @pytest.mark.parametrize("pid", [2 ** 70, -1, 0, 2 ** 63])
 def test_out_of_range_ids_are_400(db, pid):
     sid = _sample(db)
-    _err(lambda: comments.add_comment(sid, initials="RB", preset_id=pid, db=db), 400)
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", preset_id=pid, db=db), 400)
     _err(lambda: comments.update_preset(pid, text="x", db=db), 400)
     _err(lambda: comments.set_preset_active(pid, False, db=db), 400)
 
 
 def test_control_characters_are_stripped(db):
     sid = _sample(db)
-    c = comments.add_comment(sid, initials="RB", text="a\x00b\x1bc\n\td\r\x07", db=db)
+    c = comments.add_comment(sid, author_name="Ryan Brown", text="a\x00b\x1bc\n\td\r\x07", db=db)
     assert c["text"] == "abc\n\td"
-    _err(lambda: comments.add_comment(sid, initials="RB", text="\x00\x01", db=db), 400)
+    _err(lambda: comments.add_comment(sid, author_name="Ryan Brown", text="\x00\x01", db=db), 400)
     p = comments.create_preset("P\x00reset\x1f", by="a", db=db)
     assert p["text"] == "Preset"
 

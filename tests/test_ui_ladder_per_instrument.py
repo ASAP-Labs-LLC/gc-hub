@@ -30,7 +30,7 @@ for _p in (ROOT, TESTS, TESTS / "golden"):
 pytest.importorskip("flask")
 pytest.importorskip("netCDF4")
 
-from bootapp import booted, get  # noqa: E402
+from bootapp import browser_sign_in, booted, get  # noqa: E402
 from hub_boot import build_hub  # noqa: E402
 
 PLOTLY_STUB = r"""
@@ -166,6 +166,7 @@ def _wait(pred, timeout=20.0):
 def page(hub_app):
     port, hub, ladders = hub_app
     drv = _driver()
+    browser_sign_in(drv, port)
     try:
         drv.get(f"http://127.0.0.1:{port}/")
         assert _wait(lambda: drv.execute_script("return state.files.length") >= 5)

@@ -201,6 +201,21 @@ def test_maintenance_backs_up_once_a_day_and_prunes_done_jobs(tmp_path):
     assert notes == []
 
 
+def test_maintenance_prunes_sessions_that_ended_over_30_days_ago(tmp_path):
+    from datetime import timezone
+    h = _hub_folder(tmp_path)
+    store.migrate(h.db)
+    now = datetime.now(timezone.utc)
+    iso = lambda d: d.isoformat(timespec="microseconds")  # noqa: E731
+    store.web_sessions.add("old", name="A", method="password", ip=None, user_agent=None,
+                           expires_at=iso(now - timedelta(days=31)), db=h.db)
+    store.web_sessions.add("live", name="B", method="password", ip=None, user_agent=None,
+                           expires_at=iso(now + timedelta(days=1)), db=h.db)
+    res = hub.Maintenance(h.db, h.data).run_once(now=datetime.now())
+    assert res["sessions_pruned"] == 1
+    assert [s["name"] for s in store.web_sessions.list_active(db=h.db)] == ["B"]
+
+
 def test_a_failed_backup_notifies_once_and_retries_later(tmp_path, monkeypatch):
     h = _hub_folder(tmp_path)
     store.migrate(h.db)

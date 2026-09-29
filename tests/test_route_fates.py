@@ -7,6 +7,11 @@ it equals every row whose fate is not ``removed``, and that no ``removed``
 path is registered. So no route can be forgotten, added without a fate, or
 come back after removal.
 
+The table's **Auth** column (sign-in, spec D3 rev 2) classifies every route as
+``open``, ``local``, ``setup`` or ``session``; it must equal what the session
+gate does (``web_auth.route_class``), so no route can be added, or opened,
+without saying who may call it.
+
 "Registered" covers ``@app.route`` and ``app.add_url_rule`` in app.py, and
 every Blueprint app.py registers (``app.register_blueprint(mod.bp)``):
 ``@bp.route`` / ``bp.add_url_rule`` in that module, with module-level string
@@ -22,6 +27,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PLAN = ROOT / "docs" / "superpowers" / "plans" / "2026-09-28-phase2-T4-routes.md"
 FATES = {"migrated", "unchanged", "removed", "new"}
+AUTH = {"open", "local", "setup", "session"}
+# The open routes, exactly (amendment 19: no prefix globs; /api/agents is gated).
+OPEN_ROUTES = {"/healthz", "/login", "/api/login", "/api/login/card", "/api/login/admin",
+               "/api/logout", "/api/ingest", "/api/agent/heartbeat", "/api/agent/results",
+               "/api/agent/package", "/api/agent/package.zip"}
+LOCAL_ROUTES = {"/api/hub/status", "/api/admin/hub/pause-processing",
+                "/api/admin/hub/resume-processing", "/api/admin/hub/stop", "/api/restart"}
 
 
 def _constants(tree: ast.Module) -> dict:
@@ -100,6 +112,11 @@ def registered_routes() -> dict[str, frozenset]:
 
 
 def plan_table() -> list[tuple[str, frozenset, str]]:
+    return [(p, m, f) for p, m, f, _a in plan_rows()]
+
+
+def plan_rows() -> list[tuple[str, frozenset, str, str]]:
+    """``(path, methods, fate, auth)`` for every row of the table."""
     text = PLAN.read_text(encoding="utf-8")
     m = re.search(r"<!-- route-fates:begin -->(.*?)<!-- route-fates:end -->", text, re.S)
     assert m, "route-fates markers missing from the T4 plan"
@@ -110,7 +127,7 @@ def plan_table() -> list[tuple[str, frozenset, str]]:
             continue
         path = cells[0].strip("`")
         methods = frozenset(x.strip() for x in cells[1].split(","))
-        rows.append((path, methods, cells[2]))
+        rows.append((path, methods, cells[2], cells[3]))
     return rows
 
 
@@ -145,6 +162,33 @@ class RouteFateTests(unittest.TestCase):
         self.assertTrue(removed)
         for path in removed:
             self.assertNotIn(path, registered, f"{path} should be removed")
+
+    def test_every_route_says_who_may_call_it(self):
+        for path, _m, fate, auth in plan_rows():
+            if fate == "removed":
+                self.assertEqual(auth, "—", path)
+            else:
+                self.assertIn(auth, AUTH, path)
+        live = {p: a for p, _m, f, a in plan_rows() if f != "removed"}
+        self.assertEqual({p for p, a in live.items() if a == "open"}, OPEN_ROUTES)
+        self.assertEqual({p for p, a in live.items() if a == "local"}, LOCAL_ROUTES)
+        self.assertEqual({p for p, a in live.items() if a == "setup"},
+                         {"/admin/setup", "/api/admin/setup"})
+        self.assertEqual(live.get("/api/agents"), "session")
+
+    def test_the_auth_column_is_what_the_gate_does(self):
+        try:
+            import flask  # noqa: F401
+        except ImportError:
+            self.skipTest("flask is not installed")
+        import sys
+        sys.path.insert(0, str(ROOT))
+        import web_auth
+        for path, _m, fate, auth in plan_rows():
+            if fate != "removed":
+                self.assertEqual(web_auth.route_class(path), auth, path)
+        for path in registered_routes():
+            self.assertIn(web_auth.route_class(path), AUTH, path)
 
     def test_no_route_takes_a_file_path(self):
         for path in registered_routes():

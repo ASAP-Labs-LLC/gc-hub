@@ -22,7 +22,8 @@ pytest.importorskip("flask")
 pytest.importorskip("netCDF4")
 
 import store  # noqa: E402
-from bootapp import TEST_ADMIN_PASSWORD as PW, booted, send, setup_admin  # noqa: E402
+from bootapp import (TEST_ADMIN_PASSWORD as PW, booted, cookie_header, send,  # noqa: E402
+                     setup_admin)
 
 
 def raw(port, request_bytes: bytes, timeout=5.0):
@@ -86,9 +87,15 @@ def test_review_findings(tmp_path):
         line, dt = raw(port, (b"POST /api/admin/setup HTTP/1.1\r\nHost: 127.0.0.1\r\n"
                               b"Content-Type: application/json\r\nContent-Length: 150000000\r\n\r\n"))
         assert " 413 " in line + " ", line
+        cookie = cookie_header(port)["Cookie"].encode()
         line, _ = raw(port, (b"POST /api/save-analysis-defaults HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                             b"Cookie: " + cookie + b"\r\n"
                              b"Content-Type: application/json\r\nContent-Length: 150000000\r\n\r\n"))
         assert " 413 " in line + " ", line
+        # signed out, the gate answers first (401), still without reading the body
+        line, _ = raw(port, (b"POST /api/save-analysis-defaults HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                             b"Content-Type: application/json\r\nContent-Length: 150000000\r\n\r\n"))
+        assert " 401 " in line + " ", line
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
         try:
             def gen():
@@ -124,13 +131,18 @@ def test_review_findings(tmp_path):
         assert str(data) not in body["error"] and "/" not in body["error"], body
         assert ".incoming" not in body["error"]
 
-        # ── I5: the installer's hub URL
-        status, body = post_host(port, "/api/admin/instruments/gc2/installer", "evil.example:6666",
-                                 {"password": PW, "confirm_revoke": True})
-        assert status == 409 and body.get("needs_hub_url") is True, body
-        status, body = post_host(port, "/api/admin/instruments/gc2/installer",
-                                 f"localhost:{port}", {"password": PW, "confirm_revoke": True})
-        assert status == 409 and body.get("needs_hub_url") is True, body
+        # ── I5 (rev 2): the installer's hub URL never comes from the request's Host:
+        # it is the admin-set hub URL, else https://gc.asaplabs.net
+        import io
+        import zipfile
+        ck = "Cookie: " + cookie_header(port)["Cookie"] + "\r\n"
+        for host in ("evil.example:6666", f"localhost:{port}"):
+            status, body = post_host(port, "/api/admin/instruments/gc2/installer", host,
+                                     {"password": PW, "confirm_revoke": True}, ck)
+            assert status == 200, body
+            inst = json.loads(zipfile.ZipFile(io.BytesIO(body)).read("install.json"))
+            assert inst["hub_url"] == "https://gc.asaplabs.net", inst
+            assert "evil" not in json.dumps(inst) and "localhost" not in json.dumps(inst)
 
         # ── M1: revoke a token; disabled instruments' tokens get no results/package
         code, body = admin_post(port, "/api/admin/instruments/gc1/revoke-token", {"password": "nope"})

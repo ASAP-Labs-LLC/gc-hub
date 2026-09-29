@@ -28,7 +28,7 @@ for _p in (ROOT, TESTS):
 pytest.importorskip("flask")
 
 import store  # noqa: E402
-from bootapp import booted, send, wait_for  # noqa: E402
+from bootapp import cookie_header, booted, send, wait_for  # noqa: E402
 
 MiB = 1024 * 1024
 
@@ -39,7 +39,7 @@ def _raw_post(port, path, headers, body=b"", timeout=10):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
         c.putrequest("POST", path)
-        for k, v in headers.items():
+        for k, v in dict(cookie_header(port), **headers).items():
             c.putheader(k, v)
         c.endheaders()
         if body:
@@ -67,7 +67,8 @@ def _chunked_post(port, path, headers, total_bytes, timeout=20):
                 yield chunk
                 sent += len(chunk)
             yield b'"}'
-        c.request("POST", path, body=gen(), encode_chunked=True, headers=headers)
+        c.request("POST", path, body=gen(), encode_chunked=True,
+                  headers=dict(cookie_header(port), **headers))
         r = c.getresponse()
         raw = r.read()
         try:

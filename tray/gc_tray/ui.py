@@ -51,7 +51,7 @@ def build_menu(pystray, ctl, get_view, submit, *, on_exit):
     return Menu(
         Item(lambda _i: logic.status_text(get_view()), None, enabled=False),
         Menu.SEPARATOR,
-        Item("Open in browser", action(ctl.open_browser), default=True,
+        Item("Open in browser", action(ctl.open_browser, True), default=True,
              enabled=lambda _i: m()["open_enabled"]),
         Item(lambda _i: m()["pause_label"], action(ctl.toggle_pause, True),
              enabled=lambda _i: m()["pause_enabled"]),

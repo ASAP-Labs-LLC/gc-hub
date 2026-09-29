@@ -31,7 +31,8 @@ pytest.importorskip("flask")
 pytest.importorskip("netCDF4")
 
 import store  # noqa: E402
-from bootapp import booted, get, setup_admin, wait_for  # noqa: E402
+from bootapp import (booted, browser_sign_in, cookie_header, get, setup_admin,  # noqa: E402
+                     wait_for)
 from hub_boot import build_hub  # noqa: E402
 
 MARKER = "BOOTSEKRITq9z"
@@ -40,12 +41,17 @@ MARKER = "BOOTSEKRITq9z"
 def _post(port, path, body, timeout=120):
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
                                  data=json.dumps(body).encode(), method="POST",
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json",
+                                          **cookie_header(port)})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, dict(r.headers), r.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers), e.read()
+
+
+def _signed(port, path):
+    return urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=cookie_header(port))
 
 
 def _download(port, body, timeout=120):
@@ -55,7 +61,7 @@ def _download(port, body, timeout=120):
         return code, headers, data
     link = json.loads(data)["download"]
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}{link}", timeout=timeout) as r:
+        with urllib.request.urlopen(_signed(port, link), timeout=timeout) as r:
             return r.status, dict(r.headers), r.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers), e.read()
@@ -107,7 +113,7 @@ def test_download_validates_and_holds_no_secret(diag_hub):
     manifest = json.loads(members["manifest.json"])
     status, health = get(port, "/healthz")
     assert manifest["app_version"] == health["version"]
-    assert manifest["who"] == "admin@127.0.0.1"
+    assert manifest["who"] == "Test Operator (127.0.0.1)"      # the signed-in name
     assert manifest["runtime"]["running"] is True
     assert manifest["runtime"]["worker_alive"] is True
     assert manifest["runtime"]["exporter_alive"] is True
@@ -140,10 +146,16 @@ def test_estimate_and_gating(diag_hub):
     assert _post(port, "/api/admin/diagnostics/bundle", {"password": "wrong"})[0] == 403
     code, _h2, _d = _post(port, "/api/admin/diagnostics/bundle", {"password": pw})
     link = json.loads(_d)["download"]
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}{link}", timeout=60) as r:
-        r.read()
+    # the download link needs a session too (spec D3)
     try:
         urllib.request.urlopen(f"http://127.0.0.1:{port}{link}", timeout=30)
+        raise AssertionError("a download worked without a session")
+    except urllib.error.HTTPError as e:
+        assert e.code == 401
+    with urllib.request.urlopen(_signed(port, link), timeout=60) as r:
+        r.read()
+    try:
+        urllib.request.urlopen(_signed(port, link), timeout=30)
         raise AssertionError("a download token worked twice")
     except urllib.error.HTTPError as e:
         assert e.code == 404
@@ -205,6 +217,7 @@ def _wait(pred, timeout=30.0):
 def test_admin_page_diagnostics_panel(diag_hub):
     port, _hub, pw, _h = diag_hub
     drv = _driver()
+    browser_sign_in(drv, port)
     try:
         drv.get(f"http://127.0.0.1:{port}/admin/hub")
         text = drv.find_element("id", "diag-panel").text

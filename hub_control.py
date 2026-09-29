@@ -17,9 +17,11 @@ timeout; the request path (this route, and ``/healthz``'s ``hub``) never
 opens SQLite, so a locked store cannot slow the updater's health check.
 ``stale`` is true when the cache is older than ``CACHE_STALE_SECONDS``.
 
-State-changing, **loopback only** (``request.remote_addr`` in 127.0.0.0/8 or
-::1, checked first, so a LAN host cannot even spend password attempts), then
-a loopback ``Host`` (``localhost``/127.x/::1: DNS rebinding), same-origin,
+State-changing, **local only** (``netctx.is_local()``: a loopback peer, a
+loopback ``Host`` — DNS rebinding — and none of the forwarding headers the
+Cloudflare tunnel adds, whose peer is loopback too; checked first, so no LAN or
+internet host can even spend password attempts; the session gate refuses them
+too when not local), then same-origin,
 JSON (415), 64 KiB (413) and the admin password (403). An optional ``by``
 (the tray's Windows user, ≤ 64 chars, sanitised) is recorded as
 ``"<by> (<address>)"``::
@@ -62,6 +64,7 @@ from flask import Blueprint, jsonify, request
 
 import admin_auth
 import hub
+import netctx
 import paths
 import restart_policy
 import store
@@ -242,7 +245,8 @@ _sampler = ProcessSampler(started_at=_hooks.started_at)
 # ── the store-derived numbers, cached off the request path ────────────────
 
 def _empty_cache() -> dict:
-    return {"flag": None, "queue": dict(EMPTY_QUEUE), "pending": None, "at": None}
+    return {"flag": None, "queue": dict(EMPTY_QUEUE), "pending": None, "hub_url": None,
+            "at": None}
 
 
 _cache: dict = _empty_cache()
@@ -267,6 +271,8 @@ def _read_store(db: Path) -> tuple:
         conn.execute(f"PRAGMA busy_timeout={ms}")
         raw = conn.execute("SELECT value FROM settings_kv WHERE key=?",
                            (hub.PROCESSING_PAUSED_KEY,)).fetchone()
+        url = conn.execute("SELECT value FROM settings_kv WHERE key=?",
+                           (admin_auth.HUB_URL_KEY,)).fetchone()
         r = conn.execute(
             "SELECT "
             "(SELECT COUNT(*) FROM jobs WHERE state='queued' AND "
@@ -280,7 +286,7 @@ def _read_store(db: Path) -> tuple:
         conn.close()
     return (hub.parse_processing_paused(raw[0] if raw else None),
             {"jobs_due": r[0], "jobs_queued": r[1], "jobs_running": r[2],
-             "received_samples": r[3]}, r[4])
+             "received_samples": r[3]}, r[4], (url[0] if url else None) or None)
 
 
 def refresh_cache() -> bool:
@@ -292,8 +298,8 @@ def refresh_cache() -> bool:
         if db is None or not db.is_file():
             fresh = _empty_cache()
         else:
-            flag, queue, pending = _read_store(db)
-            fresh = {"flag": flag, "queue": queue, "pending": pending}
+            flag, queue, pending, hub_url = _read_store(db)
+            fresh = {"flag": flag, "queue": queue, "pending": pending, "hub_url": hub_url}
         fresh["at"] = time.monotonic()
     except Exception:  # noqa: BLE001 - locked, mid-migration, ...
         _log_limited("refresh", logging.WARNING,
@@ -382,6 +388,9 @@ def status_snapshot() -> dict:
         "cpu_count": os.cpu_count(),
         "staged_update": tag if mode == "switch" else None,
         "stale": stale,
+        # the hub's address (the admin-set hub URL, else https://gc.asaplabs.net):
+        # the tray's "Open in browser"
+        "hub_url": cache.get("hub_url") or admin_auth.DEFAULT_HUB_URL,
     }
 
 
@@ -546,24 +555,14 @@ def _stop_later(shutdown: Callable[[], None]) -> None:
 
 def is_loopback(addr: Optional[str]) -> bool:
     """127.0.0.0/8, ::1 or an IPv4-mapped loopback; nothing else (a name
-    such as ``localhost`` is never a remote address)."""
-    try:
-        ip = ipaddress.ip_address((addr or "").split("%")[0])
-    except ValueError:
-        return False
-    mapped = getattr(ip, "ipv4_mapped", None)
-    if mapped is not None:
-        ip = mapped
-    return ip.is_loopback
+    such as ``localhost`` is never a remote address). ``netctx``'s rule."""
+    return netctx.is_loopback_ip(addr)
 
 
 def host_is_loopback(host: Optional[str]) -> bool:
     """The ``Host`` header names this machine's loopback: ``localhost``,
     127.x or ::1 (with any port). A rebinding page carries its own name."""
-    name = admin_auth._hostname(host)
-    if name is None:
-        return False
-    return name == "localhost" or is_loopback(name)
+    return netctx.host_is_loopback(host)
 
 
 _BY_BAD = re.compile(r"[^A-Za-z0-9 ._@\\-]")
@@ -582,16 +581,13 @@ def _err(msg: str, status: int):
 def _guard():
     """``(by, body, None)`` or ``(None, None, error response)``: loopback
     client, loopback Host, same-origin, JSON ≤ 64 KiB, admin password."""
-    addr = request.remote_addr
-    if not is_loopback(addr):
+    addr = netctx.client_ip()
+    if not netctx.is_local():
+        # loopback peer, loopback Host (DNS rebinding) and no forwarding header:
+        # the Cloudflare tunnel's peer is loopback too, and is never local
         _log_limited(("refused", addr), logging.WARNING,
-                     "hub_control: refused %s %s from %s (not loopback)",
-                     request.method, request.path, addr)
-        return None, None, _err(LOOPBACK_ONLY_MESSAGE, 403)
-    if not host_is_loopback(request.host):
-        _log_limited(("host", request.host), logging.WARNING,
-                     "hub_control: refused %s %s with Host %r (not loopback)",
-                     request.method, request.path, request.host)
+                     "hub_control: refused %s %s from %s (Host %r): not local",
+                     request.method, request.path, addr, request.host)
         return None, None, _err(LOOPBACK_ONLY_MESSAGE, 403)
     if admin_auth._cross_site():
         return None, None, _err("Cross-site request refused", 403)

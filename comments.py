@@ -13,12 +13,16 @@ a later preset edit never rewrites history), ``'free'`` or ``'annotation'``
 (a time span ``t0 < t1`` in minutes; blank text defaults to
 ``Marked region Cx–Cy`` from the revision's calibration anchors, else
 ``Marked region a–b min``). Deleting is a soft delete (``deleted_at``,
-``deleted_by_initials``, ``deleted_by_ip``) because comments feed reports.
+``deleted_by_name``/``deleted_by_initials``, ``deleted_by_ip``) because
+comments feed reports.
 
-Authors are self-declared initials (``^[A-Z]{1,4}$`` after upper-casing),
-not authenticated. The request's address is stored beside them
+Authors are the **signed-in account name** (sign-in, spec D6 rev 2): the
+route passes the session's name as ``author_name``; ``author_initials`` is
+derived from it (``initials_from_name``: the first letter of each word,
+accents folded, A–Z only, at most 4, ``X`` if nothing is left). Initials a
+client sends are ignored. The request's address is stored beside them
 (``author_ip``) but never returned by ``public``/``for_report``: reports print
-initials only.
+initials; ``public`` and ``for_report`` also carry the name.
 
 Limits: text ≤ ``MAX_COMMENT_TEXT`` (500) characters, at most
 ``MAX_ACTIVE_COMMENTS`` (100) non-deleted comments per sample; preset text ≤
@@ -35,7 +39,7 @@ The report seam (frozen with lane P3)
 
 ::
 
-    for_report(sample_id, db) -> [{id, text, initials, created_at, t0, t1}]
+    for_report(sample_id, db) -> [{id, text, initials, author_name, created_at, t0, t1}]
         # non-deleted, oldest first; t0/t1 None unless an annotation
     log_report(sample_id, *, kind, revision=None, standard_name=None, params=None,
                ranges=None, windows=None, bullets=None, bullets_text=None,
@@ -51,6 +55,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata
 from typing import Any, Optional, Sequence
 
 import store
@@ -84,6 +89,26 @@ def normalize_initials(raw: Any) -> str:
     if not _INITIALS_RE.match(value):
         raise CommentError("Initials must be 1–4 letters A–Z.")
     return value
+
+
+def initials_from_name(name: Any) -> str:
+    """Initials from an account name: split on non-letters (accents folded
+    first), the first letter of each word, upper-cased, A–Z only, at most 4;
+    ``X`` when nothing is left."""
+    if not isinstance(name, str):
+        return "X"
+    folded = "".join(c for c in unicodedata.normalize("NFKD", name)
+                     if not unicodedata.combining(c))
+    words = [w for w in re.split(r"[^A-Za-z]+", folded) if w]
+    return "".join(w[0] for w in words).upper()[:4] or "X"
+
+
+def _author(name: Any) -> tuple:
+    """``(name, initials)`` for the signed-in author, or 400."""
+    if not isinstance(name, str) or not name.strip():
+        raise CommentError("Sign in to add or delete comments.")
+    name = name.strip()[:128]
+    return name, initials_from_name(name)
 
 
 def _text(raw: Any, limit: int, what: str, *, allow_empty: bool = False) -> str:
@@ -157,7 +182,7 @@ def public(row: dict) -> dict:
     return {"id": row["id"], "sample_id": row["sample_id"], "revision": row["revision"],
             "text": row["text"], "preset_id": row["preset_id"], "source": row["source"],
             "t0": row["t0"], "t1": row["t1"], "initials": row["author_initials"],
-            "created_at": row["created_at"]}
+            "name": row.get("author_name"), "created_at": row["created_at"]}
 
 
 def list_comments(sample_id: int, *, db=None) -> list[dict]:
@@ -165,11 +190,12 @@ def list_comments(sample_id: int, *, db=None) -> list[dict]:
     return [public(r) for r in store.sample_comments.list(sample_id, db=db)]
 
 
-def add_comment(sample_id: int, *, initials: Any, text: Any = None, preset_id: Any = None,
+def add_comment(sample_id: int, *, author_name: Any, text: Any = None, preset_id: Any = None,
                 t0: Any = None, t1: Any = None, author_ip: Optional[str] = None,
                 db=None) -> dict:
-    """Validate and add one comment; returns it (``public`` form)."""
-    initials = normalize_initials(initials)
+    """Validate and add one comment by the signed-in ``author_name``; returns
+    it (``public`` form)."""
+    author_name, initials = _author(author_name)
     span = (t0, t1) != (None, None)
     if span:
         if t0 is None or t1 is None:
@@ -209,20 +235,23 @@ def add_comment(sample_id: int, *, initials: Any, text: Any = None, preset_id: A
                                    "delete one first.", 409)
             cid = store.sample_comments.add(
                 sample_id, text=text, source=source, author_initials=initials,
+                author_name=author_name,
                 author_ip=author_ip, revision=sample.get("current_revision"),
                 preset_id=preset_id, t0=a if span else None, t1=b if span else None, db=conn)
         return public(store.sample_comments.get(cid, db=conn))
 
 
-def delete_comment(sample_id: int, comment_id: int, *, initials: Any,
+def delete_comment(sample_id: int, comment_id: int, *, author_name: Any,
                    author_ip: Optional[str] = None, db=None) -> dict:
-    """Soft-delete one of the sample's comments; returns it as it was."""
-    initials = normalize_initials(initials)
+    """Soft-delete one of the sample's comments (by the signed-in
+    ``author_name``); returns it as it was."""
+    author_name, initials = _author(author_name)
     with store.connection(db) as conn:
         row = store.sample_comments.get(comment_id, db=conn)
         if row is None or row["sample_id"] != sample_id:
             raise CommentError(f"Sample {sample_id} has no comment {comment_id}.", 404)
         if not store.sample_comments.soft_delete(comment_id, deleted_by_initials=initials,
+                                                 deleted_by_name=author_name,
                                                  deleted_by_ip=author_ip, db=conn):
             raise CommentError("That comment was already deleted.", 409)
         return public(row)
@@ -232,8 +261,10 @@ def delete_comment(sample_id: int, comment_id: int, *, initials: Any,
 
 def for_report(sample_id: int, db=None) -> list[dict]:
     """The comments a report prints: non-deleted, oldest first, as
-    ``{id, text, initials, created_at, t0, t1}`` (initials only, never an IP)."""
+    ``{id, text, initials, author_name, created_at, t0, t1}`` (the report
+    prints the initials; never an IP)."""
     return [{"id": r["id"], "text": r["text"], "initials": r["author_initials"],
+             "author_name": r.get("author_name"),
              "created_at": r["created_at"], "t0": r["t0"], "t1": r["t1"]}
             for r in store.sample_comments.list(sample_id, db=db)]
 
@@ -261,10 +292,13 @@ def log_report(sample_id: int, *, kind: str, revision: Optional[int] = None,
                comment_ids: Optional[Sequence[int]] = None, pdf_sha256: Optional[str] = None,
                author_initials: Optional[str] = None, author_ip: Optional[str] = None,
                app_version: Optional[str] = None, created_at: Optional[str] = None,
-               db=None) -> int:
+               user_name: Optional[str] = None, db=None) -> int:
     """Record one produced report PDF in ``report_log``; returns its id.
-    ``ValueError`` on an unknown ``kind``. Initials, when given, are stored
-    upper-cased (not validated: the report routes may not ask for them)."""
+    ``ValueError`` on an unknown ``kind``. ``user_name`` is the signed-in
+    account; without explicit ``author_initials`` they are derived from it.
+    Initials, when given, are stored upper-cased."""
+    if not author_initials and user_name:
+        author_initials = initials_from_name(user_name)
     if app_version is None:
         try:
             import version
@@ -279,7 +313,7 @@ def log_report(sample_id: int, *, kind: str, revision: Optional[int] = None,
         "comment_ids_json": _json(list(comment_ids) if comment_ids is not None else None),
         "app_version": app_version, "pdf_sha256": pdf_sha256,
         "author_initials": author_initials.strip().upper() if author_initials else None,
-        "author_ip": author_ip,
+        "author_ip": author_ip, "user_name": user_name,
     }
     if created_at is not None:
         fields["created_at"] = created_at

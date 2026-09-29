@@ -6,7 +6,8 @@
   <title>Calibration — Peak Assignment</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=2">
+  <script src="{{ url_for('static', filename='js/session.js') }}?v=1"></script>
   <style>
     :root{
       --bg:#0d1117; --panel:#161b22; --line:#30363d; --line2:#21262d;
@@ -359,6 +360,7 @@ load();
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>
+{% include "_signed_in.html" %}
 
 </body>
 </html>

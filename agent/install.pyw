@@ -4,8 +4,12 @@ hub's "Download installer" produced:
 
     install.pyw  launcher.pyw  install.json  [agent-package.zip  agent-package.json]
 
-``install.json`` = ``{"hub_url": ..., "token": ...}`` (minted for this PC by the
-hub). Without ``agent-package.zip`` the package is downloaded from the hub.
+``install.json`` = ``{"hub_url": ..., "token": ..., "lan_url": ...}`` (minted for
+this PC by the hub; ``lan_url`` is optional, null or absent). Without
+``agent-package.zip`` the package is downloaded from the hub, with
+``User-Agent: gc-agent/installer`` (Cloudflare refuses urllib's default) and,
+after a network/TLS error against ``hub_url`` (never after an HTTP status),
+once more from ``lan_url``. A Cloudflare challenge is reported as such.
 
 Steps: check Python >= 3.9 and that pystray / PIL are importable (no pip);
 unpack the package into ``%LOCALAPPDATA%\\ASAPLabs\\gc-agent\\versions\\<v>\\``;
@@ -26,7 +30,7 @@ the launcher; ``--yes`` takes every default and confirms every question
 (except deleting install.json: ``--delete-install-json``).
 
 When the agent is already running (its launcher holds the single-instance
-lock), only hub_url and token are updated in agent.json, in place; the agent
+lock), only hub_url, lan_url and token are updated in agent.json, in place; the agent
 reloads them. After a successful run the installer offers to delete
 install.json, which holds the token.
 """
@@ -43,6 +47,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -52,6 +57,10 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "ASAPLabs GC Agent"
 _VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$")
 _IS_WIN = sys.platform == "win32"
+# The package version is not known before the download, so the installer names
+# itself; any non-urllib agent passes Cloudflare's browser-signature check.
+USER_AGENT = "gc-agent/installer"
+CLOUDFLARE_BLOCKED = "Cloudflare blocked the agent: add the WAF skip rule in DEPLOY.md"
 
 
 class InstallError(Exception):
@@ -170,20 +179,59 @@ def read_install_json(src):
     if not isinstance(url, str) or not url.startswith(("http://", "https://")) \
             or not isinstance(tok, str) or not tok.strip():
         raise InstallError("install.json must hold hub_url and token")
-    return url.rstrip("/"), tok.strip()
+    lan = d.get("lan_url") or ""
+    if not isinstance(lan, str) or (lan.strip() and not lan.strip().startswith(("http://",
+                                                                                 "https://"))):
+        raise InstallError("install.json: lan_url must be empty or an http:// or https:// URL")
+    return url.rstrip("/"), tok.strip(), lan.strip().rstrip("/")
 
 
-def _http_get(url, token):
-    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def _cloudflare_block(exc):
+    """An HTTPError that is Cloudflare's edge, not the hub (see gc_agent.client)."""
+    h = exc.headers
+    if h is None:
+        return False
+    if h.get("cf-mitigated") is not None:
+        return True
+    if exc.code not in (403, 503) or h.get("cf-ray") is None:
+        return False
     try:
-        with opener.open(req, timeout=120) as r:
-            return r.read()
-    except Exception as exc:
+        head = (exc.read() or b"")[:64].lstrip()
+    except Exception:
+        head = b""
+    return ("text/html" in (h.get("Content-Type") or "").lower() or head.startswith(b"<")
+            or bool(re.match(br"^error code: \d+", head)))
+
+
+def _get_once(url, token):
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token,
+                                               "User-Agent": USER_AGENT})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=120) as r:
+        return r.read()
+
+
+def _http_get(base, path, token, lan_url=""):
+    """GET ``base + path``; after a network/TLS error (not an HTTP status),
+    once more from ``lan_url + path``."""
+    url = base + path
+    try:
+        return _get_once(url, token)
+    except urllib.error.HTTPError as exc:
+        if _cloudflare_block(exc):
+            raise InstallError("cannot download %s: %s" % (url, CLOUDFLARE_BLOCKED))
         raise InstallError("cannot download %s: %s" % (url, exc))
+    except Exception as exc:
+        if not lan_url or lan_url == base:
+            raise InstallError("cannot download %s: %s" % (url, exc))
+        try:
+            return _get_once(lan_url + path, token)
+        except Exception as exc2:
+            raise InstallError("cannot download %s: %s; nor from the LAN address %s: %s"
+                               % (url, exc, lan_url + path, exc2))
 
 
-def obtain_package(src, hub_url, token):
+def obtain_package(src, hub_url, token, lan_url=""):
     """Returns (zip bytes, version, sha256), verified."""
     import hashlib
     src = Path(src)
@@ -199,10 +247,11 @@ def obtain_package(src, hub_url, token):
                 raise InstallError("agent-package.json is not valid JSON")
     else:
         try:
-            meta = json.loads(_http_get(hub_url + "/api/agent/package", token).decode("utf-8"))
+            meta = json.loads(_http_get(hub_url, "/api/agent/package", token,
+                                        lan_url).decode("utf-8"))
         except ValueError:
             raise InstallError("the hub's /api/agent/package did not return JSON")
-        data = _http_get(hub_url + "/api/agent/package.zip", token)
+        data = _http_get(hub_url, "/api/agent/package.zip", token, lan_url)
     sha = hashlib.sha256(data).hexdigest()
     want = meta.get("sha256") if isinstance(meta, dict) else None
     if want and want.lower() != sha:
@@ -297,8 +346,8 @@ def start_launcher(python, root):  # pragma: no cover - exercised by hand
     subprocess.Popen([python, str(Path(root) / "launcher.pyw"), "--root", str(root)], **kw)
 
 
-def update_running(launcher, root, hub_url, token, ui):
-    """The agent is running: change only hub_url and token in agent.json.
+def update_running(launcher, root, hub_url, token, ui, lan_url=""):
+    """The agent is running: change only hub_url, lan_url and token in agent.json.
     The agent notices the file changed and reloads it (no restart needed)."""
     cfg_path = Path(root) / "agent.json"
 
@@ -317,16 +366,17 @@ def update_running(launcher, root, hub_url, token, ui):
     # writing, merge only our two keys, then check they stuck; retry if not.
     for _attempt in range(5):
         raw = read()
-        raw["hub_url"], raw["token"] = hub_url, token
+        raw["hub_url"], raw["token"], raw["lan_url"] = hub_url, token, lan_url
         launcher.atomic_write_text(cfg_path, json.dumps(raw, indent=2, sort_keys=True) + "\n")
         time.sleep(0.2)
         now = read()
-        if now.get("hub_url") == hub_url and now.get("token") == token:
+        if now.get("hub_url") == hub_url and now.get("token") == token \
+                and (now.get("lan_url") or "") == lan_url:
             break
     else:
         raise InstallError("agent.json kept changing under the installer; quit the GC agent "
                            "from its tray icon and run the installer again.")
-    ui.info("The GC agent is running, so only its hub URL and token were updated in "
+    ui.info("The GC agent is running, so only its hub URLs and token were updated in "
             "agent.json; it picks them up within a few seconds. Nothing else was changed.")
 
 
@@ -351,7 +401,7 @@ def offer_delete_install_json(src, args, ui):
 # ── install ──────────────────────────────────────────────────────────────
 def install(args, ui):
     src = Path(args.source)
-    hub_url, token = read_install_json(src)
+    hub_url, token, lan_url = read_install_json(src)
     launcher_src = src / "launcher.pyw"
     if not launcher_src.is_file():
         raise InstallError("launcher.pyw is missing beside the installer")
@@ -360,12 +410,12 @@ def install(args, ui):
     root.mkdir(parents=True, exist_ok=True)
     held = launcher.acquire_single_instance(root)
     if held is None:
-        update_running(launcher, root, hub_url, token, ui)
+        update_running(launcher, root, hub_url, token, ui, lan_url)
         offer_delete_install_json(src, args, ui)
         return 0
     work = tempfile.mkdtemp(prefix="gc-agent-install-")
     try:
-        data, version, sha = obtain_package(src, hub_url, token)
+        data, version, sha = obtain_package(src, hub_url, token, lan_url)
         config, mirror, updater = agent_modules(data, work)
         name = _unpack(updater, data, version, sha, root)
 
@@ -382,7 +432,8 @@ def install(args, ui):
                 existing = {}
         python = record_python()
         cfg = dict(existing)
-        cfg.update({"hub_url": hub_url, "token": token, "python": python})
+        cfg.update({"hub_url": hub_url, "lan_url": lan_url, "token": token,
+                    "python": python})
         lw, _ = legacy_defaults()
         watch = args.watch_dir if args.watch_dir is not None else (existing.get("watch_dir") or lw)
         cfg["watch_dir"] = ui.ask_dir("Choose the folder where ChemStation writes the .CDF files",

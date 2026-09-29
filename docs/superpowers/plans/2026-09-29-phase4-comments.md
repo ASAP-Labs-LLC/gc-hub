@@ -5,6 +5,11 @@ Spec: `docs/superpowers/specs/2026-09-29-phase3-4-bullets-comments-design.md`
 Branch: `p4/comments` from `feat/phase3-4`. Strict TDD: every task starts with
 a failing test, committed together with the code that turns it green.
 
+> **v3.1.0 (sign-in):** the self-declared initials below were replaced by the
+> signed-in account name (`author_name`; initials derived by
+> `comments.initials_from_name`, any sent by a client ignored; no initials box).
+> See `docs/superpowers/specs/2026-09-29-public-url-login-design.md` D6.
+
 ## Scope (P4 only)
 
 | Area | Files |

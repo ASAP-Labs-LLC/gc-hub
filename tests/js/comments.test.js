@@ -2,14 +2,11 @@
 const C = require('../../static/js/comments.js');
 
 module.exports = (t) => {
-    // initials: upper-cased, 1-4 letters (the server applies the same rule)
-    t.eq(C.normInitials(' rb '), 'RB');
-    t.eq(C.normInitials(null), '');
-    t.eq(C.validInitials('rb'), true);
-    t.eq(C.validInitials('ABCD'), true);
-    t.eq(C.validInitials('ABCDE'), false);
-    t.eq(C.validInitials('R2'), false);
-    t.eq(C.validInitials(''), false);
+    // the author is the signed-in account (rev 2: no initials box)
+    t.eq(C.commentingAs('Ryan C'), 'Commenting as Ryan C');
+    t.eq(C.commentingAs('  '), '');
+    t.eq(C.commentingAs(null), '');
+    t.eq('normInitials' in C || 'validInitials' in C || 'INITIALS_KEY' in C, false);
 
     // Plotly annotation text is HTML-ish: < > & must be escaped
     t.eq(C.plotlySafe('<img src=x onerror=alert(1)> & <b>'),
@@ -54,6 +51,7 @@ module.exports = (t) => {
     t.eq(C.clearConfirmText(1).includes('1 annotation comment '), true);
     t.eq(C.clearConfirmText(2, '40304').includes('on sample 40304'), true);
 
-    // the saved-initials key is per browser, and reading it never throws
-    t.eq(typeof C.INITIALS_KEY, 'string');
+    // the list line prefers the account name, else the initials
+    t.eq(C.commentMeta({ source: 'free', name: 'Ryan C', initials: 'RC',
+                         created_at: '2026-09-29T14:07:00.000000+00:00' }).startsWith('Ryan C, '), true);
 };

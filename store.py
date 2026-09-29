@@ -236,6 +236,12 @@ Conventions and decisions (where the spec left a choice)
   (soft delete: ``deleted_at``/``deleted_by_*``; the text is copied from a
   preset, never referenced) and ``report_log`` (one row per report PDF).
   v2.0.0 (schema v1 code) starts on a v2 database: it ignores the new tables.
+* **Schema v3** (sign-in) adds ``web_sessions`` (``token_hash`` is the sha256
+  of the cookie value, UNIQUE and nullable so a diagnostics copy can null it;
+  ``expires_at`` is the absolute limit) and the nullable columns
+  ``sample_comments.author_name``/``deleted_by_name`` and
+  ``report_log.user_name``. v2.0.0 still starts on a v3 database — and then
+  serves with no login at all (DEPLOY.md: pause the tunnel before a rollback).
 * **Rollback safety.** ``migrate`` on a database whose ``user_version`` is
   higher than ``len(MIGRATIONS)`` logs a warning and carries on. It raises
   ``SchemaError`` only if a table or column this code needs is missing.
@@ -517,8 +523,31 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
               "Re-run requested.",
           ), start=1)),
     ),
+    (  # v3 (sign-in): browser sessions, and the signed-in name on comments/reports
+        # token_hash is UNIQUE but nullable: the diagnostics bundle's DB copy
+        # nulls it. Only the sha256 of the cookie value is ever stored.
+        """CREATE TABLE web_sessions(
+            id INTEGER PRIMARY KEY,
+            token_hash TEXT UNIQUE,
+            name TEXT NOT NULL,
+            method TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            ip TEXT,
+            user_agent TEXT,
+            revoked_at TEXT)""",
+        "CREATE INDEX web_sessions_name ON web_sessions(name)",
+        "ALTER TABLE sample_comments ADD COLUMN author_name TEXT",
+        "ALTER TABLE sample_comments ADD COLUMN deleted_by_name TEXT",
+        "ALTER TABLE report_log ADD COLUMN user_name TEXT",
+    ),
 )
 SCHEMA_VERSION = len(MIGRATIONS)
+WEB_SESSION_METHODS: tuple[str, ...] = ("password", "card", "admin")
+WEB_SESSION_IDLE_SECONDS = 12 * 3600      # web_auth's idle limit
+WEB_SESSION_PRUNE_DAYS = 30               # Maintenance deletes sessions ended this long ago
+USER_AGENT_MAX = 200
 
 # Tables and columns this code reads or writes (equal to a fresh database).
 # On a newer database these must exist; anything extra is ignored.
@@ -571,12 +600,16 @@ REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
     "sample_comments": frozenset({
         "id", "sample_id", "revision", "text", "preset_id", "source", "t0", "t1",
         "author_initials", "author_ip", "created_at", "deleted_at", "deleted_by_initials",
-        "deleted_by_ip"}),
+        "deleted_by_ip", "author_name", "deleted_by_name"}),
     "report_log": frozenset({
         "id", "sample_id", "revision", "kind", "standard_name", "params_json", "ranges_json",
         "windows_json", "bullets_json", "bullets_text", "conclusion", "conclusion_edited",
         "comment_ids_json", "app_version", "pdf_sha256", "created_at", "author_initials",
-        "author_ip"}),
+        "author_ip", "user_name"}),
+    # v3
+    "web_sessions": frozenset({
+        "id", "token_hash", "name", "method", "created_at", "last_seen", "expires_at", "ip",
+        "user_agent", "revoked_at"}),
 }
 
 
@@ -1834,15 +1867,17 @@ class sample_comments:  # noqa: N801
     def add(sample_id: int, *, text: str, source: str, author_initials: str,
             author_ip: Optional[str], revision: Optional[int], preset_id: Optional[int] = None,
             t0: Optional[float] = None, t1: Optional[float] = None,
-            created_at: Optional[str] = None, db: Db = None) -> int:
+            created_at: Optional[str] = None, author_name: Optional[str] = None,
+            db: Db = None) -> int:
         if source not in COMMENT_SOURCES:
             raise ValueError(f"unknown comment source {source!r}")
         with _writing(db) as conn:
             cur = conn.execute(
                 "INSERT INTO sample_comments(sample_id, revision, text, preset_id, source, t0, t1, "
-                "author_initials, author_ip, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "author_initials, author_ip, created_at, author_name) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (sample_id, revision, text, preset_id, source, t0, t1, author_initials,
-                 author_ip, created_at or now_iso()))
+                 author_ip, created_at or now_iso(), author_name))
             return int(cur.lastrowid)
 
     @staticmethod
@@ -1868,13 +1903,14 @@ class sample_comments:  # noqa: N801
 
     @staticmethod
     def soft_delete(comment_id: int, *, deleted_by_initials: str, deleted_by_ip: Optional[str],
-                    db: Db = None) -> bool:
+                    deleted_by_name: Optional[str] = None, db: Db = None) -> bool:
         """Mark deleted (who, from where, when). ``False`` if missing or already deleted."""
         with _writing(db) as conn:
             return conn.execute(
-                "UPDATE sample_comments SET deleted_at=?, deleted_by_initials=?, deleted_by_ip=? "
-                "WHERE id=? AND deleted_at IS NULL",
-                (now_iso(), deleted_by_initials, deleted_by_ip, comment_id)).rowcount == 1
+                "UPDATE sample_comments SET deleted_at=?, deleted_by_initials=?, deleted_by_ip=?, "
+                "deleted_by_name=? WHERE id=? AND deleted_at IS NULL",
+                (now_iso(), deleted_by_initials, deleted_by_ip, deleted_by_name,
+                 comment_id)).rowcount == 1
 
 
 class report_log:  # noqa: N801
@@ -1903,3 +1939,97 @@ class report_log:  # noqa: N801
         with connection(db) as conn:
             return _rows(conn.execute("SELECT * FROM report_log WHERE sample_id=? "
                                       "ORDER BY created_at, id", (sample_id,)))
+
+
+class web_sessions:  # noqa: N801
+    """Browser sessions (schema v3, sign-in). Only ``token_hash`` (the sha256
+    of the cookie value) is stored; ``web_auth`` owns the rules (idle and
+    absolute expiry, the cache, the throttle). Times are ``now_iso()`` strings,
+    which sort as times."""
+
+    @staticmethod
+    def add(token_hash: str, *, name: str, method: str, ip: Optional[str],
+            user_agent: Optional[str], expires_at: str, created_at: Optional[str] = None,
+            db: Db = None) -> int:
+        if method not in WEB_SESSION_METHODS:
+            raise ValueError(f"unknown sign-in method {method!r}")
+        at = created_at or now_iso()
+        ua = user_agent[:USER_AGENT_MAX] if isinstance(user_agent, str) else None
+        with _writing(db) as conn:
+            cur = conn.execute(
+                "INSERT INTO web_sessions(token_hash, name, method, created_at, last_seen, "
+                "expires_at, ip, user_agent) VALUES (?,?,?,?,?,?,?,?)",
+                (token_hash, name, method, at, at, _ts(expires_at), ip, ua))
+            return int(cur.lastrowid)
+
+    @staticmethod
+    def get(session_id: int, *, db: Db = None) -> Optional[dict]:
+        with connection(db) as conn:
+            return _row(conn.execute("SELECT * FROM web_sessions WHERE id=?",
+                                     (session_id,)).fetchone())
+
+    @staticmethod
+    def get_by_hash(token_hash: str, *, db: Db = None) -> Optional[dict]:
+        with connection(db) as conn:
+            return _row(conn.execute("SELECT * FROM web_sessions WHERE token_hash=?",
+                                     (token_hash,)).fetchone())
+
+    @staticmethod
+    def touch_many(last_seen: dict, *, db: Db = None) -> None:
+        """``{id: now_iso string}``: record when each session was last used
+        (never moves ``last_seen`` backwards)."""
+        if not last_seen:
+            return
+        with _writing(db) as conn:
+            conn.executemany("UPDATE web_sessions SET last_seen=? WHERE id=? AND last_seen < ?",
+                             [(at, sid, at) for sid, at in last_seen.items()])
+
+    @staticmethod
+    def revoke(session_id: int, *, db: Db = None) -> bool:
+        with _writing(db) as conn:
+            return conn.execute("UPDATE web_sessions SET revoked_at=? WHERE id=? AND "
+                                "revoked_at IS NULL", (now_iso(), session_id)).rowcount == 1
+
+    @staticmethod
+    def _revoke_where(where: str, args: tuple, db: Db) -> list:
+        with _writing(db) as conn:
+            ids = [r[0] for r in conn.execute(
+                f"SELECT id FROM web_sessions WHERE revoked_at IS NULL AND {where}", args)]
+            if ids:
+                conn.execute(f"UPDATE web_sessions SET revoked_at=? WHERE id IN ({_in(ids)})",
+                             (now_iso(), *ids))
+            return ids
+
+    @staticmethod
+    def revoke_name(name: str, *, db: Db = None) -> list:
+        """Revoke every session of this account name (case-insensitive); their ids."""
+        return web_sessions._revoke_where("lower(name) = lower(?)", (name,), db)
+
+    @staticmethod
+    def revoke_method(method: str, *, db: Db = None) -> list:
+        return web_sessions._revoke_where("method = ?", (method,), db)
+
+    @staticmethod
+    def list_active(*, idle_seconds: Optional[float] = None, db: Db = None) -> list[dict]:
+        """Sessions not revoked, not past ``expires_at`` and (with
+        ``idle_seconds``) used within that long; most recently used first."""
+        now = datetime.now(timezone.utc)
+        sql = "SELECT * FROM web_sessions WHERE revoked_at IS NULL AND expires_at > ?"
+        args: list = [_ts(now)]
+        if idle_seconds is not None:
+            sql += " AND last_seen > ?"
+            args.append(_ts(now - timedelta(seconds=idle_seconds)))
+        with connection(db) as conn:
+            return _rows(conn.execute(sql + " ORDER BY last_seen DESC, id DESC", args))
+
+    @staticmethod
+    def prune(*, older_than_days: float = 30, idle_seconds: float, db: Db = None) -> int:
+        """Delete sessions that ended (revoked, past ``expires_at`` or idle
+        out) more than ``older_than_days`` ago. Returns how many."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        with _writing(db) as conn:
+            return conn.execute(
+                "DELETE FROM web_sessions WHERE (revoked_at IS NOT NULL AND revoked_at < ?) "
+                "OR expires_at < ? OR last_seen < ?",
+                (_ts(cutoff), _ts(cutoff), _ts(cutoff - timedelta(seconds=idle_seconds)))
+            ).rowcount

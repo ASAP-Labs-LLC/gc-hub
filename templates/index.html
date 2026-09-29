@@ -11,7 +11,8 @@
 
   <!-- App stylesheet (cache-bust) -->
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=38">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=2">
+  <script src="{{ url_for('static', filename='js/session.js') }}?v=1"></script>
 
   <!-- Inline critical layout styles (structural only; visual polish lives in style.css) -->
   <style>
@@ -238,8 +239,7 @@
 
     /* ── Comments (phase 4) ───────────────────────────────────────── */
     #analysis-comments-panel .panel-body { display:flex; flex-direction:column; gap:6px; }
-    .comment-initials { display:flex; align-items:center; gap:4px; margin-left:auto; font-size:10px; color:#7d8590; font-weight:normal; }
-    .comment-initials input { width:52px; font-size:11px; padding:1px 4px; text-transform:uppercase; }
+    .comment-author { margin-left:auto; font-size:10px; color:#7d8590; font-weight:normal; }
     .comment-chips { display:flex; flex-wrap:wrap; gap:4px; }
     .comment-chip { font-size:10px; padding:2px 8px; border:1px solid #30363d; border-radius:12px; background:#161b22; color:#c9d1d9; cursor:pointer; text-align:left; }
     .comment-chip:hover { border-color:#58a6ff; color:#fff; }
@@ -756,9 +756,7 @@
             <div class="panel" id="analysis-comments-panel" style="flex-shrink:0;">
               <div class="panel-header" style="display:flex; align-items:center;">
                 <span>Comments</span>
-                <label class="comment-initials" for="comment-initials" title="Self-declared; saved with each comment you add or delete, and remembered by this browser">
-                  Your initials <input id="comment-initials" type="text" maxlength="4" autocomplete="off" spellcheck="false">
-                </label>
+                <span class="comment-author" id="comment-author" title="Comments are saved with your signed-in name; reports print its initials"></span>
               </div>
               <div class="panel-body">
                 <div id="comment-presets" class="comment-chips"></div>
@@ -1141,12 +1139,13 @@
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/comments.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/comments.js') }}?v=2"></script>
 <script src="{{ url_for('static', filename='js/ladder.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=48"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=49"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>
+{% include "_signed_in.html" %}
 
 </body>
 </html>

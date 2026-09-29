@@ -54,7 +54,7 @@ class FakeCtl:
     def start(self, view=None):
         pass
 
-    def open_browser(self):
+    def open_browser(self, view=None):
         pass
 
 

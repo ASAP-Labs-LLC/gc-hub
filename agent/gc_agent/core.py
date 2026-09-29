@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 from . import config, mirror, updater, util
-from .client import HubClient, NetworkError
+from .client import CLOUDFLARE_BLOCKED, HubClient, NetworkError
 from .ledger import Ledger
 from .mirror import Mirror, MirrorError, MirrorFetchError
 from .scanner import Scanner
@@ -119,7 +119,8 @@ class Agent:
             return
         self.cfg = cfg
         self.cfg_error = None
-        self.client = HubClient(cfg["hub_url"], cfg["token"])
+        self.client = HubClient(cfg["hub_url"], cfg["token"], version=self.version,
+                                lan_url=cfg.get("lan_url") or "")
         self.sender.config_changed(self.client)
         self.hb_problem = None
         mp = cfg.get("results_mirror_path") or ""
@@ -166,6 +167,8 @@ class Agent:
         if self.paused:
             return "paused"
         s = self.sender.status()
+        if self._cloudflare_blocked():
+            return "hub-unreachable"
         if s == "auth-error" or self.hb_problem == "auth-error":
             return "auth-error"
         if s == "hub-unreachable" or self.hb_problem == "hub-unreachable":
@@ -174,8 +177,12 @@ class Agent:
             return "sending"
         return "idle"
 
+    def _cloudflare_blocked(self):
+        return bool(self.client is not None and getattr(self.client, "cloudflare_blocked", False))
+
     def last_error(self):
-        for e in (self._revert_note, self.cfg_error, self.watch_error, self.scan_error,
+        cf = CLOUDFLARE_BLOCKED if self._cloudflare_blocked() else None
+        for e in (self._revert_note, self.cfg_error, self.watch_error, cf, self.scan_error,
                   self.scanner.behind, self.sender.last_error,
                   self.hb_error, ("mirror: " + self.mirror_error) if self.mirror_error else None):
             if e:
@@ -282,10 +289,11 @@ class Agent:
         except NetworkError as exc:
             self.hb_problem, self.hb_error = "hub-unreachable", "heartbeat: %s" % exc
             return
-        if r.status != 200 or not isinstance(r.json, dict):
+        if r.status != 200 or not isinstance(r.json, dict) or r.cloudflare_blocked:
             self.hb_error = "heartbeat: HTTP %d %s" % (r.status, r.error_text())
             self.hb_problem = "hub-unreachable" if (r.status == 429 or r.status >= 500
-                                                    or r.status == 200) else "auth-error"
+                                                    or r.status == 200
+                                                    or r.cloudflare_blocked) else "auth-error"
             return
         self.hb_problem = self.hb_error = None
         if self._revert_pending:

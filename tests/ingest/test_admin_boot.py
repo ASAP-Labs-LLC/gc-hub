@@ -18,7 +18,7 @@ from ingest_helpers import admin_post, get_json, heartbeat  # noqa: E402
 pytest.importorskip("flask")
 
 import store  # noqa: E402
-from bootapp import booted, get, send  # noqa: E402
+from bootapp import booted, cookie_header, get, send  # noqa: E402
 
 PW = "lab-admin-2026"
 INSTALLER = "/api/admin/instruments/gc1/installer"
@@ -38,7 +38,8 @@ def _download(port, body, headers=None):
     import urllib.request
     req = urllib.request.Request(f"http://127.0.0.1:{port}{INSTALLER}",
                                  data=json.dumps(body).encode(), method="POST",
-                                 headers={"Content-Type": "application/json", **(headers or {})})
+                                 headers={"Content-Type": "application/json",
+                                          **cookie_header(port), **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             assert r.headers["Content-Type"].startswith("application/zip")
@@ -93,10 +94,18 @@ def test_setup_gate_installer_and_commands(tmp_path):
         # ── installer download: first mint
         code, z = _download(port, {"password": "wrong"})
         assert code == 403
-        # 127.0.0.1 is loopback: no installer until the hub URL is set (I5)
-        code, body = _download(port, {"password": PW})
-        assert code == 409 and body.get("needs_hub_url") is True, body
-        assert store.instruments.get("gc1", db=db)["token_hash"] is None     # nothing minted
+        # rev 2: no hub URL set -> installers point at https://gc.asaplabs.net (the
+        # tunnel), with this machine's LAN address as the agents' fallback; never
+        # the request's own address (needs_hub_url is gone)
+        code, z = _download(port, {"password": PW})
+        assert code == 200, z
+        inst0 = json.loads(z.read("install.json"))
+        assert inst0["hub_url"] == "https://gc.asaplabs.net"
+        assert inst0["lan_url"].startswith("http://") and inst0["lan_url"].endswith(f":{port}")
+        assert "127.0.0.1" not in inst0["lan_url"]
+        assert admin_post(port, "/api/admin/instruments/gc1/revoke-token",
+                          {"password": PW})[0] == 200
+        assert store.instruments.get("gc1", db=db)["token_hash"] is None
         code, body = admin_post(port, "/api/admin/hub-url",
                                 {"password": PW, "hub_url": f"http://127.0.0.1:{port}"})
         assert code == 200, body
@@ -107,6 +116,7 @@ def test_setup_gate_installer_and_commands(tmp_path):
                          "agent-package.json"}
         inst = json.loads(z.read("install.json"))
         assert inst["hub_url"] == f"http://127.0.0.1:{port}"
+        assert inst["lan_url"] is None               # the hub URL already is a LAN address
         tok1 = inst["token"]
         meta = json.loads(z.read("agent-package.json"))
         assert hashlib.sha256(z.read("agent-package.zip")).hexdigest() == meta["sha256"]
@@ -136,7 +146,8 @@ def test_setup_gate_installer_and_commands(tmp_path):
 
         # hub URL override
         for bad in ("ftp://x", "http://user:pw@asapsv1:5560", "http://asapsv1:5560/gc",
-                    "http://asapsv1:99999", "http://asapsv1:5560?x=1", "http://", 5560):
+                    "http://asapsv1:99999", "http://asapsv1:5560?x=1", "http://", 5560,
+                    "http://gc.asaplabs.net", "https://gc.asaplabs.net/x"):   # https off the LAN
             code, body = admin_post(port, "/api/admin/hub-url", {"password": PW, "hub_url": bad})
             assert code == 400, bad
         code, body = admin_post(port, "/api/admin/hub-url",
@@ -147,6 +158,11 @@ def test_setup_gate_installer_and_commands(tmp_path):
         assert json.loads(z.read("install.json"))["hub_url"] == "http://asapsv1:5560"
         code, body = admin_post(port, "/api/admin/hub-url", {"password": PW, "hub_url": ""})
         assert code == 200 and body["hub_url"] is None
+        assert body["effective"] == "https://gc.asaplabs.net"
+        code, body = admin_post(port, "/api/admin/hub-url",
+                                {"password": PW, "hub_url": "https://gc.example.org:8443/"})
+        assert code == 200 and body["hub_url"] == "https://gc.example.org:8443"
+        admin_post(port, "/api/admin/hub-url", {"password": PW, "hub_url": ""})
 
         # ── agent commands
         code, body = admin_post(port, "/api/admin/instruments/gc1/agent-command",

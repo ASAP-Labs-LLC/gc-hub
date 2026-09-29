@@ -72,8 +72,10 @@ def _dump(conn, table) -> list:
 
 # ── migration v1 → v2 ───────────────────────────────────────────────────────
 
-def test_schema_version_is_2():
-    assert store.SCHEMA_VERSION == 2 == len(store.MIGRATIONS)
+def test_schema_has_the_v2_step():
+    """v2 is the second step; later steps (v3: sign-in) add to it."""
+    assert store.SCHEMA_VERSION == len(store.MIGRATIONS) >= 2
+    assert "CREATE TABLE comment_presets" in "\n".join(store.MIGRATIONS[1])
 
 
 def test_v1_to_v2_is_additive(tmp_path):
@@ -88,10 +90,10 @@ def test_v1_to_v2_is_additive(tmp_path):
                        for t in before}
         idx_before = _indexes(conn)
 
-    assert store.migrate(db) == 2
+    assert store.migrate(db) == store.SCHEMA_VERSION
 
     with store.connection(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
         for t, rows in before.items():            # nothing lost or rewritten
             assert _dump(conn, t) == rows, t
             assert [tuple(r) for r in conn.execute(f'PRAGMA table_info("{t}")')] == \
@@ -179,12 +181,12 @@ def test_v2_0_0_store_starts_on_a_v2_database(tmp_path):
                          cwd=tmp_path, timeout=60)
     assert out.returncode == 0, out.stderr
     got = json.loads(out.stdout.strip().splitlines()[-1])
-    assert got["schema"] == 1 and got["version"] == 2
+    assert got["schema"] == 1 and got["version"] == store.SCHEMA_VERSION
     # v2.0.0 left the v2 tables and their rows alone
     assert [c["text"] for c in store.sample_comments.list(sid, db=db)] == ["kept"]
     assert len(store.comment_presets.list(db=db)) == len(SEEDED)
     # and today's code is happy with the database v2.0.0 wrote to
-    assert store.migrate(db) == 2
+    assert store.migrate(db) == store.SCHEMA_VERSION
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────

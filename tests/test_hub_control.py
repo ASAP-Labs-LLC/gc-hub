@@ -153,7 +153,7 @@ def test_refusals_are_logged_at_most_once_a_minute_per_address(env, caplog):
         for _ in range(5):
             _post(env["client"], ROUTES[0], environ=REMOTE)
         _post(env["client"], ROUTES[0], environ={"REMOTE_ADDR": "10.9.9.9"})
-    lines = [r for r in caplog.records if "not loopback" in r.getMessage()]
+    lines = [r for r in caplog.records if "not local" in r.getMessage()]
     assert len(lines) == 2
 
 
@@ -438,3 +438,33 @@ def test_cpu_sampler_measures_over_a_window():
     assert s.sample()["cpu_percent"] == pytest.approx(75.0)   # 7.5 s over 10 s
     t.update(wall=130.0, cpu=17.5)                            # idle; old samples age out
     assert s.sample()["cpu_percent"] == pytest.approx(0.0)
+
+
+# ── the Cloudflare tunnel (spec D4/D5 rev 2): never local ─────────────────
+
+TUNNEL = {"Host": "gc.asaplabs.net", "CF-Connecting-IP": "203.0.113.9", "CF-Ray": "8c-DFW",
+          "X-Forwarded-Proto": "https", "Origin": "https://gc.asaplabs.net"}
+
+
+@pytest.mark.parametrize("path", ROUTES)
+def test_the_tunnel_is_refused_even_with_the_password(env, path):
+    code, body = _post(env["client"], path, environ=LOCAL, headers=TUNNEL)
+    assert code == 403, body
+    assert env["rt"].calls == [] and not env["shut"].is_set()
+    assert not (env["data"] / "paused").exists()
+
+
+@pytest.mark.parametrize("hdr", [{"CF-Ray": "x"}, {"X-Forwarded-For": "203.0.113.9"},
+                                 {"CF-Connecting-IP": "127.0.0.1"}])
+def test_a_single_forwarding_header_on_loopback_is_not_local(env, hdr):
+    code, _ = _post(env["client"], ROUTES[0], headers=dict(hdr, Host="localhost:5560"))
+    assert code == 403 and env["rt"].calls == []
+
+
+def test_status_carries_the_effective_hub_url(env):
+    import store as _store
+    assert hub_control.refresh_cache()
+    assert hub_control.status_snapshot()["hub_url"] == "https://gc.asaplabs.net"
+    _store.settings_kv.set(admin_auth.HUB_URL_KEY, "http://asapsv1:5560", db=env["db"])
+    assert hub_control.refresh_cache()
+    assert hub_control.status_snapshot()["hub_url"] == "http://asapsv1:5560"
