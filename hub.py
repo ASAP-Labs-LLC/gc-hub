@@ -422,6 +422,14 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
         worker_kw.setdefault("corrections_provider", corrections_provider(db))
         worker = instruments.startup(app_conf, notifier, db=db, data_dir=data, conf_fn=conf_fn,
                                      on_final=final_hook, start=not paused, **worker_kw)
+        if paused:
+            # Worker.start (which requeues) will not run until resume, so a
+            # job left `running` by a dead process is put back now: nothing
+            # is running while paused. Idempotent with the Worker's own
+            # requeue on resume (jobs are deduplicated per sample).
+            import pipeline
+            counts = pipeline.requeue_on_start(db=db)
+            log.info("hub: starting paused; requeued %s", counts)
         if not paused:
             try:
                 exporter.start(export_interval)

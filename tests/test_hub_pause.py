@@ -169,6 +169,67 @@ def test_a_pause_that_times_out_never_leaves_duplicate_threads(tmp_path):
         rt.stop()
 
 
+def test_a_stale_running_job_is_requeued_when_the_hub_starts_paused(tmp_path, monkeypatch):
+    # The process died mid-job (the row stays `running`), then the hub comes
+    # back with processing paused: Worker.start (which requeues) never runs,
+    # so without a requeue at start-up Stop would answer 409 and the 3 AM
+    # restart would be skipped for as long as the pause lasts.
+    import hub_control
+    h = _hub_folder(tmp_path)
+    store.migrate(h.db)
+    import instruments
+    instruments.bootstrap_gc1(h.conf, db=h.db)
+    store.instruments.upsert({"id": "gc1", "live_since": datetime(2020, 1, 1)}, db=h.db)
+    cdf = fx.sample_cdf(h.src / "stale.CDF", name="STALE-1",
+                        injected=datetime(2026, 9, 25, 14, 23, 0), method_name=SIMDIS)
+    res = pipeline.submit("gc1", cdf, conf=h.conf, data_dir=h.data, db=h.db)
+    with store.connection(h.db) as conn:
+        conn.execute("UPDATE jobs SET state='running' WHERE state='queued'")
+        conn.commit()
+    hub.set_processing_paused(h.db, True, by="t")
+    monkeypatch.setenv("GC_DATA_DIR", str(h.data))
+    rt = _start(h, maintenance=False)
+    try:
+        hub_control.configure(runtime=lambda: rt)
+        assert rt.paused is True
+        with store.connection(h.db) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM jobs WHERE state='running'").fetchone()[0] == 0
+        assert hub.background_busy(h.db) is False
+        assert hub_control.busy_reasons() == []
+        rt.resume()
+        assert wait_for(lambda: store.samples.get(res.sample_id, db=h.db)["status"] == "final",
+                        timeout=60), store.samples.get(res.sample_id, db=h.db)
+        with store.connection(h.db) as conn:          # requeued once, not twice
+            n = conn.execute("SELECT COUNT(*) FROM jobs WHERE sample_id=? AND state IN "
+                             "('queued','running')", (res.sample_id,)).fetchone()[0]
+        assert n == 0
+    finally:
+        hub_control.reset()
+        rt.stop()
+
+
+def test_running_jobs_are_busy_only_while_the_worker_thread_is_alive(tmp_path, monkeypatch):
+    import types
+    import hub_control
+    h = _hub_folder(tmp_path)
+    store.migrate(h.db)
+    store.jobs.enqueue("process", {"x": 1}, db=h.db)
+    with store.connection(h.db) as conn:
+        conn.execute("UPDATE jobs SET state='running'")
+        conn.commit()
+    monkeypatch.setenv("GC_DATA_DIR", str(h.data))
+    alive = {"v": False}
+    rt = types.SimpleNamespace(paused=True, exporter=types.SimpleNamespace(ticking=False),
+                               worker=types.SimpleNamespace(is_alive=lambda: alive["v"]))
+    hub_control.configure(runtime=lambda: rt)
+    try:
+        assert hub_control.busy_reasons() == []
+        alive["v"] = True
+        assert any("job" in b for b in hub_control.busy_reasons())
+    finally:
+        hub_control.reset()
+
+
 def test_background_busy_ignores_due_jobs_while_processing_is_paused(tmp_path):
     # the 3 AM restart must not be held up by work that cannot run
     h = _hub_folder(tmp_path)

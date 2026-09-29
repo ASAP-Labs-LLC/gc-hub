@@ -408,7 +408,9 @@ def busy_reasons() -> List[str]:
     except Exception:  # noqa: BLE001
         pass
     db = _db_path()
-    if db is not None and db.is_file():
+    worker_alive = rt is not None and _alive(lambda: rt.worker.is_alive())
+    if worker_alive and db is not None and db.is_file():
+        # a `running` row without a live Worker is a leftover, not work
         try:
             running = _read_store(db)[1]["jobs_running"]
             if running:
