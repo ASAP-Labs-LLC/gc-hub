@@ -40,6 +40,23 @@ def test_set_export_path_refuses_non_absolute(hub, bad):
     assert e.value.status == 400
 
 
+@pytest.mark.parametrize("name", ["qbenchlogin.txt", "updater.json", "results.CSV.bak", "noext"])
+def test_set_export_path_refuses_a_non_csv(hub, tmp_path, name):
+    """Like hub_admin's new-path route: only a .csv (the diagnostics bundle reads
+    an export file's tail, so the path must never name an arbitrary file)."""
+    hub.gc1()
+    with pytest.raises(ia.AdminError) as e:
+        ia.set_export_path("gc1", str(tmp_path / name), _exp(hub))
+    assert e.value.status == 400
+    assert store.instruments.get("gc1", db=hub.db)["export_path"] in (None, "")
+
+
+def test_set_export_path_takes_an_upper_case_csv(hub, tmp_path):
+    hub.gc1()
+    st = ia.set_export_path("gc1", str(tmp_path / "RESULTS.CSV"), _exp(hub))
+    assert st["configured"] is True
+
+
 def test_set_export_path_in_use_is_surfaced(hub, tmp_path):
     hub.gc1()
     hub.gc2()

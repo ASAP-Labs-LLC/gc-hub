@@ -289,12 +289,14 @@ def export_status(instrument_id: str, exporter) -> dict:
 
 
 def set_export_path(instrument_id: str, path: Any, exporter) -> dict:
-    """Point the instrument's export at ``path`` (absolute). A file already
+    """Point the instrument's export at ``path`` (absolute, ``.csv``, as
+    hub_admin's new-path route requires). A file already
     there must then be adopted before the hub appends to it."""
     import exports
     get(instrument_id, db=exporter.db)
-    if not isinstance(path, str) or not path.strip() or not Path(path.strip()).is_absolute():
-        raise AdminError("The export path must be an absolute path to a CSV file, e.g. "
+    if (not isinstance(path, str) or not path.strip() or not Path(path.strip()).is_absolute()
+            or Path(path.strip()).suffix.lower() != ".csv"):
+        raise AdminError("The export path must be an absolute path to a .csv file, e.g. "
                          r"\\asapserver\Labsharedrive\...\distill_results.csv.")
     try:
         exporter.new_path(instrument_id, path.strip())
