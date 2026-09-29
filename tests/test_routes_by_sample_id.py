@@ -558,13 +558,19 @@ def test_held_and_failed_samples_are_refused(hub_app, status, error):
         store.samples.set_status(sid, "final", db=hub.db)
 
 
-def test_reports_zip_is_409_when_every_item_is_skipped(hub_app):
+def test_reports_zip_job_fails_when_every_item_is_skipped(hub_app):
+    """A background job since v3.0.1 (tests/test_reports_zip_job.py): the
+    refusal that was a 409 is now the failed job's error."""
     port, hub, _ = hub_app
     code, body = post(port, "/api/export-analysis-reports-zip",
                       {"items": [{"sample_id": UNKNOWN, "standard_name": "Diesel"},
                                  {"sample_id": hub.ids["final"], "standard_name": "NoSuchStd"}]})
-    assert _is_json_error(code, body, 409), (code, body)
-    assert "skipped" in body["error"]
+    assert code == 202, (code, body)
+    job_id = body["job"]["id"]
+    assert wait_for(lambda: get(port, f"/api/export-analysis-reports-zip/{job_id}")[1]["job"]
+                    ["state"] != "running", timeout=60)
+    job = get(port, f"/api/export-analysis-reports-zip/{job_id}")[1]["job"]
+    assert job["state"] == "failed" and "skipped" in job["error"], job
 
 
 @pytest.mark.parametrize("name", ["../evil", "a/b", "..", "x\\y", ""])

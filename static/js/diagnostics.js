@@ -1,9 +1,11 @@
 /* Hub admin "Download diagnostics" (/admin/hub, the Diagnostics panel).
    The pure helpers are module.exports for the Node tests; in the browser the
    panel is wired up below. Sizes come from POST /api/admin/diagnostics/estimate
-   and the build from POST .../bundle (JSON with the password); the bundle
-   answers a one-time download URL the browser then navigates to, so a large
-   zip streams to disk instead of into memory. DOM text is textContent only. */
+   and the build from POST .../bundle (JSON with the password), which answers
+   202 {job} at once (v3.0.1: a build takes minutes, and Cloudflare ends a
+   request after 100 s); the page polls POST .../status until the job is done,
+   then navigates to its one-time download URL, so a large zip streams to disk
+   instead of into memory. DOM text is textContent only. */
 (function () {
     'use strict';
 
@@ -61,8 +63,30 @@
             /^\/api\/admin\/diagnostics\/download\/[A-Za-z0-9_-]+$/.test(u);
     }
 
+    const BUILDING_NOTE = '(this page keeps working; large bundles take a while)';
+
+    // What the panel shows for a polled build job, and whether it is over.
+    function buildView(job) {
+        if (job.state === 'running') {
+            const phase = job.progress && job.progress.phase;
+            return { done: false, cls: '', result: null,
+                     message: phase ? `Building the bundle: ${phase}… ${BUILDING_NOTE}`
+                                    : `Building the bundle… ${BUILDING_NOTE}` };
+        }
+        if (job.state === 'done' && job.result && job.result.summary) {
+            return { done: true, message: null, cls: 'ok', result: job.result.summary };
+        }
+        return { done: true, cls: 'err', result: null,
+                 message: `The diagnostics bundle failed: ${job.error || job.state}` };
+    }
+
+    function downloadStartedText(j) {
+        return `Download started: ${j.name} (${formatBytes(j.size)}, ${j.files} files` +
+            (j.skipped ? `; ${j.skipped} left out, see summary.txt` : '') + ')';
+    }
+
     const pure = { formatBytes, chosenOptions, estimateTotal, sizeWarning,
-                   filenameFromDisposition, isDownloadUrl };
+                   filenameFromDisposition, isDownloadUrl, buildView, downloadStartedText };
     if (typeof module !== 'undefined' && module.exports) {
         module.exports = pure;
         return;
@@ -115,17 +139,45 @@
         refreshTotals();
     }
 
+    async function post(path, body) {
+        const r = await fetch(path, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+            body: JSON.stringify(Object.assign({ password: $('pw').value }, body || {})),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+        return j;
+    }
+
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    // Start the build, then poll its job until it is over; the result, or throws.
+    async function build() {
+        const started = await post('/api/admin/diagnostics/bundle',
+                                   { options: chosenOptions(boxes()) });
+        let job = started.job;
+        for (;;) {
+            const v = buildView(job);
+            if (v.done) {
+                if (!v.result) throw new Error(v.message);
+                return v.result;
+            }
+            say(v.message);
+            await sleep(1500);
+            const s = await post('/api/admin/diagnostics/status');
+            if (!s.job || s.job.id !== started.job.id) {
+                throw new Error('The build was replaced by another one; press Download again');
+            }
+            job = s.job;
+        }
+    }
+
     async function download() {
         const btn = $('btn-diag-download');
         btn.disabled = true;
-        say('Building the bundle… (this page keeps working; large bundles take a while)');
+        say(buildView({ state: 'running' }).message);
         try {
-            const r = await fetch('/api/admin/diagnostics/bundle', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
-                body: JSON.stringify({ password: $('pw').value, options: chosenOptions(boxes()) }),
-            });
-            const j = await r.json().catch(() => ({}));
-            if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+            const j = await build();
             if (!isDownloadUrl(j.download)) throw new Error('Unexpected answer from the hub');
             // A navigation, not fetch + blob: the browser streams the zip to disk.
             const a = document.createElement('a');
@@ -134,8 +186,7 @@
             document.body.appendChild(a);
             a.click();
             a.remove();
-            say(`Download started: ${j.name} (${formatBytes(j.size)}, ${j.files} files` +
-                (j.skipped ? `; ${j.skipped} left out, see summary.txt` : '') + ')', 'ok');
+            say(downloadStartedText(j), 'ok');
         } catch (e) {
             say(e.message, 'err');
         } finally {

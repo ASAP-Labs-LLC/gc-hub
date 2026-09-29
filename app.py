@@ -188,6 +188,18 @@ try:
 except Exception:  # noqa: BLE001 - never stop the app starting
     LOGGER.exception("Could not clear the diagnostics temp folder")
 
+# Report ZIPs are built in the background and fetched once (v3.0.1: building
+# N PDFs in the request outlasted Cloudflare's 100 s). Leftovers of a previous
+# process are garbage too.
+import download_jobs  # noqa: E402
+
+REPORT_ZIP_TMP = "report-zips-tmp"
+REPORT_ZIPS = download_jobs.DownloadJobs(lambda: paths.require_data_dir() / REPORT_ZIP_TMP)
+try:
+    REPORT_ZIPS.cleanup()
+except Exception:  # noqa: BLE001 - never stop the app starting
+    LOGGER.exception("Could not clear the report ZIP temp folder")
+
 # ---------------------------------------------------------------------------
 # Flask app
 # ---------------------------------------------------------------------------
@@ -829,6 +841,7 @@ def _is_server_idle() -> bool:
       - No user-initiated QBench upload thread running
       - No admin job running (``hub_admin.JOBS``: folder load, history import)
       - No diagnostics bundle being built, waiting or downloading
+      - No report ZIP being built, waiting or downloading (``REPORT_ZIPS``)
       - No Worker job running or due now (``hub.background_busy``; a retry
         scheduled for later, e.g. pending corrections, doesn't count)
 
@@ -848,6 +861,9 @@ def _is_server_idle() -> bool:
         return False
     # Block while a diagnostics bundle is built, waits to be fetched or streams
     if diagnostics.busy():
+        return False
+    # Block while a report ZIP is built, waits to be fetched or streams
+    if REPORT_ZIPS.busy():
         return False
     # Block while the Worker has due jobs (a retry scheduled later doesn't count)
     data = paths.data_dir()
@@ -2865,50 +2881,120 @@ def api_export_analysis_report():
 
 @app.route("/api/export-analysis-reports-zip", methods=["POST"])
 def api_export_analysis_reports_zip():
-    """Generate multiple analysis report PDFs (items by ``sample_id``) and
-    return them in a single ZIP. Unknown samples and missing standards are
-    skipped."""
+    """Start building analysis report PDFs (items by ``sample_id``) into one
+    ZIP in the background: 202 ``{job}`` at once (one PDF takes seconds, and
+    Cloudflare ends a request after 100 s). The page polls
+    ``GET /api/export-analysis-reports-zip/<job_id>`` and then fetches
+    ``.../<job_id>/download`` once. Unknown samples and missing standards are
+    skipped; when every item is, the job fails saying so."""
     body = request.get_json(force=True) or {}
     items = body.get("items", [])
     if not items:
         return _error("items list is required")
+    if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
+        return _error("items must be a list of objects")
     _data, db = _hub()
-    try:
-        if go is None or pio is None:
-            return _error("Plotly/kaleido not installed", 500)
+    if go is None or pio is None:
+        return _error("Plotly/kaleido not installed", 500)
+    conf = settings_mod.load_settings()
+    who = _reporter()           # captured here: the build runs outside the request
 
-        conf = settings_mod.load_settings()
-
-        buf = io.BytesIO()
-        written = 0
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for item in items:
+    def build(progress, out_path):
+        written = skipped = 0
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for n, item in enumerate(items, 1):
                 try:
                     s = _sample_or_404(item.get("sample_id"), db)
                     params = _report_request(item)
                     report_bytes, content = _build_report_pdf(s, params, conf, db)
                 except (ValueError, TypeError, SampleNotFound) as exc:
                     LOGGER.warning("Skipping ZIP item: %s", exc)
+                    skipped += 1
+                    progress(done=n)
                     continue
-                _log_report(s, content, params, "zip", report_bytes, _reporter(), db)
+                _log_report(s, content, params, "zip", report_bytes, who, db)
                 doc_name = str(item.get("doc_name") or "analysis_report")
                 filename = f"{_safe_filename(s['lab_id'])}_{_safe_filename(doc_name)}.pdf"
                 zf.writestr(filename, report_bytes)
                 written += 1
-
+                progress(done=n)
         if not written:
-            return _error(f"All {len(items)} report(s) were skipped (unknown sample, "
-                          "no CDF or standard not found); see the log", 409)
-        buf.seek(0)
-        return send_file(
-            buf,
-            mimetype="application/zip",
-            as_attachment=True,
-            download_name="analysis_reports.zip",
-        )
-    except Exception as exc:
-        LOGGER.exception("Batch analysis report ZIP generation failed")
-        return _error(str(exc), 500)
+            raise download_jobs.NothingToDownload(
+                f"All {len(items)} report(s) were skipped (unknown sample, no CDF or "
+                "standard not found); see the log")
+        LOGGER.info("Analysis report ZIP (%d PDFs, %d skipped) built for %s", written, skipped,
+                    who[0])
+        return {"written": written, "skipped": skipped}
+
+    try:
+        job = REPORT_ZIPS.start("reports-zip", build, name="analysis_reports.zip",
+                                owner=_zip_owner(), total=len(items))
+    except download_jobs.Busy as exc:
+        return _error(str(exc), 409)
+    LOGGER.info("Analysis report ZIP of %d item(s) started by %s", len(items), _who())
+    return _no_store(jsonify({"job": _zip_job(job)})), 202
+
+
+def _zip_owner() -> str:
+    """Who may see and fetch a report ZIP job: the signed-in name that started it."""
+    return web_auth.current_name() or netctx.client_ip() or "unknown"
+
+
+def _zip_job(job: dict) -> dict:
+    """A report ZIP job as the page sees it, with its download link once done."""
+    out = dict(job)
+    out["download"] = (f"/api/export-analysis-reports-zip/{job['id']}/download"
+                       if job["state"] == "done" else None)
+    return out
+
+
+def _no_store(resp):
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/export-analysis-reports-zip/<job_id>", methods=["GET"])
+def api_export_analysis_reports_zip_status(job_id):
+    """The report ZIP job (``{job}``): state, ``done``/``total``, ``result``
+    (``{written, skipped}``), ``error``, and ``download`` once it is done.
+    404 for an unknown or expired job, or one somebody else started."""
+    job = REPORT_ZIPS.status(job_id, _zip_owner())
+    if job is None:
+        return _error("Unknown or expired report ZIP; export it again", 404)
+    return _no_store(jsonify({"job": _zip_job(job)}))
+
+
+@app.route("/api/export-analysis-reports-zip/<job_id>/download", methods=["GET"])
+def api_export_analysis_reports_zip_download(job_id):
+    """Stream a finished report ZIP once, then delete it."""
+    d = REPORT_ZIPS.claim(job_id, _zip_owner())
+    if d is None:
+        return _error("Unknown, unfinished or already downloaded report ZIP", 404)
+    try:
+        fh = open(d["path"], "rb")
+    except OSError:
+        REPORT_ZIPS.finished_streaming(d)
+        return _error("The report ZIP is gone; export it again", 404)
+    closed = []
+
+    def done():
+        if not closed:
+            closed.append(True)
+            fh.close()
+            REPORT_ZIPS.finished_streaming(d)
+
+    def stream():
+        try:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                yield chunk
+        finally:
+            done()
+
+    resp = Response(stream(), mimetype="application/zip", direct_passthrough=True, headers={
+        "Content-Disposition": f'attachment; filename="{d["name"]}"',
+        "Content-Length": str(d["size"])})
+    resp.call_on_close(done)
+    return _no_store(resp)
 
 
 # ===================================================================== #
@@ -3663,6 +3749,8 @@ def _stop_busy() -> list:
         pending = sum(1 for i, _ in enumerate(_upload_items) if i not in _upload_skipped)
     if _upload_thread is not None and _upload_thread.is_alive():
         return [f"a QBench upload is running ({pending} item(s) queued)"]
+    if REPORT_ZIPS.running():
+        return ["a report ZIP is being built"]
     return []
 
 

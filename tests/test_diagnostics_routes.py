@@ -2,10 +2,12 @@
 bare Flask app over a seeded hub layout (app.py is never imported). The
 booted end-to-end download is in tests/test_diagnostics_boot.py.
 
-POST /api/admin/diagnostics/bundle builds the zip and answers a one-time
-download URL; GET /api/admin/diagnostics/download/<token> streams it once and
-deletes it (M3). The estimate is a POST with the password in the JSON body
-(M1)."""
+POST /api/admin/diagnostics/bundle answers 202 {job} at once and builds the
+zip in the background (v3.0.1: a build takes minutes, and Cloudflare ends a
+request after 100 s); POST /api/admin/diagnostics/status gives the job, whose
+``result.summary`` carries the one-time download URL; GET
+/api/admin/diagnostics/download/<token> streams it once and deletes it (M3).
+The estimate is a POST with the password in the JSON body (M1)."""
 from __future__ import annotations
 
 import io
@@ -44,6 +46,7 @@ def client(tmp_path, monkeypatch):
     admin_auth.reset_throttle()
     diagnostics.clear_estimate_cache()
     import hub_admin
+    monkeypatch.setattr(hub_admin, "DIAG_JOBS", hub_admin.AdminJobs())
     app = flask.Flask(__name__)
     app.register_blueprint(hub_admin.bp)
     yield app.test_client(), s
@@ -56,11 +59,39 @@ def _bundle(c, body, **kw):
     return c.post("/api/admin/diagnostics/bundle", json=body, **kw)
 
 
-def _build_and_fetch(c, body):
-    r = _bundle(c, body)
+def _status(c):
+    r = c.post("/api/admin/diagnostics/status", json={"password": PW})
     assert r.status_code == 200, r.get_data(as_text=True)[:500]
-    j = r.get_json()
     assert "no-store" in r.headers["Cache-Control"]
+    return r.get_json()["job"]
+
+
+def _finished(c, timeout=60.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = _status(c)
+        if job["state"] != "running":
+            return job
+        time.sleep(0.02)
+    raise AssertionError(f"the build did not finish: {job}")
+
+
+def _built(c, body):
+    """Start a build (202 at once), wait for its job, return the result."""
+    r = _bundle(c, body)
+    assert r.status_code == 202, r.get_data(as_text=True)[:500]
+    assert "no-store" in r.headers["Cache-Control"]
+    job = r.get_json()["job"]
+    assert job["kind"] == "diagnostics-bundle" and job["state"] == "running"
+    assert "password" not in job["params"]
+    done = _finished(c)
+    assert done["id"] == job["id"]
+    assert done["state"] == "done", done
+    return done["result"]["summary"]
+
+
+def _build_and_fetch(c, body):
+    j = _built(c, body)
     g = c.get(j["download"])
     return j, g
 
@@ -106,7 +137,7 @@ def test_the_typed_password_is_redacted(client):
 
 def test_a_waiting_download_keeps_the_hub_busy_until_fetched(client):
     c, _s = client
-    j = _bundle(c, {"password": PW}).get_json()
+    j = _built(c, {"password": PW})
     assert diagnostics.busy() is True
     g = c.get(j["download"])
     g.get_data()
@@ -116,7 +147,7 @@ def test_a_waiting_download_keeps_the_hub_busy_until_fetched(client):
 
 def test_download_tokens_expire(client, monkeypatch):
     c, s = client
-    j = _bundle(c, {"password": PW}).get_json()
+    j = _built(c, {"password": PW})
     path = next((s.data / diagnostics.TMP_DIRNAME).glob("*.zip"))
     monkeypatch.setattr(diagnostics.time, "time", lambda: time.monotonic() + 10 ** 10)
     assert c.get(j["download"]).status_code == 404
@@ -149,14 +180,66 @@ def test_a_second_concurrent_build_is_a_409(client):
     assert "already" in r.get_json()["error"]
 
 
-def test_not_enough_disk_is_a_507(client, monkeypatch):
-    c, _ = client
+def test_not_enough_disk_fails_the_build_job(client, monkeypatch):
+    """The disk check needs the estimate (a walk of every stored CDF), so it
+    runs in the job: a refusal is a failed job with the reason, not a 507."""
+    c, s = client
     import collections
     usage = collections.namedtuple("usage", "total used free")
     monkeypatch.setattr(diagnostics.shutil, "disk_usage", lambda p: usage(10 ** 12, 0, 1000))
     r = _bundle(c, {"password": PW})
-    assert r.status_code == 507
-    assert "free disk space" in r.get_json()["error"]
+    assert r.status_code == 202, r.get_data(as_text=True)[:500]
+    job = _finished(c)
+    assert job["state"] == "failed" and "free disk space" in job["error"], job
+    assert job["result"] is None
+    assert diagnostics.busy() is False
+    tmp = s.data / diagnostics.TMP_DIRNAME
+    assert not any(p.suffix in (".part", ".zip") for p in tmp.iterdir())
+
+
+def test_the_bundle_answers_at_once_and_builds_in_the_background(client, monkeypatch):
+    c, _s = client
+    import threading
+    release = threading.Event()
+    real = diagnostics.build_bundle
+
+    def slow(options, **kw):
+        kw["progress"]({"phase": "database"})
+        assert release.wait(10), "the test never released the build"
+        return real(options, **kw)
+
+    monkeypatch.setattr(diagnostics, "build_bundle", slow)
+    t0 = time.monotonic()
+    r = _bundle(c, {"password": PW})
+    assert r.status_code == 202, r.get_data(as_text=True)[:500]
+    assert time.monotonic() - t0 < 5
+    try:
+        deadline = time.time() + 10
+        while (_status(c)["progress"] or {}).get("phase") != "database":
+            assert time.time() < deadline, _status(c)
+            time.sleep(0.01)
+        running = _status(c)
+        assert running["state"] == "running" and running["result"] is None
+        assert diagnostics.busy() is True             # holds off the 3 AM restart and Stop
+        second = _bundle(c, {"password": PW})         # one build at a time
+        assert second.status_code == 409 and "already" in second.get_json()["error"]
+    finally:
+        release.set()
+    done = _finished(c)
+    assert done["state"] == "done", done
+    res = done["result"]["summary"]
+    assert set(res) == {"download", "name", "size", "files", "skipped"}
+    g = c.get(res["download"])
+    assert g.status_code == 200 and len(g.get_data()) == res["size"]
+    g.close()
+
+
+def test_status_needs_the_password(client):
+    c, _ = client
+    assert c.post("/api/admin/diagnostics/status", json={"password": "wrong"}).status_code == 403
+    assert c.post("/api/admin/diagnostics/status", data="{}",
+                  content_type="text/plain").status_code == 415
+    assert _status(c) is None                          # no build yet
 
 
 def test_estimate_is_a_post_with_the_password_in_json(client):
@@ -185,7 +268,7 @@ def test_leftover_temp_files_are_cleaned(client):
     old.write_bytes(b"x")
     past = time.time() - 2 * 3600
     os.utime(old, (past, past))
-    assert _bundle(c, {"password": PW}).status_code == 200
+    _built(c, {"password": PW})
     assert not old.exists()
 
 

@@ -147,8 +147,21 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
     pdfs["direct"] = r.data
 
     current["path"] = "zip"
+    # a background job since v3.0.1: 202 {job}, poll it, then the one-time download
     r = client.post("/api/export-analysis-reports-zip", json={"items": [item]})
-    out["responses"]["zip"] = {"status": r.status_code}
+    if r.status_code != 202:
+        raise SystemExit(f"the ZIP export answered {r.status_code}: {r.get_data(as_text=True)}")
+    job_id = r.get_json()["job"]["id"]
+    deadline = time.time() + 180
+    while True:
+        job = client.get(f"/api/export-analysis-reports-zip/{job_id}").get_json()["job"]
+        if job["state"] != "running":
+            break
+        if time.time() > deadline:
+            raise SystemExit("the ZIP export never finished")
+        time.sleep(0.1)
+    r = client.get(job["download"]) if job["download"] else r
+    out["responses"]["zip"] = {"status": r.status_code, "job_state": job["state"]}
     with zipfile.ZipFile(io.BytesIO(r.data)) as zf:
         pdfs["zip"] = zf.read(zf.namelist()[0])
 

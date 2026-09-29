@@ -9,7 +9,8 @@ Admin jobs (one at a time, in a background thread, polled status)::
 
     POST /api/admin/load-folder          {password, instrument, folder, backfill?}
          → 202 {job}; 400 bad folder; 404 unknown instrument; 409 a job is running
-    POST /api/admin/jobs/status          {password} → {job} (the current or last job)
+    POST /api/admin/jobs/status          {password} → {job} (the current or last job;
+         once it has finished, ``result: {summary}``)
     POST /api/admin/jobs/stop            {password} → {job}; asks the running job (of
          either kind) to stop between batches, by raising from its own progress
          callback (``jobs.load_folder``/``jobs.import_history`` both re-raise with
@@ -17,7 +18,8 @@ Admin jobs (one at a time, in a background thread, polled status)::
 
 ``job`` is ``{id, kind, state: running|done|failed|stopped, params, started_at,
 finished_at, progress: {phase, done, total, file}, counts: {outcome: n},
-recent: [{file, outcome, sample_id, message}], summary, error}``.
+recent: [{file, outcome, sample_id, message}], summary, result, error}``
+(``result`` is ``{summary}`` once a job that produced one has finished).
 ``jobs.load_folder.load_folder`` does the work (read-only on the folder,
 resumable, injection-time order); the running hub Worker processes what it
 submits. ``AdminJobs.start(kind, fn, params)`` is generic: the 2D history
@@ -28,8 +30,12 @@ sample is backfill and is never exported automatically, D11)::
 
     POST /api/admin/import-history/dry-run
          {password, instrument, processed_dir, results_csv?, aliases?, batch_size?}
-         → 200 {summary}; nothing is written. 400 bad folder/CSV/aliases; 404
-           unknown instrument.
+         → 202 {job} at once (v3.0.1: kind ``import-history-dry-run`` on the
+           same runner, one job at a time, stoppable; over a whole share folder
+           it runs for minutes and Cloudflare ends a request after 100 s);
+           the finished job carries ``result: {summary}``; nothing is written.
+           400 bad folder/CSV/aliases; 404 unknown instrument (both before the
+           job); 409 a job is running.
     POST /api/admin/import-history/start
          {password, instrument, processed_dir, results_csv?, aliases?, batch_size?,
           confirm: true}
@@ -65,10 +71,15 @@ Diagnostics (``diagnostics.py``; one bundle at a time)::
          → {options: [{key, label, default, bytes, files, note}]} (in
            ``diagnostics.OPTION_KEYS`` order; cached a minute); 403 wrong password
     POST /api/admin/diagnostics/bundle     {password, options?: {key: bool}}
-         → 200 {download, name, size, files, skipped}: the zip is built to a
-           temp file under ``<data>/diagnostics-tmp`` (the password given is
-           redacted from it too); 400 bad options; 409 another bundle is being
-           built; 507 not enough free disk (``diagnostics.check_disk``)
+         → 202 {job} at once (kind ``diagnostics-bundle``, its own ``AdminJobs``
+           runner ``DIAG_JOBS``: a build takes minutes and Cloudflare ends a
+           request after 100 s); the zip is built to a temp file under
+           ``<data>/diagnostics-tmp`` (the password given is redacted from it
+           too); 400 bad options; 409 another bundle is being built. Not
+           enough free disk (``diagnostics.check_disk``) fails the job.
+    POST /api/admin/diagnostics/status     {password}
+         → {job}: the current or last build; when done, ``job.result.summary``
+           is {download, name, size, files, skipped}
     GET  /api/admin/diagnostics/download/<token>
          → the zip (attachment, Cache-Control: no-store), streamed once and
            deleted; the token is random, single-use and expires after 10
@@ -143,7 +154,8 @@ class AdminJobs:
                 raise RuntimeError(f"a {self._job['kind']} job is already running")
             job = {"id": next(self._ids), "kind": kind, "state": "running", "params": params,
                    "started_at": _now(), "finished_at": None, "progress": {}, "counts": {},
-                   "recent": [], "summary": None, "error": None, "stop_requested": False}
+                   "recent": [], "summary": None, "result": None, "error": None,
+                   "stop_requested": False}
             self._job = job
         threading.Thread(target=self._run, args=(job, fn), daemon=True,
                          name=f"admin-{kind}").start()
@@ -186,7 +198,8 @@ class AdminJobs:
             summary = getattr(exc, "import_summary", None) or getattr(exc, "load_summary", None)
             state, error = "failed", f"{type(exc).__name__}: {exc}"
         with self._lock:
-            job.update(state=state, error=error, summary=summary, finished_at=_now())
+            job.update(state=state, error=error, summary=summary, finished_at=_now(),
+                       result=None if summary is None else {"summary": summary})
 
 
 def _copy(job: Optional[dict]) -> Optional[dict]:
@@ -311,7 +324,10 @@ def _import_history_params(body: dict):
 @bp.route("/api/admin/import-history/dry-run", methods=["POST"])
 def api_admin_import_history_dry_run():
     """Classify a v1 processed folder and results CSV against the store, without
-    writing anything (``jobs.import_history.import_history(..., dry_run=True)``)."""
+    writing anything (``jobs.import_history.import_history(..., dry_run=True)``),
+    as an admin job (kind ``import-history-dry-run``): over a whole share folder
+    it takes minutes, and Cloudflare ends a request after 100 s (HTTP 524).
+    The request's own errors (400/404) are answered here, before the job."""
     body, err = _admin()
     if err:
         return err
@@ -319,11 +335,23 @@ def api_admin_import_history_dry_run():
     if err:
         return err
     inst, processed_dir, results_csv, aliases, batch_size = params
-    from jobs.import_history import import_history
-    summary = import_history(inst, processed_dir, results_csv, instrument_folder_aliases=aliases,
-                             db=_db(), data_dir=paths.require_data_dir(), dry_run=True,
-                             batch_size=batch_size)
-    return jsonify({"summary": summary})
+
+    def run(progress):
+        from jobs.import_history import import_history
+        return import_history(inst, processed_dir, results_csv, instrument_folder_aliases=aliases,
+                              db=_db(), data_dir=paths.require_data_dir(), progress=progress,
+                              dry_run=True, batch_size=batch_size)
+
+    try:
+        job = JOBS.start("import-history-dry-run", run, {
+            "instrument": inst, "processed_dir": str(processed_dir),
+            "results_csv": str(results_csv) if results_csv else None, "aliases": aliases,
+            "batch_size": batch_size, "by": _who()})
+    except RuntimeError as exc:
+        return _err(str(exc), 409, job=JOBS.current())
+    log.info("admin: import-history dry run %s from %s (csv %s) started by %s", inst,
+             processed_dir, results_csv, _who())
+    return jsonify({"job": job}), 202
 
 
 @bp.route("/api/admin/import-history/start", methods=["POST"])
@@ -514,11 +542,21 @@ def _bundle_name() -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", raw)
 
 
+#: The diagnostics bundle's own job runner: one build at a time (with
+#: ``diagnostics.exclusive``), independent of the import/load jobs so a long
+#: history import never blocks a bundle.
+DIAG_JOBS = AdminJobs()
+
+
 @bp.route("/api/admin/diagnostics/bundle", methods=["POST"])
 def api_admin_diagnostics_bundle():
-    """Build the diagnostics zip; answer a one-time download URL. The build
-    runs in this request's thread (the app keeps serving on its others) and
-    never takes the store's write lock; one build at a time."""
+    """Start building the diagnostics zip in the background: 202 ``{job}`` at
+    once (a build takes minutes and Cloudflare ends a request after 100 s).
+    The finished job's ``result.summary`` is ``{download, name, size, files,
+    skipped}``, polled with ``/api/admin/diagnostics/status``. The build never
+    takes the store's write lock; one build at a time (409). The disk check
+    (507 before v3.0.1) needs the estimate, a walk of every stored CDF, so it
+    runs in the job: not enough disk is a failed job with the reason."""
     body, err = _admin()
     if err:
         return err
@@ -527,39 +565,70 @@ def api_admin_diagnostics_bundle():
     except ValueError as exc:
         return _err(str(exc), 400)
     data_dir = paths.require_data_dir()
+    db = _db()
     name = _bundle_name()
     password = body.get("password")
+    who = _who()                 # captured here: the job runs outside the request
+    # Taken here, so a second request gets its 409 at once and diagnostics.busy()
+    # holds off the 3 AM restart and the tray's Stop from this moment; the job
+    # thread releases it (a threading.Lock may be released by another thread).
+    hold = diagnostics.exclusive()
     try:
-        with diagnostics.exclusive():
-            tmp = diagnostics.cleanup_tmp(data_dir)
-            try:
-                diagnostics.check_disk(tmp, options, data_dir=data_dir, db=_db())
-            except diagnostics.NoSpace as exc:
-                return _err(str(exc), 507)
-            part = tmp / f"{name}.zip.part"
-            try:
-                import hub
-                manifest = diagnostics.build_bundle(
-                    options, data_dir=data_dir, db=_db(), out_path=part,
-                    who=_who(), runtime=hub.running(),
-                    extra_secrets=[password] if isinstance(password, str) else [])
-                final = tmp / f"{name}.zip"
-                part.replace(final)
-            except Exception as exc:  # noqa: BLE001 - report it, never kill the hub
-                log.error("diagnostics bundle failed:\n%s", traceback.format_exc())
-                for leftover in (part, tmp / f"{name}.zip"):
-                    _unlink_quietly(leftover)
-                return _err(f"The diagnostics bundle failed: {type(exc).__name__}: {exc}", 500)
-            token = diagnostics.register_download(final, f"{name}.zip")
+        hold.__enter__()
     except diagnostics.Busy as exc:
         return _err(str(exc), 409)
-    size = final.stat().st_size
+
+    def run(progress):
+        try:
+            return _build_diagnostics(options, data_dir=data_dir, db=db, name=name, who=who,
+                                      password=password, progress=progress)
+        finally:
+            hold.__exit__(None, None, None)
+
+    try:
+        job = DIAG_JOBS.start("diagnostics-bundle", run, {"options": options, "by": who})
+    except RuntimeError as exc:
+        hold.__exit__(None, None, None)
+        return _err(str(exc), 409, job=DIAG_JOBS.current())
+    log.info("admin: diagnostics bundle %s (options %s) started by %s", name, options, who)
+    return _no_store(jsonify({"job": job})), 202
+
+
+def _build_diagnostics(options, *, data_dir, db, name, who, password, progress) -> dict:
+    """The bundle job (the build lock is held by the caller): the disk check,
+    the build to ``<data>/diagnostics-tmp``, the one-time download."""
+    tmp = diagnostics.cleanup_tmp(data_dir)
+    diagnostics.check_disk(tmp, options, data_dir=data_dir, db=db)
+    part = tmp / f"{name}.zip.part"
+    final = tmp / f"{name}.zip"
+    try:
+        import hub
+        manifest = diagnostics.build_bundle(
+            options, data_dir=data_dir, db=db, out_path=part, who=who,
+            runtime=hub.running(), progress=progress,
+            extra_secrets=[password] if isinstance(password, str) else [])
+        part.replace(final)
+        size = final.stat().st_size
+    except BaseException:
+        log.error("diagnostics bundle failed:\n%s", traceback.format_exc())
+        for leftover in (part, final):
+            _unlink_quietly(leftover)
+        raise
+    token = diagnostics.register_download(final, f"{name}.zip")
     log.warning("admin: diagnostics bundle %s (%d bytes, %d files, options %s) built for %s",
-                name, size, len(manifest.get("files", [])), options, _who())
-    return _no_store(jsonify({
-        "download": f"/api/admin/diagnostics/download/{token}", "name": f"{name}.zip",
-        "size": size, "files": len(manifest.get("files", [])),
-        "skipped": len(manifest.get("skipped", []))}))
+                name, size, len(manifest.get("files", [])), options, who)
+    return {"download": f"/api/admin/diagnostics/download/{token}", "name": f"{name}.zip",
+            "size": size, "files": len(manifest.get("files", [])),
+            "skipped": len(manifest.get("skipped", []))}
+
+
+@bp.route("/api/admin/diagnostics/status", methods=["POST"])
+def api_admin_diagnostics_status():
+    """The current or last diagnostics build: ``{job}`` (``None`` before any)."""
+    _body, err = _admin()
+    if err:
+        return err
+    return _no_store(jsonify({"job": DIAG_JOBS.current()}))
 
 
 @bp.route("/api/admin/diagnostics/download/<token>", methods=["GET"])
