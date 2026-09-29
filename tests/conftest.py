@@ -51,7 +51,7 @@ atexit.register(shutil.rmtree, TEST_HOME, ignore_errors=True)
 for _name in ("PORT", "GC_PORT", "GC_DATA_DIR", "GC_CAL_CDF"):
     os.environ.pop(_name, None)
 
-_DEPLOY_ENV_VARS = ("PORT", "GC_PORT", "GC_DATA_DIR", "GC_CAL_CDF")
+_DEPLOY_ENV_VARS = ("PORT", "GC_PORT", "GC_DATA_DIR", "GC_CAL_CDF", "LEM_URL")
 
 # ── No silent skips where the deps are supposed to be there ──────────────
 # Tests that need numpy/netCDF4/flask/... skip when those are absent, which is

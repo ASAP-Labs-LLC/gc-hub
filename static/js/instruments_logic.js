@@ -159,10 +159,56 @@
         return { text: status.problem || 'Calibration not usable', level: 'bad' };
     }
 
+    // D10: the LEM machine dropdown. answer: GET /api/lem/machines's body
+    // (null when the request failed); saved: the instrument's saved uid.
+    // -> {options: [{text, value, other?}], selected: index, note: text|null}.
+    // "— none —", one entry per machine ("Title (uid)", closed ones marked),
+    // then "Other…" (reveals a text box). A saved uid LEM doesn't list is kept
+    // as "Unknown machine (uid)"; when LEM can't be reached, only the saved
+    // value is offered. The texts are set with textContent by the page.
+    const LEM_DOWN_NOTE = "LEM can't be reached; showing the saved value.";
+    function lemMachineOptions(answer, saved) {
+        const uid = typeof saved === 'string' ? saved : '';
+        const machines = answer && typeof answer === 'object' && Array.isArray(answer.machines) &&
+            answer.source !== 'unavailable' ? answer.machines : null;
+        const options = [{ text: '— none —', value: '' }];
+        let note = null;
+        if (machines === null) {
+            if (uid) options.push({ text: uid, value: uid });
+            note = LEM_DOWN_NOTE;
+        } else {
+            const listed = [];
+            for (const m of machines) {
+                if (!m || typeof m.uid !== 'string' || !m.uid) continue;
+                const title = typeof m.title === 'string' ? m.title : '';
+                listed.push({ text: (title ? title + ' (' + m.uid + ')' : m.uid) + (m.closed ? ' (closed)' : ''),
+                              value: m.uid });
+            }
+            if (uid && !listed.some(o => o.value === uid)) {
+                options.push({ text: 'Unknown machine (' + uid + ')', value: uid });
+            }
+            options.push(...listed);
+            if (answer.source === 'cached') {
+                const min = Math.max(1, Math.round((Number(answer.age_seconds) || 0) / 60));
+                note = "LEM can't be reached; showing its list from " + min + ' min ago.';
+            }
+        }
+        options.push({ text: 'Other…', value: '', other: true });
+        const at = uid ? options.findIndex(o => !o.other && o.value === uid) : 0;
+        return { options, selected: at < 0 ? 0 : at, note };
+    }
+
+    // The uid to save: the chosen option's, or the typed one for "Other…".
+    function lemPickerValue(option, typed) {
+        if (!option) return '';
+        if (option.other) return String(typed === null || typed === undefined ? '' : typed).trim();
+        return option.value;
+    }
+
     const api = {
         SKEW_WARN_SECONDS, formatSkew, skewWarning, agentHealth, parseCorrections,
         liveSinceValue, liveSinceInput, liveSinceConfirm, localNow, installerOutcome, methodRows, orderStandards,
-        releaseSummary, calibrationBadge,
+        releaseSummary, calibrationBadge, lemMachineOptions, lemPickerValue,
     };
     root.InstrumentsLogic = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;

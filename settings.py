@@ -103,6 +103,10 @@ DEFAULTS: Dict[str, str] = {
     "bestfit_threshold": "0.93",
     "bestfit_shift_tolerance_min": "0.05",
     "bestfit_mix_min_frac": "0.10",
+    # D10: where the Instruments page's LEM machine dropdown comes from
+    # (lem_machines.py; read-only GET <lem_url>/api/machines). A bare
+    # http(s)://host[:port]; the LEM_URL environment variable wins.
+    "lem_url": "https://lem.asaplabs.net",
 }
 
 # ---------------------------------------------------------------------------
@@ -139,6 +143,9 @@ ADMIN_KEYS = (
     "analysis_x_max_min", "analysis_spike_min_width_min", "analysis_range_overlays",
     "analysis_min_width_min", "analysis_merge_gap_min", "analysis_spike_report_threshold",
     "analysis_spike_max_fwhm_min", "analysis_spike_min_dominance",
+    # D10: the hub fetches from this address server-side, so only an admin
+    # may point it elsewhere (validated in app.api_save_settings).
+    "lem_url",
 )
 
 

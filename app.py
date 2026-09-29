@@ -100,6 +100,7 @@ GC_PORT = instance.resolve_port()
 os.environ["GC_PORT"] = str(GC_PORT)
 
 import distill
+import lem_machines
 import sample_flags
 import settings as settings_mod
 
@@ -1550,10 +1551,13 @@ def api_save_settings():
                           f"corrections and the blank limit are set on the server (settings.json, "
                           f"DEPLOY.md) or per instrument (Calibration and Instruments pages).", 400)
         if any(k in settings_mod.ADMIN_KEYS for k in changed) and not _check_admin(body):
-            return _error("Best-fit and analysis defaults need the admin password", 403)
+            return _error("Best-fit, analysis defaults and the LEM address need the admin password", 403)
         bad = analysis_core.invalid_analysis_settings(changed)
         if bad:
             return _error(f"{', '.join(bad)} must be a number \u2265 0", 400)
+        if "lem_url" in changed and not lem_machines.valid_url(changed["lem_url"]):
+            return _error("lem_url must be http(s)://host or http(s)://host:port "
+                          "(no path)", 400)
         if changed:
             # Flag rules and best-fit settings need no cache clearing:
             # sample_cache rows carry the fingerprint they were computed with.
