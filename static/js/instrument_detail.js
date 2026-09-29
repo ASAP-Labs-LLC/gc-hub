@@ -28,9 +28,13 @@
                           calibration: '#calibration', method: '#methods', go_live: '#export', first_result: '#export' };
 
     // ── load ────────────────────────────────────────────────────────────────
-    async function load() {
-        const [d, st] = await Promise.all([S.getJSON('/api/instruments/' + enc(IID)),
-                                           S.getJSON('/api/instruments/' + enc(IID) + '/setup')]);
+    // `background`: a reload caused by a live update (X-GC-Background: 1), not a click.
+    let bgRender = false;
+    async function load(background) {
+        const bg = background === true;
+        const [d, st] = await Promise.all([S.getJSON('/api/instruments/' + enc(IID), bg),
+                                           S.getJSON('/api/instruments/' + enc(IID) + '/setup', bg)]);
+        bgRender = bg;
         if (d.status !== 200) { S.toast((d.body && d.body.error) || 'Could not load ' + IID, 'err'); return; }
         D = d.body;
         if (st.status === 200) SETUP = st.body;
@@ -330,11 +334,11 @@
             h('div', { className: 'row' }, h('button', { type: 'button', className: 'btn', text: 'Release selected…', onclick: releaseSelected })),
         ];
     }
-    async function loadBackfill() {
+    async function loadBackfill(background) {
         const e = backfillEls;
         if (!e) return;
         const params = new URLSearchParams({ q: e.q.value, released: e.released.value, limit: '200' });
-        const r = await S.getJSON('/api/instruments/' + enc(e.inst.id) + '/backfill?' + params);
+        const r = await S.getJSON('/api/instruments/' + enc(e.inst.id) + '/backfill?' + params, background === true);
         if (e !== backfillEls) return;
         e.tbody.replaceChildren();
         if (r.status !== 200) { S.toast((r.body && r.body.error) || 'Could not load backfill', 'err'); return; }
@@ -355,9 +359,9 @@
         conflictsBox = h('div', { className: 'body', style: 'gap:12px' });
         return [conflictsBox];
     }
-    async function loadConflicts() {
+    async function loadConflicts(background) {
         const box = conflictsBox;
-        const r = await S.getJSON('/api/conflicts?instrument=' + enc(IID));
+        const r = await S.getJSON('/api/conflicts?instrument=' + enc(IID), background === true);
         if (box !== conflictsBox) return;
         box.replaceChildren();
         if (r.status !== 200) { box.appendChild(h('p', { className: 'errline', text: (r.body && r.body.error) || 'Could not load conflicts' })); return; }
@@ -399,8 +403,8 @@
         renderHead();
         renderChecklist();
         for (const key of Object.keys(SECTIONS)) renderSection(key);
-        loadBackfill();
-        loadConflicts();
+        loadBackfill(bgRender);
+        loadConflicts(bgRender);
         S.addRecent({ href: '/instruments/' + IID, label: D.instrument.name });
     }
 
@@ -422,7 +426,7 @@
     }
 
     let reloadTimer = null;
-    function reloadSoon() { clearTimeout(reloadTimer); reloadTimer = setTimeout(load, 300); }
+    function reloadSoon() { clearTimeout(reloadTimer); reloadTimer = setTimeout(() => load(true), 300); }
     function onLive(update) {
         const mine = (update.agents || []).find(a => a.instrument_id === IID);
         if (mine) {

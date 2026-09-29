@@ -232,16 +232,17 @@
         pick.value = current;
     }
 
-    async function refresh() {
+    async function refresh(background) {
+        const bg = background === true;       // a live update, not a click
         const cur = chosen();
         if (cur === NEW || !inst) return;
-        const r = await S.getJSON('/api/instruments/' + enc(inst.id) + '/setup', true);
+        const r = await S.getJSON('/api/instruments/' + enc(inst.id) + '/setup', bg);
         if (r.status === 200) { SETUP = r.body; renderInstrument(); }
-        S.loadInstruments(true);
+        S.loadInstruments(bg);
     }
 
     let refreshTimer = null;
-    function refreshSoon() { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, 300); }
+    function refreshSoon() { clearTimeout(refreshTimer); refreshTimer = setTimeout(() => refresh(true), 300); }
 
     function onLive(update) {
         if (!inst) return;

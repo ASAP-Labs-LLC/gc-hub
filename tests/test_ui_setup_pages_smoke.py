@@ -29,6 +29,19 @@ import ui_setup_demo  # noqa: E402
 from bootapp import booted, browser_sign_in, setup_admin  # noqa: E402
 
 SIZES = [(1366, 768), (1440, 900)]
+FETCH_SPY = """
+window.__gets = [];
+const __f = window.fetch;
+window.fetch = function (url, opts) {
+  const o = opts || {};
+  if (!o.method || o.method === 'GET') {
+    const h = o.headers || {};
+    const bg = typeof h.get === 'function' ? h.get('X-GC-Background') : h['X-GC-Background'];
+    window.__gets.push([String(url), bg || null]);
+  }
+  return __f.apply(this, arguments);
+};
+"""
 THEMES = ["light", "dark"]
 
 
@@ -159,13 +172,21 @@ def test_the_guide_moves_on_when_the_agent_checks_in_and_add_a_gc(tmp_path):
         drv = _driver()
         browser_sign_in(drv, port)
         try:
+            # record every GET the page makes, with its X-GC-Background header
+            drv.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": FETCH_SPY})
             _open(drv, port, "/setup?instrument=gc2", "light", (1440, 900))
             assert _wait(lambda: _js(drv, "return document.querySelector('[data-testid=step-checkin]')"
                                           ".dataset.status;") == "current")
+            time.sleep(1.0)
+            _js(drv, "window.__settled = window.__gets.length;")
             ui_setup_demo.touch_agent(hub.db, "gc2")               # the agent says hello
             assert _wait(lambda: _js(drv, "return document.querySelector('[data-testid=step-checkin]')"
                                           ".dataset.status;") == "done", timeout=20)
             assert _js(drv, "return document.querySelector('[data-testid=guide-step]').textContent;") == "Step 7 of 8"
+            # everything fetched because of the live update or a timer is background
+            later = _js(drv, "return window.__gets.slice(window.__settled);")
+            assert later and all(bg == "1" for _url, bg in later), later
+            assert any("/setup" in url for url, _bg in later), later
 
             # "Add a new GC": step 1's form, the admin password once, then its guide
             _open(drv, port, "/setup?new=1", "light", (1440, 900))

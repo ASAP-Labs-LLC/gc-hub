@@ -70,10 +70,18 @@
         if (message) toastTimer = setTimeout(() => { t.className = 'toast'; }, kind === 'err' ? 9000 : 5000);
     }
 
+    // `background`: this GET comes from a live update or a timer, not a click,
+    // so it carries X-GC-Background: 1 (never activity, never keeps the session
+    // alive): through GCLive.bgFetch when live.js provides it.
     async function getJSON(path, background) {
         const headers = { Accept: 'application/json' };
-        if (background) headers['X-GC-Background'] = '1';
-        const r = await fetch(path, { headers, cache: 'no-store' });
+        let r;
+        if (background && window.GCLive && typeof window.GCLive.bgFetch === 'function') {
+            r = await window.GCLive.bgFetch(path, { headers, cache: 'no-store' });
+        } else {
+            if (background) headers['X-GC-Background'] = '1';
+            r = await fetch(path, { headers, cache: 'no-store' });
+        }
         let body = null;
         try { body = await r.json(); } catch (_e) { body = null; }
         return { status: r.status, body };
@@ -211,8 +219,8 @@
 
     // ── bell ────────────────────────────────────────────────────────────────
     let notes = [];
-    async function loadNotes() {
-        const r = await getJSON('/api/notifications', true);
+    async function loadNotes(background) {
+        const r = await getJSON('/api/notifications', !!background);
         if (r.status !== 200 || !Array.isArray(r.body)) return;
         notes = r.body;
         renderNotes(notes.length);
@@ -270,7 +278,7 @@
 
     function onLive(update) {
         lastUpdateAt = Date.now();
-        if (typeof update.notifications_unread === 'number' && update.notifications_unread !== notes.length) loadNotes();
+        if (typeof update.notifications_unread === 'number' && update.notifications_unread !== notes.length) loadNotes(true);
         const hub = update.hub || null;
         const upd = $('menu-update');
         if (upd && hub && hub.staged_update) {
