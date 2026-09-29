@@ -1,4 +1,4 @@
-"""store.py: the hub's SQLite store (phase 2; schema v2 since phase 4).
+"""store.py: the hub's SQLite store (phase 2, schema v1).
 
 SQLite is the source of truth (spec D6). This module owns the schema, its
 additive migrations, short-lived connections, and small typed helpers. It is
@@ -114,24 +114,6 @@ Small tables::
     conflicts.set_error(conflict_id, error, *, db)          # why the last Replace failed (None clears)
     conflicts.resolve(conflict_id, resolution, *, by, db)   # 'kept-existing' | 'replaced'; clears error
 
-Comments and the report log (schema v2, phase 4; the rules are ``comments.py``)::
-
-    comment_presets.list(include_inactive=False, *, db) -> list[dict]   # sort, id
-    comment_presets.get(preset_id, *, db) -> dict | None
-    comment_presets.count_active(*, db) -> int
-    comment_presets.add(text, *, created_by=None, db) -> int           # sorted last
-    comment_presets.update(preset_id, *, db, text=..., active=..., sort=...)  # ValueError if missing
-    comment_presets.reorder(ids, *, db)                                 # sort = position
-    sample_comments.add(sample_id, *, text, source, author_initials, author_ip, revision,
-                        preset_id=None, t0=None, t1=None, created_at=None, db) -> int
-    sample_comments.get(comment_id, *, db) -> dict | None
-    sample_comments.list(sample_id, include_deleted=False, *, db) -> list[dict]  # created_at, id
-    sample_comments.count_active(sample_id, *, db) -> int
-    sample_comments.soft_delete(comment_id, *, deleted_by_initials, deleted_by_ip, db) -> bool
-        # False if already deleted; the row is never removed (comments feed reports)
-    report_log.add(sample_id, *, kind, db, **fields) -> int    # kind in REPORT_KINDS
-    report_log.list(sample_id, *, db) -> list[dict]            # oldest first
-
 Conventions and decisions (where the spec left a choice)
 ========================================================
 
@@ -231,11 +213,6 @@ Conventions and decisions (where the spec left a choice)
   ``settings-<YYYY-MM-DD>.json`` copied from ``paths.settings_file()``.
   Pruning keeps the newest ``keep`` (≥ 1) ``gc-*.db`` files and the settings
   copies of the days kept; pre-migrate copies are never pruned.
-* **Schema v2** (phase 4) adds ``comment_presets`` (its four seeds are INSERTs
-  inside the v2 step, so they are written exactly once), ``sample_comments``
-  (soft delete: ``deleted_at``/``deleted_by_*``; the text is copied from a
-  preset, never referenced) and ``report_log`` (one row per report PDF).
-  v2.0.0 (schema v1 code) starts on a v2 database: it ignores the new tables.
 * **Rollback safety.** ``migrate`` on a database whose ``user_version`` is
   higher than ``len(MIGRATIONS)`` logs a warning and carries on. It raises
   ``SchemaError`` only if a table or column this code needs is missing.
@@ -268,8 +245,6 @@ STATUSES: tuple[str, ...] = (
 )
 INJECTION_DT_SOURCES: tuple[str, ...] = ("cdf", "mtime", "csv")
 CONFLICT_RESOLUTIONS: tuple[str, ...] = ("kept-existing", "replaced")
-COMMENT_SOURCES: tuple[str, ...] = ("preset", "free", "annotation")
-REPORT_KINDS: tuple[str, ...] = ("download", "zip", "qbench")
 REVISION_REASONS: tuple[str, ...] = (
     "processed", "reprocess", "import", "export-lims", "corrections-released", "replace",
 )
@@ -284,11 +259,6 @@ class SchemaError(RuntimeError):
 
 
 # ── schema ──────────────────────────────────────────────────────────────────
-
-def _sql_text(text: str) -> str:
-    """A SQL string literal (quotes doubled), for the seed INSERTs in MIGRATIONS."""
-    return "'" + text.replace("'", "''") + "'"
-
 
 # MIGRATIONS[i] takes user_version i to i + 1. Additive only: CREATE TABLE,
 # CREATE INDEX, ALTER TABLE ... ADD COLUMN. Never drop, rename or rewrite.
@@ -458,69 +428,10 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             counts TEXT,
             stopped TEXT)""",
     ),
-    (  # v2 (phase 4): comment presets (seeded here, once), sample comments, report log
-        """CREATE TABLE comment_presets(
-            id INTEGER PRIMARY KEY,
-            text TEXT NOT NULL,
-            sort INTEGER NOT NULL DEFAULT 0,
-            active INTEGER NOT NULL DEFAULT 1,
-            created_by TEXT,
-            created_at TEXT,
-            updated_at TEXT)""",
-        """CREATE TABLE sample_comments(
-            id INTEGER PRIMARY KEY,
-            sample_id INTEGER NOT NULL REFERENCES samples(id),
-            revision INTEGER,
-            text TEXT NOT NULL,
-            preset_id INTEGER,
-            source TEXT NOT NULL,
-            t0 REAL,
-            t1 REAL,
-            author_initials TEXT NOT NULL,
-            author_ip TEXT,
-            created_at TEXT NOT NULL,
-            deleted_at TEXT,
-            deleted_by_initials TEXT,
-            deleted_by_ip TEXT)""",
-        "CREATE INDEX sample_comments_sample ON sample_comments(sample_id, created_at)",
-        """CREATE TABLE report_log(
-            id INTEGER PRIMARY KEY,
-            sample_id INTEGER NOT NULL REFERENCES samples(id),
-            revision INTEGER,
-            kind TEXT NOT NULL,
-            standard_name TEXT,
-            params_json TEXT,
-            ranges_json TEXT,
-            windows_json TEXT,
-            bullets_json TEXT,
-            bullets_text TEXT,
-            conclusion TEXT,
-            conclusion_edited INTEGER,
-            comment_ids_json TEXT,
-            app_version TEXT,
-            pdf_sha256 TEXT,
-            created_at TEXT NOT NULL,
-            author_initials TEXT,
-            author_ip TEXT)""",
-        "CREATE INDEX report_log_sample ON report_log(sample_id, created_at)",
-        # The seeds live in this step (same transaction as the tables), so they
-        # are inserted exactly once, never again at start-up. Worded for a
-        # report: QBench PDFs may reach customers. Timestamps in now_iso() form.
-        *(f"""INSERT INTO comment_presets(text, sort, active, created_by, created_at, updated_at)
-              VALUES ({_sql_text(text)}, {sort}, 1, 'seed',
-                      strftime('%Y-%m-%dT%H:%M:%f000+00:00', 'now'),
-                      strftime('%Y-%m-%dT%H:%M:%f000+00:00', 'now'))"""
-          for sort, text in enumerate((
-              "Sample appears to be a renewable fuel, not conventional petroleum diesel.",
-              "Sample appears to be gasoline.",
-              "Possible contamination; results should be interpreted with caution.",
-              "Re-run requested.",
-          ), start=1)),
-    ),
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 
-# Tables and columns this code reads or writes (equal to a fresh database).
+# Tables and columns this code reads or writes (equal to a fresh v1 database).
 # On a newer database these must exist; anything extra is ignored.
 REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
     "instruments": frozenset({
@@ -565,18 +476,6 @@ REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
     "import_runs": frozenset({
         "id", "instrument_id", "started_at", "finished_at", "by", "sources", "counts",
         "stopped"}),
-    # v2
-    "comment_presets": frozenset({
-        "id", "text", "sort", "active", "created_by", "created_at", "updated_at"}),
-    "sample_comments": frozenset({
-        "id", "sample_id", "revision", "text", "preset_id", "source", "t0", "t1",
-        "author_initials", "author_ip", "created_at", "deleted_at", "deleted_by_initials",
-        "deleted_by_ip"}),
-    "report_log": frozenset({
-        "id", "sample_id", "revision", "kind", "standard_name", "params_json", "ranges_json",
-        "windows_json", "bullets_json", "bullets_text", "conclusion", "conclusion_edited",
-        "comment_ids_json", "app_version", "pdf_sha256", "created_at", "author_initials",
-        "author_ip"}),
 }
 
 
@@ -1762,144 +1661,3 @@ class conflicts:  # noqa: N801
                              (resolution, by, now_iso(), conflict_id)).rowcount
             if n != 1:
                 raise ValueError(f"conflict {conflict_id} is missing or already resolved")
-
-
-# ── comments and the report log (schema v2) ─────────────────────────────────
-
-class comment_presets:  # noqa: N801
-    """The one-click comment texts (admin-managed). Deactivated, never deleted."""
-
-    FIELDS = frozenset({"text", "active", "sort"})
-
-    @staticmethod
-    def list(include_inactive: bool = False, *, db: Db = None) -> list[dict]:
-        sql = "SELECT * FROM comment_presets"
-        if not include_inactive:
-            sql += " WHERE active=1"
-        with connection(db) as conn:
-            return _rows(conn.execute(sql + " ORDER BY sort, id"))
-
-    @staticmethod
-    def get(preset_id: int, *, db: Db = None) -> Optional[dict]:
-        with connection(db) as conn:
-            return _row(conn.execute("SELECT * FROM comment_presets WHERE id=?",
-                                     (preset_id,)).fetchone())
-
-    @staticmethod
-    def count_active(*, db: Db = None) -> int:
-        with connection(db) as conn:
-            return int(conn.execute("SELECT COUNT(*) FROM comment_presets WHERE active=1")
-                       .fetchone()[0])
-
-    @staticmethod
-    def add(text: str, *, created_by: Optional[str] = None, db: Db = None) -> int:
-        now = now_iso()
-        with _writing(db) as conn:
-            nxt = conn.execute("SELECT COALESCE(MAX(sort), 0) + 1 FROM comment_presets").fetchone()[0]
-            cur = conn.execute(
-                "INSERT INTO comment_presets(text, sort, active, created_by, created_at, updated_at) "
-                "VALUES (?,?,1,?,?,?)", (text, nxt, created_by, now, now))
-            return int(cur.lastrowid)
-
-    @staticmethod
-    def update(preset_id: int, *, db: Db = None, **fields: Any) -> None:
-        """Change ``text``/``active``/``sort``; ``ValueError`` on another field or a
-        missing preset."""
-        bad = set(fields) - comment_presets.FIELDS
-        if bad:
-            raise ValueError(f"unknown comment_presets fields: {sorted(bad)}")
-        cols = sorted(fields)
-        with _writing(db) as conn:
-            n = conn.execute(
-                f"UPDATE comment_presets SET {', '.join(f'{c}=?' for c in cols + ['updated_at'])} "
-                "WHERE id=?", [fields[c] for c in cols] + [now_iso(), preset_id]).rowcount
-            if n != 1:
-                raise ValueError(f"comment preset {preset_id} is missing")
-
-    @staticmethod
-    def reorder(ids: Sequence[int], *, db: Db = None) -> None:
-        """``sort`` = position in ``ids`` (1-based). Presets not named keep theirs."""
-        now = now_iso()
-        with _writing(db) as conn:
-            for pos, pid in enumerate(ids, start=1):
-                if conn.execute("UPDATE comment_presets SET sort=?, updated_at=? WHERE id=?",
-                                (pos, now, pid)).rowcount != 1:
-                    raise ValueError(f"comment preset {pid} is missing")
-
-
-class sample_comments:  # noqa: N801
-    """Comments on a sample (preset, free text or annotation span). Soft delete only."""
-
-    @staticmethod
-    def add(sample_id: int, *, text: str, source: str, author_initials: str,
-            author_ip: Optional[str], revision: Optional[int], preset_id: Optional[int] = None,
-            t0: Optional[float] = None, t1: Optional[float] = None,
-            created_at: Optional[str] = None, db: Db = None) -> int:
-        if source not in COMMENT_SOURCES:
-            raise ValueError(f"unknown comment source {source!r}")
-        with _writing(db) as conn:
-            cur = conn.execute(
-                "INSERT INTO sample_comments(sample_id, revision, text, preset_id, source, t0, t1, "
-                "author_initials, author_ip, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (sample_id, revision, text, preset_id, source, t0, t1, author_initials,
-                 author_ip, created_at or now_iso()))
-            return int(cur.lastrowid)
-
-    @staticmethod
-    def get(comment_id: int, *, db: Db = None) -> Optional[dict]:
-        with connection(db) as conn:
-            return _row(conn.execute("SELECT * FROM sample_comments WHERE id=?",
-                                     (comment_id,)).fetchone())
-
-    @staticmethod
-    def list(sample_id: int, include_deleted: bool = False, *, db: Db = None) -> list[dict]:
-        """The sample's comments, oldest first (``created_at``, then ``id``)."""
-        sql = "SELECT * FROM sample_comments WHERE sample_id=?"
-        if not include_deleted:
-            sql += " AND deleted_at IS NULL"
-        with connection(db) as conn:
-            return _rows(conn.execute(sql + " ORDER BY created_at, id", (sample_id,)))
-
-    @staticmethod
-    def count_active(sample_id: int, *, db: Db = None) -> int:
-        with connection(db) as conn:
-            return int(conn.execute("SELECT COUNT(*) FROM sample_comments WHERE sample_id=? "
-                                    "AND deleted_at IS NULL", (sample_id,)).fetchone()[0])
-
-    @staticmethod
-    def soft_delete(comment_id: int, *, deleted_by_initials: str, deleted_by_ip: Optional[str],
-                    db: Db = None) -> bool:
-        """Mark deleted (who, from where, when). ``False`` if missing or already deleted."""
-        with _writing(db) as conn:
-            return conn.execute(
-                "UPDATE sample_comments SET deleted_at=?, deleted_by_initials=?, deleted_by_ip=? "
-                "WHERE id=? AND deleted_at IS NULL",
-                (now_iso(), deleted_by_initials, deleted_by_ip, comment_id)).rowcount == 1
-
-
-class report_log:  # noqa: N801
-    """One row per report PDF produced (download, ZIP entry, QBench upload): the
-    record of what was reported. Append-only."""
-
-    FIELDS = frozenset(REQUIRED_COLUMNS["report_log"] - {"id", "sample_id", "kind"})
-
-    @staticmethod
-    def add(sample_id: int, *, kind: str, db: Db = None, **fields: Any) -> int:
-        if kind not in REPORT_KINDS:
-            raise ValueError(f"unknown report kind {kind!r}")
-        bad = set(fields) - report_log.FIELDS
-        if bad:
-            raise ValueError(f"unknown report_log fields: {sorted(bad)}")
-        fields.setdefault("created_at", now_iso())
-        cols = sorted(fields)
-        with _writing(db) as conn:
-            cur = conn.execute(
-                f"INSERT INTO report_log(sample_id, kind, {', '.join(cols)}) "
-                f"VALUES (?, ?, {_in(cols)})", [sample_id, kind] + [fields[c] for c in cols])
-            return int(cur.lastrowid)
-
-    @staticmethod
-    def list(sample_id: int, *, db: Db = None) -> list[dict]:
-        with connection(db) as conn:
-            return _rows(conn.execute("SELECT * FROM report_log WHERE sample_id=? "
-                                      "ORDER BY created_at, id", (sample_id,)))

@@ -235,6 +235,22 @@
     /* ── Annotation crosshair toggle ──────────────────────────────── */
     .annotation-toggle { padding: 4px 10px; font-size: 11px; }
     .annotation-toggle.active { background: #58a6ff; color: #fff; border-color: #58a6ff; }
+
+    /* ── Comments (phase 4) ───────────────────────────────────────── */
+    #analysis-comments-panel .panel-body { display:flex; flex-direction:column; gap:6px; }
+    .comment-initials { display:flex; align-items:center; gap:4px; margin-left:auto; font-size:10px; color:#7d8590; font-weight:normal; }
+    .comment-initials input { width:52px; font-size:11px; padding:1px 4px; text-transform:uppercase; }
+    .comment-chips { display:flex; flex-wrap:wrap; gap:4px; }
+    .comment-chip { font-size:10px; padding:2px 8px; border:1px solid #30363d; border-radius:12px; background:#161b22; color:#c9d1d9; cursor:pointer; text-align:left; }
+    .comment-chip:hover { border-color:#58a6ff; color:#fff; }
+    .comment-add { display:flex; gap:4px; }
+    .comment-add input { flex:1; font-size:11px; padding:3px 6px; }
+    #comment-list { list-style:none; margin:0; padding:0; max-height:140px; overflow:auto; font-size:11px; }
+    #comment-list li { display:flex; align-items:baseline; gap:6px; padding:3px 2px; border-bottom:1px solid #21262d; }
+    #comment-list li.muted { color:#7d8590; }
+    #comment-list .comment-text { flex:1; color:#c9d1d9; white-space:pre-wrap; word-break:break-word; }
+    #comment-list .comment-meta { color:#7d8590; font-size:10px; white-space:nowrap; }
+    #comment-list .comment-delete { background:none; border:none; color:#f85149; cursor:pointer; font-size:13px; line-height:1; padding:0 2px; }
   </style>
 </head>
 <body>
@@ -736,6 +752,23 @@
                 <textarea id="analysis-conclusion" rows="3" style="width:100%; font-size:12px;" placeholder="Enter conclusion..."></textarea>
               </div>
             </div>
+            <!-- Comments (phase 4, static/js/comments.js): saved on the sample, printed in its reports -->
+            <div class="panel" id="analysis-comments-panel" style="flex-shrink:0;">
+              <div class="panel-header" style="display:flex; align-items:center;">
+                <span>Comments</span>
+                <label class="comment-initials" for="comment-initials" title="Self-declared; saved with each comment you add or delete, and remembered by this browser">
+                  Your initials <input id="comment-initials" type="text" maxlength="4" autocomplete="off" spellcheck="false">
+                </label>
+              </div>
+              <div class="panel-body">
+                <div id="comment-presets" class="comment-chips"></div>
+                <div class="comment-add">
+                  <input id="comment-free-text" type="text" maxlength="500" placeholder="Add a comment for the report...">
+                  <button class="btn btn-secondary" id="btn-comment-add" style="font-size:11px; padding:2px 10px;">Add</button>
+                </div>
+                <ul id="comment-list"></ul>
+              </div>
+            </div>
           </div>
 
           <!-- Queue -->
@@ -1078,6 +1111,7 @@
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/comments.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/app.js') }}?v=47"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
