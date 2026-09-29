@@ -100,8 +100,8 @@
             const r = await fetch('/api/admin/diagnostics/estimate', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
                 body: JSON.stringify({ password: $('pw').value }) });
-            const j = await r.json().catch(() => ({}));
-            if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+            const j = (await window.GCSession.readJson(r)).body || {};
+            if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
             estimateRows = j.options || [];
             for (const row of estimateRows) {
                 const td = document.querySelector(`#diag-options tr[data-key="${row.key}"] .diag-size`);
@@ -124,8 +124,8 @@
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
                 body: JSON.stringify({ password: $('pw').value, options: chosenOptions(boxes()) }),
             });
-            const j = await r.json().catch(() => ({}));
-            if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+            const j = (await window.GCSession.readJson(r)).body || {};
+            if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
             if (!isDownloadUrl(j.download)) throw new Error('Unexpected answer from the hub');
             // A navigation, not fetch + blob: the browser streams the zip to disk.
             const a = document.createElement('a');

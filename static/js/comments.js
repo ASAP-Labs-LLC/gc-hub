@@ -121,9 +121,8 @@
             opts.body = JSON.stringify(body);
         }
         const r = await fetch(url, opts);
-        let j = {};
-        try { j = await r.json(); } catch (_) { j = {}; }
-        if (!r.ok) throw new Error((j && j.error) || `HTTP ${r.status}`);
+        const j = (await root.GCSession.readJson(r)).body || {};
+        if (!r.ok || j.error) throw new Error((j && j.error) || `HTTP ${r.status}`);
         return j;
     }
 

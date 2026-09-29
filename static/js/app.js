@@ -275,13 +275,17 @@ async function api(method, url, body, extra) {
     }
     const resp = await fetch(url, opts);
     if (!resp.ok) {
-        let errMsg = `API error ${resp.status}`;
-        try { const j = await resp.json(); errMsg = j.error || j.message || errMsg; } catch { /* ignore */ }
-        throw new Error(errMsg);
+        const j = (await GCSession.readJson(resp)).body || {};
+        throw new Error(j.error || j.message || `API error ${resp.status}`);
     }
     const ct = resp.headers.get('content-type') || '';
-    if (ct.includes('application/json')) return resp.json();
-    return resp;
+    if (!ct.includes('application/json')) return resp;
+    const j = (await GCSession.readJson(resp)).body;
+    // a body that claims to be JSON but doesn't parse comes back as readJson's {error}
+    if (j && typeof j.error === 'string' && j.error.startsWith('The hub answered HTTP ')) {
+        throw new Error(j.error);
+    }
+    return j;
 }
 
 async function apiGet(url) { return api('GET', url); }
@@ -293,7 +297,7 @@ async function apiPostRefusable(url, what, body) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
     });
-    const j = await resp.json().catch(() => ({}));
+    const j = (await GCSession.readJson(resp)).body || {};
     if (!resp.ok) {
         throw new Error((j.refused && j.refused.length)
             ? refusalSummary(what, j.refused, state.files)
@@ -880,7 +884,7 @@ function showContextMenu(e, file) {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ sample_ids }),
                 });
-                const result = await resp.json().catch(() => ({}));
+                const result = (await GCSession.readJson(resp)).body || {};
                 if (!resp.ok && !(result.refused && result.refused.length)) {
                     throw new Error(result.error || `API error ${resp.status}`);
                 }
@@ -3780,7 +3784,9 @@ async function _fetchHealthz(timeoutMs) {
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     try {
         const resp = await fetch('/healthz', { method: 'GET', cache: 'no-store', signal: ctl.signal });
-        return resp.ok ? await resp.json() : null;
+        if (!resp.ok) return null;
+        const j = (await GCSession.readJson(resp)).body;
+        return (j && j.status) ? j : null;     // a page instead of /healthz's JSON: not up
     } finally {
         clearTimeout(timer);
     }

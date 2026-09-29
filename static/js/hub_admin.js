@@ -24,9 +24,8 @@
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify(Object.assign({password: $("pw").value}, body || {})),
     });
-    let j = null;
-    try { j = await r.json(); } catch (e) { j = {}; }
-    if (!r.ok) throw new Error((j && j.error) || ("HTTP " + r.status));
+    const j = (await window.GCSession.readJson(r)).body || {};
+    if (!r.ok || j.error) throw new Error((j && j.error) || ("HTTP " + r.status));
     return j;
   }
 

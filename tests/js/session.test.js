@@ -63,4 +63,66 @@ module.exports = (t) => {
     S.checkSession(fake(200, false), () => { n++; }).then((s) => { who = s; });
     t.eq(n, 1);
     t.eq(who, { name: 'Ryan C', method: 'password' });
+
+    readJsonTests(t);
 };
+
+// readJson (v3.1.0): a web page where data was expected (a hub error page, or
+// Cloudflare's block/challenge/5xx page) becomes {error} instead of
+// "SyntaxError: Unexpected token '<'".
+function readJsonTests(t) {
+    const hdrs = (o) => ({ get: (k) => { const v = o[k.toLowerCase()]; return v === undefined ? null : v; } });
+    const mk = (status, headers, text) => ({ status, ok: status >= 200 && status < 300,
+        headers: hdrs(headers), text: () => sync(text) });
+    const read = (r) => { let got = null; S.readJson(r).then((x) => { got = x; }); return got; };
+    const JSON_CT = { 'content-type': 'application/json' };
+    const page = (status, extra) => 'The hub answered HTTP ' + status + ' with a web page instead of data' +
+        (extra ? ' (' + extra + ')' : '') + '.';
+
+    // JSON passes straight through, whatever the status
+    t.eq(read(mk(201, JSON_CT, '{"ok":true}')), { status: 201, body: { ok: true } });
+    t.eq(read(mk(403, { 'content-type': 'application/json; charset=utf-8' }, '{"error":"Nope"}')),
+        { status: 403, body: { error: 'Nope' } });
+    t.eq(read(mk(200, { 'content-type': 'application/problem+json' }, '[1,2]')), { status: 200, body: [1, 2] });
+
+    // the hub's own HTML page (werkzeug's error page, a template)
+    t.eq(read(mk(500, { 'content-type': 'text/html; charset=utf-8', 'x-gc-hub': '1' },
+        '<!doctype html>\n<html lang=en><title>500 Internal Server Error</title>')),
+    { status: 500, body: { error: page(500) } });
+    // through the tunnel every response has cf-ray: the hub's own page is still the hub's
+    t.eq(read(mk(200, { 'content-type': 'text/html', 'cf-ray': '8c1d-DFW', server: 'cloudflare', 'x-gc-hub': '1' },
+        '<!DOCTYPE html><html><head><title>Sign in</title>')).body, { error: page(200) });
+
+    // Cloudflare's own pages: block, challenge, 5xx, plain "error code"
+    t.eq(read(mk(403, { 'content-type': 'text/html; charset=UTF-8', 'cf-ray': '8c1d-DFW', server: 'cloudflare' },
+        '<!DOCTYPE html>\n<html><head><title>Attention Required! | Cloudflare</title></head>')).body,
+    { error: page(403, 'Cloudflare: Attention Required! | Cloudflare') });
+    t.eq(read(mk(403, { 'content-type': 'text/html', server: 'cloudflare' },
+        '<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title>')).body,
+    { error: page(403, 'Cloudflare: Just a moment...') });
+    t.eq(read(mk(502, { 'content-type': 'text/html', 'cf-ray': 'x' },
+        '<!DOCTYPE html><title>\n  gc.asaplabs.net | 502: Bad gateway\n</title>')).body,
+    { error: page(502, 'Cloudflare: gc.asaplabs.net | 502: Bad gateway') });
+    t.eq(read(mk(403, { 'content-type': 'text/plain; charset=UTF-8' }, 'error code: 1020')).body,
+        { error: page(403, 'Cloudflare: error code: 1020') });
+    t.eq(read(mk(530, { 'content-type': 'text/html', 'cf-ray': 'x' },
+        '<html><body>error code: 1033</body></html>')).body,
+    { error: page(530, 'Cloudflare: error code: 1033') });
+    // entities in the title are decoded; a Cloudflare page with neither title nor code
+    t.eq(read(mk(403, { 'cf-ray': 'x' }, '<html><title>A &amp; B &#39;x&#39;</title>')).body,
+        { error: page(403, "Cloudflare: A & B 'x'") });
+    t.eq(read(mk(520, { 'cf-ray': 'x' }, '<html><body>oops</body></html>')).body,
+        { error: page(520, 'Cloudflare') });
+
+    // cf headers but neither HTML nor an error code: not called Cloudflare
+    t.eq(read(mk(502, { 'cf-ray': 'x', 'content-type': 'text/plain' }, 'Bad Gateway')).body,
+        { error: page(502) });
+    // a JSON content-type that doesn't parse
+    t.eq(read(mk(200, JSON_CT, '<!DOCTYPE html>')).body, { error: page(200) });
+    // no headers object at all; an empty 204
+    t.eq(read({ status: 500, text: () => sync('<html>') }).body, { error: page(500) });
+    t.eq(read(mk(204, {}, '')), { status: 204, body: {} });
+
+    // the pure part is exported too
+    t.eq(S.parseBody(418, hdrs({}), 'teapot'), { error: page(418) });
+}
