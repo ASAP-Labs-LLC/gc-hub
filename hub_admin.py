@@ -59,10 +59,22 @@ pending_since, refused, refused_detail, last_error}``. A refusal
 instrument 404. ``path`` must be an absolute ``.csv`` path in an existing
 folder.
 
+Diagnostics (``diagnostics.py``; one bundle at a time)::
+
+    GET  /api/admin/diagnostics/estimate   header X-Admin-Password
+         → {options: [{key, label, default, bytes, files, note}]} (in
+           ``diagnostics.OPTION_KEYS`` order); 403 wrong
+           password or a cross-site request
+    POST /api/admin/diagnostics/bundle     {password, options?: {key: bool}}
+         → 200 the zip (attachment, Cache-Control: no-store), built to a temp
+           file under ``<data>/diagnostics-tmp`` and deleted once streamed;
+           400 bad options; 409 another bundle is being built
+
 ``GET /admin/hub`` is the small admin page (templates/hub_admin.html).
 """
 from __future__ import annotations
 
+import contextlib
 import itertools
 import logging
 import threading
@@ -71,8 +83,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, Response, jsonify, render_template, request
 
+import diagnostics
 import exports
 import paths
 import store
@@ -462,6 +475,105 @@ def api_admin_exports_write_fresh(instrument_id):
         return _refused(exc)
     exp.wake()
     return jsonify({"status": exp.status(instrument_id), "rows": rows})
+
+
+# ── diagnostics ─────────────────────────────────────────────────────────────
+
+DIAG_CHUNK = 1024 * 1024
+
+
+def _admin_header():
+    """The estimate route's gate (a GET: the password comes in
+    ``X-Admin-Password``). None when allowed, else the error response."""
+    import admin_auth
+    if admin_auth._cross_site():
+        return _err("Cross-site request refused", 403)
+    try:
+        ok = admin_auth.check_admin_body({"password": request.headers.get("X-Admin-Password")})
+    except Exception:  # noqa: BLE001 - the gate never opens on an error
+        log.exception("admin check failed")
+        ok = False
+    return None if ok else _err("Incorrect password", 403)
+
+
+def _no_store(resp):
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@bp.route("/api/admin/diagnostics/estimate", methods=["GET"])
+def api_admin_diagnostics_estimate():
+    """Expected (uncompressed) size of each bundle option."""
+    err = _admin_header()
+    if err:
+        return err
+    est = diagnostics.estimate(data_dir=paths.require_data_dir(), db=_db())
+    return _no_store(jsonify({"options": [dict(v, key=k) for k, v in est.items()]}))
+
+
+def _bundle_name() -> str:
+    import re
+    import socket
+    import version
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    raw = f"gc-diagnostics-{socket.gethostname()}-{version.APP_VERSION}-{stamp}"
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", raw)
+
+
+@bp.route("/api/admin/diagnostics/bundle", methods=["POST"])
+def api_admin_diagnostics_bundle():
+    """Build the diagnostics zip and send it. The build runs in this request's
+    thread (the app keeps serving on its others) and never takes the store's
+    write lock; one build at a time."""
+    body, err = _admin()
+    if err:
+        return err
+    try:
+        options = diagnostics.normalize_options(body.get("options"))
+    except ValueError as exc:
+        return _err(str(exc), 400)
+    data_dir = paths.require_data_dir()
+    name = _bundle_name()
+    try:
+        with diagnostics.exclusive():
+            tmp = diagnostics.cleanup_tmp(data_dir)
+            out = tmp / f"{name}.zip.part"
+            try:
+                import hub
+                manifest = diagnostics.build_bundle(
+                    options, data_dir=data_dir, db=_db(), out_path=out,
+                    who=f"admin@{_who()}", runtime=hub.running())
+            except Exception as exc:  # noqa: BLE001 - report it, never kill the hub
+                log.error("diagnostics bundle failed:\n%s", traceback.format_exc())
+                with contextlib.suppress(OSError):
+                    out.unlink()
+                return _err(f"The diagnostics bundle failed: {type(exc).__name__}: {exc}", 500)
+    except diagnostics.Busy as exc:
+        return _err(str(exc), 409)
+    size = out.stat().st_size
+    fh = open(out, "rb")
+    log.warning("admin: diagnostics bundle %s (%d bytes, %d files, options %s) sent to %s",
+                name, size, len(manifest.get("files", [])), options, _who())
+
+    def stream():
+        try:
+            for chunk in iter(lambda: fh.read(DIAG_CHUNK), b""):
+                yield chunk
+        finally:
+            fh.close()
+            with contextlib.suppress(OSError):
+                out.unlink()
+
+    resp = Response(stream(), mimetype="application/zip", direct_passthrough=True, headers={
+        "Content-Disposition": f'attachment; filename="{name}.zip"',
+        "Content-Length": str(size)})
+    resp.call_on_close(lambda: (fh.close(), _unlink_quietly(out)))
+    return _no_store(resp)
+
+
+def _unlink_quietly(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink()
 
 
 # ── the page ────────────────────────────────────────────────────────────────

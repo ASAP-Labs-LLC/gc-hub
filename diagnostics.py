@@ -957,13 +957,23 @@ def estimate(*, data_dir, db, now: Optional[datetime] = None) -> dict:
     return out
 
 
-def cleanup_tmp(data_dir) -> Path:
-    """The temp folder under the data folder, emptied of leftovers (a build
-    killed half-way). Returns it."""
+TMP_MAX_AGE_SECONDS = 3600
+
+
+def cleanup_tmp(data_dir, max_age: float = TMP_MAX_AGE_SECONDS) -> Path:
+    """The temp folder under the data folder, cleared of leftovers older than
+    ``max_age`` (a build killed half-way; a bundle still being streamed to
+    another admin is younger). Returns it."""
     tmp = Path(data_dir) / TMP_DIRNAME
+    cutoff = time.time() - max_age
     if tmp.is_dir():
         for p in tmp.iterdir():
-            if p.is_dir():
+            try:
+                if p.lstat().st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+            if p.is_dir() and not p.is_symlink():
                 shutil.rmtree(p, ignore_errors=True)
             else:
                 with contextlib.suppress(OSError):
