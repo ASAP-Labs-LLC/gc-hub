@@ -22,7 +22,7 @@ for _p in (ROOT, TESTS):
 pytest.importorskip("flask")
 
 import store  # noqa: E402
-from bootapp import booted, send, wait_for  # noqa: E402
+from bootapp import cookie_header, booted, send, wait_for  # noqa: E402
 
 MiB = 1024 * 1024
 PAGES = ("/", "/calibration", "/instruments", "/admin/hub", "/admin/setup")
@@ -34,7 +34,7 @@ def _raw_post(port, path, headers, body=b"", timeout=10):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
         c.putrequest("POST", path)
-        for k, v in headers.items():
+        for k, v in dict(cookie_header(port), **headers).items():
             c.putheader(k, v)
         c.endheaders()
         if body:
@@ -52,7 +52,7 @@ def _raw_post(port, path, headers, body=b"", timeout=10):
 def _get(port, path):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     try:
-        c.request("GET", path)
+        c.request("GET", path, headers=cookie_header(port))
         r = c.getresponse()
         return r.status, r.read()
     finally:
@@ -146,4 +146,6 @@ def test_every_page_links_a_favicon_that_is_served(app_port, page):
 
 def test_every_template_links_the_favicon():
     for t in sorted((ROOT / "templates").glob("*.html")):
+        if t.name.startswith("_"):        # a partial (_signed_in.html), not a page
+            continue
         assert 'rel="icon"' in t.read_text(encoding="utf-8"), t.name

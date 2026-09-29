@@ -30,7 +30,7 @@ pytest.importorskip("flask")
 pytest.importorskip("netCDF4")
 webdriver = pytest.importorskip("selenium.webdriver")
 
-from bootapp import booted  # noqa: E402
+from bootapp import browser_sign_in, booted  # noqa: E402
 from hub_boot import LIVE_SINCE, build_hub  # noqa: E402
 
 RECORDER = """
@@ -103,6 +103,7 @@ def page():
         fx.write_cdf(hub.standards / "Base.CDF", t, np.clip(y, 0, None), "Base", LIVE_SINCE)
         with booted(tmp) as (port, _proc, _data, _home):
             drv = _driver()
+            browser_sign_in(drv, port)
             drv.get(f"http://127.0.0.1:{port}/")
             _wait(lambda: drv.execute_script(
                 "return state.files && state.files.length > 0 && "

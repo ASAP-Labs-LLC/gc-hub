@@ -184,6 +184,7 @@ def test_report_log_rows_for_every_export(harness):
         assert r["conclusion"] == content["conclusion_generated"]
         assert r["conclusion_edited"] is False
         assert r["db_given"] and r["author_initials"] is None
+        assert r["user_name"] == "Report Harness" and r["author_ip"] == "127.0.0.1"
         assert re.fullmatch(r"[0-9a-f]{64}", r["pdf_sha256"])
         assert r["standard_name"] == "Base" and r["revision"] >= 1
         assert r["app_version"]

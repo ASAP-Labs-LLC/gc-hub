@@ -43,7 +43,9 @@ def test_review_minors_in_the_page():
     src = PAGE_JS.read_text(encoding="utf-8")
     html = TEMPLATE.read_text(encoding="utf-8")
     assert "querySelectorAll('details.add')[" not in src
-    assert 'id="hub-url-box"' in html and "hub-url-box" in src
+    # (rev 2: the installer never needs the hub URL first, so the page no longer
+    # opens that box itself; it stays findable by id)
+    assert 'id="hub-url-box"' in html
     for fn in ("loadBackfill", "loadConflicts", "select"):
         body = src.split(f"async function {fn}(", 1)[1].split("\n    }\n", 1)[0]
         assert "stale(" in body, fn

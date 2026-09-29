@@ -70,13 +70,14 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
                    ranges=None, windows=None, bullets=None, bullets_text=None,
                    conclusion=None, conclusion_edited=None, comment_ids=None,
                    pdf_sha256=None, author_initials=None, author_ip=None,
-                   app_version=None, created_at=None, db=None):
+                   app_version=None, created_at=None, user_name=None, db=None):
         log_rows.append(dict(
             sample_id=sample_id, kind=kind, revision=revision, standard_name=standard_name,
             params=params, ranges=ranges, windows=windows, bullets=bullets,
             bullets_text=bullets_text, conclusion=conclusion,
             conclusion_edited=conclusion_edited, comment_ids=comment_ids,
             pdf_sha256=pdf_sha256, author_initials=author_initials, author_ip=author_ip,
+            user_name=user_name,
             app_version=app_version, created_at=created_at, db_given=db is not None))
         return len(log_rows)
     fake.log_report = log_report
@@ -85,6 +86,19 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
     import app  # noqa: E402  (after GC_DATA_DIR and the fake comments module)
 
     client = app.app.test_client()
+    # Signed in (the session gate): a session row straight into the store,
+    # as tests/bootapp.py does. No switch turns sign-in off.
+    import hashlib
+    import secrets
+    from datetime import datetime, timedelta, timezone
+    import store as _store
+    token = secrets.token_urlsafe(32)
+    _store.web_sessions.add(
+        hashlib.sha256(token.encode()).hexdigest(), name="Report Harness", method="password",
+        ip="127.0.0.1", user_agent="harness",
+        expires_at=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        db=Path(data_dir) / _store.DB_FILENAME)
+    client.set_cookie("gc_session", token)
     deadline = time.time() + 90
     while client.get("/api/files").status_code != 200:
         if time.time() > deadline:

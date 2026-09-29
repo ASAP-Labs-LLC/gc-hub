@@ -23,7 +23,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bootapp import ROOT, booted, get, post, wait_for  # noqa: E402
+from bootapp import get_text, ROOT, booted, get, post, wait_for  # noqa: E402
 
 sys.path.insert(0, str(ROOT))
 
@@ -270,7 +270,7 @@ class RestartRouteTests(unittest.TestCase):
                 _, body = post(port, "/api/restart", {"dry_run": True})
                 self.assertEqual((body["mode"], body["tag"]), ("restart", None))
                 # The Settings modal carries the Restart button and its helpers.
-                html = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read().decode()
+                html = get_text(port, "/")
                 self.assertIn('id="btn-restart"', html)
                 self.assertIn("js/restart.js", html)
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/static/js/restart.js",

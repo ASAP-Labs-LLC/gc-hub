@@ -1227,13 +1227,18 @@ def test_hub_control_stop_waits_for_a_diagnostics_bundle(tmp_path):
 
 # ── the sign-in lane (auth/login): web_sessions and new env vars ────────────
 
-def test_any_token_hash_column_is_nulled_in_the_copy(seeded, tmp_path):
+def test_web_sessions_keep_their_rows_with_token_hash_nulled_in_the_copy(seeded, tmp_path):
+    """Spec D7: the DB copy keeps web_sessions (name, method, IP, times) with
+    every token_hash nulled (the schema-v3 table, as the hub writes it)."""
     with store.connection(seeded.db) as conn:
-        conn.execute("CREATE TABLE web_sessions(id INTEGER PRIMARY KEY, name TEXT, "
-                     "token_hash TEXT UNIQUE, created_at TEXT)")
-        conn.execute("INSERT INTO web_sessions(name, token_hash, created_at) VALUES "
-                     "('Ryan', ?, '2026-09-29'), ('Ana', NULL, '2026-09-29')",
-                     (f"sess-{MARKER}-hash",))
+        assert "web_sessions" in {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+    store.web_sessions.add(f"sess-{MARKER}-hash", name="Ryan C", method="card",
+                           ip="203.0.113.9", user_agent="UA", expires_at="2099-01-01T00:00:00+00:00",
+                           db=seeded.db)
+    store.web_sessions.add(f"sess-{MARKER}-hash2", name="Admin (break-glass)", method="admin",
+                           ip="10.0.0.5", user_agent=None, expires_at="2099-01-01T00:00:00+00:00",
+                           db=seeded.db)
     out, _ = seeded.build()
     members = _members(out)
     _assert_no_marker(members)
@@ -1241,10 +1246,12 @@ def test_any_token_hash_column_is_nulled_in_the_copy(seeded, tmp_path):
     copy.write_bytes(members["database/gc.db"])
     conn = sqlite3.connect(copy)
     try:
-        rows = conn.execute("SELECT name, token_hash FROM web_sessions ORDER BY id").fetchall()
+        rows = conn.execute("SELECT name, method, ip, token_hash, created_at IS NOT NULL "
+                            "FROM web_sessions ORDER BY id").fetchall()
     finally:
         conn.close()
-    assert rows == [("Ryan", None), ("Ana", None)]
+    assert rows == [("Ryan C", "card", "203.0.113.9", None, 1),
+                    ("Admin (break-glass)", "admin", "10.0.0.5", None, 1)]
 
 
 def test_labcore_and_lem_urls_are_reported_by_name(seeded, monkeypatch):

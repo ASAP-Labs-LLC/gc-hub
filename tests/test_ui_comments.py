@@ -25,7 +25,7 @@ pytest.importorskip("netCDF4")
 webdriver = pytest.importorskip("selenium.webdriver")
 
 import store  # noqa: E402
-from bootapp import booted, setup_admin  # noqa: E402
+from bootapp import browser_sign_in, booted, setup_admin  # noqa: E402
 from hub_boot import build_hub  # noqa: E402
 
 PLOTLY_STUB = r"""
@@ -124,9 +124,10 @@ def _trend(drv):
 def page(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("p4-ui")
     hub = build_hub(tmp)
-    with booted(tmp) as (port, _proc, data, _home):
+    with booted(tmp, sign_in_as="Ryan Brown") as (port, _proc, data, _home):
         pw = setup_admin(port, data)
         drv = _driver()
+        browser_sign_in(drv, port)
         try:
             drv.get(f"http://127.0.0.1:{port}/")
             assert _wait(lambda: _js(drv, "return state.files.length") >= 5)
@@ -136,23 +137,15 @@ def page(tmp_path_factory):
             drv.quit()
 
 
-def test_initials_are_required_and_remembered(page):
-    drv, hub, port, _pw = page
-    sid = hub.ids["final"]
-    _select(drv, sid)
-    _js(drv, "localStorage.removeItem(Comments.INITIALS_KEY);"
-             "document.getElementById('comment-initials').value = '';")
-    _js(drv, "document.getElementById('comment-free-text').value = 'no initials';"
-             "document.getElementById('btn-comment-add').click();")
-    time.sleep(0.5)
-    assert _comments(hub.db, sid) == []
-    _js(drv, "const i = document.getElementById('comment-initials');"
-             "i.value = 'rb'; i.dispatchEvent(new Event('input'));")
-    assert _js(drv, "return localStorage.getItem(Comments.INITIALS_KEY)") == "RB"
-    drv.get(f"http://127.0.0.1:{port}/")
-    assert _wait(lambda: _js(drv, "return document.getElementById('comment-initials').value")
-                 == "RB")
-    assert _wait(lambda: _js(drv, "return state.files.length") >= 5)
+def test_comments_are_by_the_signed_in_name(page):
+    """Sign-in (D6 rev 2): no initials box; the page says who comments are
+    saved as, and the server records the session's name."""
+    drv, hub, _port, _pw = page
+    assert _js(drv, "return document.getElementById('comment-initials')") is None
+    assert _wait(lambda: _js(drv, "return document.getElementById('comment-author')"
+                                  ".textContent") == "Commenting as Ryan Brown")
+    assert "Ryan Brown" in _js(drv, "return document.getElementById('signed-in').textContent")
+    assert _js(drv, "return 'INITIALS_KEY' in Comments || 'requireInitials' in Comments") is False
 
 
 def test_free_text_is_rendered_as_text(page):
@@ -167,7 +160,7 @@ def test_free_text_is_rendered_as_text(page):
     assert _js(drv, "return window.__pwned || 0") == 0
     meta = _js(drv, "return document.querySelector('#comment-list li .comment-meta')"
                     ".textContent")
-    assert "RB" in meta
+    assert "Ryan Brown" in meta           # the list shows the account name
 
 
 def test_preset_chip_adds_the_preset_text(page):
@@ -180,7 +173,7 @@ def test_preset_chip_adds_the_preset_text(page):
     assert _wait(lambda: _comments(hub.db, sid))
     c = _comments(hub.db, sid)[0]
     assert c["text"] == "Sample appears to be gasoline." and c["source"] == "preset"
-    assert c["author_initials"] == "RB"
+    assert c["author_initials"] == "RB" and c["author_name"] == "Ryan Brown"
     assert _wait(lambda: _list_texts(drv) == ["Sample appears to be gasoline."])
 
 

@@ -25,7 +25,7 @@ pytest.importorskip("netCDF4")
 import cdf_fixtures as fx  # noqa: E402
 import exports  # noqa: E402
 import store  # noqa: E402
-from bootapp import booted, get, post, send, setup_admin, wait_for  # noqa: E402
+from bootapp import get_text, booted, get, post, send, setup_admin, wait_for  # noqa: E402
 from hub_boot import SIMDIS, Hub  # noqa: E402
 
 
@@ -153,5 +153,5 @@ def test_export_status_adopt_new_path_and_write_fresh(admin_hub, tmp_path):
 
 def test_admin_page_is_served(admin_hub):
     port, _h, _pw = admin_hub
-    html = urllib.request.urlopen(f"http://127.0.0.1:{port}/admin/hub", timeout=5).read().decode()
+    html = get_text(port, "/admin/hub")
     assert 'id="app-version"' in html and "hub_admin.js" in html
