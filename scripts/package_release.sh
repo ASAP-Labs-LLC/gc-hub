@@ -103,7 +103,8 @@ printf '%s\n' "$TAG" > "$STAGE/VERSION"
 # mode only), the admin CLI tools run on the server, the agent sources the
 # hub builds its agent package and installers from, and the server docs
 # (DEPLOY.md holds the cutover and parity runbooks and points to
-# RELEASING.md; docs/ is not shipped).
+# RELEASING.md; docs/ is not shipped), and the hub tray (tray/, run from the
+# release's .venv on ASAPSV1).
 # (tests/test_release_package.py also checks every locally imported module.)
 missing=0
 for f in app.py requirements.txt VERSION DEPLOY.md RELEASING.md \
@@ -118,7 +119,10 @@ for f in app.py requirements.txt VERSION DEPLOY.md RELEASING.md \
          jobs/import_history.py tools/import_history.py \
          tools/load_folder.py tools/parity_report.py tools/import_dry_run.py \
          agent/build_package.py agent/requirements-agent.txt \
-         agent/launcher.pyw agent/install.pyw agent/gc_agent/__init__.py; do
+         agent/launcher.pyw agent/install.pyw agent/gc_agent/__init__.py \
+         hub_control.py tray/hub_tray.pyw tray/tray.example.json tray/gc_tray/__init__.py \
+         tray/gc_tray/main.py tray/gc_tray/logic.py tray/gc_tray/ui.py \
+         tray/gc_tray/client.py tray/gc_tray/controller.py tray/gc_tray/winsys.py; do
   if [ ! -e "$STAGE/$f" ]; then echo "MISSING from package: $f" >&2; missing=1; fi
 done
 [ "$missing" -eq 0 ] || { echo "refusing to package" >&2; exit 1; }

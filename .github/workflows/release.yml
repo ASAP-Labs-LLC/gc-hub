@@ -18,8 +18,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The same checks as every push (.github/workflows/ci.yml, exports-ci.yml and
-  # agent-ci.yml). A red suite never releases.
+  # The same checks as every push (.github/workflows/ci.yml, exports-ci.yml,
+  # agent-ci.yml and tray-ci.yml). A red suite never releases.
   test:
     uses: ./.github/workflows/ci.yml
 
@@ -31,8 +31,12 @@ jobs:
   agent:
     uses: ./.github/workflows/agent-ci.yml
 
+  # The hub tray on Windows (and Linux) with the release's pins.
+  tray:
+    uses: ./.github/workflows/tray-ci.yml
+
   publish:
-    needs: [test, exports, agent]
+    needs: [test, exports, agent, tray]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Creating a release needs this. Without it a repo whose default token is

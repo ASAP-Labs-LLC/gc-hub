@@ -199,6 +199,8 @@ app.register_blueprint(instruments_api.bp)
 app.register_blueprint(hub_admin.bp)
 import comments_api  # noqa: E402  (phase 4: sample comments, presets)
 app.register_blueprint(comments_api.bp)
+import hub_control  # noqa: E402  (hub tray: status, pause/resume processing, stop)
+app.register_blueprint(hub_control.bp)
 
 # ---------------------------------------------------------------------------
 # Global state
@@ -792,6 +794,8 @@ _NON_ACTIVITY_PATHS = {
     # 2B1: GC-PC agents are machines, never users (ingest_api)
     "/api/ingest", "/api/agent/heartbeat", "/api/agent/results",
     "/api/agent/package", "/api/agent/package.zip",
+    # the hub tray polls it every 5 s for as long as it runs (hub_control)
+    hub_control.STATUS_PATH,
 }
 
 
@@ -3498,8 +3502,13 @@ def healthz():
         for addr in stale:
             del _recent_clients[addr]
         active = len(_recent_clients)
-    return jsonify({"status": "ok", "version": version.APP_VERSION, "pid": os.getpid(),
-                    "active_sessions": active, "idle_seconds": round(idle, 1)})
+    body = {"status": "ok", "version": version.APP_VERSION, "pid": os.getpid(),
+            "active_sessions": active, "idle_seconds": round(idle, 1)}
+    try:   # extra, never part of the contract: the hub tray's numbers
+        body["hub"] = hub_control.status_snapshot()
+    except Exception:
+        LOGGER.exception("healthz: hub status unavailable (non-fatal)")
+    return jsonify(body)
 
 
 @app.route("/")
@@ -3538,6 +3547,7 @@ def _init_app() -> None:
     store exists."""
     threading.Thread(target=_start_hub, daemon=True, name="hub-start").start()
     threading.Thread(target=_auto_restart_loop, daemon=True, name="auto-restart").start()
+    hub_control.start_refresher()   # /healthz's `hub` and /api/hub/status never read SQLite
 
 
 def _start_hub() -> None:
@@ -3555,6 +3565,10 @@ def _start_hub() -> None:
     if rt is None:
         return
     _hub_runtime = rt
+    try:   # a pause that landed during the start-up; the paused notice
+        hub_control.reconcile(rt)
+    except Exception:
+        LOGGER.exception("Could not apply the persisted processing pause")
     if not _stop_hub_registered.is_set():
         _stop_hub_registered.set()
         atexit.register(_stop_hub)
@@ -3582,6 +3596,36 @@ def _restart_hub() -> None:
     failed), on a background thread like at start-up."""
     if _hub_runtime is None and hub.running() is None:
         threading.Thread(target=_start_hub, daemon=True, name="hub-restart").start()
+
+
+def _shutdown_for_stop() -> None:
+    """hub_control's Stop: the updater's ``paused`` marker is written and
+    ``restart_policy.request_stop()`` recorded, so stop the hub's threads
+    and exit for good (a restart already under way cannot respawn either:
+    ``should_respawn`` refuses after a stop)."""
+    _claim_restart()
+    LOGGER.warning("=== HUB STOPPED (hub tray / POST /api/admin/hub/stop): exiting without a "
+                   "respawn; start it again with the updater's resume ===")
+    _stop_hub()
+    for h in logging.root.handlers:   # os._exit skips logging's atexit flush
+        try:
+            h.flush()
+        except Exception:
+            pass
+    os._exit(0)
+
+
+def _stop_busy() -> list:
+    """The app's own reasons not to Stop now (hub_control adds the rest)."""
+    with _upload_items_lock:
+        pending = sum(1 for i, _ in enumerate(_upload_items) if i not in _upload_skipped)
+    if _upload_thread is not None and _upload_thread.is_alive():
+        return [f"a QBench upload is running ({pending} item(s) queued)"]
+    return []
+
+
+hub_control.configure(runtime=lambda: _hub_runtime, shutdown=_shutdown_for_stop,
+                      started_at=_server_start_time, busy_extra=_stop_busy)
 
 
 def _wake_exports() -> None:

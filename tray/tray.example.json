@@ -1,0 +1,16 @@
+{
+  "_comment": "Optional. Copy to %APPDATA%\\ASAPLabs\\gc-hub-tray.json (or pass --config) and keep only what you change; every key has this default. No password goes here: the tray asks for it and keeps it in memory only.",
+  "port": 5560,
+  "app_name": "gc",
+  "data_dir": "C:\\ASAPApps\\gc\\data",
+  "_updater_python": "Empty = the tray's own interpreter (the release .venv); updater.py is stdlib-only.",
+  "updater_python": "",
+  "updater_script": "C:\\ASAPApps\\updater\\updater.py",
+  "updater_config": "C:\\ASAPApps\\updater\\config.json",
+  "poll_seconds": 5,
+  "_busy": "Amber when the hub uses more than cpu_busy_percent of one core for cpu_busy_seconds, or more than queue_busy_threshold jobs are due.",
+  "cpu_busy_percent": 50,
+  "cpu_busy_seconds": 60,
+  "queue_busy_threshold": 25,
+  "remember_password": true
+}

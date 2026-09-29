@@ -30,9 +30,21 @@ chromedriver-autoinstaller==0.6.4
 PyJWT==2.15.0
 requests==2.34.2
 
+# Hub tray (tray/hub_tray.pyw, 2026-09-29). psutil: the process CPU % and RSS in
+# /api/hub/status and /healthz (hub_control; abi3 wheels, cp37-abi3-win_amd64
+# checked for 3.14). pystray: the tray icon itself, which runs with this
+# release's .venv pythonw.exe, so it is pinned here, Windows only (pure
+# Python; needs Pillow and six, both pinned below; its Linux/macOS backends
+# are not wanted on a server or in CI). Verified 2026-09-29 with
+# `pip download --only-binary=:all: --platform win_amd64 --python-version 3.14`.
+psutil==7.2.2
+pystray==0.19.5; sys_platform == "win32"
+
 # --- transitive (frozen from a Python 3.14 venv, 2026-09-26; checked 2026-09-28) ---
 # 2026-09-28 (v2): pystray and watchdog dropped with run.pyw (the hub no longer
 # imports them; the agent declares its own in agent/requirements-agent.txt).
+# 2026-09-29: pystray is back, Windows only, for the hub tray (see above);
+# psutil has no dependencies; pystray's Pillow and six are the pins below.
 # Pillow stays, as a transitive pin: reportlab and xhtml2pdf require it. A
 # clean 3.14 venv from the direct pins alone yields exactly this block (plus
 # newer cftime/platformdirs/Werkzeug releases, deliberately not taken here).
