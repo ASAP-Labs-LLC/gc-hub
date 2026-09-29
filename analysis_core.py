@@ -562,7 +562,10 @@ def range_windows(ranges: list[dict], ladder, t_min: float, t_max: float) -> lis
         cs, ce = int(r["c_start"]), int(r["c_end"])
         if cs > ce:
             cs, ce = ce, cs
-        raw0, raw1 = ladder_carbon_to_time(cs, ladder), ladder_carbon_to_time(ce, ladder)
+        # a single-carbon range (C7–C7) spans half a carbon each side
+        half = 0.5 if cs == ce else 0.0
+        raw0 = ladder_carbon_to_time(cs - half, ladder)
+        raw1 = ladder_carbon_to_time(ce + half, ladder)
         t0, t1 = max(raw0, float(t_min)), min(raw1, float(t_max))
         evaluable = t1 - t0 > _EPS
         start_clipped = evaluable and t0 > raw0 + _EPS
@@ -787,7 +790,11 @@ def _assess(pieces: list[dict], spikes: list[dict], params: dict) -> dict | None
         "spike_only": spike_only,
         "also": also,
         "spans": _merge_spans([p for p in pieces if p["sign"] == dom], params["merge_gap_min"]),
-        "elevated": any(p["sign"] == 1 for p in pieces) or any(s["sign"] == 1 for s in spikes),
+        # LOWER overall with sharp peaks above the standard: worded "mixed"
+        "mixed": (not spike_only) and dom == -1 and any(s["sign"] == 1 for s in spikes),
+        # the conclusion's "elevated": iff the bullet reports something higher
+        "elevated": (dom == 1 or any(s["sign"] == 1 for s in spikes)
+                     or bool(also and also["direction"] == "higher")),
     }
 
 
@@ -796,7 +803,7 @@ def _item(kind: str, **fields) -> dict:
             "t0": None, "t1": None, "clipped": False, "c_eval_start": None,
             "c_eval_end": None, "direction": None, "severity": None, "max_diff": None,
             "max_at": None, "frac_above": None, "spikes": [], "spike_only": False,
-            "also": None, "spans": [], "elevated": False}
+            "also": None, "spans": [], "mixed": False, "elevated": False}
     base.update(fields)
     return base
 
@@ -897,24 +904,26 @@ def _span_text(spans, limit: int) -> str:
     return shown
 
 
-def _spike_text(spikes: list[dict], standard_name: str) -> str:
-    parts = []
-    for sign, word in ((1, "above"), (-1, "below")):
-        group = [s for s in spikes if s["sign"] == sign]
-        if not group:
-            continue
-        n = len(group)
-        noun = "sharp spike" if n == 1 else "sharp spikes"
-        if n <= 3:
-            times = sorted(s["t"] for s in group)
-            parts.append(f"{n} {noun} {word} {standard_name} at "
-                         + ", ".join(f"{x:.2f}" for x in times) + " min")
-        else:
-            top = sorted(group, key=lambda s: -abs(s["value"]))[:3]
-            parts.append(f"{n} {noun} {word} {standard_name} incl. "
-                         + ", ".join(f"{s['t']:.2f}" for s in sorted(top, key=lambda s: s["t"]))
-                         + " min")
-    return "; ".join(parts)
+def _peak_times(group: list[dict]) -> str:
+    """"at a, b min" for ≤ 3 peaks, else "incl." the 3 largest (time order)."""
+    if len(group) <= 3:
+        return "at " + ", ".join(f"{x['t']:.2f}" for x in sorted(group, key=lambda s: s["t"])) \
+            + " min"
+    top = sorted(group, key=lambda s: -abs(s["value"]))[:3]
+    return "incl. " + ", ".join(f"{x['t']:.2f}" for x in sorted(top, key=lambda s: s["t"])) \
+        + " min"
+
+
+def _spike_text(spikes: list[dict]) -> str:
+    """"N sharp peaks above[, M below] the standard at …"."""
+    up = [x for x in spikes if x["sign"] == 1]
+    down = [x for x in spikes if x["sign"] == -1]
+    if up and down:
+        return (f"{len(up)} sharp peak{'s' if len(up) != 1 else ''} above, {len(down)} below "
+                f"the standard {_peak_times(up + down)}")
+    group, word = (up, "above") if up else (down, "below")
+    return (f"{len(group)} sharp peak{'s' if len(group) != 1 else ''} {word} the standard "
+            f"{_peak_times(group)}")
 
 
 def _pct(frac: float) -> str:
@@ -926,11 +935,18 @@ def _pct(frac: float) -> str:
 
 def _assessment_text(it: dict, standard_name: str, *, spans: bool) -> str:
     """``HIGHER than <std> — <severity> …`` for a range/outside item."""
-    head = (f"{'HIGHER' if it['direction'] == 'higher' else 'LOWER'} than {standard_name} "
-            f"— {it['severity']}")
+    up = [x for x in it["spikes"] if x["sign"] == 1]
+    if it.get("mixed"):
+        head = (f"mixed: LOWER than {standard_name} overall, with {_spike_text(up)} "
+                f"— {it['severity']}")
+        listed = [x for x in it["spikes"] if x["sign"] == -1]
+    else:
+        head = (f"{'HIGHER' if it['direction'] == 'higher' else 'LOWER'} than {standard_name} "
+                f"— {it['severity']}")
+        listed = it["spikes"]
     if it["spike_only"]:
-        return (f"{head}, sharp peaks only ({_spike_text(it['spikes'], standard_name)}; "
-                "trend within marginal)")
+        return (f"{head}, sharp peaks only ({_spike_text(it['spikes'])}; "
+                "no broad deviation above the marginal threshold)")
     if spans and it["spans"]:
         head += " at " + _span_text(it["spans"], 3)
     if it["also"]:
@@ -938,9 +954,9 @@ def _assessment_text(it: dict, standard_name: str, *, spans: bool) -> str:
                  + _span_text(it["also"]["spans"], 2))
     details = [f"max {it['max_diff']:+.0f} at {it['max_at']:.2f} min"]
     if it["frac_above"] is not None:
-        details.append(f"{_pct(it['frac_above'])} of range above marginal")
-    if it["spikes"]:
-        details.append(_spike_text(it["spikes"], standard_name))
+        details.append(f"{_pct(it['frac_above'])} of range beyond the marginal threshold")
+    if listed:
+        details.append(_spike_text(listed))
     return f"{head} ({'; '.join(details)})"
 
 
@@ -954,7 +970,8 @@ def render_bullets(items: list[dict], standard_name: str) -> str:
             lines.append(NO_DEVIATION_IN_RANGES if it.get("within_ranges") else NO_DEVIATION)
         elif kind == "not-evaluated":
             lines.append(f"• {it['label']} (C{it['c_start']}–C{it['c_end']}): "
-                         "not evaluated — outside the calibrated/run range")
+                         "not evaluated — outside the evaluated window "
+                         "(calibration, run end or x-axis limit)")
         elif kind == "range":
             clip = ""
             if it["clipped"]:
@@ -994,7 +1011,12 @@ def deviation_conclusion(items: list[dict], ranges: list[dict], standard_name: s
                     "standard; no ranges were defined to attribute the deviation. "
                     + indicative)
         return consistent
-    hits = [i for i in items if i["kind"] == "range" and i["elevated"]]
+    hits, seen = [], set()
+    for i in items:
+        key = (i["label"].lower(), i["c_start"], i["c_end"]) if i["label"] else None
+        if i["kind"] == "range" and i["elevated"] and key not in seen:
+            seen.add(key)
+            hits.append(i)
     if not hits:
         return consistent
     if len(hits) == 1:

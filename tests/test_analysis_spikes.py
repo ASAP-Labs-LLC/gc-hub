@@ -140,7 +140,8 @@ def test_gasoline_spike_gives_a_gas_bullet_and_the_gas_conclusion():
     assert len(gas) == 1 and gas[0]["spike_only"] and gas[0]["direction"] == "higher"
     assert out["text"].splitlines()[0] == (
         "• Gas (C5–C11): HIGHER than Diesel #2 — significant, sharp peaks only "
-        "(1 sharp spike above Diesel #2 at 2.00 min; trend within marginal)")
+        "(1 sharp peak above the standard at 2.00 min; "
+        "no broad deviation above the marginal threshold)")
     assert out["conclusion"] == (
         "Conclusion: Compared to Diesel #2, this sample shows elevated intensity in the "
         "gas range (C5–C11), consistent with possible gas range contamination. "
