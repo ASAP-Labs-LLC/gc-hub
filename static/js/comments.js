@@ -1,25 +1,24 @@
 /* Analysis-tab comments (phase 4): preset chips, free text, the sample's
    comment list, and the annotation spans drawn on the trend plot.
 
-   Pure helpers (normInitials ... clearConfirmText) are shared with the Node
+   Pure helpers (commentingAs ... clearConfirmText) are shared with the Node
    tests (module.exports); the rest runs in the browser as window.Comments.
    Every string from the server is rendered with textContent; Plotly label
-   text goes through plotlySafe (Plotly treats < > as markup). Initials are
-   self-declared (not authenticated) and remembered per browser. */
+   text goes through plotlySafe (Plotly treats < > as markup). The author is
+   the signed-in account (GET /api/session via GCSession.whoami, shown as
+   "Commenting as <name>"); the server derives the initials from it and
+   ignores any the page might send. */
 (function (root) {
     'use strict';
 
-    const INITIALS_KEY = 'gc.commentInitials';
     const ANNOT_FILL = 'rgba(88, 166, 255, 0.15)';      // the shape filter keys on these
     const ANNOT_LABEL_BG = 'rgba(13,17,23,0.8)';
     const LABEL_MAX = 30;
 
-    function normInitials(s) {
-        return String(s == null ? '' : s).trim().toUpperCase();
-    }
-
-    function validInitials(s) {
-        return /^[A-Z]{1,4}$/.test(normInitials(s));
+    /** The line above the comment box: who comments are saved as. */
+    function commentingAs(name) {
+        const n = String(name == null ? '' : name).trim();
+        return n ? `Commenting as ${n}` : '';
     }
 
     function plotlySafe(s) {
@@ -69,7 +68,7 @@
 
     /** "RB, 2026-09-29 14:05" (annotations: "1.20–1.50 min; RB, ..."). */
     function commentMeta(c) {
-        const who = `${c.initials || '?'}, ${_when(c.created_at)}`;
+        const who = `${c.name || c.initials || '?'}, ${_when(c.created_at)}`;
         if (c.source === 'annotation' && c.t0 != null && c.t1 != null) {
             return `${Number(c.t0).toFixed(2)}–${Number(c.t1).toFixed(2)} min; ${who}`;
         }
@@ -83,7 +82,7 @@
     }
 
     const pure = {
-        INITIALS_KEY, ANNOT_FILL, ANNOT_LABEL_BG, normInitials, validInitials, plotlySafe,
+        ANNOT_FILL, ANNOT_LABEL_BG, commentingAs, plotlySafe,
         annotationComments, annotationOverlay, isAnnotationShape, isAnnotationLabel,
         commentMeta, clearConfirmText,
     };
@@ -106,28 +105,13 @@
         if (typeof root.showNotification === 'function') root.showNotification(msg, kind);
     }
 
-    function readSavedInitials() {
-        try { return root.localStorage.getItem(INITIALS_KEY) || ''; } catch (_) { return ''; }
-    }
-
-    function saveInitials(v) {
-        try { root.localStorage.setItem(INITIALS_KEY, v); } catch (_) { /* private mode */ }
-    }
-
-    function initials() {
-        const el = $('comment-initials');
-        return normInitials(el ? el.value : '');
-    }
-
-    /** The initials, or null after telling the user to enter them. */
-    function requireInitials() {
-        const v = initials();
-        if (validInitials(v)) return v;
-        notify('Enter your initials (1–4 letters) before adding or deleting a comment',
-            'error');
-        const el = $('comment-initials');
-        if (el) el.focus();
-        return null;
+    /** Show "Commenting as <name>" (the signed-in account). */
+    function showAuthor() {
+        const box = $('comment-author');
+        if (!box || !root.GCSession || !root.GCSession.whoami) return Promise.resolve();
+        return root.GCSession.whoami().then((me) => {
+            box.textContent = commentingAs(me && me.name);
+        }).catch(() => {});
     }
 
     async function request(method, url, body) {
@@ -242,11 +226,9 @@
             notify('The selected sample changed; comment not added', 'error');
             return null;
         }
-        const who = requireInitials();
-        if (!who) return null;
         try {
             const j = await request('POST', `/api/samples/${encodeURIComponent(target)}/comments`,
-                Object.assign({ initials: who }, fields));
+                Object.assign({}, fields));
             if (target === sampleId) await load(target);
             return j.comment;
         } catch (e) {
@@ -255,17 +237,15 @@
         }
     }
 
-    async function _delete(c, who) {
+    async function _delete(c) {
         await request('POST', `/api/samples/${encodeURIComponent(c.sample_id)}` +
-            `/comments/${encodeURIComponent(c.id)}/delete`, { initials: who });
+            `/comments/${encodeURIComponent(c.id)}/delete`, {});
     }
 
     async function remove(c) {
-        const who = requireInitials();
-        if (!who) return;
         if (!root.confirm(`Delete this comment?\n\n${c.text}`)) return;
         try {
-            await _delete(c, who);
+            await _delete(c);
         } catch (e) {
             notify('Comment not deleted: ' + e.message, 'error');
         }
@@ -283,12 +263,10 @@
         }
         const targets = annotationComments(comments).filter(c => c.sample_id === target);
         if (!targets.length) { notify('No annotations on this sample', 'info'); return 0; }
-        const who = requireInitials();
-        if (!who) return 0;
         if (!root.confirm(clearConfirmText(targets.length, label))) return 0;
         let done = 0;
         for (const c of targets) {
-            try { await _delete(c, who); done++; } catch (e) {
+            try { await _delete(c); done++; } catch (e) {
                 notify('Annotation not deleted: ' + e.message, 'error');
             }
         }
@@ -323,15 +301,7 @@
 
     function init(opts) {
         onChange = (opts && opts.onChange) || null;
-        const ini = $('comment-initials');
-        if (ini) {
-            ini.value = readSavedInitials();
-            ini.addEventListener('input', () => {
-                const v = normInitials(ini.value);
-                if (validInitials(v)) saveInitials(v);
-            });
-            ini.addEventListener('change', () => { ini.value = normInitials(ini.value); });
-        }
+        showAuthor();
         const btn = $('btn-comment-add');
         if (btn) btn.addEventListener('click', addFreeText);
         const input = $('comment-free-text');
@@ -345,7 +315,7 @@
     }
 
     root.Comments = Object.assign({}, pure, {
-        init, load, setSample, add, remove, clearAnnotations, loadPresets, requireInitials,
+        init, load, setSample, add, remove, clearAnnotations, loadPresets,
         current,
         sampleId: () => sampleId,
     });

@@ -1,6 +1,8 @@
 """comments_api.py routes (phase 4), on the real app booted in a subprocess
 (``tests/bootapp.py``): sample comments, the preset list, the admin preset
-editor, the limits, soft delete, initials validation and the cross-site guard.
+editor, the limits, soft delete, the cross-site guard, and (sign-in, D6 rev 2)
+the author: the session's name, with initials derived from it and any
+``initials`` in the body ignored.
 """
 from __future__ import annotations
 
@@ -20,7 +22,8 @@ for _p in (TESTS.parent, TESTS):
 pytest.importorskip("flask")
 
 import store  # noqa: E402
-from bootapp import booted, get, post, send, setup_admin, wait_for  # noqa: E402
+from bootapp import (booted, cookie_header, get, post, send, setup_admin,  # noqa: E402
+                     sign_in, wait_for)
 
 JSON = {"Content-Type": "application/json"}
 
@@ -34,7 +37,7 @@ def hub():
             assert wait_for(lambda: db.is_file()
                             and store.instruments.get("gc1", db=db) is not None, timeout=30)
             pw = setup_admin(port, data)
-            yield port, db, pw
+            yield port, db, pw, data
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -55,37 +58,49 @@ def _raw(port, path, body: dict, headers=None):
 
 
 def test_add_list_and_delete_a_free_comment(hub):
-    port, db, _pw = hub
+    port, db, _pw, data = hub
     sid = _sample(db)
     assert get(port, f"/api/samples/{sid}/comments") == (200, {"comments": []})
+    # the body's initials are ignored: the session (Test Operator) decides
     code, body = post(port, f"/api/samples/{sid}/comments", {"text": "Odd hump", "initials": "rb"})
     assert code == 201, body
     c = body["comment"]
-    assert c["text"] == "Odd hump" and c["initials"] == "RB" and c["source"] == "free"
+    assert c["text"] == "Odd hump" and c["initials"] == "TO" and c["source"] == "free"
+    assert c["name"] == "Test Operator"
     code, body = get(port, f"/api/samples/{sid}/comments")
     assert code == 200 and [x["id"] for x in body["comments"]] == [c["id"]]
     assert "127.0.0.1" not in json.dumps(body) and "author_ip" not in json.dumps(body)
-    assert store.sample_comments.get(c["id"], db=db)["author_ip"] == "127.0.0.1"
+    row = store.sample_comments.get(c["id"], db=db)
+    assert row["author_ip"] == "127.0.0.1" and row["author_name"] == "Test Operator"
 
-    code, body = post(port, f"/api/samples/{sid}/comments/{c['id']}/delete", {"initials": "jd"})
+    jane = cookie_header(port, sign_in(port, data, "Jane Doe", remember=False))
+    code, body = post(port, f"/api/samples/{sid}/comments/{c['id']}/delete", {"initials": "XX"},
+                      headers=jane)
     assert code == 200, body
     row = store.sample_comments.get(c["id"], db=db)
     assert row["deleted_at"] and row["deleted_by_initials"] == "JD"
-    assert row["deleted_by_ip"] == "127.0.0.1"
+    assert row["deleted_by_name"] == "Jane Doe" and row["deleted_by_ip"] == "127.0.0.1"
     assert get(port, f"/api/samples/{sid}/comments")[1] == {"comments": []}
-    assert post(port, f"/api/samples/{sid}/comments/{c['id']}/delete",
-                {"initials": "JD"})[0] == 409
+    assert post(port, f"/api/samples/{sid}/comments/{c['id']}/delete", {})[0] == 409
+
+
+def test_comments_need_a_session(hub):
+    port, db, _pw, _data = hub
+    sid = _sample(db)
+    url = f"/api/samples/{sid}/comments"
+    assert get(port, url, auth=False)[0] == 401
+    code, body = post(port, url, {"text": "anon", "initials": "RB"}, auth=False)
+    assert code == 401 and body["login_required"] is True
+    assert store.sample_comments.list(sid, db=db) == []
 
 
 def test_refusals(hub):
-    port, db, _pw = hub
+    port, db, _pw, _data = hub
     sid = _sample(db)
     other = _sample(db)
     url = f"/api/samples/{sid}/comments"
     assert get(port, "/api/samples/987654/comments")[0] == 404
     assert post(port, "/api/samples/987654/comments", {"text": "x", "initials": "RB"})[0] == 404
-    for bad in ("", "ABCDE", "R2", None):
-        assert post(port, url, {"text": "x", "initials": bad})[0] == 400, bad
     assert post(port, url, {"text": "x" * 501, "initials": "RB"})[0] == 400
     assert post(port, url, {"text": "   ", "initials": "RB"})[0] == 400
     assert post(port, url, ["x"])[0] == 400
@@ -102,15 +117,13 @@ def test_refusals(hub):
     assert post(port, f"/api/samples/{other}/comments/{body['comment']['id']}/delete",
                 {"initials": "RB"})[0] == 404
     assert post(port, f"/api/samples/{sid}/comments/99999/delete", {"initials": "RB"})[0] == 404
-    assert post(port, f"/api/samples/{sid}/comments/{body['comment']['id']}/delete",
-                {"initials": "1"})[0] == 400
     assert send(port, f"/api/samples/{sid}/comments/{body['comment']['id']}/delete",
                 b'{"initials": "RB"}', {"Content-Type": "text/plain"})[0] == 415
     assert len(get(port, url)[1]["comments"]) == 1
 
 
 def test_cross_site_writes_are_refused(hub):
-    port, db, _pw = hub
+    port, db, _pw, _data = hub
     sid = _sample(db)
     url = f"/api/samples/{sid}/comments"
     body = {"text": "x", "initials": "RB"}
@@ -129,7 +142,7 @@ def test_cross_site_writes_are_refused(hub):
 
 
 def test_at_most_100_active_comments(hub):
-    port, db, _pw = hub
+    port, db, _pw, _data = hub
     sid = _sample(db)
     for i in range(99):
         store.sample_comments.add(sid, text=f"c{i}", source="free", author_initials="RB",
@@ -141,7 +154,7 @@ def test_at_most_100_active_comments(hub):
 
 
 def test_preset_comment_copies_the_text(hub):
-    port, db, _pw = hub
+    port, db, _pw, _data = hub
     sid = _sample(db)
     code, body = get(port, "/api/comment-presets")
     assert code == 200
@@ -160,7 +173,7 @@ def test_preset_comment_copies_the_text(hub):
 
 
 def test_annotation_comment_route(hub):
-    port, db, _pw = hub
+    port, db, _pw, _data = hub
     sid = _sample(db)
     code, body = post(port, f"/api/samples/{sid}/comments",
                       {"text": "", "initials": "RB", "t0": 2.0, "t1": 1.5})
@@ -175,7 +188,7 @@ def test_annotation_comment_route(hub):
 # ── admin presets ───────────────────────────────────────────────────────────
 
 def test_admin_presets_need_json_and_the_password(hub):
-    port, _db, _pw = hub
+    port, _db, _pw, _data = hub
     url = "/api/admin/comment-presets"
     assert send(port, url, b'{"password": "x", "action": "list"}',
                 {"Content-Type": "text/plain"})[0] == 415
@@ -184,7 +197,7 @@ def test_admin_presets_need_json_and_the_password(hub):
 
 
 def test_admin_presets_create_update_reorder_deactivate(hub):
-    port, _db, pw = hub
+    port, _db, pw, _data = hub
     url = "/api/admin/comment-presets"
     code, body = post(port, url, {"password": pw, "action": "list"})
     assert code == 200 and len(body["presets"]) >= 4
