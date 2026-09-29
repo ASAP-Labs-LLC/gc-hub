@@ -91,6 +91,7 @@ from flask import Blueprint, Response, jsonify, render_template, request
 
 import diagnostics
 import exports
+import web_auth
 import paths
 import store
 
@@ -215,7 +216,8 @@ def _db() -> Path:
 
 
 def _who() -> str:
-    return request.remote_addr or "unknown"
+    """`<session name> (<client address>)`: logs and every stored `by`."""
+    return web_auth.actor()
 
 
 # ── admin jobs ──────────────────────────────────────────────────────────────
@@ -338,7 +340,7 @@ def api_admin_import_history_start():
     if err:
         return err
     inst, processed_dir, results_csv, aliases, batch_size = params
-    by = f"admin@{_who()}"      # recorded on the run and its revisions (captured here:
+    by = _who()                 # recorded on the run and its revisions (captured here:
                                 # the job runs outside the request)
 
     def run(progress):
@@ -539,7 +541,7 @@ def api_admin_diagnostics_bundle():
                 import hub
                 manifest = diagnostics.build_bundle(
                     options, data_dir=data_dir, db=_db(), out_path=part,
-                    who=f"admin@{_who()}", runtime=hub.running(),
+                    who=_who(), runtime=hub.running(),
                     extra_secrets=[password] if isinstance(password, str) else [])
                 final = tmp / f"{name}.zip"
                 part.replace(final)
@@ -596,12 +598,52 @@ def _unlink_quietly(path: Path) -> None:
         path.unlink()
 
 
+# ── sign-in sessions (spec D2) ──────────────────────────────────────────────
+
+@bp.route("/api/admin/sessions", methods=["POST"])
+def api_admin_sessions():
+    """The active browser sessions and their revocation (admin password):
+    ``{action: "list"}`` → ``{sessions: [{id, name, method, ip, created_at,
+    last_seen, user_agent}]}`` (never a token hash); ``{action: "revoke", id}``;
+    ``{action: "revoke-name", name}`` (every session of that account)."""
+    body, err = _admin()
+    if err:
+        return err
+    action = body.get("action", "list")
+    try:
+        if action == "revoke":
+            sid = body.get("id")
+            if isinstance(sid, bool) or not isinstance(sid, int):
+                return _err("id must be a session id", 400)
+            if not web_auth.revoke(sid):
+                return _err(f"No active session {sid}.", 404)
+            log.warning("admin: session %s revoked by %s", sid, _who())
+        elif action == "revoke-name":
+            name = body.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return _err("name is required", 400)
+            ids = web_auth.revoke_name(name.strip())
+            log.warning("admin: %d session(s) of %s revoked by %s", len(ids), name.strip(),
+                        _who())
+        elif action != "list":
+            return _err("action must be one of list, revoke, revoke-name", 400)
+        return jsonify({"sessions": web_auth.active_sessions()})
+    except web_auth.StoreUnavailable as exc:
+        return _err(f"The hub's database is unavailable: {exc}", 503)
+
+
 # ── the page ────────────────────────────────────────────────────────────────
 
 @bp.route("/admin/hub", methods=["GET"])
 def admin_hub_page():
+    import admin_auth
     import version
+    try:
+        configured = admin_auth.configured_hub_url()
+    except Exception:  # noqa: BLE001 - no store yet
+        configured = None
     diag_options = [{"key": k, "label": diagnostics.LABELS[k], "default": diagnostics.OPTIONS[k]}
                     for k in diagnostics.OPTION_KEYS]
     return render_template("hub_admin.html", app_version=version.APP_VERSION,
-                           diag_options=diag_options)
+                           diag_options=diag_options, hub_url=configured or "",
+                           hub_url_effective=configured or admin_auth.DEFAULT_HUB_URL)

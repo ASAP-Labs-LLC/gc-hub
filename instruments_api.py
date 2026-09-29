@@ -66,6 +66,7 @@ import paths
 import standards
 import store
 import version
+import web_auth
 
 log = logging.getLogger("instruments_api")
 
@@ -110,7 +111,7 @@ def _comp_dir(conf: Optional[dict] = None) -> Path:
 
 
 def _by() -> str:
-    return f"admin@{request.remote_addr or '?'}"
+    return web_auth.actor()
 
 
 def _err(message: str, status: int = 400, **extra):
@@ -183,6 +184,7 @@ def api_instruments():
         "instruments": [_summary(r, conf, db, counts, agents) for r in store.instruments.list(db=db)],
         "hub_methods": methods.names(),
         "hub_url": ingest_api.configured_hub_url(db=db),
+        "hub_url_effective": ingest_api.effective_hub_url(db=db),
         "agent_commands": list(ingest_api.AGENT_COMMANDS),
         "skew_warn_seconds": ia.SKEW_WARN_SECONDS,
     })

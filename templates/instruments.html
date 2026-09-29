@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Instruments</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=2">
+  <script src="{{ url_for('static', filename='js/session.js') }}?v=1"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/instruments.css') }}?v=1">
 </head>
 <body>
@@ -38,8 +39,9 @@
       <details class="add" id="hub-url-box">
         <summary>Hub URL for installers</summary>
         <form id="hub-url-form" autocomplete="off">
-          <label>URL <input name="hub_url" placeholder="http://asapsv1:5560"></label>
-          <p class="hint">The address the GC PCs use to reach this hub. Empty clears it.</p>
+          <label>URL <input name="hub_url" placeholder="https://gc.asaplabs.net"></label>
+          <p class="hint">The address the GC PCs use to reach this hub. Now: <span id="hub-url-effective"></span>.
+            Empty = https://gc.asaplabs.net. http:// only for a lab-network name or IP.</p>
           <button class="btn" type="submit">Save hub URL</button>
         </form>
       </details>
@@ -50,10 +52,11 @@
     </main>
   </div>
 
-  <script src="{{ url_for('static', filename='js/instruments_logic.js') }}?v=1"></script>
-  <script src="{{ url_for('static', filename='js/instruments.js') }}?v=1"></script>
+  <script src="{{ url_for('static', filename='js/instruments_logic.js') }}?v=2"></script>
+  <script src="{{ url_for('static', filename='js/instruments.js') }}?v=2"></script>
 
   <!-- Which build is running, bottom-right. Same string /healthz reports. -->
   <div id="app-version" aria-hidden="true">{{ app_version }}</div>
+  {% include "_signed_in.html" %}
 </body>
 </html>

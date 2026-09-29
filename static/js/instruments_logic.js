@@ -106,9 +106,6 @@
                 (b.hub_url ? ' The new installer will point at ' + b.hub_url + '.' : '') +
                 ' Download a new installer and revoke the old token?' };
         }
-        if (status === 409 && b.needs_hub_url) {
-            return { kind: 'needs_hub_url', message: b.error || 'Set the hub URL first.' };
-        }
         return { kind: 'error', message: b.error || ('HTTP ' + status) };
     }
 

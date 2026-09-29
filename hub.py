@@ -147,7 +147,7 @@ def default_notifier() -> Optional[Notifier]:
 
 
 class Maintenance:
-    """The nightly backup, the job-table prune and, while gc1 has no hub
+    """The nightly backup, the job-table and sign-in-session prunes and, while gc1 has no hub
     corrections, the seed retry every ``SEED_RETRY`` (``run_once`` is one
     pass). ``conf_fn`` supplies ``settings.json`` for the seed (default
     ``settings.load_settings``); ``seed_attempted_at`` is when the start-up
@@ -165,6 +165,7 @@ class Maintenance:
         self._failed_at: Optional[datetime] = None
         self._notified_day: Optional[str] = None
         self._pruned_day: Optional[str] = None
+        self._sessions_pruned: Optional[int] = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -203,6 +204,14 @@ class Maintenance:
         if self._pruned_day == day:
             return None
         cutoff = (now - timedelta(days=PRUNE_DAYS)).astimezone(timezone.utc)
+        try:   # sign-in sessions that ended (revoked, expired, idle) over 30 days ago
+            self._sessions_pruned = store.web_sessions.prune(
+                older_than_days=store.WEB_SESSION_PRUNE_DAYS,
+                idle_seconds=store.WEB_SESSION_IDLE_SECONDS, db=self.db)
+            if self._sessions_pruned:
+                log.info("hub: pruned %d ended sign-in session(s)", self._sessions_pruned)
+        except Exception:  # noqa: BLE001
+            log.exception("hub: pruning old sign-in sessions failed")
         try:
             n = store.jobs.prune_done(cutoff, db=self.db)
         except Exception:  # noqa: BLE001
@@ -235,7 +244,9 @@ class Maintenance:
         except Exception:  # noqa: BLE001 - never stops the backup
             log.exception("hub: gc1 corrections seed retry failed")
             seeded = False
-        return {"seeded": seeded, "backup": self._backup(now), "pruned": self._prune(now)}
+        self._sessions_pruned = None
+        return {"seeded": seeded, "backup": self._backup(now), "pruned": self._prune(now),
+                "sessions_pruned": self._sessions_pruned}
 
     def start(self, interval: float = MAINTENANCE_INTERVAL_SECONDS,
               join_timeout: float = 60.0) -> None:

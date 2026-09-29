@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hub admin</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=2">
+  <script src="{{ url_for('static', filename='js/session.js') }}?v=1"></script>
   <style>
     :root{
       --bg:#0d1117; --panel:#161b22; --line:#30363d;
@@ -51,6 +52,28 @@
     <span id="msg" role="status"></span>
     <p style="margin-top:8px">Every action below needs the admin password (set once at
       <a href="/admin/setup">/admin/setup</a>). <a href="/">Back to the app</a></p>
+  </div>
+
+  <div class="panel">
+    <h2>Hub address</h2>
+    <p>The address the GC PCs' agents and the hub tray's "Open in browser" use:
+      <strong id="hub-url-effective">{{ hub_url_effective }}</strong>. New agent installers get it
+      (with this machine's LAN address as their fallback). Empty = https://gc.asaplabs.net;
+      http:// only for a lab-network name or IP.</p>
+    <input id="hub-url" class="wide" type="text" value="{{ hub_url }}"
+      placeholder="https://gc.asaplabs.net">
+    <button id="btn-hub-url">Save hub address</button>
+  </div>
+
+  <div class="panel">
+    <h2>Signed-in sessions</h2>
+    <p>Who is signed in (browser sessions; idle ones end after 12 hours, all after 14 days,
+      7 through gc.asaplabs.net). Revoke signs that browser out at once.</p>
+    <button id="btn-sessions">Load sessions</button>
+    <table>
+      <thead><tr><th>Name</th><th>Method</th><th>Address</th><th>Last seen</th><th></th></tr></thead>
+      <tbody id="sessions"></tbody>
+    </table>
   </div>
 
   <div class="panel">
@@ -147,10 +170,11 @@
     <span id="diag-msg" role="status"></span>
   </div>
 </main>
-<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/diagnostics.js') }}?v=2"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>
+{% include "_signed_in.html" %}
 </body>
 </html>
