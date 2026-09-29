@@ -581,4 +581,7 @@ def _unlink_quietly(path: Path) -> None:
 @bp.route("/admin/hub", methods=["GET"])
 def admin_hub_page():
     import version
-    return render_template("hub_admin.html", app_version=version.APP_VERSION)
+    diag_options = [{"key": k, "label": diagnostics.LABELS[k], "default": diagnostics.OPTIONS[k]}
+                    for k in diagnostics.OPTION_KEYS]
+    return render_template("hub_admin.html", app_version=version.APP_VERSION,
+                           diag_options=diag_options)
