@@ -9,6 +9,7 @@ submitted while paused waits as ``received`` and is processed on resume.
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -122,3 +123,61 @@ def test_an_explicit_paused_argument_wins_over_the_store(tmp_path):
     finally:
         rt.stop()
     assert hub.running() is None
+
+
+def _named(name):
+    return [t for t in threading.enumerate() if t.name == name and t.is_alive()]
+
+
+def test_a_pause_that_times_out_never_leaves_duplicate_threads(tmp_path):
+    # Review harness dup_threads.py: an export append and a maintenance pass
+    # stuck for 1 s outlive pause(timeout=0.2); resume must not start a second
+    # thread beside the old one, and "alive" must be the real thread state.
+    h = _hub_folder(tmp_path)
+    rt = hub.start(h.conf, data_dir=h.data, notifier=None, conf_fn=lambda: h.conf,
+                   export_interval=0.05, maintenance=True, maintenance_interval=0.05)
+    try:
+        orig_tick, orig_run = rt.exporter.tick, rt.maintenance.run_once
+
+        def slow_tick(*a, **k):
+            time.sleep(1.0)
+            return orig_tick(*a, **k)
+
+        def slow_run(*a, **k):
+            time.sleep(1.0)
+            return orig_run(*a, **k)
+
+        rt.exporter.tick = slow_tick
+        rt.maintenance.run_once = slow_run
+        time.sleep(0.3)
+        rt.pause(timeout=0.2)
+        assert rt.paused is True
+        assert rt.exporter_alive() == bool(_named("gc-hub-exports"))
+        assert rt.maintenance.is_alive() == bool(_named("gc-hub-maintenance"))
+        rt.resume()
+        for _ in range(25):
+            assert len(_named("gc-hub-exports")) <= 1
+            assert len(_named("gc-hub-maintenance")) <= 1
+            time.sleep(0.1)
+        assert len(_named("gc-hub-exports")) == 1 and rt.exporter_alive()
+        assert len(_named("gc-hub-maintenance")) == 1 and rt.maintenance.is_alive()
+        rt.pause(timeout=0.2)
+        assert wait_for(lambda: not _named("gc-hub-exports")
+                        and not _named("gc-hub-maintenance"), timeout=5)
+        assert not rt.exporter_alive() and not rt.maintenance.is_alive()
+    finally:
+        rt.stop()
+
+
+def test_background_busy_ignores_due_jobs_while_processing_is_paused(tmp_path):
+    # the 3 AM restart must not be held up by work that cannot run
+    h = _hub_folder(tmp_path)
+    store.migrate(h.db)
+    store.jobs.enqueue("process", {"x": 1}, db=h.db)
+    assert hub.background_busy(h.db) is True
+    hub.set_processing_paused(h.db, True, by="t")
+    assert hub.background_busy(h.db) is False
+    with store.connection(h.db) as conn:
+        conn.execute("UPDATE jobs SET state='running'")
+        conn.commit()
+    assert hub.background_busy(h.db) is True     # something really running still counts

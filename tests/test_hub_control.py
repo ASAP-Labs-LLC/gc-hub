@@ -51,11 +51,16 @@ class FakeWorker:
         return not self.rt.paused
 
 
+class FakeExporter:
+    ticking = False
+
+
 class FakeRuntime:
     def __init__(self, paused=False):
         self.paused = paused
         self.calls = []
         self.worker = FakeWorker(self)
+        self.exporter = FakeExporter()
 
     def pause(self):
         self.calls.append("pause")
@@ -125,6 +130,34 @@ def test_is_loopback(addr, ok):
 
 
 @pytest.mark.parametrize("path", ROUTES)
+@pytest.mark.parametrize("host", ["evil.example", "evil.example:5560", "10.0.0.5:5560",
+                                  "asapsv1:5560"])
+def test_a_foreign_host_header_is_refused_even_from_loopback(env, path, host):
+    # DNS rebinding: a page on evil.example resolved to 127.0.0.1 reaches us
+    # from loopback, but with its own name in Host.
+    code, body = _post(env["client"], path, headers={"Host": host})
+    assert code == 403
+    assert env["rt"].calls == [] and not env["shut"].is_set()
+
+
+@pytest.mark.parametrize("host", ["localhost", "localhost:5560", "127.0.0.1:5560",
+                                  "[::1]:5560", "127.9.9.9"])
+def test_loopback_host_headers_are_accepted(env, host):
+    code, _ = _post(env["client"], "/api/admin/hub/pause-processing", headers={"Host": host})
+    assert code == 202
+
+
+def test_refusals_are_logged_at_most_once_a_minute_per_address(env, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="hub_control"):
+        for _ in range(5):
+            _post(env["client"], ROUTES[0], environ=REMOTE)
+        _post(env["client"], ROUTES[0], environ={"REMOTE_ADDR": "10.9.9.9"})
+    lines = [r for r in caplog.records if "not loopback" in r.getMessage()]
+    assert len(lines) == 2
+
+
+@pytest.mark.parametrize("path", ROUTES)
 def test_wrong_password_json_and_size_rules(env, path):
     c = env["client"]
     assert _post(c, path, {"password": "wrong-one"})[0] == 403
@@ -141,24 +174,35 @@ def test_wrong_password_json_and_size_rules(env, path):
 
 # ── pause / resume ────────────────────────────────────────────────────────
 
+def _wait(pred, timeout=5.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return bool(pred())
+
+
 def test_pause_then_resume(env):
+    # 202 at once: the threads are stopped/started on a background thread
+    # (a pause may wait on a running job), the tray polls the status.
     c, rt, db, notices = env["client"], env["rt"], env["db"], env["notices"]
     code, body = _post(c, "/api/admin/hub/pause-processing")
-    assert code == 200 and body["processing_paused"] is True
-    assert rt.calls == ["pause"]
+    assert code == 202 and body["processing_paused"] is True
+    assert _wait(lambda: rt.calls == ["pause"])
     assert hub.processing_paused(db)["by"] == "127.0.0.1"
     paused_notes = [n for n in notices.list_all() if "paused" in n["message"].lower()]
     assert len(paused_notes) == 1 and paused_notes[0]["level"] == "warning"
     # idempotent: no second notice
-    assert _post(c, "/api/admin/hub/pause-processing")[0] == 200
+    assert _post(c, "/api/admin/hub/pause-processing")[0] == 202
     assert len([n for n in notices.list_all() if "paused" in n["message"].lower()]) == 1
 
     snap = hub_control.status_snapshot()
     assert snap["processing_paused"] is True and snap["state"] == "processing-paused"
 
     code, body = _post(c, "/api/admin/hub/resume-processing")
-    assert code == 200 and body["processing_paused"] is False
-    assert rt.calls[-1] == "resume"
+    assert code == 202 and body["processing_paused"] is False
+    assert _wait(lambda: rt.calls[-1] == "resume")
     assert hub.processing_paused(db) is None
     # the paused notice is gone; a resumed one says so
     assert not any(n["id"] == paused_notes[0]["id"] for n in notices.list_all())
@@ -166,10 +210,37 @@ def test_pause_then_resume(env):
     assert hub_control.status_snapshot()["state"] == "running"
 
 
+def test_a_slow_pause_does_not_hold_the_request(env):
+    gate = threading.Event()
+    rt = env["rt"]
+    orig = rt.pause
+
+    def slow():
+        gate.wait(10)
+        orig()
+    rt.pause = slow
+    t0 = time.time()
+    code, _ = _post(env["client"], "/api/admin/hub/pause-processing")
+    assert code == 202 and time.time() - t0 < 2
+    gate.set()
+    assert _wait(lambda: rt.paused)
+
+
+def test_the_tray_user_is_recorded_and_sanitised(env):
+    code, _ = _post(env["client"], "/api/admin/hub/pause-processing",
+                    {"password": PW, "by": "ASAP\\ryan<script>" + "x" * 100})
+    assert code == 202
+    by = hub.processing_paused(env["db"])["by"]
+    assert by.startswith("ASAP\\ryanscript") and by.endswith("(127.0.0.1)")
+    assert "<" not in by and len(by) <= 64 + len(" (127.0.0.1)")
+    note = [n for n in env["notices"].list_all() if "paused" in n["message"].lower()][0]
+    assert "paused by ASAP\\ryanscript" in note["message"]
+
+
 def test_pause_before_the_hub_has_started_is_remembered(env):
     hub_control.configure(runtime=lambda: None)
     code, body = _post(env["client"], "/api/admin/hub/pause-processing")
-    assert code == 200 and body["processing_paused"] is True
+    assert code == 202 and body["processing_paused"] is True
     assert hub.processing_paused(env["db"]) is not None
     assert hub_control.status_snapshot()["state"] == "starting"
 
@@ -206,6 +277,42 @@ def test_stop_writes_the_updater_marker_then_shuts_down_without_respawn(env):
     assert restart_policy.stop_requested()
     assert env["shut"].wait(10)
     assert body["marker"] == "paused"
+
+
+def test_stop_refuses_while_work_is_in_progress_unless_forced(env, monkeypatch):
+    rt = env["rt"]
+    rt.exporter.ticking = True
+    hub_control.configure(busy_extra=lambda: ["a QBench upload is running"])
+    store.instruments.upsert({"id": "gc1", "name": "GC-1"}, db=env["db"])
+    store.jobs.enqueue("process", {"x": 1}, db=env["db"])
+    with store.connection(env["db"]) as conn:
+        conn.execute("UPDATE jobs SET state='running'")
+        conn.commit()
+
+    class Jobs:
+        def current(self):
+            return {"state": "running", "kind": "load-folder"}
+    import hub_admin
+    monkeypatch.setattr(hub_admin, "JOBS", Jobs())
+    code, body = _post(env["client"], "/api/admin/hub/stop")
+    assert code == 409, body
+    text = " ".join(body["busy"])
+    for want in ("QBench", "export", "load-folder", "job"):
+        assert want in text, text
+    assert not (env["data"] / "paused").exists() and not restart_policy.stop_requested()
+    code, body = _post(env["client"], "/api/admin/hub/stop", {"password": PW, "force": True})
+    assert code == 202, body
+    assert env["shut"].wait(10)
+
+
+def test_busy_includes_a_diagnostics_build_when_that_module_says_so(env, monkeypatch):
+    import types
+    fake = types.ModuleType("diagnostics")
+    fake.busy = lambda: True
+    monkeypatch.setitem(sys.modules, "diagnostics", fake)
+    assert any("diagnostics" in b for b in hub_control.busy_reasons())
+    fake.busy = lambda: False
+    assert hub_control.busy_reasons() == []
 
 
 def test_stop_refused_when_the_marker_cannot_be_written(env, monkeypatch):
@@ -250,6 +357,7 @@ def _seed_queue(db):
 
 def test_status_is_open_read_only_and_complete(env):
     _seed_queue(env["db"])
+    hub_control.refresh_cache()
     r = env["client"].get("/api/hub/status", environ_base=REMOTE)
     assert r.status_code == 200
     s = r.get_json()
@@ -263,11 +371,44 @@ def test_status_is_open_read_only_and_complete(env):
     assert s["queue"] == {"jobs_due": 1, "jobs_queued": 2, "jobs_running": 0,
                           "received_samples": 2}
     assert s["exporter"]["pending_rows"] == 1
+    assert s["stale"] is False
     assert isinstance(s["cpu_percent"], (int, float)) and s["cpu_percent"] >= 0
     assert s["rss_bytes"] is None or s["rss_bytes"] > 1_000_000
     assert "password" not in json.dumps(s).lower()
     (env["data"] / "paused").write_text("x")
     assert env["client"].get("/api/hub/status").get_json()["updater_paused"] is True
+
+
+def test_status_never_touches_sqlite_on_the_request(env, monkeypatch):
+    _seed_queue(env["db"])
+    hub_control.refresh_cache()
+
+    def boom(*a, **k):
+        raise AssertionError("the request path opened the database")
+    monkeypatch.setattr(sqlite3, "connect", boom)
+    monkeypatch.setattr(store, "connection", boom)
+    s = hub_control.status_snapshot()
+    assert s["queue"]["jobs_queued"] == 2 and s["stale"] is False
+
+
+def test_refresh_under_an_exclusive_lock_is_quick_keeps_the_last_values_and_goes_stale(
+        env, monkeypatch):
+    _seed_queue(env["db"])
+    hub_control.refresh_cache()
+    lock = sqlite3.connect(str(env["db"]), isolation_level=None)
+    try:
+        lock.execute("PRAGMA locking_mode=EXCLUSIVE")
+        lock.execute("BEGIN EXCLUSIVE")
+        t0 = time.time()
+        assert hub_control.refresh_cache() is False
+        assert time.time() - t0 < 1.0
+        s = hub_control.status_snapshot()
+        assert s["queue"]["jobs_queued"] == 2          # the last good values
+        monkeypatch.setattr(hub_control, "CACHE_STALE_SECONDS", 0.0)
+        assert hub_control.status_snapshot()["stale"] is True
+    finally:
+        lock.execute("ROLLBACK")
+        lock.close()
 
 
 def test_status_with_no_store_yet(tmp_path, monkeypatch):

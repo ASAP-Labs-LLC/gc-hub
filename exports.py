@@ -638,6 +638,7 @@ class HubExporter:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self.ticking = False          # a background pass (append) is in progress
 
     # ── paths ──
 
@@ -1280,15 +1281,28 @@ class HubExporter:
                 out[iid] = {"appended": 0, "pending": None, "error": repr(exc), "refused": None}
         return out
 
-    def start(self, interval: float = FLUSH_INTERVAL_SECONDS) -> threading.Thread:
+    def start(self, interval: float = FLUSH_INTERVAL_SECONDS,
+              join_timeout: float = 60.0) -> threading.Thread:
+        """Start the flush loop. A previous thread whose ``stop`` timed out
+        (an append in progress) is waited for first, so two loops never run
+        at once; ``RuntimeError`` if it is still running after
+        ``join_timeout``."""
         if self._thread is not None and self._thread.is_alive():
-            return self._thread
+            if not self._stop.is_set():
+                return self._thread
+            self._thread.join(join_timeout)
+            if self._thread.is_alive():
+                raise RuntimeError("the previous export thread is still running")
         self._stop.clear()
 
         def loop() -> None:
             while not self._stop.is_set():
                 self._wake.clear()
-                self.tick()
+                self.ticking = True
+                try:
+                    self.tick()
+                finally:
+                    self.ticking = False
                 self._wake.wait(interval)
 
         self._thread = threading.Thread(target=loop, name="gc-hub-exports", daemon=True)
@@ -1304,8 +1318,12 @@ class HubExporter:
         return self._thread is not None and self._thread.is_alive()
 
     def stop(self, timeout: float = 10.0) -> None:
+        """Ask the loop to end and wait up to ``timeout``. A thread still
+        busy after that is kept (``is_alive`` stays true) and finishes on
+        its own; ``start`` waits for it."""
         self._stop.set()
         self._wake.set()
         if self._thread is not None:
             self._thread.join(timeout)
-            self._thread = None
+            if not self._thread.is_alive():
+                self._thread = None

@@ -237,9 +237,17 @@ class Maintenance:
             seeded = False
         return {"seeded": seeded, "backup": self._backup(now), "pruned": self._prune(now)}
 
-    def start(self, interval: float = MAINTENANCE_INTERVAL_SECONDS) -> None:
+    def start(self, interval: float = MAINTENANCE_INTERVAL_SECONDS,
+              join_timeout: float = 60.0) -> None:
+        """Start the loop; a previous thread whose ``stop`` timed out is
+        waited for first (``RuntimeError`` if it is still running after
+        ``join_timeout``), so two loops never run at once."""
         if self._thread is not None and self._thread.is_alive():
-            return
+            if not self._stop.is_set():
+                return
+            self._thread.join(join_timeout)
+            if self._thread.is_alive():
+                raise RuntimeError("the previous maintenance thread is still running")
         self._stop.clear()
 
         def loop() -> None:
@@ -257,10 +265,13 @@ class Maintenance:
         return self._thread is not None and self._thread.is_alive()
 
     def stop(self, timeout: float = 10.0) -> None:
+        """A thread still busy after ``timeout`` is kept (``is_alive``) and
+        finishes on its own; ``start`` waits for it."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout)
-            self._thread = None
+            if not self._thread.is_alive():
+                self._thread = None
 
 
 class HubRuntime:
@@ -453,7 +464,12 @@ PROCESSING_PAUSED_KEY = "hub_processing_paused"
 
 def processing_paused(db) -> Optional[dict]:
     """``{"since", "by"}`` while processing is paused, else None."""
-    raw = store.settings_kv.get(PROCESSING_PAUSED_KEY, db=db)
+    return parse_processing_paused(store.settings_kv.get(PROCESSING_PAUSED_KEY, db=db))
+
+
+def parse_processing_paused(raw) -> Optional[dict]:
+    """``processing_paused`` from the stored value (hub_control reads the
+    row itself, with a short timeout)."""
     if not raw:
         return None
     try:
@@ -515,13 +531,19 @@ def background_busy(db, *, now: Optional[datetime] = None) -> bool:
     """True while the Worker has work now: a job ``running``, or ``queued``
     and due (``not_before`` unset or passed). A retry scheduled later (e.g.
     ``pending_corrections`` every 5 minutes) is not work now. False when the
-    store can't be read (never blocks a restart on an error)."""
+    store can't be read (never blocks a restart on an error). While
+    processing is paused, due jobs cannot run, so only a ``running`` one
+    counts (a paused hub must not skip its 3 AM restart forever)."""
     stamp = store._ts((now or datetime.now()).astimezone())
     try:
+        paused = processing_paused(db) is not None
         with store.connection(db) as conn:
-            r = conn.execute("SELECT 1 FROM jobs WHERE state='running' OR (state='queued' AND "
-                             "(not_before IS NULL OR not_before <= ?)) LIMIT 1",
-                             (stamp,)).fetchone()
+            if paused:
+                r = conn.execute("SELECT 1 FROM jobs WHERE state='running' LIMIT 1").fetchone()
+            else:
+                r = conn.execute(
+                    "SELECT 1 FROM jobs WHERE state='running' OR (state='queued' AND "
+                    "(not_before IS NULL OR not_before <= ?)) LIMIT 1", (stamp,)).fetchone()
     except Exception:  # noqa: BLE001
         log.exception("hub: could not read the job queue")
         return False

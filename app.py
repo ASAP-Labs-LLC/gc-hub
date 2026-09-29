@@ -3547,6 +3547,7 @@ def _init_app() -> None:
     store exists."""
     threading.Thread(target=_start_hub, daemon=True, name="hub-start").start()
     threading.Thread(target=_auto_restart_loop, daemon=True, name="auto-restart").start()
+    hub_control.start_refresher()   # /healthz's `hub` and /api/hub/status never read SQLite
 
 
 def _start_hub() -> None:
@@ -3614,8 +3615,17 @@ def _shutdown_for_stop() -> None:
     os._exit(0)
 
 
+def _stop_busy() -> list:
+    """The app's own reasons not to Stop now (hub_control adds the rest)."""
+    with _upload_items_lock:
+        pending = sum(1 for i, _ in enumerate(_upload_items) if i not in _upload_skipped)
+    if _upload_thread is not None and _upload_thread.is_alive():
+        return [f"a QBench upload is running ({pending} item(s) queued)"]
+    return []
+
+
 hub_control.configure(runtime=lambda: _hub_runtime, shutdown=_shutdown_for_stop,
-                      started_at=_server_start_time)
+                      started_at=_server_start_time, busy_extra=_stop_busy)
 
 
 def _wake_exports() -> None:
