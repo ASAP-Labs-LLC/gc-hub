@@ -617,6 +617,8 @@ def report_params(body: dict, conf: dict) -> dict:
         "spike_min_width_min": pick(None, "analysis_spike_min_width_min",
                                     DEFAULT_SPIKE_MIN_WIDTH_MIN),
     }
+    p["spike_max_fwhm_min"] = pick(None, "analysis_spike_max_fwhm_min", 0.20)
+    p["spike_min_dominance"] = pick(None, "analysis_spike_min_dominance", 0.6)
     srt = conf.get("analysis_spike_report_threshold", "")
     p["spike_report_threshold"] = float(srt) if srt not in (None, "") else p["thresh_moderate"]
     for k, v in p.items():
@@ -706,13 +708,39 @@ def _extent(t: np.ndarray, params: dict) -> int:
     return int(np.searchsorted(t, float(params["x_max_min"]) + _EPS, side="right"))
 
 
-def find_spikes(t: np.ndarray, spike_diff: np.ndarray, params: dict) -> list[dict]:
-    """Qualifying spikes: spike-channel runs with |diff| ≥ marginal, at least
-    ``spike_min_width_min`` wide, whose peak reaches
-    ``spike_report_threshold``; on the displayed axis only. Each is
-    ``{t, sign, value, t0, t1, area}`` (``t`` = the peak's time)."""
+def _fwhm(t: np.ndarray, v: np.ndarray, k: int, sign: int) -> float:
+    """Full width at half height of the peak of ``sign * v`` at index *k*."""
+    half = abs(v[k]) / 2.0
+    a = k
+    while a > 0 and sign * v[a] > half:
+        a -= 1
+    b = k
+    while b < len(v) - 1 and sign * v[b] > half:
+        b += 1
+    return float(t[b] - t[a])
+
+
+def find_spikes(t: np.ndarray, spike_diff: np.ndarray, params: dict,
+                heights=None) -> list[dict]:
+    """Qualifying sharp peaks of the spike channel, on the displayed axis:
+
+    * a run with |diff| ≥ marginal at least ``spike_min_width_min`` wide,
+      whose apex reaches ``spike_report_threshold``;
+    * **sharp**: its full width at half height is ≤ ``spike_max_fwhm_min``
+      (a broad hump is the trend channel's, never a "sharp peak");
+    * **dominant** (when *heights* ``(sample, standard)`` — each smoothed
+      signal above its own low-quantile baseline — are given):
+      |diff at the apex| ≥ ``spike_min_dominance`` × the larger local peak
+      height, so a height difference of a peak both runs share is not a
+      sharp peak; a peak one of them lacks is.
+
+    Each is ``{t, sign, value, t0, t1, area, fwhm, dominance}`` (``t`` = the
+    apex; ``dominance`` None without *heights*)."""
     t = np.asarray(t, dtype=float)
     v = np.asarray(spike_diff, dtype=float)
+    hs = ht = None
+    if heights is not None:
+        hs, ht = (np.asarray(h, dtype=float) for h in heights)
     out = []
     for s, e, sign in _signed_runs(v, params["thresh_marginal"], _extent(t, params)):
         p = _piece(t, v, s, e, sign)
@@ -720,9 +748,61 @@ def find_spikes(t: np.ndarray, spike_diff: np.ndarray, params: dict) -> list[dic
             continue
         if abs(p["peak"]) + _EPS < params["spike_report_threshold"]:
             continue
+        k = s + int(np.argmax(np.abs(v[s:e + 1])))
+        fwhm = _fwhm(t, v, k, sign)
+        if fwhm > params["spike_max_fwhm_min"] + _EPS:
+            continue
+        dominance = None
+        if hs is not None:
+            dominance = abs(p["peak"]) / max(float(hs[k]), float(ht[k]), 1.0)
+            if dominance + _EPS < params["spike_min_dominance"]:
+                continue
         out.append({"t": p["peak_t"], "sign": sign, "value": p["peak"],
-                    "t0": p["t0"], "t1": p["t1"], "area": p["area"]})
+                    "t0": p["t0"], "t1": p["t1"], "area": p["area"],
+                    "fwhm": fwhm, "dominance": dominance})
     return out
+
+
+#: Minimum normalized cross-correlation of the two runs' derivatives for a
+#: shift to be applied (below it they share no peak pattern to align on).
+ALIGN_MIN_CORRELATION = 0.5
+
+
+def align_to_standard(t: np.ndarray, y_sample: np.ndarray, y_std: np.ndarray,
+                      max_lag_min: float = 0.02) -> tuple[np.ndarray, float]:
+    """The sample shifted onto the standard by one global sub-sample lag
+    (cross-correlation of the smoothed first derivatives, searched within
+    ±*max_lag_min*, refined by a parabola): ``(aligned sample, lag in
+    minutes)``. The spike channel's input only — a retention drift between
+    two runs of the same product must not read as sharp peaks. Input too
+    short for the search is returned unchanged with lag 0."""
+    t = np.asarray(t, dtype=float)
+    ys = np.asarray(y_sample, dtype=float)
+    yst = np.asarray(y_std, dtype=float)
+    n = len(t)
+    if n < 3:
+        return ys, 0.0
+    dt = float(np.median(np.diff(t)))
+    lag_pts = int(max_lag_min / dt) if dt > 0 else 0
+    if lag_pts < 1 or n <= 2 * lag_pts + 2:
+        return ys, 0.0
+    smooth = (lambda y: gaussian_filter1d(y, 2.0)) if gaussian_filter1d is not None \
+        else (lambda y: y)
+    a = np.gradient(smooth(ys))
+    b = np.gradient(smooth(yst))[lag_pts:-lag_pts]
+    lags = np.arange(-lag_pts, lag_pts + 1)
+    cc = np.array([np.dot(np.roll(a, k)[lag_pts:-lag_pts], b) for k in lags])
+    i = int(np.argmax(cc))
+    norm = float(np.linalg.norm(a[lag_pts:-lag_pts]) * np.linalg.norm(b))
+    if norm <= 0 or cc[i] / norm < ALIGN_MIN_CORRELATION:
+        return ys, 0.0          # no shared peak pattern to align on
+    frac = 0.0
+    if 0 < i < len(lags) - 1:
+        y0, y1, y2 = cc[i - 1], cc[i], cc[i + 1]
+        denom = y0 - 2 * y1 + y2
+        frac = 0.5 * (y0 - y2) / denom if denom != 0 else 0.0
+    lag = float(np.clip((lags[i] + frac) * dt, -max_lag_min, max_lag_min))
+    return np.interp(t, t + lag, ys), lag
 
 
 def _clip(runs, intervals, t, v, min_width) -> list[dict]:
@@ -816,8 +896,11 @@ def build_deviation_report(
     ranges: list[dict],
     ladder,
     params: dict,
+    spike_heights=None,
 ) -> list[dict]:
     """The structured deviation report: one item per bullet line.
+    *spike_heights* ``(sample, standard)`` enables the dominance test of
+    ``find_spikes``.
 
     Kinds: ``range`` (a deviating range), ``not-evaluated`` (its window has
     width 0), ``none`` (``within_ranges`` tells which sentence), ``outside``
@@ -833,7 +916,7 @@ def build_deviation_report(
     if n_ext == 0:
         return [_item("none", within_ranges=False)]
     runs = _signed_runs(trend, params["thresh_marginal"], n_ext)
-    spikes = find_spikes(t, spike, params)
+    spikes = find_spikes(t, spike, params, heights=spike_heights)
     min_w = params["min_width_min"]
     whole = [(0, n_ext - 1)]
 
@@ -1065,14 +1148,22 @@ def analyze_report(
         cal_times=[], cal_carbons=[],          # the legacy segments are not used
         spike_min_width_min=params["spike_min_width_min"],
     )
-    items = build_deviation_report(t, pair["diff"], pair["spike_diff"], ranges=ranges,
-                                   ladder=ladder, params=params)
+    # The spike channel reads the sample aligned onto the standard, and each
+    # run's height above its own low-quantile baseline (the dominance test).
+    aligned, lag = align_to_standard(t, y_sample, y_std)
+    spike_diff = spike_difference(aligned, y_std)
+    smooth = (lambda y: gaussian_filter1d(np.asarray(y, dtype=float), SPIKE_SIGMA_PTS)) \
+        if gaussian_filter1d is not None else (lambda y: np.asarray(y, dtype=float))
+    heights = (smooth(aligned) - pair["trend_sample"], smooth(y_std) - pair["trend_std"])
+    items = build_deviation_report(t, pair["diff"], spike_diff, ranges=ranges,
+                                   ladder=ladder, params=params, spike_heights=heights)
     n_ext = _extent(t, params)
     t_max = float(t[n_ext - 1]) if n_ext else float(t[0])
     windows = range_windows(ranges, ladder, float(t[0]), t_max) if ranges else []
     return {
         "diff": pair["diff"],
-        "spike_diff": pair["spike_diff"],
+        "spike_diff": spike_diff,
+        "alignment_lag_min": lag,
         "trend_sample": pair["trend_sample"],
         "trend_std": pair["trend_std"],
         "windows": windows,

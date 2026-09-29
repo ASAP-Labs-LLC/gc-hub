@@ -101,7 +101,8 @@ def test_the_request_parameters_are_used_everywhere(harness):
     assert p == {"quantile": 0.25, "window": 251, "sigma": 20.0, "thresh_marginal": 120.0,
                  "thresh_moderate": 450.0, "thresh_significant": 1800.0, "x_max_min": 6.5,
                  "min_width_min": 0.05, "merge_gap_min": 0.10, "spike_min_width_min": 0.02,
-                 "spike_report_threshold": 450.0}
+                 "spike_report_threshold": 450.0, "spike_max_fwhm_min": 0.20,
+                 "spike_min_dominance": 0.6}
     assert [r["label"] for r in harness["records"][0]["content"]["ranges"]] == \
         ["Spiky <b>", "Oil"]
 

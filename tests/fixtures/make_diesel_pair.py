@@ -9,9 +9,14 @@ the pair is synthetic but modelled on real data:
 * each chromatogram is an unresolved hump (C9–C26, centred near C15) with a
   resolved n-alkane peak at every carbon on top, a rising baseline and
   detector noise;
-* the "sample" is another diesel batch: peaks 1–4 ms later, ±12% peak
-  heights, a 6% heavier hump and its own noise. That is the everyday case
-  that gave operators dozens of per-excursion bullets.
+* the "sample" is another diesel batch: every peak 0.002 min later, peak
+  heights varied by up to ±30% (``jitter=0.3``), a 1% heavier hump and its
+  own noise. That is the everyday case that gave operators dozens of
+  per-excursion bullets.
+
+``batch`` and ``with_gasoline`` build the review's variants (other retention
+shifts and jitters; the same diesel with 1–10% gasoline) for
+``tests/test_bullets_regression.py``.
 
 No customer identifiers. Deterministic (fixed seed). Run from the repo root:
 ``python tests/fixtures/make_diesel_pair.py``.
@@ -52,9 +57,41 @@ def chromatogram(t, rng, *, hump_scale=1.0, shift=0.0, jitter=0.0):
     return y
 
 
+AXIS = dict(n=10287, dt=0.0008333333457510861, t0=0.00073853333791097)
+STANDARD_SEED = 20260925
+
+
+def axis():
+    return np.arange(AXIS["n"]) * AXIS["dt"] + AXIS["t0"]
+
+
+def standard(t):
+    return chromatogram(t, np.random.default_rng(STANDARD_SEED))
+
+
+def batch(t, seed, *, shift=0.002, jitter=0.3, hump=1.01):
+    """Another batch of the same diesel."""
+    return chromatogram(t, np.random.default_rng(seed), hump_scale=hump, shift=shift,
+                        jitter=jitter)
+
+
+def _gasoline_components():
+    rng = np.random.default_rng(3)
+    return rng.uniform(5.0, 10.5, 22), rng.uniform(0.25, 1.0, 22) * 40000   # neat scale
+
+
+def with_gasoline(t, frac, *, seed=12, shift=0.002):
+    """A diesel batch diluted with *frac* gasoline: 22 resolved components
+    between C5 and C10.5 (some co-eluting with the n-alkanes)."""
+    y = (1 - frac) * batch(t, seed, shift=shift)
+    for c, h in zip(*_gasoline_components()):
+        y += frac * h * np.exp(-0.5 * ((t - c2t(c)) / 0.006) ** 2)
+    return y
+
+
 def build():
-    t = np.arange(10287) * (0.0008333333457510861) + 0.00073853333791097
-    std = chromatogram(t, np.random.default_rng(20260925))
+    t = axis()
+    std = standard(t)
     sample = chromatogram(t, np.random.default_rng(20260929), hump_scale=1.01,
                           shift=0.002, jitter=0.3)
     np.savez_compressed(OUT, t=t, sample=sample.astype(np.float32),

@@ -29,7 +29,8 @@ OIL = {"label": "Oil", "c_start": 20, "c_end": 44, "color": "#a05014"}    # 6.0�
 PARAMS = dict(quantile=0.20, window=301, sigma=34.0,
               thresh_marginal=100.0, thresh_moderate=500.0, thresh_significant=2000.0,
               x_max_min=8.0, min_width_min=0.05, merge_gap_min=0.10,
-              spike_min_width_min=0.02, spike_report_threshold=500.0)
+              spike_min_width_min=0.02, spike_report_threshold=500.0,
+              spike_max_fwhm_min=0.20, spike_min_dominance=0.6)
 
 
 def axis():
@@ -126,7 +127,8 @@ class TestReportParams:
             "analysis_thresh_marginal": "100", "analysis_thresh_moderate": "500",
             "analysis_thresh_significant": "2000", "analysis_x_max_min": "7.0",
             "analysis_spike_min_width_min": "0.02", "analysis_min_width_min": "0.05",
-            "analysis_merge_gap_min": "0.10", "analysis_spike_report_threshold": ""}
+            "analysis_merge_gap_min": "0.10", "analysis_spike_report_threshold": "",
+            "analysis_spike_max_fwhm_min": "0.20", "analysis_spike_min_dominance": "0.6"}
 
     def test_operator_params_from_the_body_admin_ones_from_settings(self):
         p = ac.report_params({"quantile": 0.3, "window": 201.0, "sigma": 10,
@@ -138,7 +140,8 @@ class TestReportParams:
         assert p == dict(quantile=0.3, window=201, sigma=10.0, thresh_marginal=50.0,
                          thresh_moderate=400.0, thresh_significant=900.0, x_max_min=6.5,
                          min_width_min=0.05, merge_gap_min=0.10, spike_min_width_min=0.02,
-                         spike_report_threshold=400.0)   # empty = the moderate in effect
+                         spike_report_threshold=400.0,   # empty = the moderate in effect
+                         spike_max_fwhm_min=0.20, spike_min_dominance=0.6)
 
     def test_settings_fill_the_gaps(self):
         p = ac.report_params({}, dict(self.CONF, analysis_spike_report_threshold="750"))
@@ -161,6 +164,73 @@ class TestFindSpikes:
         spikes = ac.find_spikes(t, v, PARAMS)
         assert [(round(s["t"], 3), s["sign"]) for s in spikes] == [(1.0, 1), (2.0, -1)]
         assert spikes[1]["value"] == pytest.approx(-1500, rel=1e-3)
+
+    def test_broad_humps_are_not_sharp_peaks(self):
+        t, v = zeros()
+        gauss(t, v, 2.5, 0.4, 800)            # FWHM 0.94 min
+        gauss(t, v, 5.0, 0.3, -900)           # a broad negative hump
+        gauss(t, v, 7.0, 0.08, 900)           # FWHM 0.19 min: still sharp
+        spikes = ac.find_spikes(t, v, PARAMS)
+        assert [round(s["t"], 2) for s in spikes] == [7.0]
+        assert spikes[0]["fwhm"] == pytest.approx(0.188, abs=0.003)
+        assert ac.find_spikes(t, v, dict(PARAMS, spike_max_fwhm_min=0.1)) == []
+
+    def test_a_peak_must_dominate_the_local_peaks(self):
+        """|diff at the apex| over the larger of the sample's and the
+        standard's local peak heights (each above its own baseline): a
+        height mismatch of a big shared peak is not a sharp peak; a peak the
+        standard doesn't have is."""
+        t, v = zeros()
+        gauss(t, v, 1.0, 0.01, 900)           # a 900 difference on a 5000-high shared peak
+        gauss(t, v, 3.0, 0.01, 900)           # a 900 peak the standard lacks
+        hs, ht = np.zeros_like(t), np.zeros_like(t)
+        gauss(t, hs, 1.0, 0.01, 5900)
+        gauss(t, ht, 1.0, 0.01, 5000)
+        gauss(t, hs, 3.0, 0.01, 900)
+        spikes = ac.find_spikes(t, v, PARAMS, heights=(hs, ht))
+        assert [round(s["t"], 2) for s in spikes] == [3.0]
+        assert spikes[0]["dominance"] == pytest.approx(1.0, abs=0.01)
+        loose = ac.find_spikes(t, v, dict(PARAMS, spike_min_dominance=0.15), heights=(hs, ht))
+        assert [round(s["t"], 2) for s in loose] == [1.0, 3.0]
+
+
+class TestAlignment:
+    def test_recovers_a_global_retention_shift(self):
+        t = axis()
+        std = np.full_like(t, 50.0)
+        for c in np.arange(0.5, 8.5, 0.37):
+            gauss(t, std, c, 0.008, 5000)
+        for shift in (0.004, -0.008, 0.013):
+            sample = np.interp(t, t + shift, std)            # every peak later by *shift*
+            aligned, lag = ac.align_to_standard(t, sample, std)
+            assert lag == pytest.approx(-shift, abs=0.0003)
+            m = (t > 0.3) & (t < 8.5)
+            assert np.max(np.abs(aligned - std)[m]) < 0.1 * np.max(np.abs(sample - std)[m])
+
+    def test_the_search_is_bounded(self):
+        t = axis()
+        std = np.full_like(t, 50.0)
+        for c in np.arange(0.5, 8.5, 0.37):
+            gauss(t, std, c, 0.008, 5000)
+        _, lag = ac.align_to_standard(t, np.interp(t, t + 0.05, std), std)
+        assert abs(lag) <= 0.02 + 1e-9
+
+    def test_no_shared_structure_means_no_shift(self):
+        """A peak only the sample has (nothing to match in the standard)
+        must not drag the alignment."""
+        t = axis()
+        std = np.full_like(t, 50.0)
+        gauss(t, std, 4.0, 1.0, 1500)
+        sample = std.copy()
+        gauss(t, sample, 1.2, 0.02, 3000)
+        aligned, lag = ac.align_to_standard(t, sample, std)
+        assert lag == 0.0 and np.array_equal(aligned, sample)
+
+    def test_flat_or_short_input_is_left_alone(self):
+        t = np.arange(20) * 0.001
+        y = np.ones(20)
+        aligned, lag = ac.align_to_standard(t, y, y)
+        assert lag == 0.0 and np.array_equal(aligned, y)
 
 
 # ── build_deviation_report + render_bullets: the rules, golden text ────
@@ -461,6 +531,20 @@ class TestConclusion:
             "are indicative only and do not confirm specific substances.")
 
 
+def test_analyze_report_does_not_call_broad_humps_sharp_peaks():
+    t = axis()
+    ys = np.full_like(t, 50.0)
+    yst = ys.copy()
+    gauss(t, ys, 2.5, 0.4, 800)             # broad hump in the sample
+    gauss(t, ys, 1.2, 0.01, 3000)           # and one sharp peak
+    gauss(t, yst, 4.2, 0.3, 900)            # a broad region lower in the sample
+    out = ac.analyze_report(t, ys, yst, ranges=[GAS, OIL], ladder=LADDER,
+                            params=dict(PARAMS, sigma=0.0), standard_name=STD)
+    assert [round(s["t"], 2) for s in out["spikes"]] == [1.2]
+    assert "1 sharp peak above the standard at 1.20 min" in out["text"]
+    assert "below the standard" not in out["text"]
+
+
 def test_analyze_report_runs_both_channels_and_returns_everything():
     t = axis()
     y_std = 50 + gauss(t, np.zeros_like(t), 4.0, 1.0, 1500)
@@ -469,7 +553,7 @@ def test_analyze_report_runs_both_channels_and_returns_everything():
     out = ac.analyze_report(t, y_s, y_std, ranges=[GAS, OIL], ladder=LADDER,
                             params=dict(PARAMS, sigma=0.0), standard_name=STD)
     assert set(out) >= {"diff", "spike_diff", "trend_sample", "trend_std", "windows",
-                        "items", "text", "conclusion", "spikes"}
+                        "items", "text", "conclusion", "spikes", "alignment_lag_min"}
     assert out["text"].startswith("• Gas (C5–C11): HIGHER than Diesel #2 — significant, "
                                   "sharp peaks only (1 sharp peak above the standard at 1.20 min")
     assert [round(s["t"], 2) for s in out["spikes"]] == [1.2]
