@@ -153,6 +153,48 @@ Ryan: "have the samples create custom links so that the links are sendable, and 
 - **"Copy link".** A "Copy link" action on every sample (classic: in the sample's context menu and the Dashboard header; new UI: in the sample header). It copies `<effective hub_url>/samples/<id>`, always the gc.asaplabs.net form, even when opened over the LAN, with a toast "Link copied".
 - **Out of scope.** A "View in GC Hub" link inside COA Reviewer is a COA change and needs Ryan's go-ahead separately.
 
+## Purge instrument data (v3.1)
+
+Ryan wants to "purge only GC-1's samples, and keep GC-2 and the settings". A sample spans `samples`, `revisions`, `jobs`, `export_rows`, `sample_cache`, `conflicts`, `sample_comments` and `report_log`, plus stored CDFs. Hand-editing `gc.db` is unsafe.
+
+- **Module and routes.** `purge.py` (an admin operation), with routes on the `hub_admin` blueprint. All of them need the admin password, JSON and a session.
+  - `POST /api/admin/purge/preview {instrument, scope: all|backfill}` → counts per table, CDF file count/bytes, how many purged samples were already appended to the results CSV (`export_rows.hub_appended_at`), and any CDFs that are kept because something else references them.
+  - `POST /api/admin/purge/start {instrument, scope, confirm_text: "PURGE <INSTRUMENT NAME>", new_results_path?}` → 202 `{job}` on `AdminJobs` (one admin job at a time). Progress and result come through `/api/admin/jobs/status`.
+- **Order of work.**
+  1. Refuse if another admin job is running.
+  2. Pause processing for that instrument: its queued and running jobs are cancelled or waited for, and no new jobs are queued for it while the purge runs. Ingest for it is answered 503 "purge in progress; retry", and the agent retries.
+  3. Back up `gc.db` with `VACUUM INTO backups/pre-purge-<inst>-<ts>.db`. This is never pruned by the 14-day rule.
+  4. In ONE write transaction, delete every row tied to the purged samples:
+     - `revisions`, `jobs`, `export_rows`, `sample_cache`, `conflicts`, `sample_comments`, `report_log`, `samples`, and any other table that references `samples.id`. Found from the schema, with a test that fails if a new referencing table is added and not handled.
+     - `PRAGMA foreign_key_check` must be clean afterwards.
+  5. After the commit, MOVE the CDF files to `<data>/purged/<inst>-<ts>/` (same relative layout), never delete them.
+  6. Record an `instrument_events` row, raise a notification ("Ryan C purged 1,234 GC-1 samples (all) · backup … · files in purged\…"), and publish `live` events.
+- **Kept, always:**
+  - the instrument row and its settings: calibration CDF and assignments, corrections, `method_map`, `lem_machine_uid`, `live_since`, `export_path`, agent and token;
+  - other instruments' data;
+  - global settings and presets.
+- **Referenced CDFs are never moved.** This covers any CDF referenced by an instrument's calibration, a comparison standard, or a revision of a sample that is NOT purged (e.g. a blank used across the scope boundary). The preview lists them.
+- **`scope: backfill`** purges only `is_backfill` samples, i.e. imported history. This is for redoing an import.
+- **The results CSV is append-only and is not edited.** If any purged sample had been appended, the preview warns that re-sent runs will be appended again. It offers `new_results_path` (validated like `exports new-path`), applied through `HubExporter` after the purge.
+- **UI.** An Admin "Purge instrument data" panel:
+  1. instrument + scope;
+  2. Preview;
+  3. a typed confirmation with the instrument name;
+  4. Start, with progress.
+
+  It includes plain-language text about the backup and the purged folder, and how to restore (DEPLOY.md: stop the hub, copy the backup over `gc.db`, move the files back).
+- **Tests.** Cover:
+  - purging GC-1 leaves GC-2 byte-identical, row for row;
+  - the settings survive;
+  - no orphan rows (every table checked);
+  - CDFs are moved, and referenced ones are kept;
+  - the backup is written;
+  - it refuses while a job runs;
+  - a wrong confirmation is refused;
+  - `scope=backfill` spares live samples;
+  - a purge crash mid-transaction leaves the DB unchanged;
+  - ingest during the purge answers 503 and succeeds after it.
+
 ## Later releases
 
 - **v3.2:** new Samples page, opt-in at `/next`; classic stays at `/`.
