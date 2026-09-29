@@ -20,9 +20,16 @@ needs ``{password, setup_code}``; the code is compared with
 ``hmac.compare_digest`` and the file is deleted on success. Resetting a
 forgotten password = deleting the ``settings_kv`` row on the server; the next
 start (or setup page view) writes and logs a new code. The setup route also
-refuses a ``Host`` header that isn't an IP literal, ``localhost``, one of the
-machine's own names or the configured ``hub_url`` host (``host_allowed``):
-defence in depth against DNS rebinding, on top of the cross-site guard.
+refuses a ``Host`` header that isn't an IP literal, ``localhost`` or one of the
+machine's own names (``host_allowed``) — the hub URL's host (by default
+gc.asaplabs.net) only for an https request with a signed-in session, i.e.
+setup through the Cloudflare tunnel, where the session gate also demands a
+LabLink session: defence in depth against DNS rebinding, on top of the
+cross-site guard (``netctx.is_cross_site``).
+
+**Client and "local"** come from ``netctx``: the throttle key is the
+request's ``client_ip()`` (the real client through the tunnel, IPv6 by /64)
+and the hub-wide budget's exemption is ``is_local()`` (never the tunnel).
 
 API::
 

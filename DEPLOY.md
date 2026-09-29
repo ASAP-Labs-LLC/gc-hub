@@ -238,7 +238,10 @@ refused with a message pointing to `/admin/setup`.
 2. In a browser, open `http://asapsv1:5560/admin/setup` (the hub's own name
    or IP address; setup is refused under any other host name). Enter the code
    and the new password (at least 8 characters). The code file is deleted
-   once the password is set.
+   once the password is set. **From v3.1** this page is open without signing
+   in only on the lab network and only until a password is set; through
+   `https://gc.asaplabs.net` it needs a LabLink sign-in first (and still the
+   code). Once a password is set, setup is closed everywhere.
 
 **Forgotten password (reset).** Stop nothing; on ASAPSV1 run, from the
 current release folder with its venv's Python:
@@ -268,11 +271,14 @@ entries if present.
 **The share copies are v1.x.** They have no hub store and keep their own
 behaviour until cutover; the hub's admin password does not apply to them.
 
-**Agent installers need the hub URL.** Before the first "Download
-installer", set the address the GC PCs use to reach the hub: Instruments
-page > *Hub URL for installers*, `http://asapsv1:5560` (or
-`POST /api/admin/hub-url {password, hub_url}`). A download from `localhost`
-or `127.0.0.1` on the server itself is refused until it is set.
+**Agent installers and the hub URL.** From v3.1 an installer always points
+at the **hub address**: the one set on Hub admin > *Hub address* (or the
+Instruments page's *Hub URL for installers*, the same setting;
+`POST /api/admin/hub-url {password, hub_url}`), else `https://gc.asaplabs.net`.
+It also carries this machine's lab-network address (`http://<ASAPSV1>:5560`)
+as `lan_url`, which the agent uses only when gc.asaplabs.net can't be reached
+at all. An `http://` hub address is accepted only for a lab-network name or IP.
+(v2.0–v3.0 refused a download from `localhost` until the URL was set.)
 
 ## Upgrading to v2 (the hub)
 
@@ -379,6 +385,82 @@ the v3.0.0 release notes first. Nothing needs editing on the server:
   on the migrated database, but its reports omit comments and use v2's
   bullets, and it writes no `report_log` rows. Comments made under v3 are
   kept and reappear after upgrading again.
+
+## Sign-in and gc.asaplabs.net (v3.1)
+
+From v3.1.0 every page and API needs a signed-in session (LabLink, as in COA
+Reviewer), on the lab network and through `https://gc.asaplabs.net` alike.
+Exceptions: `/healthz` (the updater), the sign-in routes, the agents'
+bearer-token paths (`/api/ingest`, `/api/agent/heartbeat|results|package|
+package.zip`), and the hub tray's own calls from ASAPSV1 itself. Read the
+v3.1.0 release notes; then, **before** installing it:
+
+**1. The tunnel.** `gc.asaplabs.net` is a Cloudflare tunnel (cloudflared,
+same account as `coa.asaplabs.net`). Its ingress for `gc.asaplabs.net` must
+point at `http://localhost:5560` (the hub). The hub trusts Cloudflare's
+`CF-Connecting-IP` and `X-Forwarded-Proto` only from **loopback**, so with
+cloudflared on ASAPSV1 there is nothing to set. If cloudflared runs on another
+machine, add its address to `C:\ASAPApps\gc\data\settings.json` and restart
+the hub:
+
+```json
+"trusted_proxies": ["10.0.0.7"]
+```
+
+(a list of IPs or CIDRs; a comma-separated string also works). Without it,
+every tunnel user shares that machine's address, and the tunnel counts as
+the lab network (no https redirect, the admin break-glass offered).
+
+**2. Cloudflare settings for gc.asaplabs.net** (dashboard, the
+`asaplabs.net` zone):
+
+- **SSL/TLS > Edge Certificates > Always Use HTTPS: on.** The hub also
+  redirects plain `http://` through the tunnel to `https://` (308) and sends
+  HSTS, but `http://gc.asaplabs.net` must never be served.
+- **The agents' WAF skip rule.** Agents call `/api/ingest` and `/api/agent/…`
+  with their bearer token, not a browser; a Cloudflare challenge would stop
+  them (the agent tray then says "Cloudflare blocked the agent: add the WAF
+  skip rule in DEPLOY.md"). Security > WAF > Custom rules > Create rule:
+  *Skip GC agents*; expression
+  `(http.host eq "gc.asaplabs.net" and (starts_with(http.request.uri.path, "/api/ingest") or starts_with(http.request.uri.path, "/api/agent/")))`;
+  action **Skip**, and tick: all remaining custom rules, **Browser Integrity
+  Check**, **Security Level**, and (Security > Bots) **Super Bot Fight Mode**
+  for these requests. Place it first. Those paths stay bearer-token protected
+  by the hub. (Cloudflare refuses urllib's default User-Agent with `403 error
+  code: 1010`; the agent and the hub send their own, `gc-agent/<version>` and
+  `gc-hub/<version>`.)
+- Uploads are capped at 25 MB by the hub, under Cloudflare's 100 MB limit; an
+  upload slower than Cloudflare's 100 s is answered 524 and retried by the
+  agent (the hub drops the duplicate).
+
+**3. LabLink sign-in.** The hub asks LabVision (`https://labvision.asaplabs.net`,
+or `LABCORE_URL`) with `POST /api/login`, the endpoint COA uses; it keeps no
+LabLink password. Failed sign-ins are throttled in the hub (per address and
+user 5 in 10 minutes, per address 30, and 100 hub-wide through Cloudflare;
+a restart clears them), and **LabCore's own lockout is shared with COA
+Reviewer**: someone who mistypes here also counts there.
+
+**4. The admin password is the break-glass.** When LabVision is down, "Sign in
+with the admin password" works on the lab network and on ASAPSV1 itself,
+never through gc.asaplabs.net. Admin actions still need the admin password on
+top of any session. Changing it signs every break-glass session out.
+
+**5. After the update.** Everyone signs in once. On Hub admin, *Signed-in
+sessions* lists who is signed in (Revoke, Revoke all for this name);
+Maintenance deletes sessions that ended more than 30 days ago. `app.log`
+records every sign-in (name, method, address) and failed sign-in (address,
+method, a hash of the username; never a password or card code).
+
+**Rollback warning.** Schema v3 adds a sessions table and three name columns;
+older releases start on it, **but a release before v3.1.0 has no login**:
+rolling back makes everything at gc.asaplabs.net public again. **Before**
+`updater.py rollback --app gc`, pause the `gc.asaplabs.net` public hostname
+(Zero Trust > Networks > Tunnels > the tunnel > Public hostnames: delete or
+disable it), and restore it only after upgrading to v3.1+ again.
+
+**Diagnostics.** The bundle's database copy keeps the sessions (name, method,
+address, times) with every token hash nulled; its download link needs a
+signed-in session.
 
 ## Before cutover (once, for both GCs)
 
@@ -644,7 +726,12 @@ has no window and no icon: a tray icon inside it would sit in session 0,
 where nobody sees it. The **hub tray** (`tray\hub_tray.pyw`, shipped in every
 release) is a separate small program for the admin logged on to ASAPSV1. It
 shows how the hub is doing and lets you pause it or stop it if it is slowing
-the server down. It talks to the hub at `http://127.0.0.1:5560` only.
+the server down. It talks to the hub at `http://127.0.0.1:5560` only (from
+v3.1 its pause/stop/restart calls need no sign-in because they come from
+ASAPSV1 itself, and they are refused through gc.asaplabs.net). "Open in
+browser" opens the hub address from the hub's status (`https://gc.asaplabs.net`
+unless set otherwise on Hub admin), else `hub_url` in the tray's config, else
+`http://localhost:5560`.
 
 **Install (once, as the admin who uses ASAPSV1).** Log on to ASAPSV1 (RDP),
 open a command prompt (not elevated) and run, via the `current` junction so

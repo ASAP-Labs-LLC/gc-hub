@@ -270,6 +270,10 @@ CREATE INDEX report_log_sample ON report_log(sample_id, created_at)
 
 ### Author
 
+> **Superseded in v3.1.0** by sign-in (`2026-09-29-public-url-login-design.md`,
+> D6): the author is the signed-in account name, the initials are derived
+> from it, and the initials box is gone. The text below is the v3.0.0 design.
+
 There is no user login. The Analysis tab has a "Your initials" box, remembered
 per browser (localStorage with try/catch) and required before adding or
 deleting a comment. The server validates initials as `^[A-Z]{1,4}$` (after
