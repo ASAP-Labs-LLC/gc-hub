@@ -1529,6 +1529,9 @@ def api_save_settings():
                           f"DEPLOY.md) or per instrument (Calibration and Instruments pages).", 400)
         if any(k in settings_mod.ADMIN_KEYS for k in changed) and not _check_admin(body):
             return _error("Best-fit and analysis defaults need the admin password", 403)
+        bad = analysis_core.invalid_analysis_settings(changed)
+        if bad:
+            return _error(f"{', '.join(bad)} must be a number \u2265 0", 400)
         if changed:
             # Flag rules and best-fit settings need no cache clearing:
             # sample_cache rows carry the fingerprint they were computed with.
@@ -1555,19 +1558,26 @@ def api_save_analysis_defaults():
             return err
         if not _check_admin(body):
             return _error("Incorrect password", 403)
-        params = body.get("params", {})
-        overlays = body.get("range_overlays", [])
+        params = body.get("params") or {}
         changes = {}
-        # Trend line + thresholds
+        # Trend line + thresholds + the deviation-bullet settings
         for key in ("quantile", "window", "sigma", "thresh_marginal",
                      "thresh_moderate", "thresh_significant", "x_max_min",
                      "min_width_min", "merge_gap_min", "spike_min_width_min",
-                     "spike_report_threshold"):
+                     "spike_report_threshold", "spike_max_fwhm_min", "spike_min_dominance"):
             if key in params:
-                changes[f"analysis_{key}"] = str(params[key])
-        # Full range overlays as JSON
-        changes["analysis_range_overlays"] = json.dumps(overlays)
-        settings_mod.update_settings(changes)
+                changes[f"analysis_{key}"] = "" if params[key] is None else str(params[key])
+        bad = analysis_core.invalid_analysis_settings(changes)
+        if bad:
+            return _error(f"{', '.join(bad)} must be a number \u2265 0", 400)
+        # The range overlays only when the request carries them ([] = none).
+        if "range_overlays" in body:
+            overlays = body.get("range_overlays")
+            if not isinstance(overlays, list):
+                return _error("range_overlays must be a list", 400)
+            changes["analysis_range_overlays"] = json.dumps(overlays)
+        if changes:
+            settings_mod.update_settings(changes)
         return jsonify({"ok": True})
     except Exception as exc:
         return _error(str(exc), 500)

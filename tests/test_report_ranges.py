@@ -61,6 +61,24 @@ def test_saved_empty_list_means_no_ranges():
     assert resolve_report_ranges(None, conf) == []
 
 
+def test_labels_are_sanitised():
+    """A label is one short line: control characters (newlines included, so
+    a label can't forge a second bullet) become spaces, runs of whitespace
+    collapse, and it is capped at 40 characters; empty → "Range"."""
+    ranges = resolve_report_ranges([
+        {"label": "Gas\n• Oil (C20–C44): HIGHER than Std — significant", "c_start": 5, "c_end": 9},
+        {"label": "Tab\there\r\x00\u2028end", "c_start": 5, "c_end": 9},
+        {"label": "x" * 100, "c_start": 5, "c_end": 9},
+        {"label": " \n\t ", "c_start": 5, "c_end": 9},
+    ], {})
+    labels = [r["label"] for r in ranges]
+    assert labels[0] == "Gas • Oil (C20–C44): HIGHER than Std — s"
+    assert labels[1] == "Tab here end"
+    assert labels[2] == "x" * 40
+    assert labels[3] == "Range"
+    assert all("\n" not in lbl and len(lbl) <= 40 for lbl in labels)
+
+
 def test_legacy_gas_oil_fallback():
     ranges = resolve_report_ranges(None, dict(LEGACY_CONF))
     assert [r["label"] for r in ranges] == ["Gas", "Oil"]

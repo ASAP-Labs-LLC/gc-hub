@@ -177,6 +177,8 @@ class DeviationBulletSettingsTests(unittest.TestCase):
         "analysis_min_width_min": "0.05",
         "analysis_merge_gap_min": "0.10",
         "analysis_spike_report_threshold": "",   # empty = the moderate threshold
+        "analysis_spike_max_fwhm_min": "0.20",
+        "analysis_spike_min_dominance": "0.6",
     }
 
     def test_defaults(self) -> None:
@@ -196,7 +198,7 @@ class DeviationBulletSettingsTests(unittest.TestCase):
         names = {c.value for c in ast.walk(fn)
                  if isinstance(c, ast.Constant) and isinstance(c.value, str)}
         for key in ("min_width_min", "merge_gap_min", "spike_report_threshold",
-                    "spike_min_width_min"):
+                    "spike_min_width_min", "spike_max_fwhm_min", "spike_min_dominance"):
             self.assertIn(key, names)
 
 

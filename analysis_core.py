@@ -290,6 +290,21 @@ _DEFAULT_RANGE_COLORS = [
 ]
 
 
+#: Longest range label kept (bullets, charts and the PDF print it).
+RANGE_LABEL_MAX = 40
+
+
+def clean_range_label(label) -> str:
+    """One short line: control/format/line-separator characters (newlines
+    included, so a label can't forge a bullet line) become spaces, runs of
+    whitespace collapse, capped at ``RANGE_LABEL_MAX``; empty → "Range"."""
+    import unicodedata
+    text = "".join(" " if unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp") else ch
+                   for ch in str("" if label is None else label))
+    text = " ".join(text.split())[:RANGE_LABEL_MAX].rstrip()
+    return text or "Range"
+
+
 def resolve_report_ranges(body_ranges, conf: dict) -> list[dict]:
     """Resolve the region list for analysis/report generation.
 
@@ -306,7 +321,7 @@ def resolve_report_ranges(body_ranges, conf: dict) -> list[dict]:
         for i, r in enumerate(raw):
             try:
                 out.append({
-                    "label": str(r.get("label", "Range")),
+                    "label": clean_range_label(r.get("label", "Range")),
                     "c_start": int(r.get("c_start", 5)),
                     "c_end": int(r.get("c_end", 15)),
                     "color": str(r.get("color") or
@@ -607,6 +622,39 @@ def report_params(body: dict, conf: dict) -> dict:
     if p["window"] < 1:
         raise ValueError("window must be at least 1")
     return p
+
+
+#: The deviation-bullet admin settings and whether an empty value is allowed
+#: (the spike report threshold: empty = the moderate threshold).
+ANALYSIS_NUMERIC_SETTINGS = {
+    "analysis_min_width_min": False,
+    "analysis_merge_gap_min": False,
+    "analysis_spike_min_width_min": False,
+    "analysis_spike_max_fwhm_min": False,
+    "analysis_spike_min_dominance": False,
+    "analysis_spike_report_threshold": True,
+}
+
+
+def invalid_analysis_settings(changes: dict) -> list[str]:
+    """The keys of *changes* that are deviation-bullet settings with a value
+    that isn't a finite number ≥ 0 (empty allowed only where it means the
+    default)."""
+    bad = []
+    for key, allow_empty in ANALYSIS_NUMERIC_SETTINGS.items():
+        if key not in changes:
+            continue
+        v = changes[key]
+        if (v is None or str(v).strip() == "") and allow_empty:
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            bad.append(key)
+            continue
+        if not math.isfinite(f) or f < 0:
+            bad.append(key)
+    return bad
 
 
 def severity_of(peak_abs: float, params: dict) -> str | None:

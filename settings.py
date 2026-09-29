@@ -84,6 +84,11 @@ DEFAULTS: Dict[str, str] = {
     "analysis_min_width_min": "0.05",
     "analysis_merge_gap_min": "0.10",
     "analysis_spike_report_threshold": "",
+    # A counted spike must be sharp (full width at half height ≤ this, min)
+    # and dominate the local peaks (|difference at the apex| ≥ this fraction
+    # of the larger of the sample's and the standard's local peak height).
+    "analysis_spike_max_fwhm_min": "0.20",
+    "analysis_spike_min_dominance": "0.6",
     "analysis_range_overlays": "",
     "analysis_report_logo": "",
     "analysis_export_last_dir": "",
@@ -133,6 +138,7 @@ ADMIN_KEYS = (
     "analysis_gas_c_start", "analysis_gas_c_end", "analysis_oil_c_start", "analysis_oil_c_end",
     "analysis_x_max_min", "analysis_spike_min_width_min", "analysis_range_overlays",
     "analysis_min_width_min", "analysis_merge_gap_min", "analysis_spike_report_threshold",
+    "analysis_spike_max_fwhm_min", "analysis_spike_min_dominance",
 )
 
 
