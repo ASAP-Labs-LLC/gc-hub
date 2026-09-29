@@ -180,6 +180,25 @@ def test_config_that_is_not_json(tmp_path):
         logic.load_config(p)
 
 
+def test_the_port_comes_from_the_updater_config_when_tray_json_has_none(tmp_path):
+    upd = tmp_path / "config.json"
+    upd.write_text(json.dumps({"apps": [
+        {"name": "coa", "port": 5559},
+        {"name": "gc", "port": 5571, "root": "C:\\ASAPApps\\gc"}]}))
+    p = tmp_path / "tray.json"
+    p.write_text(json.dumps({"updater_config": str(upd)}))
+    cfg = logic.load_config(p)
+    assert cfg["port"] == 5571
+    assert logic.browser_url(cfg) == "http://localhost:5571"
+    p.write_text(json.dumps({"updater_config": str(upd), "port": 5580}))
+    assert logic.load_config(p)["port"] == 5580            # tray.json wins
+    upd.write_text("{broken")
+    p.write_text(json.dumps({"updater_config": str(upd)}))
+    assert logic.load_config(p)["port"] == 5560            # unreadable: the default
+    upd.write_text(json.dumps({"apps": [{"name": "gc", "port": "x"}]}))
+    assert logic.load_config(p)["port"] == 5560
+
+
 def test_the_shipped_example_is_the_defaults():
     from pathlib import Path
     example = Path(__file__).resolve().parents[2] / "tray" / "tray.example.json"

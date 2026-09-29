@@ -3,7 +3,9 @@ real one needs a desktop session), plus the Windows glue behind injectable
 seams: single instance, HKCU Run autostart, the entry point's arguments."""
 from __future__ import annotations
 
+import http.client
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -49,7 +51,7 @@ class FakeCtl:
     def stop(self):
         pass
 
-    def start(self):
+    def start(self, view=None):
         pass
 
     def open_browser(self):
@@ -102,6 +104,117 @@ def test_menu_enabled_flags_follow_the_view(stub_pystray):
         by_text[text] = it.enabled(it) if callable(it.enabled) else it.enabled
     assert by_text["Start hub"] is True
     assert by_text["Stop hub"] is False and by_text["Open in browser"] is False
+
+
+# ── the poll loop (review harness tray_poll.py) ───────────────────────────
+
+class _Icon:
+    last = None
+
+    def __init__(self, name, image, title, menu):
+        self.menu, self.title, self.icon = menu, title, image
+        self.history = [image]
+        self._stop = threading.Event()
+        _Icon.last = self
+
+    def __setattr__(self, key, value):
+        if key == "icon" and "history" in self.__dict__:
+            self.history.append(value)
+        object.__setattr__(self, key, value)
+
+    def update_menu(self):
+        pass
+
+    def run(self):
+        self._stop.wait(30)
+
+    def stop(self):
+        self._stop.set()
+
+
+class _FlakyClient:
+    """The 3rd poll gets a broken response that escapes as an exception
+    (what http.client's BadStatusLine did before the client caught it)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def status(self):
+        self.calls += 1
+        if self.calls == 3:
+            raise http.client.BadStatusLine("HELLO")
+        return {"state": "running", "version": "v3.0.0", "cpu_percent": 1.0}
+
+
+def test_the_poll_loop_survives_a_bad_response_and_shows_red(stub_pystray, monkeypatch,
+                                                              tmp_path):
+    stub_pystray.Icon = _Icon
+    from gc_tray import ui
+    monkeypatch.setattr(ui, "make_image", lambda colour: colour)
+    cfg = dict(logic.DEFAULTS, data_dir=str(tmp_path), poll_seconds=0.1)
+    client = _FlakyClient()
+    t = threading.Thread(target=ui.run, args=(cfg, FakeCtl(), client),
+                         kwargs={"release_root": tmp_path, "relaunch": lambda: None},
+                         daemon=True)
+    t.start()
+    try:
+        assert _wait(lambda: client.calls >= 6, 10), client.calls
+        assert [x for x in threading.enumerate() if x.name == "gc-tray-poll" and x.is_alive()]
+        icon = _Icon.last
+        assert "red" in icon.history                  # the bad poll showed "not responding"
+        assert icon.history[-1] == "green"            # and it recovered
+    finally:
+        exit_item = [i for i in _Icon.last.menu.items
+                     if i is not _Menu.SEPARATOR and i.text == "Exit tray"][0]
+        exit_item.action(None, exit_item)
+        t.join(5)
+    assert not t.is_alive()                           # Exit tray ends run()
+
+
+def test_the_poller_backs_off_while_the_hub_is_down(tmp_path):
+    from gc_tray import ui
+
+    class Down:
+        def status(self):
+            return None
+
+    icon = types.SimpleNamespace(icon=None, title="", update_menu=lambda: None)
+    cfg = dict(logic.DEFAULTS, data_dir=str(tmp_path), poll_seconds=5)
+    p = ui.Poller(cfg, Down(), icon, image=lambda c: c, release_root=tmp_path,
+                  relaunch=lambda: None)
+    waits = [p.poll_once() for _ in range(6)]
+    assert waits[0] == 5 and waits == sorted(waits) and waits[-1] == ui.MAX_BACKOFF_SECONDS
+    assert icon.icon == "red" and p.view["state"] == "down"
+
+    class Up:
+        def status(self):
+            return {"state": "running", "version": "v3.0.0"}
+    p.client = Up()
+    assert p.poll_once() == 5 and icon.icon == "green"
+
+
+def test_the_poller_survives_anything_its_steps_raise(tmp_path):
+    from gc_tray import ui
+
+    class Boom:
+        def status(self):
+            raise RuntimeError("anything")
+
+    icon = types.SimpleNamespace(icon=None, title="", update_menu=lambda: None)
+    p = ui.Poller(dict(logic.DEFAULTS, data_dir=str(tmp_path)), Boom(), icon,
+                  image=lambda c: c, release_root=tmp_path, relaunch=lambda: None)
+    assert p.poll_once() > 0
+    assert icon.icon == "red" and "not responding" in icon.title
+
+
+def _wait(pred, timeout):
+    import time
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return bool(pred())
 
 
 def test_menu_builds_with_the_real_pystray_on_windows():
@@ -195,12 +308,45 @@ def test_single_instance(tmp_path):
     again.release()
 
 
+def test_single_instance_can_wait_for_a_relaunching_tray(tmp_path):
+    first = winsys.acquire_single_instance(lock_dir=tmp_path)
+    threading.Timer(0.5, first.release).start()
+    second = winsys.acquire_single_instance(lock_dir=tmp_path, wait=5.0)
+    assert second is not None
+    second.release()
+
+
+def test_relaunch_releases_the_lock_only_after_the_spawn_succeeded():
+    from gc_tray import main
+    events = []
+
+    class Held:
+        def release(self):
+            events.append("release")
+
+    def spawn_ok(cmd, cwd=None):
+        events.append(("spawn", tuple(cmd)))
+
+    main.make_relaunch(Held(), ["pw.exe", "t.pyw"], "/r", spawn=spawn_ok)()
+    assert events == [("spawn", ("pw.exe", "t.pyw", "--wait-for-lock")), "release"]
+
+    events.clear()
+
+    def spawn_fails(cmd, cwd=None):
+        raise OSError("no")
+    with pytest.raises(OSError):
+        main.make_relaunch(Held(), ["pw.exe", "t.pyw"], "/r", spawn=spawn_fails)()
+    assert events == []                               # still ours: no second tray
+
+
 def test_entry_point_arguments():
     from gc_tray import main
     a = main.parse_args(["--install"])
     assert a.install and not a.uninstall
     a = main.parse_args(["--uninstall", "--config", "x.json"])
     assert a.uninstall and a.config == "x.json"
+    assert main.parse_args(["--wait-for-lock"]).wait_for_lock is True
+    assert main.parse_args([]).wait_for_lock is False
     with pytest.raises(SystemExit):
         main.parse_args(["--install", "--uninstall"])
 

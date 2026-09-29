@@ -25,6 +25,8 @@ class FakeHub:
         self.status = {"version": "v3.0.0", "state": "running", "processing_paused": False,
                        "queue": {"jobs_due": 0, "jobs_queued": 0}, "staged_update": None}
         self.restart_answer = (200, {"mode": "restart", "tag": None, "pid": 1})
+        self.busy = []              # Stop answers 409 {busy} unless force
+        self.throttled = False      # admin_auth's backoff: 403 with another message
         hub = self
 
         class H(BaseHTTPRequestHandler):
@@ -51,13 +53,18 @@ class FakeHub:
                 hub.requests.append(("POST", self.path, body, dict(self.headers)))
                 if self.path == "/api/restart":
                     return self._send(*hub.restart_answer)
+                if hub.throttled:
+                    return self._send(403, {"error": "Too many failed attempts; try again "
+                                                     "in 8 s."})
                 if body.get("password") != PW:
                     return self._send(403, {"error": "Incorrect password"})
                 if self.path == "/api/admin/hub/pause-processing":
-                    return self._send(200, {"processing_paused": True})
+                    return self._send(202, {"processing_paused": True})
                 if self.path == "/api/admin/hub/resume-processing":
-                    return self._send(200, {"processing_paused": False})
+                    return self._send(202, {"processing_paused": False})
                 if self.path == "/api/admin/hub/stop":
+                    if hub.busy and body.get("force") is not True:
+                        return self._send(409, {"error": "busy", "busy": hub.busy})
                     return self._send(202, {"stopping": True, "marker": "paused"})
                 self._send(404, {"error": "Not found"})
 
@@ -104,10 +111,19 @@ class ScriptedUI:
         return [e[0] for e in self.log]
 
 
-def _ctl(fake, ui, **cfg):
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def _ctl(fake, ui, clock=None, **cfg):
     conf = dict(logic.DEFAULTS, port=fake.port, **cfg)
     return controller_mod.Controller(conf, client_mod.HubClient(logic.status_url(conf)), ui,
-                                     python="py.exe")
+                                     python="py.exe", user="ryan",
+                                     clock=clock or Clock())
 
 
 # ── client ────────────────────────────────────────────────────────────────
@@ -122,6 +138,44 @@ def test_client_status_and_post(fake):
     method, path, sent, headers = fake.requests[-1]
     assert headers.get("Content-Type") == "application/json"
     assert "Origin" not in headers           # passes the hub's cross-site guard
+
+
+def _raw_server(reply: bytes) -> int:
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen(5)
+
+    def run():
+        while True:
+            try:
+                c, _ = s.accept()
+            except OSError:
+                return
+            try:
+                c.recv(65536)
+                c.sendall(reply)
+            finally:
+                c.close()
+    threading.Thread(target=run, daemon=True).start()
+    return s.getsockname()[1]
+
+
+@pytest.mark.parametrize("reply", [
+    b"HELLO\r\n\r\n",                                                   # BadStatusLine
+    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n"
+    b"{\"state\": \"run",                                               # IncompleteRead
+    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n\xff\xfe",            # not UTF-8 JSON
+    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n",    # broken chunking
+    b"",                                                                # closed at once
+], ids=["bad-status-line", "incomplete-read", "non-utf8", "bad-chunk", "empty"])
+def test_client_never_raises_on_a_broken_response(reply):
+    # review harness tray_client.py: these used to escape and kill the poll thread
+    c = client_mod.HubClient(f"http://127.0.0.1:{_raw_server(reply)}", timeout=2)
+    assert c.status() is None
+    code, body = c.post("/api/admin/hub/stop", {})
+    assert isinstance(body, dict)
+    assert code is None or isinstance(code, int)
 
 
 def test_client_unreachable_is_none():
@@ -142,7 +196,7 @@ def test_pause_asks_once_then_remembers_the_password(fake):
     ctl = _ctl(fake, ui)
     view = logic.parse_status(fake.status, marker_present=False)
     assert ctl.toggle_pause(view) is True
-    assert fake.posts("/api/admin/hub/pause-processing")[-1][2] == {"password": PW}
+    assert fake.posts("/api/admin/hub/pause-processing")[-1][2] == {"password": PW, "by": "ryan"}
     paused = logic.parse_status(dict(fake.status, state="processing-paused",
                                      processing_paused=True), marker_present=False)
     assert ctl.toggle_pause(paused) is True
@@ -212,7 +266,60 @@ def test_stop_confirms_explains_start_and_sends_the_password(fake):
     assert ctl.stop() is True
     confirm = [e for e in ui.log if e[0] == "confirm"][0]
     assert "Start hub" in confirm[2]
-    assert fake.posts("/api/admin/hub/stop")[-1][2] == {"password": PW}
+    assert fake.posts("/api/admin/hub/stop")[-1][2] == {"password": PW, "by": "ryan"}
+    assert "force" in confirm[2].lower() or "anyway" in confirm[2].lower()
+
+
+def test_stop_while_busy_names_the_work_and_offers_stop_anyway(fake):
+    fake.busy = ["a QBench upload is running (3 item(s) queued)", "1 processing job(s) running"]
+    ui = ScriptedUI(passwords=[PW])
+    ctl = _ctl(fake, ui)
+    assert ctl.stop() is True
+    confirms = [e for e in ui.log if e[0] == "confirm"]
+    assert len(confirms) == 2 and "QBench upload" in confirms[1][2]
+    assert "Stop anyway" in confirms[1][2]
+    sent = [r[2] for r in fake.posts("/api/admin/hub/stop")]
+    assert sent[0].get("force") is None and sent[1]["force"] is True
+    assert ui.kinds().count("ask") == 1 and "error" not in ui.kinds()
+
+
+def test_stop_while_busy_declined_stops_nothing(fake):
+    fake.busy = ["1 processing job(s) running"]
+    ui = ScriptedUI(passwords=[PW])
+    ctl = _ctl(fake, ui)
+    answers = iter([True, False])
+    ui.confirm = lambda title, text: (ui.log.append(("confirm", title, text)), next(answers))[1]
+    assert ctl.stop() is False
+    assert len(fake.posts("/api/admin/hub/stop")) == 1
+
+
+def test_a_throttled_refusal_keeps_the_remembered_password(fake):
+    ui = ScriptedUI(passwords=[PW])
+    ctl = _ctl(fake, ui)
+    view = logic.parse_status(fake.status, marker_present=False)
+    assert ctl.toggle_pause(view) is True
+    fake.throttled = True
+    assert ctl.toggle_pause(view) is False
+    assert ui.log[-1][0] == "error" and "Too many" in ui.log[-1][2]
+    fake.throttled = False
+    assert ctl.toggle_pause(view) is True
+    assert ui.kinds().count("ask") == 1          # never asked again
+
+
+def test_the_password_is_forgotten_after_15_idle_minutes(fake):
+    clock = Clock()
+    ui = ScriptedUI(passwords=[PW, PW])
+    ctl = _ctl(fake, ui, clock=clock)
+    view = logic.parse_status(fake.status, marker_present=False)
+    ctl.toggle_pause(view)
+    clock.t += 14 * 60
+    ctl.toggle_pause(view)                        # used again: the idle clock restarts
+    clock.t += 14 * 60
+    ctl.toggle_pause(view)
+    assert ui.kinds().count("ask") == 1
+    clock.t += 15 * 60 + 1
+    ctl.toggle_pause(view)
+    assert ui.kinds().count("ask") == 2
 
 
 def test_stop_declined_sends_nothing(fake):
@@ -236,6 +343,20 @@ def test_start_runs_the_updater_resume(fake):
     assert cmd[0] == "py.exe" and cmd[2:] == ["resume", "--app", "gc", "--config",
                                               logic.DEFAULTS["updater_config"]]
     assert ui.log[-1][0] == "info" and "20 s" in ui.log[-1][2]
+
+
+def test_start_does_not_promise_when_no_marker_was_seen(fake):
+    # down without a visible `paused` marker: the updater should restart it
+    # anyway; if it does not, the updater itself is the problem
+    ui = ScriptedUI()
+    ctl = _ctl(fake, ui)
+    ctl.run_cmd = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", "")
+    assert ctl.start(logic.parse_status(None, marker_present=False)) is True
+    text = ui.log[-1][2]
+    assert "should start within ~20 s if the updater is running" in text
+    assert "check the updater" in text
+    ctl.start(logic.parse_status(None, marker_present=True))
+    assert "should start" not in ui.log[-1][2] and "20 s" in ui.log[-1][2]
 
 
 def test_start_falls_back_to_removing_the_marker(fake, tmp_path):

@@ -1,6 +1,6 @@
 """hub_tray.pyw's entry point.
 
-    pythonw hub_tray.pyw                 run the tray (one per logged-on user)
+    pythonw hub_tray.pyw                 run the tray (one per logon session)
     pythonw hub_tray.pyw --install       autostart at this user's logon (HKCU Run), start it
     pythonw hub_tray.pyw --uninstall     remove the autostart (a running tray keeps running
                                          until Exit tray)
@@ -34,7 +34,28 @@ def parse_args(argv=None):
                    help="start the tray at logon for this user (HKCU Run) and start it now")
     g.add_argument("--uninstall", action="store_true", help="remove the logon autostart")
     ap.add_argument("--config", help="tray.json (default %%APPDATA%%\\ASAPLabs\\gc-hub-tray.json)")
+    ap.add_argument("--wait-for-lock", action="store_true",
+                    help=argparse.SUPPRESS)   # a relaunch: wait for the old tray to exit
     return ap.parse_args(argv)
+
+
+RELAUNCH_LOCK_WAIT_SECONDS = 20.0
+
+
+def make_relaunch(held, cmd, cwd, *, spawn=None):
+    """The poller's ``relaunch()``: start the new tray (which waits for the
+    lock), and only once that spawn has succeeded let go of the lock; a
+    failed spawn raises with the lock still held, so this tray carries on
+    and never a second one runs."""
+    def relaunch():
+        (spawn or _spawn)(list(cmd) + ["--wait-for-lock"], cwd=cwd)
+        held.release()
+    return relaunch
+
+
+def _spawn(cmd, cwd=None):  # pragma: no cover - desktop
+    from .ui import spawn_detached
+    spawn_detached(cmd, cwd=cwd)
 
 
 def _setup_logging() -> None:
@@ -92,9 +113,10 @@ def main(argv=None) -> int:  # pragma: no cover - desktop
                              "drag it out of the hidden icons).")
         return 0
 
-    held = winsys.acquire_single_instance()
+    held = winsys.acquire_single_instance(
+        wait=RELAUNCH_LOCK_WAIT_SECONDS if args.wait_for_lock else 0.0)
     if held is None:
-        log.info("another GC hub tray is already running for this user; exiting")
+        log.info("another GC hub tray is already running in this session; exiting")
         return 0
     try:
         cfg = logic.load_config(args.config or winsys.default_config_path())
@@ -109,10 +131,7 @@ def main(argv=None) -> int:  # pragma: no cover - desktop
     if sys.platform == "win32":
         ctl.elevate = winsys.run_elevated
 
-    def relaunch():
-        held.release()
-        ui.spawn_detached(_command(args.config), cwd=str(Path(_script()).parent))
-
+    relaunch = make_relaunch(held, _command(args.config), str(Path(_script()).parent))
     log.info("GC hub tray started (hub %s)", logic.status_url(cfg))
     try:
         return ui.run(cfg, ctl, client, release_root=Path(_script()).parent.parent,

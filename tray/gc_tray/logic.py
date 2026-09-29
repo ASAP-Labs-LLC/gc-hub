@@ -64,6 +64,7 @@ def load_config(path) -> dict:
     """``DEFAULTS`` overlaid with the known keys of ``path`` (a missing file
     is fine; unknown keys, e.g. ``_comment``, are ignored)."""
     cfg = dict(DEFAULTS)
+    raw: dict = {}
     p = Path(path) if path else None
     if p is not None and p.is_file():
         try:
@@ -73,6 +74,9 @@ def load_config(path) -> dict:
         if not isinstance(raw, dict):
             raise ConfigError(f"{p}: expected a JSON object")
         cfg.update({k: v for k, v in raw.items() if k in DEFAULTS})
+    if "port" not in raw:
+        cfg["port"] = updater_port(cfg.get("updater_config"), cfg.get("app_name")) \
+            or DEFAULTS["port"]
     _num(cfg, "port", 1, 65535, integer=True)
     _num(cfg, "poll_seconds", 1, 3600)
     _num(cfg, "cpu_busy_percent", 1, 10000)
@@ -84,6 +88,21 @@ def load_config(path) -> dict:
         if not isinstance(cfg[key], str):
             raise ConfigError(f"tray.json: {key} must be a string")
     return cfg
+
+
+def updater_port(updater_config, app_name) -> Optional[int]:
+    """The ``port`` of the ``app_name`` entry in the updater's config.json,
+    or None when it cannot be read (it is often Administrators-only)."""
+    try:
+        data = json.loads(Path(updater_config).read_text(encoding="utf-8-sig"))
+        for app in data.get("apps") or []:
+            if isinstance(app, dict) and app.get("name") == app_name:
+                port = app.get("port")
+                if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536:
+                    return port
+    except Exception:  # noqa: BLE001 - missing, unreadable, malformed
+        return None
+    return None
 
 
 def status_url(cfg) -> str:

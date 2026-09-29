@@ -1,13 +1,15 @@
 """Windows glue behind plain functions (patterns from agent/launcher.pyw and
-agent/install.pyw): one tray per logged-on user (a named mutex in the
-session's ``Local\\`` namespace; an flock'd file elsewhere, for tests), and
-autostart through ``HKCU\\...\\Run`` for that user only. ``winreg`` is
-injectable so the registry code is tested without touching a real one."""
+agent/install.pyw): one tray per logon session (a named mutex in the
+session's ``Local\\`` namespace, so two RDP sessions each get their own; an
+flock'd file elsewhere, for tests), and autostart through ``HKCU\\...\\Run``
+for the installing user only. ``winreg`` is injectable so the registry code
+is tested without touching a real one."""
 from __future__ import annotations
 
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -28,9 +30,20 @@ class _Held:
             self._release = None
 
 
-def acquire_single_instance(lock_dir=None) -> Optional[_Held]:
-    """A held lock, or None when another tray (of this user) holds it.
-    ``lock_dir`` (POSIX/tests only) is where the lock file goes."""
+def acquire_single_instance(lock_dir=None, *, wait: float = 0.0) -> Optional[_Held]:
+    """A held lock, or None when another tray in this logon session holds
+    it (still, after ``wait`` seconds: a relaunching tray waits for the old
+    one to let go). ``lock_dir`` (POSIX/tests only) is where the lock file
+    goes."""
+    deadline = time.monotonic() + max(0.0, wait)
+    while True:
+        held = _try_acquire(lock_dir)
+        if held is not None or time.monotonic() >= deadline:
+            return held
+        time.sleep(0.2)
+
+
+def _try_acquire(lock_dir) -> Optional[_Held]:
     if _IS_WIN and lock_dir is None:  # pragma: no cover - Windows only
         import ctypes
         from ctypes import wintypes

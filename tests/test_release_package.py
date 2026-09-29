@@ -207,6 +207,8 @@ class PackageTests(unittest.TestCase):
                      "agent/gc_agent/core.py", "agent/requirements-agent.txt",
                      "hub_control.py", "tray/hub_tray.pyw", "tray/gc_tray/__init__.py",
                      "tray/gc_tray/logic.py", "tray/gc_tray/ui.py", "tray/tray.example.json",
+                     "tray/gc_tray/client.py", "tray/gc_tray/controller.py",
+                     "tray/gc_tray/winsys.py", "tray/gc_tray/main.py",
                      "templates/index.html", "templates/calibration.html",
                      "templates/hub_admin.html", "static/js/hub_admin.js",
                      "static/js/app.js", "static/css/style.css", "static/css/badge.css",
