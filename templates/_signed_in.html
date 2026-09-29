@@ -1,0 +1,6 @@
+{#- The signed-in line next to the version badge (bottom-right), on every page.
+    `web_user` comes from web_auth.template_context; session.js wires the button. -#}
+{% if web_user %}
+<div id="signed-in">Signed in as <span id="signed-in-name">{{ web_user.name }}</span> ·
+  <button type="button" id="sign-out">Sign out</button></div>
+{% endif %}

@@ -58,6 +58,7 @@ from werkzeug.exceptions import HTTPException
 # Resolved before the rest is imported and published back to the
 # environment, so every module and every subprocess we spawn agrees on it.
 import instance
+import netctx
 import paths
 import restart_policy
 import restart_update
@@ -210,6 +211,14 @@ import comments_api  # noqa: E402  (phase 4: sample comments, presets)
 app.register_blueprint(comments_api.bp)
 import hub_control  # noqa: E402  (hub tray: status, pause/resume processing, stop)
 app.register_blueprint(hub_control.bp)
+import web_auth  # noqa: E402  (sign-in: LabLink sessions, the session gate)
+app.register_blueprint(web_auth.bp)
+# Order matters (before_request runs in registration order): the https
+# redirect for the tunnel first, then the cross-site guard (below), then the
+# session gate, then activity tracking.
+app.before_request(web_auth.require_https)
+app.after_request(web_auth.add_security_headers)
+app.context_processor(web_auth.template_context)
 
 # ---------------------------------------------------------------------------
 # Global state
@@ -242,7 +251,7 @@ _creds_new: dict = {}               # {"username": ..., "password": ...}
 # ── Activity tracking & auto-restart ─────────────────────────────────
 _last_activity: float = time.time()
 _last_activity_lock = threading.Lock()
-_recent_clients: dict[str, float] = {}   # remote_addr -> last-seen time, for /healthz active_sessions
+_recent_clients: dict[str, float] = {}   # session token hash -> last-seen time (/healthz active_sessions)
 _server_start_time: float = time.time()
 _auto_restart_done_today: str = ""          # date string e.g. "2026-05-07"
 AUTO_RESTART_HOUR = restart_policy.AUTO_RESTART_HOUR   # 3 AM local time
@@ -662,7 +671,10 @@ def _revision_ladder(sample: dict, conf: dict, db, data: Path,
 
 
 def _who() -> str:
-    return request.remote_addr or "unknown"
+    """Who did this, for logs and every stored ``by``: ``'<session name>
+    (<client address>)'`` (``web_auth.actor``; the address alone when nobody
+    is signed in, e.g. the hub tray's local restart)."""
+    return web_auth.actor()
 
 
 def _gate_reason(s: dict) -> str:
@@ -696,59 +708,39 @@ def _check_admin(body) -> bool:
 # ===================================================================== #
 #  Cross-site write guard
 # ===================================================================== #
-# There is no login or session, and the app listens on the lab LAN, so any
-# page open in a lab browser could otherwise POST here: get_json(force=True)
-# parses a text/plain body, which is a CORS "simple" request (no preflight).
+# The app listens on the lab LAN and at https://gc.asaplabs.net (a Cloudflare
+# tunnel), so any page open in a browser could otherwise POST here:
+# get_json(force=True) parses a text/plain body, which is a CORS "simple"
+# request (no preflight), and the session cookie is SameSite=Lax, not Strict.
 # Browsers mark every fetch with Origin (on non-GET) and Sec-Fetch-Site; the
-# app's own pages send a matching Origin and "same-origin". Requests with
-# neither header (curl, the updater, tests) are not from a browser page and
-# pass. DNS rebinding is not covered (see the spec's Open items).
+# app's own pages send a matching Origin and "same-origin". The rule is
+# ``netctx.is_cross_site`` (one origin rule, shared with admin_auth): "my
+# origin" is https when the request came through the tunnel
+# (``netctx.is_https``), else the request's own scheme, plus its Host.
+# Requests with neither header (curl, the updater, agents, tests) are not
+# from a browser page and pass. DNS rebinding is not covered here (setup's
+# Host check is, and every other route needs a session cookie).
 
 _STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-_ALLOWED_FETCH_SITES = frozenset({"same-origin", "none"})
-_DEFAULT_PORTS = {"http": 80, "https": 443}
-
-
-def _host_port(netloc: str, scheme: str):
-    """``(hostname, port)`` from a ``host[:port]`` string, or None."""
-    try:
-        parts = urllib.parse.urlsplit(f"{scheme}://{netloc}")
-        host = (parts.hostname or "").lower()
-        port = parts.port or _DEFAULT_PORTS.get(scheme)
-    except ValueError:
-        return None
-    return (host, port) if host else None
-
-
-def _is_cross_site_request() -> bool:
-    site = request.headers.get("Sec-Fetch-Site")
-    if site is not None and site.strip().lower() not in _ALLOWED_FETCH_SITES:
-        return True
-    origin = request.headers.get("Origin")
-    if origin is not None:
-        try:
-            parts = urllib.parse.urlsplit(origin.strip())
-        except ValueError:
-            return True
-        if parts.scheme not in _DEFAULT_PORTS or not parts.netloc:
-            return True  # includes the opaque origin "null"
-        mine = _host_port(request.host, request.scheme)
-        return mine is None or _host_port(parts.netloc, parts.scheme) != mine
-    return False
 
 
 @app.before_request
 def _refuse_cross_site_writes():
     """Refuse state-changing /api/ requests that a browser marks as coming
-    from another site. Registered before activity tracking, so a refused
-    request does not count as use."""
+    from another site. Registered before the session gate and activity
+    tracking, so a refused request does not count as use."""
     if request.method in _STATE_CHANGING_METHODS and request.path.startswith("/api/") \
-            and _is_cross_site_request():
+            and netctx.is_cross_site():
         LOGGER.warning("Refused cross-site %s %s from %s (Origin %r, Sec-Fetch-Site %r)",
-                       request.method, request.path, request.remote_addr,
+                       request.method, request.path, netctx.client_ip(),
                        request.headers.get("Origin"), request.headers.get("Sec-Fetch-Site"))
         return jsonify({"error": "Cross-site request refused"}), 403
     return None
+
+
+# The session gate (web_auth.gate): every route needs a signed-in session
+# except the open, local (hub tray) and pre-setup paths web_auth lists.
+app.before_request(web_auth.gate)
 
 
 def _admin_json_body():
@@ -810,14 +802,22 @@ _NON_ACTIVITY_PATHS = {
 
 @app.before_request
 def _track_activity():
-    """Record the timestamp of every incoming request for idle detection."""
+    """Record a signed-in person's request for idle detection (runs after the
+    session gate). Unauthenticated requests (scanners, the tray, agents)
+    never count, so they can't block the updater's idle deploy or the 3 AM
+    restart. ``/healthz``'s ``active_sessions`` counts the distinct sessions
+    seen in the last 5 minutes; ``web_auth.note_seen`` keeps ``last_seen``."""
     global _last_activity
     path = request.path
     if path in _NON_ACTIVITY_PATHS or path.startswith("/static/") or path.endswith("/stream"):
         return
+    session = web_auth.current_user()
+    if session is None:
+        return
     with _last_activity_lock:
         _last_activity = time.time()
-        _recent_clients[request.remote_addr] = _last_activity
+        _recent_clients[session["token_hash"]] = _last_activity
+    web_auth.note_seen(session)
 
 
 def _is_server_idle() -> bool:
@@ -1600,6 +1600,7 @@ def api_save_analysis_defaults():
             changes["analysis_range_overlays"] = json.dumps(overlays)
         if changes:
             settings_mod.update_settings(changes)
+            LOGGER.info("Analysis defaults saved by %s: %s", _who(), ", ".join(sorted(changes)))
         return jsonify({"ok": True})
     except Exception as exc:
         return _error(str(exc), 500)
@@ -2071,6 +2072,8 @@ def api_calibration_save():
         with distill._CAL_LOCK:
             distill._CAL_CACHE.clear()
         queued = pipeline.on_calibration_saved(row["id"], db=db)
+        LOGGER.info("Calibration of %s saved by %s (%d peaks; queued: %s)",
+                    row["id"], _who(), len(clean), queued)
 
         anchors = distill.anchors_for(
             distill.parse_assignment_map(distill.upsert_assignments("", cal_path, clean)),
@@ -2199,6 +2202,9 @@ def api_reprocess():
             s["id"], by=_who(), use_current_blank=bool(body.get("use_current_blank")),
             use_current_corrections=bool(body.get("use_current_corrections")), db=db))
         queued.append(s["id"])
+    if queued:
+        LOGGER.info("Reprocess of %d sample(s) requested by %s: %s", len(queued), _who(),
+                    ", ".join(str(i) for i in queued[:50]))
     return jsonify({"status": "queued", "count": len(queued), "sample_ids": queued,
                     "job_ids": job_ids, "refused": refused})
 
@@ -2295,7 +2301,7 @@ def api_restart():
             # Each exit under the updater spends one of its few starts per
             # 15 minutes; a process that just came up doesn't need another.
             return jsonify({"error": f"The server just restarted, try again in {wait} s"}), 409
-        mode, tag = request_restart(request.remote_addr or "unknown")
+        mode, tag = request_restart(_who())
     return jsonify({"mode": mode, "tag": tag, "pid": os.getpid()})
 
 
@@ -2574,6 +2580,8 @@ def api_export_lims():
             refused.append({"sample_id": sid, "error": str(exc)})
     if exported:
         _wake_exports()
+        LOGGER.info("Export to LIMS of %d sample(s) by %s: %s", len(exported), _who(),
+                    ", ".join(str(e["sample_id"]) for e in exported[:50]))
     if refused:
         notifications_mod.get_store().add(
             "warning", f"Export to LIMS: {len(refused)} of {len(ids)} sample(s) refused — "
@@ -2711,8 +2719,14 @@ def _comments_for_report(sample_id: int, db) -> list[dict]:
     return [dict(c) for c in comments_mod.for_report(sample_id, db)]
 
 
+def _reporter() -> tuple:
+    """``(signed-in name, client address)`` of this request, for report_log
+    (captured at enqueue time for QBench uploads, which run on a thread)."""
+    return web_auth.current_name(), netctx.client_ip()
+
+
 def _log_report(sample: dict, content: dict, params: dict, kind: str, pdf: bytes,
-                author_ip: Optional[str], db) -> None:
+                who: tuple, db) -> None:
     """One ``report_log`` row (phase 4's ``comments.log_report``) for a report
     PDF: what was reported, with which parameters, ranges and comments. A
     failure is logged, never raised (the PDF has already been delivered or
@@ -2724,7 +2738,8 @@ def _log_report(sample: dict, content: dict, params: dict, kind: str, pdf: bytes
         # comments.log_report(sample_id, *, kind, revision, standard_name,
         # params, ranges, windows, bullets, bullets_text, conclusion,
         # conclusion_edited, comment_ids, pdf_sha256, author_initials,
-        # author_ip, app_version, created_at, db) — phase 4 serialises.
+        # author_ip, app_version, created_at, user_name, db) — phase 4
+        # serialises; the initials are derived from the signed-in name.
         comments_mod.log_report(
             sample["id"],
             kind=kind,
@@ -2739,8 +2754,8 @@ def _log_report(sample: dict, content: dict, params: dict, kind: str, pdf: bytes
             conclusion_edited=edited,
             comment_ids=[c["id"] for c in content["comments"]],
             pdf_sha256=hashlib.sha256(pdf).hexdigest(),
-            author_initials=None,
-            author_ip=author_ip,
+            user_name=who[0],
+            author_ip=who[1],
             app_version=version.APP_VERSION,
             db=db,
         )
@@ -2825,7 +2840,8 @@ def api_export_analysis_report():
             report_bytes, content = _build_report_pdf(s, params, conf, db)
         except ValueError as exc:
             return _error(str(exc), 404 if "not found" in str(exc) else 400)
-        _log_report(s, content, params, "download", report_bytes, _who(), db)
+        _log_report(s, content, params, "download", report_bytes, _reporter(), db)
+        LOGGER.info("Analysis report of sample %s downloaded by %s", s["id"], _who())
 
         doc_name = str(body.get("doc_name") or "analysis_report")
         filename = f"{_safe_filename(s['lab_id'])}_{_safe_filename(doc_name)}.pdf"
@@ -2870,7 +2886,7 @@ def api_export_analysis_reports_zip():
                 except (ValueError, TypeError, SampleNotFound) as exc:
                     LOGGER.warning("Skipping ZIP item: %s", exc)
                     continue
-                _log_report(s, content, params, "zip", report_bytes, _who(), db)
+                _log_report(s, content, params, "zip", report_bytes, _reporter(), db)
                 doc_name = str(item.get("doc_name") or "analysis_report")
                 filename = f"{_safe_filename(s['lab_id'])}_{_safe_filename(doc_name)}.pdf"
                 zf.writestr(filename, report_bytes)
@@ -2951,9 +2967,12 @@ def api_qbench_upload():
             refused.append({"sample_id": sid, "lab_id": s["lab_id"], "error": _gate_reason(s)})
         clean = {k: v for k, v in item.items()
                  if k not in ("pdf_path", "sample_path", "lab_id", "bullets")}
-        new_queue.append(dict(clean, sample_id=sid, lab_id=s["lab_id"], _author_ip=_who()))
+        name, ip = _reporter()
+        new_queue.append(dict(clean, sample_id=sid, lab_id=s["lab_id"], _author_ip=ip,
+                              _user_name=name))
     if not new_queue:
         return _error("queue is required (list of {sample_id, standard_name})")
+    LOGGER.info("QBench upload of %d sample(s) requested by %s", len(new_queue), _who())
     if refused:
         return jsonify({"error": f"{len(refused)} sample(s) can't be uploaded to QBench",
                         "refused": refused}), 409
@@ -3030,7 +3049,8 @@ def api_qbench_upload():
         _record_qbench_upload(item.get("sample_id"), item_revs.get(idx), hub_db)
         if idx in item_reports:
             row, content, rparams, pdf = item_reports[idx]
-            _log_report(row, content, rparams, "qbench", pdf, item.get("_author_ip"), hub_db)
+            _log_report(row, content, rparams, "qbench", pdf,
+                        (item.get("_user_name"), item.get("_author_ip")), hub_db)
 
     def _do_upload():
       login_fail_count = 0
@@ -3486,8 +3506,8 @@ def api_qbench_api_credentials_post():
         LOGGER.error("Could not save QBench API credentials: %s", type(exc).__name__)
         return _error(f"QBench accepted the credentials but saving them failed "
                       f"({type(exc).__name__}) at {qbench_secrets.describe()['store_path']}", 500)
-    LOGGER.info("QBench API credentials updated from %s (client id ...%s)",
-                request.remote_addr, cid[-4:])
+    LOGGER.info("QBench API credentials updated by %s (client id ...%s)",
+                _who(), cid[-4:])
     # QBenchAPIClient resolves the pair on construction and nothing holds a
     # long-lived client, so the next QBench call uses the new pair.
     return jsonify(qbench_secrets.describe())
@@ -3504,7 +3524,8 @@ def api_qbench_api_credentials_post():
 @app.route("/healthz")
 def healthz():
     """Updater health contract (see coa-reviewer/RELEASING.md): 200 + status
-    ok + version == tag. No auth, no outbound calls, not activity."""
+    ok + version == tag. No auth, no outbound calls, not activity. Through
+    the Cloudflare tunnel only ``{status, version, pid}``."""
     now = time.time()
     with _last_activity_lock:
         idle = now - _last_activity
@@ -3515,6 +3536,10 @@ def healthz():
         for addr in stale:
             del _recent_clients[addr]
         active = len(_recent_clients)
+    if netctx.is_proxied():
+        # Through Cloudflare (gc.asaplabs.net): no session count, idle time or
+        # hub internals for the internet. The updater polls localhost.
+        return jsonify({"status": "ok", "version": version.APP_VERSION, "pid": os.getpid()})
     body = {"status": "ok", "version": version.APP_VERSION, "pid": os.getpid(),
             "active_sessions": active, "idle_seconds": round(idle, 1)}
     try:   # extra, never part of the contract: the hub tray's numbers

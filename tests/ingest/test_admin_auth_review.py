@@ -104,8 +104,11 @@ def test_host_allowed(db):
     for h in ("evil.example", "evil.example:5560", "asapsv1.attacker.net", "", None, "a b"):
         assert not admin_auth.host_allowed(h, db=db), h
     store.settings_kv.set("hub_url", "http://asapsv1.lab:5560", db=db)
-    assert admin_auth.host_allowed("asapsv1.lab:5560", db=db)
-    assert not admin_auth.host_allowed("evil.example", db=db)
+    # rev 2 (amendment 12): the hub_url host only for setup through the tunnel
+    # (https and a signed-in session)
+    assert not admin_auth.host_allowed("asapsv1.lab:5560", db=db)
+    assert admin_auth.host_allowed("asapsv1.lab:5560", db=db, tunnel_session=True)
+    assert not admin_auth.host_allowed("evil.example", db=db, tunnel_session=True)
 
 
 # ── I1: parallel guesses and CPU ────────────────────────────────────────────

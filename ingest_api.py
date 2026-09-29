@@ -30,6 +30,7 @@ from flask import Blueprint, Response, jsonify, request
 
 import admin_auth
 import distill
+import netctx
 import paths
 import pipeline
 import store
@@ -301,7 +302,7 @@ def _authenticate(*, enabled_only: bool = False):
         return None, _err("the hub has no data folder configured", 503)
     if inst is None:
         log.warning("refused agent request %s %s from %s: bad token", request.method,
-                    request.path, request.remote_addr)
+                    request.path, netctx.client_ip())
         return None, _err("invalid agent token", 401)
     if enabled_only and not inst.get("enabled", 1):
         return None, _err(f"instrument {inst['id']} is disabled", 403)
@@ -573,41 +574,54 @@ def _admin_body():
 
 
 def configured_hub_url(*, db=None) -> Optional[str]:
-    return store.settings_kv.get(HUB_URL_KEY, db=_db(db)) or None
+    """The admin-set hub URL, or None (``admin_auth.configured_hub_url``)."""
+    return admin_auth.configured_hub_url(db=_db(db))
+
+
+def effective_hub_url(*, db=None) -> str:
+    """What installers write: the admin-set hub URL, else
+    https://gc.asaplabs.net (spec D5 rev 2: one hub address setting). Never
+    derived from the request, so a page opened through the tunnel (or on
+    localhost) can't put an address a GC PC can't use into an installer."""
+    return admin_auth.effective_hub_url(db=_db(db))
 
 
 def _valid_hub_url(url: str) -> bool:
-    """``http(s)://host[:port]`` only: no user info, path, query or fragment."""
+    """A bare ``http(s)://host[:port]``, https unless the host is a LAN name
+    or IP (``admin_auth.valid_hub_url``)."""
+    return admin_auth.valid_hub_url(url) is not None
+
+
+def lan_url(hub_url: str) -> Optional[str]:
+    """The agents' fallback after a network/TLS error against ``hub_url``:
+    ``http://<this machine's name>:<port>``, or None when ``hub_url`` already
+    is a LAN address (the agent then has nothing to fall back to)."""
+    import os
+    import socket
     try:
-        parts = urllib.parse.urlsplit(url)
-        parts.port      # noqa: B018 - raises ValueError on a bad port
-    except ValueError:
-        return False
-    return (parts.scheme in ("http", "https") and bool(parts.hostname)
-            and "@" not in parts.netloc and parts.path in ("", "/")
-            and not parts.query and not parts.fragment)
-
-
-def derived_hub_url() -> Optional[str]:
-    """The request's own address as the hub URL, or ``None`` when it can't be
-    trusted for an agent on another PC: a loopback address (the admin is on
-    the server itself) or a name that isn't this machine's (a rebinding or a
-    proxy). Then the admin must set the hub URL first (I5)."""
-    name = admin_auth._hostname(request.host)
-    if name is None:
-        return None
-    if admin_auth.is_ip_literal(name):
-        import ipaddress
-        if ipaddress.ip_address(name).is_loopback:
+        parts = urllib.parse.urlsplit(hub_url)
+        if parts.scheme == "http" and admin_auth.is_lan_host(parts.hostname):
             return None
-    elif name == "localhost" or not admin_auth.is_machine_name(name):
+    except ValueError:
+        pass
+    try:
+        port = int(os.environ.get("PORT") or os.environ.get("GC_PORT") or 5560)
+    except ValueError:
+        port = 5560
+    try:
+        name = (socket.gethostname() or "").strip().split(".")[0].lower()
+    except OSError:
+        name = ""
+    if not name or not re.match(r"^[a-z0-9-]+$", name):
         return None
-    return request.host_url.rstrip("/")
+    url = f"http://{name}:{port}"
+    return None if url == hub_url.rstrip("/") else url
 
 
-def installer_zip(hub_url: str, token: str, package: tuple, version: str) -> bytes:
+def installer_zip(hub_url: str, token: str, package: tuple, version: str,
+                  lan: Optional[str] = None) -> bytes:
     """The "Download installer" zip (contract §1): ``install.pyw``,
-    ``launcher.pyw``, ``install.json`` ``{hub_url, token}``,
+    ``launcher.pyw``, ``install.json`` ``{hub_url, token, lan_url}``,
     ``agent-package.zip`` and ``agent-package.json`` ``{version, sha256}``,
     at the zip root. The only place a token is ever written."""
     import io
@@ -617,7 +631,8 @@ def installer_zip(hub_url: str, token: str, package: tuple, version: str) -> byt
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for name in ("install.pyw", "launcher.pyw"):
             z.writestr(name, (AGENT_DIR / name).read_bytes())
-        z.writestr("install.json", json.dumps({"hub_url": hub_url, "token": token}, indent=2))
+        z.writestr("install.json", json.dumps({"hub_url": hub_url, "token": token,
+                                               "lan_url": lan}, indent=2))
         z.writestr("agent-package.zip", data)
         z.writestr("agent-package.json", json.dumps({"version": version, "sha256": sha}, indent=2))
     return buf.getvalue()
@@ -634,12 +649,7 @@ def api_admin_installer(instrument_id):
     inst = store.instruments.get(instrument_id, db=_db(None))
     if inst is None:
         return _err(f"unknown instrument {instrument_id!r}", 404)
-    hub_url = configured_hub_url() or derived_hub_url()
-    if hub_url is None:
-        return jsonify({"error": "Set the hub URL first (the address the GC PCs use to reach "
-                                 "this hub, e.g. http://asapsv1:5560): this page was opened as "
-                                 f"{request.host}, which a GC PC can't use.",
-                        "needs_hub_url": True}), 409
+    hub_url = effective_hub_url()
     confirmed = body.get("confirm_revoke") is True
     needs_confirm = jsonify({
         "error": f"{inst.get('name') or instrument_id} already has an agent token (issued "
@@ -652,7 +662,7 @@ def api_admin_installer(instrument_id):
     if err:
         return err
     token = new_token()                     # the zip is built before the hash is stored
-    data = installer_zip(hub_url, token, pkg, hub_version())
+    data = installer_zip(hub_url, token, pkg, hub_version(), lan_url(hub_url))
     try:
         mint_token(instrument_id, token=token, require_no_token=not confirmed)
     except TokenExists:                     # minted by someone else meanwhile
@@ -660,7 +670,7 @@ def api_admin_installer(instrument_id):
     except LookupError:
         return _err(f"unknown instrument {instrument_id!r}", 404)
     log.warning("agent installer downloaded for %s by %s (hub_url %s)", instrument_id,
-                request.remote_addr, hub_url)
+                _actor(), hub_url)
     return Response(data, mimetype="application/zip", headers={
         "Content-Disposition": f'attachment; filename="gc-agent-installer-{instrument_id}.zip"',
         "Cache-Control": "no-store", "X-GC-Hub-URL": hub_url})
@@ -676,6 +686,7 @@ def api_admin_revoke_token(instrument_id):
         revoke_token(instrument_id)
     except LookupError as exc:
         return _err(str(exc), 404)
+    log.warning("agent token of %s revoked by %s", instrument_id, _actor())
     return jsonify({"ok": True})
 
 
@@ -688,12 +699,20 @@ def api_admin_hub_url():
     url = body.get("hub_url")
     if url is None or (isinstance(url, str) and not url.strip()):
         store.settings_kv.delete(HUB_URL_KEY, db=_db(None))
-        return jsonify({"hub_url": None})
-    if not isinstance(url, str) or not _valid_hub_url(url.strip()):
-        return _err("hub_url must be an http:// or https:// URL, e.g. http://asapsv1:5560", 400)
-    url = url.strip().rstrip("/")
-    store.settings_kv.set(HUB_URL_KEY, url, db=_db(None))
-    return jsonify({"hub_url": url})
+        log.warning("hub URL cleared by %s (now %s)", _actor(), admin_auth.DEFAULT_HUB_URL)
+        return jsonify({"hub_url": None, "effective": admin_auth.DEFAULT_HUB_URL})
+    good = admin_auth.valid_hub_url(url)
+    if good is None:
+        return _err("hub_url must be a bare https:// address such as https://gc.asaplabs.net "
+                    "(http:// only for a lab-network name or IP, e.g. http://asapsv1:5560)", 400)
+    store.settings_kv.set(HUB_URL_KEY, good, db=_db(None))
+    log.warning("hub URL set to %s by %s", good, _actor())
+    return jsonify({"hub_url": good, "effective": good})
+
+
+def _actor() -> str:
+    import web_auth
+    return web_auth.actor()
 
 
 @bp.route("/api/admin/instruments/<instrument_id>/agent-command", methods=["POST"])
@@ -708,5 +727,5 @@ def api_admin_agent_command(instrument_id):
         set_agent_command(instrument_id, command)
     except LookupError as exc:
         return _err(str(exc), 404)
-    log.info("agent command %r queued for %s", command, instrument_id)
+    log.info("agent command %r queued for %s by %s", command, instrument_id, _actor())
     return jsonify({"ok": True, "command": command})
