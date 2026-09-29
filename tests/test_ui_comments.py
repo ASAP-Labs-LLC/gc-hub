@@ -312,3 +312,139 @@ def test_presets_admin_panel(page):
              "li.querySelector('.preset-save').click();", first["id"])
     assert _wait(lambda: store.comment_presets.get(first["id"], db=hub.db)["text"]
                  == "Edited by admin")
+
+
+# ── wrong-sample races (critic C1, I2) ──────────────────────────────────────
+
+FETCH_DELAY = r"""
+if (!window.__delayInstalled) {
+  window.__delayInstalled = true;
+  window.__delay = {};          // url substring -> ms
+  window.__fakeAnalysis = null; // (body) -> {ms, result}
+  const orig = window.fetch.bind(window);
+  window.fetch = async function (url, opts) {
+    const u = String(url);
+    if (window.__fakeAnalysis && u.includes('/api/analysis')) {
+      const f = window.__fakeAnalysis(JSON.parse(opts.body));
+      await new Promise(r => setTimeout(r, f.ms));
+      return new Response(JSON.stringify(f.result),
+                          {status: 200, headers: {'Content-Type': 'application/json'}});
+    }
+    for (const [k, ms] of Object.entries(window.__delay)) {
+      if (u.includes(k)) await new Promise(r => setTimeout(r, ms));
+    }
+    return orig(url, opts);
+  };
+}
+"""
+
+
+def _home(drv, port):
+    if not drv.current_url.rstrip("/").endswith(str(port)):
+        drv.get(f"http://127.0.0.1:{port}/")
+    assert _wait(lambda: _js(drv, "return state.files.length") >= 5)
+
+
+def _annot(db, sid, t0, t1, text):
+    return store.sample_comments.add(sid, text=text, source="annotation", t0=t0, t1=t1,
+                                     author_initials="ZZ", author_ip=None, revision=None, db=db)
+
+
+def _drawn(drv):
+    fill = _js(drv, "return Comments.ANNOT_FILL")
+    return sorted((s["x0"], s["x1"]) for s in _trend(drv)["shapes"] if s.get("fillcolor") == fill)
+
+
+def test_clear_annotations_never_touches_the_previous_sample(page):
+    drv, hub, port, _pw = page
+    _home(drv, port)
+    a, b = hub.ids["backfill"], hub.ids["slashed"]
+    ca = _annot(hub.db, a, 1.0, 1.2, "on A")
+    cb = _annot(hub.db, b, 3.0, 3.2, "on B")
+    _js(drv, FETCH_DELAY)
+    _select(drv, a)
+    assert _wait(lambda: _drawn(drv) == [(1.0, 1.2)]), _drawn(drv)
+
+    _js(drv, "window.__delay[arguments[0]] = 1500;", f"/api/samples/{b}/comments")
+    _select(drv, b)
+    # while B's comments are in flight, A's spans are not shown as B's
+    _js(drv, "redrawAnnotations();")
+    time.sleep(0.2)
+    assert _drawn(drv) == []
+    _js(drv, "window.__confirms = []; window.confirm = m => { __confirms.push(m); return true; };"
+             "document.getElementById('btn-clear-annotations').click();")
+    assert _wait(lambda: store.sample_comments.get(cb, db=hub.db)["deleted_at"]), "B not cleared"
+    time.sleep(0.5)
+    assert store.sample_comments.get(ca, db=hub.db)["deleted_at"] is None   # A untouched
+    msg = _js(drv, "return window.__confirms[0]")
+    assert "1 annotation comment" in msg and "AB/../12" in msg, msg
+    _js(drv, "window.__delay = {};")
+
+
+def test_annotation_is_refused_when_the_sample_changed(page):
+    drv, hub, port, _pw = page
+    _home(drv, port)
+    a, b = hub.ids["backfill"], hub.ids["other"]
+    before = {s: len(_comments(hub.db, s)) for s in (a, b)}
+    _select(drv, a)
+    _js(drv, "setupAnnotationHandler();"
+             "if (!annotationMode) toggleAnnotationMode();"
+             "const d = document.getElementById('analysis-trend-plot');"
+             "(d.__handlers.plotly_selected || []).forEach(f => f({range: {x: [0.5, 0.7]}}));")
+    _select(drv, b)                                   # the operator moved on
+    _js(drv, "document.getElementById('annotation-comment-input').value = 'meant for A';"
+             "document.getElementById('btn-annotation-save').click();")
+    time.sleep(0.8)
+    assert {s: len(_comments(hub.db, s)) for s in (a, b)} == before
+    assert _js(drv, "return document.getElementById('modal-annotation')"
+                    ".classList.contains('open')")
+    # back on A, the same modal saves to A
+    _select(drv, a)
+    _js(drv, "document.getElementById('btn-annotation-save').click();")
+    assert _wait(lambda: len(_comments(hub.db, a)) == before[a] + 1)
+    assert _comments(hub.db, a)[-1]["text"] == "meant for A"
+    assert len(_comments(hub.db, b)) == before[b]
+
+
+def test_a_slow_earlier_analysis_does_not_render_over_a_newer_one(page):
+    drv, hub, port, _pw = page
+    _home(drv, port)
+    a, b = hub.ids["backfill"], hub.ids["final"]
+    _js(drv, FETCH_DELAY)
+    _js(drv, """
+        window.__fakeAnalysis = body => ({
+          ms: body.sample_id === arguments[0] ? 1500 : 100,
+          result: {trend: {sample_x: [0, 1], sample_y: [0, 1]}, diff: {x: [0, 1], y: [0, 0]},
+                   report: 'r', conclusion: 'from ' + body.sample_id}});
+        state.selectedStandard = state.comparisonStandards[0];
+    """, a)
+    _select(drv, a)
+    _js(drv, "runAnalysis();")
+    time.sleep(0.2)
+    _select(drv, b)
+    _js(drv, "runAnalysis();")
+    time.sleep(2.5)
+    assert _js(drv, "return document.getElementById('analysis-conclusion').value") == f"from {b}"
+    assert _js(drv, "return state._renderedAnalysisSampleId") == b
+    _js(drv, "window.__fakeAnalysis = null;")
+
+
+def test_admin_reorder_keeps_unsaved_edits(page):
+    drv, hub, port, pw = page
+    drv.get(f"http://127.0.0.1:{port}/admin/hub")
+    _js(drv, "document.getElementById('pw').value = arguments[0];"
+             "document.getElementById('btn-presets-load').click();", pw)
+    assert _wait(lambda: _js(drv, "return document.querySelectorAll('#presets li').length") >= 3)
+    ids = [p["id"] for p in store.comment_presets.list(include_inactive=True, db=hub.db)]
+    _js(drv, "document.querySelector(`#presets li[data-id='${arguments[0]}'] input.preset-text`)"
+             ".value = 'unsaved edit';", ids[0])
+    _js(drv, "document.querySelector(`#presets li[data-id='${arguments[0]}'] .preset-down`)"
+             ".click();", ids[2])
+    assert _wait(lambda: [p["id"] for p in store.comment_presets.list(include_inactive=True,
+                                                                      db=hub.db)][3] == ids[2])
+    assert _wait(lambda: _js(drv, "return document.querySelector(`#presets li[data-id='"
+                                  "${arguments[0]}'] input.preset-text`).value", ids[0])
+                 == "unsaved edit")
+    assert store.comment_presets.get(ids[0], db=hub.db)["text"] != "unsaved edit"
+    drv.get(f"http://127.0.0.1:{port}/")
+    assert _wait(lambda: _js(drv, "return state.files.length") >= 5)

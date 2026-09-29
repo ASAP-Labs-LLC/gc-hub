@@ -76,8 +76,9 @@
         return who;
     }
 
-    function clearConfirmText(n) {
-        return `Delete the ${n} annotation comment${n === 1 ? '' : 's'} on this sample? ` +
+    function clearConfirmText(n, label) {
+        const where = label ? `on sample ${label}` : 'on this sample';
+        return `Delete the ${n} annotation comment${n === 1 ? '' : 's'} ${where}? ` +
             'They stay in the record as deleted and leave the report.';
     }
 
@@ -94,8 +95,10 @@
     // ── browser part ──────────────────────────────────────────────────────
 
     const $ = id => document.getElementById(id);
-    let sampleId = null;
+    let sampleId = null;          // the sample asked for
+    let loadedId = null;          // the sample ``comments`` belong to (null while loading)
     let comments = [];
+    let inflight = null;          // the pending load of ``sampleId``
     let loadSeq = 0;
     let onChange = null;          // app.js: redraw the annotation shapes
 
@@ -172,48 +175,79 @@
         const count = $('annotation-count');
         if (count) count.textContent = n ? `${n} annotation${n === 1 ? '' : 's'}` : '';
         if (onChange) {
-            try { onChange(comments); } catch (e) { console.error(e); }
+            try { onChange(current()); } catch (e) { console.error(e); }
         }
+    }
+
+    /** The comments of the sample asked for; [] while they are loading (never
+        another sample's). */
+    function current() {
+        return (loadedId !== null && loadedId === sampleId) ? comments.slice() : [];
     }
 
     /** Load the comments of ``id`` (null clears). Resolves when drawn. */
-    async function load(id) {
-        sampleId = id == null ? null : id;
+    function load(id) {
+        const target = id == null ? null : id;
         const seq = ++loadSeq;
-        if (sampleId == null) {
+        const changed = target !== sampleId;
+        sampleId = target;
+        if (changed) {             // never show the previous sample's list or spans
             comments = [];
+            loadedId = null;
             render();
-            return comments;
         }
-        try {
-            const j = await request('GET', `/api/samples/${encodeURIComponent(sampleId)}/comments`);
-            if (seq !== loadSeq) return comments;          // a newer sample won
-            comments = j.comments || [];
-        } catch (e) {
-            if (seq !== loadSeq) return comments;
-            comments = [];
-            notify('Could not load comments: ' + e.message, 'error');
+        if (target == null) {
+            loadedId = null;
+            inflight = null;
+            render();
+            return Promise.resolve([]);
         }
-        render();
-        return comments;
+        const p = (async () => {
+            let list = [];
+            try {
+                const j = await request('GET', `/api/samples/${encodeURIComponent(target)}/comments`);
+                list = (j.comments || []).filter(c => c.sample_id === target);
+            } catch (e) {
+                if (seq === loadSeq) notify('Could not load comments: ' + e.message, 'error');
+            }
+            if (seq !== loadSeq) return current();         // a newer load won
+            comments = list;
+            loadedId = target;
+            inflight = null;
+            render();
+            return current();
+        })();
+        inflight = p;
+        return p;
     }
 
-    /** Called on every sample change: reload only when the sample differs. */
+    /** Called on every sample change: reload only when the sample differs. A
+        call for the sample being loaded waits for that load. */
     function setSample(id) {
         const next = id == null ? null : id;
-        if (next === sampleId) return Promise.resolve(comments);
+        if (next === sampleId) {
+            if (inflight) return inflight;
+            if (loadedId === next) return Promise.resolve(current());
+        }
         return load(next);
     }
 
-    /** POST one comment ({text} | {preset_id} | {text, t0, t1}). Returns it, or null. */
-    async function add(fields) {
-        if (sampleId == null) { notify('Select a sample first', 'info'); return null; }
+    /** POST one comment ({text} | {preset_id} | {text, t0, t1}) to ``forSample``
+        (default: the current sample). Refused (null) when the current sample is
+        not ``forSample``. Returns the comment, or null. */
+    async function add(fields, forSample) {
+        const target = forSample === undefined ? sampleId : forSample;
+        if (target == null) { notify('Select a sample first', 'info'); return null; }
+        if (target !== sampleId) {
+            notify('The selected sample changed; comment not added', 'error');
+            return null;
+        }
         const who = requireInitials();
         if (!who) return null;
         try {
-            const j = await request('POST', `/api/samples/${encodeURIComponent(sampleId)}/comments`,
+            const j = await request('POST', `/api/samples/${encodeURIComponent(target)}/comments`,
                 Object.assign({ initials: who }, fields));
-            await load(sampleId);
+            if (target === sampleId) await load(target);
             return j.comment;
         } catch (e) {
             notify('Comment not added: ' + e.message, 'error');
@@ -222,9 +256,8 @@
     }
 
     async function _delete(c, who) {
-        await request('POST', `/api/samples/${encodeURIComponent(c.sample_id != null
-            ? c.sample_id : sampleId)}/comments/${encodeURIComponent(c.id)}/delete`,
-            { initials: who });
+        await request('POST', `/api/samples/${encodeURIComponent(c.sample_id)}` +
+            `/comments/${encodeURIComponent(c.id)}/delete`, { initials: who });
     }
 
     async function remove(c) {
@@ -239,13 +272,20 @@
         await load(sampleId);
     }
 
-    /** Clear Annotations: soft-delete this sample's annotation comments. */
-    async function clearAnnotations() {
-        const targets = annotationComments(comments);
+    /** Clear Annotations: soft-delete the annotation comments of ``forSample``,
+        which must be the loaded current sample (``label`` names it in the
+        confirmation). */
+    async function clearAnnotations(forSample, label) {
+        const target = forSample === undefined ? sampleId : forSample;
+        if (target == null || target !== sampleId || loadedId !== target) {
+            notify('The selected sample changed; nothing was deleted', 'error');
+            return 0;
+        }
+        const targets = annotationComments(comments).filter(c => c.sample_id === target);
         if (!targets.length) { notify('No annotations on this sample', 'info'); return 0; }
         const who = requireInitials();
         if (!who) return 0;
-        if (!root.confirm(clearConfirmText(targets.length))) return 0;
+        if (!root.confirm(clearConfirmText(targets.length, label))) return 0;
         let done = 0;
         for (const c of targets) {
             try { await _delete(c, who); done++; } catch (e) {
@@ -306,7 +346,7 @@
 
     root.Comments = Object.assign({}, pure, {
         init, load, setSample, add, remove, clearAnnotations, loadPresets, requireInitials,
-        current: () => comments.slice(),
+        current,
         sampleId: () => sampleId,
     });
 })(typeof window !== 'undefined' ? window : globalThis);

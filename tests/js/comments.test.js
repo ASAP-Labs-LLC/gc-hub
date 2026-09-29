@@ -52,6 +52,7 @@ module.exports = (t) => {
     // Clear Annotations confirmation names the count
     t.eq(C.clearConfirmText(2).includes('2 annotation comments'), true);
     t.eq(C.clearConfirmText(1).includes('1 annotation comment '), true);
+    t.eq(C.clearConfirmText(2, '40304').includes('on sample 40304'), true);
 
     // the saved-initials key is per browser, and reading it never throws
     t.eq(typeof C.INITIALS_KEY, 'string');

@@ -1939,6 +1939,8 @@ function _setAnalysisLoading(on) {
     if (statusEl) statusEl.textContent = on ? 'Running analysis...' : 'Ready';
 }
 
+let _analysisSeq = 0;
+
 async function runAnalysis() {
     if (!state.selectedSample) {
         showNotification('Select a sample first', 'info');
@@ -1961,14 +1963,19 @@ async function runAnalysis() {
         })),
     };
 
+    // Only the latest request renders: a slow earlier analysis (another
+    // sample or other parameters) must not draw over a newer one.
+    const seq = ++_analysisSeq;
     try {
         const result = await apiPost('/api/analysis', body);
+        if (seq !== _analysisSeq) return;
         state.analysisResult = result;
+        state._renderedAnalysisSampleId = body.sample_id;
         renderAnalysisResults(result);
     } catch (e) {
-        showNotification('Analysis failed: ' + e.message, 'error');
+        if (seq === _analysisSeq) showNotification('Analysis failed: ' + e.message, 'error');
     } finally {
-        _setAnalysisLoading(false);
+        if (seq === _analysisSeq) _setAnalysisLoading(false);
     }
 }
 
@@ -2199,7 +2206,10 @@ function setupAnnotationHandler() {
             ? `${c_range}  (${t_start.toFixed(2)}–${t_end.toFixed(2)} min)`
             : `(${t_start.toFixed(2)}–${t_end.toFixed(2)} min)`;
 
-        _openAnnotationModal(regionDesc, t_start, t_end, trendDiv);
+        // The sample whose analysis the trend plot shows (else the selection)
+        const sid = state._renderedAnalysisSampleId != null ? state._renderedAnalysisSampleId
+            : (state.selectedSample ? state.selectedSample.sample_id : null);
+        _openAnnotationModal(regionDesc, t_start, t_end, trendDiv, sid);
 
         // Disable annotation mode after one annotation (no endless loop)
         annotationMode = false;
@@ -2210,7 +2220,7 @@ function setupAnnotationHandler() {
     });
 }
 
-function _openAnnotationModal(regionDesc, t_start, t_end, trendDiv) {
+function _openAnnotationModal(regionDesc, t_start, t_end, trendDiv, sampleId) {
     const modal = document.getElementById('modal-annotation');
     if (!modal) return;
 
@@ -2230,11 +2240,17 @@ function _openAnnotationModal(regionDesc, t_start, t_end, trendDiv) {
     async function _save() {
         if (busy) return;                        // one POST per save
         if (!Comments.requireInitials()) return; // keep the modal open
+        const current = state.selectedSample ? state.selectedSample.sample_id : null;
+        if (sampleId == null || current !== sampleId) {
+            // Drawn on one sample, another is selected now: never save it there
+            showNotification('The selected sample changed since this region was drawn. ' +
+                'Select that sample again to save it, or Cancel.', 'error');
+            return;                              // the modal stays open
+        }
         busy = true;
         const text = (inputEl ? inputEl.value : '').trim();
-        // on the sample shown, whatever path selected it
-        await Comments.setSample(state.selectedSample ? state.selectedSample.sample_id : null);
-        const saved = await Comments.add({ text, t0: t_start, t1: t_end });
+        await Comments.setSample(sampleId);
+        const saved = await Comments.add({ text, t0: t_start, t1: t_end }, sampleId);
         if (!saved) { busy = false; return; }    // refused: the modal stays open
         closeModal(modal);
         Plotly.restyle(trendDiv, { selectedpoints: [null] });
@@ -2294,7 +2310,8 @@ function clearAllAnnotations() {
     if (typeof Comments === 'undefined') return;
     const sid = state.selectedSample ? state.selectedSample.sample_id : null;
     if (sid == null) { showNotification('Select a sample first', 'info'); return; }
-    Comments.setSample(sid).then(() => Comments.clearAnnotations());
+    const label = state.selectedSample.lab_id || state.selectedSample.name || String(sid);
+    Comments.setSample(sid).then(() => Comments.clearAnnotations(sid, label));
 }
 
 /* ===================================================================
