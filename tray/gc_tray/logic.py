@@ -18,6 +18,8 @@ due) or processing paused / starting; red stopped, stopping or unreachable.
 from __future__ import annotations
 
 import json
+import re
+import urllib.parse
 from pathlib import Path
 from typing import Optional
 
@@ -39,6 +41,9 @@ DEFAULTS = {
     "cpu_busy_seconds": 60,
     "queue_busy_threshold": 25,
     "remember_password": True,
+    # "Open in browser" when the hub doesn't say (it normally does: its
+    # effective hub_url, https://gc.asaplabs.net unless an admin set another)
+    "hub_url": "",
 }
 
 _SERVER_STATES = {"running": "running", "processing-paused": "paused",
@@ -87,7 +92,30 @@ def load_config(path) -> dict:
     for key in ("app_name", "data_dir", "updater_python", "updater_script", "updater_config"):
         if not isinstance(cfg[key], str):
             raise ConfigError(f"tray.json: {key} must be a string")
+    if cfg["hub_url"] != "":
+        url = clean_url(cfg["hub_url"])
+        if url is None:
+            raise ConfigError("tray.json: hub_url must be empty or an http:// or https:// URL")
+        cfg["hub_url"] = url
     return cfg
+
+
+_URL_BAD_CHARS = re.compile(r"[\s\\<>\"'`]")
+
+
+def clean_url(value) -> Optional[str]:
+    """``value`` without a trailing slash if it is a plain ``http(s)://host[:port]``
+    URL (no user info, no whitespace or quotes), else None."""
+    if not isinstance(value, str) or not value or _URL_BAD_CHARS.search(value):
+        return None
+    try:
+        parts = urllib.parse.urlsplit(value)
+        parts.port  # noqa: B018 - raises ValueError on a bad port
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname or "@" in parts.netloc:
+        return None
+    return value.rstrip("/")
 
 
 def updater_port(updater_config, app_name) -> Optional[int]:
@@ -112,7 +140,14 @@ def status_url(cfg) -> str:
     return f"http://127.0.0.1:{int(cfg['port'])}"
 
 
-def browser_url(cfg) -> str:
+def browser_url(cfg, view: Optional[dict] = None) -> str:
+    """What "Open in browser" opens: the hub's own hub URL from the last
+    status (``view['hub_url']``), else tray.json's ``hub_url``, else
+    localhost. Control calls never use it (``status_url``)."""
+    for candidate in ((view or {}).get("hub_url"), cfg.get("hub_url")):
+        url = clean_url(candidate)
+        if url:
+            return url
     return f"http://localhost:{int(cfg['port'])}"
 
 
@@ -146,7 +181,8 @@ def parse_status(body, *, marker_present: bool) -> dict:
         return {"reachable": False, "state": "stopped" if marker_present else "down",
                 "version": None, "cpu_percent": None, "rss_bytes": None, "queue": None,
                 "jobs_due": None, "pending_rows": None, "staged_update": None,
-                "processing_paused": False, "updater_paused": bool(marker_present)}
+                "processing_paused": False, "updater_paused": bool(marker_present),
+                "hub_url": None}
     queue = body.get("queue") if isinstance(body.get("queue"), dict) else {}
     exporter = body.get("exporter") if isinstance(body.get("exporter"), dict) else {}
     state = body.get("state")
@@ -165,6 +201,7 @@ def parse_status(body, *, marker_present: bool) -> dict:
         "staged_update": staged if isinstance(staged, str) and staged else None,
         "processing_paused": body.get("processing_paused") is True or state == "paused",
         "updater_paused": body.get("updater_paused") is True,
+        "hub_url": clean_url(body.get("hub_url")),
     }
 
 

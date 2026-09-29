@@ -126,7 +126,8 @@ def main(argv=None) -> int:  # pragma: no cover - desktop
         return 2
     from .client import HubClient
     from .controller import Controller
-    client = HubClient(logic.status_url(cfg))
+    version = logic.read_version(Path(_script()).parent.parent)
+    client = HubClient(logic.status_url(cfg), user_agent=f"gc-hub-tray/{version}")
     ctl = Controller(cfg, client, ui.TkUI(), python=sys.executable)
     if sys.platform == "win32":
         ctl.elevate = winsys.run_elevated

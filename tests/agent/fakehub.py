@@ -64,6 +64,9 @@ class FakeHub:
         self.package_version = ""
         self.package_zip = b""
         self.package_sha_override = None
+        # raw answers for ANY route, consumed first and before the token
+        # check (what Cloudflare's edge does): (status, {header: value}, bytes)
+        self.raw_script = []
         self._server = None
         self._thread = None
 
@@ -93,6 +96,16 @@ class FakeHub:
                 rec = Recorded(method, self.path, dict(self.headers.items()), body)
                 with hub.lock:
                     hub.requests.append(rec)
+                    raw = hub.raw_script.pop(0) if hub.raw_script else None
+                if raw is not None:
+                    status, headers, data = raw
+                    self.send_response(status)
+                    for k, v in headers.items():
+                        self.send_header(k, v)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return None
                 if self.headers.get("Authorization") != "Bearer " + hub.token:
                     return self._send(401, {"error": "bad token"})
                 route = (method, u.path)

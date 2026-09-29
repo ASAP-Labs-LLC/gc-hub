@@ -12,5 +12,7 @@
   "cpu_busy_percent": 50,
   "cpu_busy_seconds": 60,
   "queue_busy_threshold": 25,
-  "remember_password": true
+  "remember_password": true,
+  "_hub_url": "Open in browser: empty = the address the hub reports (its hub URL, https://gc.asaplabs.net by default), else http://localhost:<port>. Control always stays on 127.0.0.1.",
+  "hub_url": ""
 }

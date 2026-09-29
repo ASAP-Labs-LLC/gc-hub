@@ -198,5 +198,7 @@ class Controller:
         self.ui.info(TITLE, done)
         return True
 
-    def open_browser(self) -> None:
-        self.open_url(logic.browser_url(self.cfg))
+    def open_browser(self, view: Optional[dict] = None) -> None:
+        """The hub's public address from the last poll (``view``), else
+        tray.json's ``hub_url``, else localhost."""
+        self.open_url(logic.browser_url(self.cfg, view))

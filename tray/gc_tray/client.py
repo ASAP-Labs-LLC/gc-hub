@@ -1,8 +1,9 @@
 """The tray's HTTP client for the hub (stdlib urllib).
 
 Requests carry no ``Origin``/``Sec-Fetch-Site`` (the hub's cross-site guard
-lets such non-browser clients through) and go to 127.0.0.1, which is what
-hub_control's loopback-only routes require.
+lets such non-browser clients through), name themselves (``User-Agent:
+gc-hub-tray/<version>``) and go to 127.0.0.1, which is what hub_control's
+loopback-only routes require (never the public hub URL).
 
 Neither call ever raises: a broken or truncated response (``http.client``'s
 BadStatusLine, IncompleteRead, ...), a socket error or undecodable JSON is
@@ -22,9 +23,11 @@ _NETWORK_ERRORS = (OSError, http.client.HTTPException, ValueError)
 
 
 class HubClient:
-    def __init__(self, base_url: str, *, timeout: float = 3.0) -> None:
+    def __init__(self, base_url: str, *, timeout: float = 3.0,
+                 user_agent: str = "gc-hub-tray/dev") -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.user_agent = user_agent
         # never through a proxy: this is the machine talking to itself
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -32,7 +35,9 @@ class HubClient:
         """``/api/hub/status``'s JSON, or None when the hub does not answer
         properly."""
         try:
-            with self._opener.open(self.base_url + STATUS_PATH, timeout=self.timeout) as r:
+            req = urllib.request.Request(self.base_url + STATUS_PATH,
+                                         headers={"User-Agent": self.user_agent})
+            with self._opener.open(req, timeout=self.timeout) as r:
                 body = json.loads(r.read(MAX_RESPONSE) or b"null")
         except _NETWORK_ERRORS:
             return None
@@ -45,7 +50,8 @@ class HubClient:
         cannot be reached or the answer is broken."""
         req = urllib.request.Request(self.base_url + path, data=json.dumps(body).encode("utf-8"),
                                      method="POST",
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": "application/json",
+                                              "User-Agent": self.user_agent})
         try:
             try:
                 with self._opener.open(req, timeout=timeout) as r:
