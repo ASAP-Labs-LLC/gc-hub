@@ -187,3 +187,9 @@ def test_leftover_temp_files_are_cleaned(client):
     os.utime(old, (past, past))
     assert _bundle(c, {"password": PW}).status_code == 200
     assert not old.exists()
+
+
+def test_two_builds_in_the_same_second_do_not_collide(client):
+    import hub_admin
+    names = {hub_admin._bundle_name() for _ in range(50)}
+    assert len(names) == 50 and all(n.startswith("gc-diagnostics-") for n in names)

@@ -41,10 +41,16 @@ Options (``OPTION_KEYS``; defaults in ``OPTIONS``):
   phase-1 ``correction_factors_json`` file, and the comparison standards
   (names and sizes; the files too when under ``STANDARDS_MAX_BYTES``).
 * ``updater``: the last ``UPDATER_LOG_LINES`` lines of the updater's log, its
-  config files (secret keys and token shapes redacted) and the app root's
-  small marker/state files. The app root is ``GC_APP_ROOT`` or the data
-  folder's parent (``C:\\ASAPApps\\gc``), the updater folder ``GC_UPDATER_DIR``
-  or the app root's sibling ``updater``; absent ones are skipped silently.
+  ``config.json`` (secret keys and token shapes redacted) and every other
+  non-dot file there by name and size only; from the app root only
+  ``APP_ROOT_FILES``, the ``current`` link and the release names, and only
+  when it looks like one (``releases/`` or ``current``). An allowlist: a
+  dotfile, a key or anything unknown is never read. The app root is
+  ``GC_APP_ROOT`` or the data folder's parent (``C:\\ASAPApps\\gc``), the
+  updater folder ``GC_UPDATER_DIR`` or the app root's sibling ``updater``;
+  absent ones are skipped silently. The updater's markers (``paused``,
+  ``switching``, ``switch-*``, ``staged.json``, ``held-tags.json``) are in the
+  data folder and go in the manifest.
 * ``environment``: installed packages (``name==version``), Python, platform,
   and whether each relevant environment variable is set (never its value).
 * ``all_cdfs`` (off by default): every file under ``data/cdf``, at most
@@ -163,31 +169,68 @@ ENV_NAMES = ("GC_DATA_DIR", "PORT", "GC_PORT", "GC_APP_ROOT", "GC_UPDATER_DIR",
              "QBENCH_STORE_PATH", "QBENCH_CLIENT_ID", "QBENCH_CLIENT_SECRET", "COA_DATA_DIR",
              "APPDATA", "TEMP", "HOME", "USERPROFILE")
 
-UPDATER_FILES = ("staged.json", "held-tags.json")
-SECRET_KEY_RE = re.compile(
-    r"pass(word|wd)?|secret|token|credential|api[_-]?key|private|cookie|session|setup[_-]?code"
-    r"|\bpat\b|_pat$|^pat_",
-    re.IGNORECASE)
+# Written by the updater (coa-reviewer deploy/updater/updater.py) in the data
+# folder: read, never modified.
+UPDATER_FILES = ("staged.json", "held-tags.json", "paused", "switching")
+# The only files read from the app root (N1: an allowlist). The updater keeps
+# ``releases/``, the ``current`` junction and ``data/`` there.
+APP_ROOT_FILES = ("VERSION", "current", "current.txt")
+# The only files read from the updater's folder besides updater.log; every
+# other (non-dot) file is listed by name and size.
+UPDATER_CONFIG_NAMES = ("config.json",)
+# A secret-looking key: one of these substrings, or one of these words (keys
+# are split on separators and camelCase: githubPat -> github, pat), or two
+# adjacent words making one (api + key).
+_SECRET_SUBSTRINGS = ("password", "passwd", "passphrase", "secret", "token", "credential",
+                      "apikey", "api_key", "api-key", "privatekey", "private_key",
+                      "setupcode", "setup_code", "setup-code", "authorization")
+_SECRET_WORDS = {"pat", "auth", "pwd", "pw", "pass", "cookie", "session", "private", "creds"}
+_SECRET_PAIRS = {"apikey", "privatekey", "setupcode", "accesskey", "secretkey"}
+_NOT_SECRET_KEY = re.compile(r"(_at|At|_count|Count)$|^(has|is)[_A-Z]")
 EXCLUDED_NAMES = ("admin-setup-code.txt", "qbenchlogin.txt")
 EXCLUDED_NAME_RE = re.compile(r"^(\.qbench-.*|qbench.*\.json(\.corrupt-.*)?)$", re.IGNORECASE)
 # Values that look like fragments of a secret but are not secret, and are common
 # enough in data that redacting them corrupts it (I2).
 NOT_SECRET = {"pbkdf2_sha256", "pbkdf2", "sha256", "sha512", "sha1", "bcrypt", "scrypt",
               "argon2", "argon2id", "true", "false", "null", "none"}
+
+
+def _json_kv(m):
+    key, sep, value = m.group(1), m.group(2), m.group(3)
+    if is_secret_key(key) and value != REDACTED:
+        return f'"{key}"{sep}"{REDACTED}"'
+    return m.group(0)
+
+
+def _plain_kv(m):
+    key = m.group(1)
+    if is_secret_key(key) and m.group(3) != REDACTED:
+        return m.group(1) + m.group(2) + REDACTED
+    return m.group(0)
+
+
 PATTERNS = (
     (re.compile(r"(Admin setup code:?\s*)[^\s(]+", re.IGNORECASE), r"\1" + REDACTED),
-    (re.compile(r"ghp_[A-Za-z0-9]{20,}"), REDACTED),
+    (re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"), REDACTED),
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), REDACTED),
+    (re.compile(r"(Authorization:?\s*(?:token|Bearer|Basic)\s+)(?!\[REDACTED\])\S+",
+                re.IGNORECASE), r"\1" + REDACTED),
     (re.compile(r"(Bearer\s+)(?!\[REDACTED\])\S+", re.IGNORECASE), r"\1" + REDACTED),
-    (re.compile(r'("(?:token|access_token|refresh_token|client_secret|password|secret|api_key)"'
-                r'\s*:\s*")(?:[^"\\]|\\.)*(")', re.IGNORECASE), r"\1" + REDACTED + r"\2"),
+    # the password in a URL's userinfo: scheme://user:PASS@host
+    (re.compile(r"(\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:)(?!\[REDACTED\])[^@\s/]+(@)"),
+     r"\1" + REDACTED + r"\2"),
+    # "key": "value" (JSON) and key = value / key: value (ini, logs, query strings)
+    (re.compile(r'"([^"\\]{1,100})"(\s*:\s*)"((?:[^"\\]|\\.)*)"'), _json_kv),
+    (re.compile(r"(?<![\w.-])([A-Za-z_][\w.-]{0,80})(\s*[=:]\s*)(?![\s\"'\[{/\\])"
+                r"([^\s,;&\"']+)"), _plain_kv),
 )
 
-# Lower-case substrings every PATTERNS match contains (the database scrub's
-# SQL pre-filter).
-PATTERN_HINTS = ("admin setup code", "ghp_", "github_pat_", "bearer", '"token"',
-                 '"access_token"', '"refresh_token"', '"client_secret"', '"password"',
-                 '"secret"', '"api_key"')
+# Lower-case substrings at least one of which every PATTERNS match contains
+# (the database scrub's SQL pre-filter).
+PATTERN_HINTS = ("admin setup code", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
+                 "bearer", "authorization", "://", "pass", "pwd", "pw", "pat", "auth", "secret",
+                 "token", "credential", "api", "cookie", "session", "private", "setup", "creds",
+                 "key")
 
 Progress = Optional[Callable[[dict], Any]]
 
@@ -363,8 +406,23 @@ def _walk_files(root: Path) -> list:
 
 # ── secrets ─────────────────────────────────────────────────────────────────
 
+def _key_words(key: str) -> list:
+    return [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", key)]
+
+
 def is_secret_key(key: Any) -> bool:
-    return isinstance(key, str) and bool(SECRET_KEY_RE.search(key))
+    """Whether a settings/config/JSON key names a secret (``githubPat``,
+    ``db_passwd``, ``apiKey``, ...) but not a path or a timestamp
+    (``export_path``, ``token_issued_at``)."""
+    if not isinstance(key, str) or not key or _NOT_SECRET_KEY.search(key):
+        return False
+    low = key.lower()
+    if any(s in low for s in _SECRET_SUBSTRINGS):
+        return True
+    words = _key_words(key)
+    if any(w in _SECRET_WORDS for w in words):
+        return True
+    return any(a + b in _SECRET_PAIRS for a, b in zip(words, words[1:]))
 
 
 def _qbench_store_paths() -> list:
@@ -423,14 +481,18 @@ def _hash_parts(value: str) -> list:
 class Secrets:
     """The values to redact, and how to find them in text and bytes."""
 
-    def __init__(self, raw: Iterable[str]):
+    def __init__(self, exact: Iterable[str], fragments: Iterable[str] = ()):
+        """``exact``: whole known secret values (redacted from 6 characters,
+        digits too). ``fragments``: parts of one (a hash's salt/digest, lines
+        of an unparsed file), never redacted when purely digits (I2)."""
         values: set = set()
         short = 0
-        for v in raw:
+        for v, is_fragment in [(v, False) for v in exact] + [(v, True) for v in fragments]:
             v = str(v or "").strip()
             if not v or v == REDACTED:
                 continue
-            if len(v) < MIN_SECRET_LEN or v.isdigit() or v.lower() in NOT_SECRET:
+            if (len(v) < MIN_SECRET_LEN or v.lower() in NOT_SECRET
+                    or (is_fragment and v.isdigit())):
                 short += 1
                 continue
             values.add(v)
@@ -496,18 +558,24 @@ class Secrets:
         return False
 
 
-def _lines_and_value(text: str) -> list:
-    return [text] + [line.strip() for line in text.splitlines()]
+def _password_line(text: str) -> Optional[str]:
+    """``qbenchlogin.txt``: username on line 1, password on line 2; only the
+    password is a secret."""
+    lines = text.splitlines()
+    return lines[1].strip() if len(lines) > 1 else None
 
 
 def known_secrets(data_dir: Path, db: Optional[Path], extra: Iterable[str] = ()) -> Secrets:
     """Every secret value the hub keeps (see the module docstring)."""
-    found: list = []
+    exact: list = []
+    fragments: list = []
     data_dir = Path(data_dir)
-    for name in EXCLUDED_NAMES:
-        text = _read_text(data_dir / name)
-        if text:
-            found.extend(_lines_and_value(text))
+    code = _read_text(data_dir / "admin-setup-code.txt")
+    if code:
+        exact.append(code.strip())
+    local_login = _read_text(data_dir / "qbenchlogin.txt")
+    if local_login:
+        exact.append(_password_line(local_login))
     selenium = "not found"
     login = _selenium_login_path()
     if login is not None:
@@ -516,7 +584,7 @@ def known_secrets(data_dir: Path, db: Optional[Path], extra: Iterable[str] = ())
             selenium = "creds file unreadable"
         elif text:
             selenium = "read"
-            found.extend(_lines_and_value(text))
+            exact.append(_password_line(text))
     stores = set(_qbench_store_paths())
     for p in data_dir.iterdir() if data_dir.is_dir() else ():
         if EXCLUDED_NAME_RE.match(p.name):
@@ -525,18 +593,17 @@ def known_secrets(data_dir: Path, db: Optional[Path], extra: Iterable[str] = ())
         ok, text = bounded(lambda p=p: _read_text(p))
         if not ok or text is None:
             continue
-        found.append(text)
         try:
-            found.extend(_strings(json.loads(text)))
+            exact.extend(_strings(json.loads(text)))
         except ValueError:
-            found.extend(_lines_and_value(text))
+            fragments.extend(line.strip() for line in text.splitlines())
     for env in ("QBENCH_CLIENT_ID", "QBENCH_CLIENT_SECRET"):
         if os.environ.get(env):
-            found.append(os.environ[env])
+            exact.append(os.environ[env])
     settings_text = _read_text(data_dir / "settings.json", limit=16 * 1024 * 1024)
     if settings_text:
         try:
-            found.extend(_secret_values_in(json.loads(settings_text)))
+            exact.extend(_secret_values_in(json.loads(settings_text)))
         except ValueError:
             pass
     if db is not None and Path(db).is_file():
@@ -544,14 +611,15 @@ def known_secrets(data_dir: Path, db: Optional[Path], extra: Iterable[str] = ())
         try:
             for key, value in conn.execute("SELECT key, value FROM settings_kv"):
                 if is_secret_key(key) and value:
-                    found.extend(_hash_parts(str(value)))
+                    parts = _hash_parts(str(value))
+                    (fragments if len(parts) == 2 else exact).extend(parts)
             for (h,) in conn.execute("SELECT token_hash FROM instruments "
                                      "WHERE token_hash IS NOT NULL AND token_hash != ''"):
-                found.append(str(h))
+                exact.append(str(h))
         finally:
             conn.close()
-    found.extend(str(e) for e in extra if e)
-    out = Secrets(found)
+    exact.extend(str(e) for e in extra if e)
+    out = Secrets([e for e in exact if e], fragments)
     out.selenium = selenium
     return out
 
@@ -953,6 +1021,33 @@ def _is_cdf(path: Path) -> bool:
     return path.suffix.lower() == ".cdf"
 
 
+CDF_FILE_MAX_BYTES = 50 * 1024 * 1024
+CDF_MAGIC = (b"CDF\x01", b"CDF\x02", b"\x89HDF")
+
+
+def outside_cdf_problem(path: Path) -> Optional[str]:
+    """Why a CDF outside the data folder (a calibration CDF, a problem CDF
+    stored with an absolute path) may not go in, or None: its real path must
+    be a ``.cdf``, it must start with netCDF/HDF5 magic, and be at most
+    ``CDF_FILE_MAX_BYTES``."""
+    def check():
+        real = path.resolve()
+        if not _is_cdf(path) or not _is_cdf(real):
+            return "not a .cdf"
+        if not real.is_file():
+            return "missing"
+        size = real.stat().st_size
+        if size > CDF_FILE_MAX_BYTES:
+            return f"too large ({size} bytes; the cap is {CDF_FILE_MAX_BYTES})"
+        with open(real, "rb") as fh:
+            head = fh.read(4)
+        if not any(head.startswith(m) for m in CDF_MAGIC):
+            return "not a netCDF/HDF5 file"
+        return None
+    ok, why = bounded(check)
+    return why if ok else "unreadable or timed out"
+
+
 # ── exports health (C1) ─────────────────────────────────────────────────────
 
 def _export_probe(b: _Bundle, inst_id: str, path: Path) -> dict:
@@ -1032,8 +1127,9 @@ def _add_calibration(b: _Bundle, conn: sqlite3.Connection, data_dir: Path,
             p = Path(raw)
             if not p.is_absolute():
                 p = data_dir / p
-            if not _is_cdf(p):
-                b.skip(f"{base}/{_safe(p.name)}", "calibration file is not a .cdf")
+            why = b.excluded(p) or outside_cdf_problem(p)
+            if why:
+                b.skip(f"{base}/{_safe(p.name)}", f"calibration CDF: {why}")
             else:
                 b.add_file(f"{base}/{_safe(p.name)}", p, text=False, outside_ok=True)
         assignments = inst.get("calibration_assignments")
@@ -1080,32 +1176,43 @@ def _add_calibration(b: _Bundle, conn: sqlite3.Connection, data_dir: Path,
             b.add_file(f"calibration/standards/{p.relative_to(std).as_posix()}", p, text=False)
 
 
+def _looks_like_app_root(root: Path) -> bool:
+    """The updater's app root has ``releases/`` or a ``current`` junction."""
+    cur = root / "current"
+    isjunction = getattr(os.path, "isjunction", lambda p: False)
+    return ((root / "releases").is_dir() or os.path.lexists(cur) or isjunction(cur))
+
+
 def _add_updater(b: _Bundle, data_dir: Path) -> None:
+    """N1: only known names are read (``APP_ROOT_FILES``, ``updater.log``,
+    ``UPDATER_CONFIG_NAMES``), and the app root only when it looks like one;
+    dotfiles are never read or listed."""
     root = app_root(data_dir)
     ok, is_dir = bounded(lambda: root.is_dir())
     if ok and is_dir:
-        info: dict = {"path": str(root), "files": {}, "dirs": [], "links": {}}
-        for p in sorted(root.iterdir()):
-            try:
-                if p.is_symlink() or getattr(os.path, "isjunction", lambda x: False)(p):
-                    ok, target = bounded(lambda p=p: os.readlink(p))
-                    info["links"][p.name] = redact_text(str(target), b.secrets) if ok else None
-                elif p.is_dir():
-                    info["dirs"].append(p.name)
-                    if p.name == "releases":
-                        info["releases"] = sorted(c.name for c in p.iterdir() if c.is_dir())
-                elif p.is_file():
-                    if b.excluded(p) or is_secret_key(p.name):
-                        info["files"][p.name] = {"size": p.stat().st_size,
-                                                 "content": "(not read: a secret)"}
-                    elif p.stat().st_size <= UPDATER_FILE_MAX:
-                        info["files"][p.name] = _small_file_info(p, b.secrets)
-                    else:
-                        info["files"][p.name] = {"size": p.stat().st_size,
-                                                 "content": "(not read: large)"}
-            except OSError as exc:
-                info["files"][p.name] = {"error": str(exc)}
-        b.add_json("updater/app_root.json", info)
+        ok, looks = bounded(lambda: _looks_like_app_root(root))
+        if not (ok and looks):
+            b.add_json("updater/app_root.json", {
+                "path": str(root),
+                "note": "not an updater app root (no releases/ folder, no current link); "
+                        "not read"})
+        else:
+            info: dict = {"path": str(root), "files": {}}
+            cur = root / "current"
+            isjunction = getattr(os.path, "isjunction", lambda x: False)
+            if cur.is_symlink() or isjunction(cur):
+                ok, target = bounded(lambda: os.readlink(cur))
+                info["current_target"] = redact_text(str(target), b.secrets) if ok else None
+            rel = root / "releases"
+            if rel.is_dir():
+                info["releases"] = sorted(c.name for c in rel.iterdir()
+                                          if c.is_dir() and not c.name.startswith("."))
+            info["has_data_dir"] = (root / "data").is_dir()
+            for name in APP_ROOT_FILES:
+                p = root / name
+                if p.is_file() and not p.is_symlink() and not b.excluded(p):
+                    info["files"][name] = _small_file_info(p, b.secrets)
+            b.add_json("updater/app_root.json", info)
     udir = updater_dir(data_dir)
     ok, is_dir = bounded(lambda: udir.is_dir())
     if not (ok and is_dir):
@@ -1125,9 +1232,12 @@ def _add_updater(b: _Bundle, data_dir: Path) -> None:
             b.add_text("updater/updater.log", "\n".join(lines) + "\n")
         else:
             b.skip("updater/updater.log", "unreadable or timed out")
+    listing = []
     for p in sorted(udir.iterdir()):
-        if (not p.is_file() or p.is_symlink() or p.suffix.lower() not in UPDATER_CONFIG_SUFFIXES
-                or b.excluded(p)):
+        if p.name.startswith(".") or p.is_symlink() or not p.is_file():
+            continue
+        listing.append({"name": p.name, "size": p.stat().st_size})
+        if p.name not in UPDATER_CONFIG_NAMES or b.excluded(p):
             continue
         name = f"updater/{_safe(p.name)}"
         if p.stat().st_size > UPDATER_FILE_MAX:
@@ -1138,6 +1248,7 @@ def _add_updater(b: _Bundle, data_dir: Path) -> None:
             b.add_json(name, redact_settings(json.loads(text)))
         except ValueError:
             b.add_text(name, _redact_config_text(text))
+    b.add_json("updater/listing.json", listing)
 
 
 def environment_info() -> dict:
@@ -1311,9 +1422,11 @@ def build_bundle(options: Any, *, data_dir, db, out_path, progress: Progress = N
                             continue
                         seen.add(name)
                         outside = not _within(p, data_dir)
-                        if outside and not _is_cdf(p):
-                            b.skip(name, f"outside the data folder and not a .cdf ({why})")
-                            continue
+                        if outside:
+                            bad = b.excluded(p) or outside_cdf_problem(p)
+                            if bad:
+                                b.skip(name, f"outside the data folder: {bad} ({why})")
+                                continue
                         st = _stat(p)
                         if st is None:
                             b.skip(name, f"missing ({why})")

@@ -184,7 +184,13 @@ class Seeded:
         (self.data / "switch-refused").write_text("reason: busy", encoding="utf-8")
 
         # ── the app root's markers and the updater (sibling of the app root) ──
-        (self.app_root / "paused").write_text("paused by ryan", encoding="utf-8")
+        (self.data / "paused").write_text("paused by ryan", encoding="utf-8")
+        (self.app_root / "VERSION").write_text("v3.0.0\n", encoding="utf-8")
+        # things that must never be read from an app root (N1)
+        (self.app_root / ".netrc").write_text(f"machine github.com password NETRC{MARKER}\n")
+        (self.app_root / "id_ed25519").write_text(f"-----BEGIN KEY-----\nKEY{MARKER}\n")
+        (self.app_root / ".env").write_text(f"DB_URL=postgres://u:DBPW{MARKER}@h/db\n")
+        (self.app_root / "notes.txt").write_text("NOTESCONTENTxyz\n")
         (self.app_root / "releases" / "v3.0.0").mkdir(parents=True)
         (self.app_root / "current.txt").write_text("v3.0.0", encoding="utf-8")
         self.updater = root / "updater"
@@ -197,6 +203,10 @@ class Seeded:
             {"github_token": f"ghp_{MARKER}xyz", "repo": "ASAP-Labs-LLC/gc-hub",
              "interval": 20, "apps": [{"name": "gc", "access_token": f"at-{MARKER}"}]}),
             encoding="utf-8")
+        (self.updater / "config.example.json").write_text('{"x": 1}', encoding="utf-8")
+        (self.updater / "secrets.json").write_text(f'{{"k": "UPDSECRET{MARKER}"}}',
+                                                   encoding="utf-8")
+        (self.updater / ".env").write_text(f"GH=UPDENV{MARKER}\n", encoding="utf-8")
 
     def build(self, options=None, **kw):
         out = self.root / "out.zip"
@@ -769,10 +779,46 @@ def test_updater_context(seeded):
     assert cfg["github_token"] == "[REDACTED]"
     assert cfg["apps"][0]["access_token"] == "[REDACTED]"
     markers = json.loads(m["updater/app_root.json"])
-    assert markers["files"]["paused"]["content"] == "paused by ryan"
     assert markers["files"]["current.txt"]["content"] == "v3.0.0"
-    assert "releases" in markers["dirs"]
+    assert markers["files"]["VERSION"]["content"] == "v3.0.0\n"
+    assert markers["releases"] == ["v3.0.0"]
+    assert set(markers["files"]) == {"current.txt", "VERSION"}
+    assert manifest["updater"]["paused"]["content"] == "paused by ryan"   # data dir marker
+    # the updater folder: log + known config read; everything else by name/size only
+    assert "updater/secrets.json" not in m and "updater/config.example.json" not in m
+    listing = {f["name"]: f["size"] for f in json.loads(m["updater/listing.json"])}
+    assert "secrets.json" in listing and "config.example.json" in listing
+    assert ".env" not in listing
     _assert_no_marker(m)
+
+
+def test_app_root_is_an_allowlist(seeded):
+    """N1: dotfiles, keys and unknown files in the app root never go in, not
+    even by name."""
+    out, _ = seeded.build()
+    m = _members(out)
+    for bad in ("NETRC", "KEY" + MARKER, "DBPW", "NOTESCONTENTxyz", "id_ed25519", ".netrc",
+                "notes.txt", ".env"):
+        assert _hits({k: v for k, v in m.items() if k.startswith("updater/")}, bad) == [], bad
+    _assert_no_marker(m)
+
+
+def test_a_folder_that_is_not_an_app_root_is_not_read(seeded, tmp_path, monkeypatch):
+    """N1: GC_APP_ROOT aimed at a home-like folder (no releases/, no current)."""
+    home = tmp_path / "fakehome"
+    home.mkdir()
+    (home / ".netrc").write_text("machine github.com login ryan password NETRCPASSxyz\n")
+    (home / ".git-credentials").write_text("https://ryan:GITCREDTOKENxyz@github.com\n")
+    (home / "id_ed25519").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nKEYMATxyz\n")
+    (home / ".env").write_text("DB_URL=postgres://u:DBPWxyz@h/db\n")
+    (home / "VERSION").write_text("VERSIONFROMHOMExyz")
+    monkeypatch.setenv("GC_APP_ROOT", str(home))
+    out, _ = seeded.build({"updater": True})
+    m = _members(out)
+    for bad in ("NETRCPASSxyz", "GITCREDTOKENxyz", "KEYMATxyz", "DBPWxyz", "VERSIONFROMHOMExyz"):
+        assert _hits(m, bad) == [], bad
+    info = json.loads(m["updater/app_root.json"])
+    assert "not an updater app root" in info["note"] and "files" not in info
 
 
 def test_updater_paths_are_configurable_and_skipped_when_absent(seeded, tmp_path,
@@ -929,3 +975,89 @@ def test_app_and_uploader_name_the_same_selenium_login_file():
               and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Constant)}
     import qbench_pdf_uploader
     assert consts["_QBENCH_CREDS_FILE"] == qbench_pdf_uploader.CREDENTIALS_FILE
+
+
+# ── round 3 ─────────────────────────────────────────────────────────────────
+
+def test_more_token_shapes_are_redacted(seeded):
+    with open(seeded.data / "app.log", "a", encoding="utf-8") as f:
+        f.write("oauth gho_" + "Q" * 30 + " and ghs_" + "R" * 30 + " and ghu_" + "S" * 25 + "\n")
+        f.write("clone https://ryan:URLPASSWORD123@github.com/x.git\n")
+        f.write("Authorization: token AUTHTOKENabc123\n")
+        f.write("Authorization: Basic QkFTSUNBVVRIeHl6\n")
+        f.write('{"githubPat": "CAMELPATxyz1", "export_path": "C:/keep/me.csv"}\n')
+        f.write("githubPat = INIPATxyz2\n")
+        f.write("login pwd=PWDVALUExyz3 path=C:/also/kept\n")
+    out, _ = seeded.build()
+    log = _members(out)["logs/app.log"].decode()
+    for gone in ("Q" * 30, "R" * 30, "S" * 25, "URLPASSWORD123", "AUTHTOKENabc123",
+                 "QkFTSUNBVVRIeHl6", "CAMELPATxyz1", "INIPATxyz2", "PWDVALUExyz3"):
+        assert gone not in log, gone
+    assert "https://ryan:[REDACTED]@github.com" in log
+    assert "C:/keep/me.csv" in log and "path=C:/also/kept" in log
+
+
+def test_secret_key_names():
+    for k in ("githubPat", "github_pat", "PAT", "authToken", "Authorization", "pwd", "db_passwd",
+              "clientSecret", "apiKey", "api-key", "credentials", "password"):
+        assert diagnostics.is_secret_key(k), k
+    for k in ("export_path", "path", "processed_cdf_dir", "author", "pattern", "patch",
+              "analysis_window", "hub_url", "compatible"):
+        assert not diagnostics.is_secret_key(k), k
+
+
+def test_settings_keep_paths_redact_camel_case_secrets(seeded):
+    doc = json.loads((seeded.data / "settings.json").read_text())
+    doc["githubPat"] = "CAMEL-SETTING-PAT-1"
+    (seeded.data / "settings.json").write_text(json.dumps(doc))
+    out, _ = seeded.build()
+    s = json.loads(_members(out)["settings/settings.json"])
+    assert s["githubPat"] == "[REDACTED]"
+    assert s["processed_cdf_dir"] == seeded.settings["processed_cdf_dir"]
+
+
+def test_outside_cdfs_need_netcdf_magic_and_a_size_cap(seeded, tmp_path, monkeypatch):
+    fake = tmp_path / "fake" / "NOTREALLY.CDF"
+    fake.parent.mkdir()
+    fake.write_text("machine x password FAKECDFxyz\n")
+    big = tmp_path / "fake" / "BIG.CDF"
+    big.write_bytes(b"\x89HDF\r\n" + b"0" * 200)
+    link = tmp_path / "fake" / "LINK.CDF"
+    try:
+        link.symlink_to(seeded.creds)
+    except (OSError, NotImplementedError):
+        link = None
+    with store.connection(seeded.db) as conn:
+        conn.execute("UPDATE instruments SET calibration_cdf=? WHERE id='gc2'", (str(fake),))
+        conn.execute("UPDATE samples SET cdf_path=? WHERE id=?", (str(big), seeded.error_id))
+        if link is not None:
+            recent = _iso(seeded.now - timedelta(days=2))
+            sid = seeded.ids[("awaiting_calibration", recent, None)][0]
+            conn.execute("UPDATE samples SET cdf_path=? WHERE id=?", (str(link), sid))
+    monkeypatch.setattr(diagnostics, "CDF_FILE_MAX_BYTES", 100)
+    out, manifest = seeded.build()
+    m = _members(out)
+    assert _hits(m, "FAKECDFxyz") == []
+    assert not any(n.endswith("NOTREALLY.CDF") for n in m)
+    assert not any(n.endswith("BIG.CDF") for n in m)
+    assert not any(n.endswith("LINK.CDF") for n in m)
+    reasons = " ".join(s["reason"] for s in manifest["skipped"])
+    assert "not a netCDF" in reasons and "too large" in reasons
+    assert b"NOTREALLY.CDF" in m["summary.txt"]
+    assert m["calibration/gc1/CAL_09162026.CDF"] == b"CDF\x01calibration"
+
+
+def test_numeric_known_secrets_are_redacted(seeded):
+    store.samples.update(seeded.error_id, review_note="pw 83920175", db=seeded.db)
+    q = json.loads((seeded.data / "qbench.json").read_text())
+    q["client_secret"] = "55512345"
+    (seeded.data / "qbench.json").write_text(json.dumps(q))
+    seeded.creds.write_text("labuser\n90807060\n", encoding="utf-8")
+    with open(seeded.data / "app.log", "a", encoding="utf-8") as f:
+        f.write("typed 83920175, secret 55512345, web 90807060, user labuser, area 1310000\n")
+    out, manifest = seeded.build(extra_secrets=["83920175"])
+    m = _members(out)
+    for gone in ("83920175", "55512345", "90807060"):
+        assert _hits(m, gone) == [], gone
+    log = m["logs/app.log"].decode()
+    assert "labuser" in log and "1310000" in log      # the username and data survive

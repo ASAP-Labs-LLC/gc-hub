@@ -505,8 +505,10 @@ def _bundle_name() -> str:
     import re
     import socket
     import version
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    raw = f"gc-diagnostics-{socket.gethostname()}-{version.APP_VERSION}-{stamp}"
+    import secrets as _secrets
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    raw = (f"gc-diagnostics-{socket.gethostname()}-{version.APP_VERSION}-{stamp}-"
+           f"{_secrets.token_hex(3)}")
     return re.sub(r"[^A-Za-z0-9._-]+", "_", raw)
 
 
@@ -539,13 +541,13 @@ def api_admin_diagnostics_bundle():
                     options, data_dir=data_dir, db=_db(), out_path=part,
                     who=f"admin@{_who()}", runtime=hub.running(),
                     extra_secrets=[password] if isinstance(password, str) else [])
+                final = tmp / f"{name}.zip"
+                part.replace(final)
             except Exception as exc:  # noqa: BLE001 - report it, never kill the hub
                 log.error("diagnostics bundle failed:\n%s", traceback.format_exc())
-                with contextlib.suppress(OSError):
-                    part.unlink()
+                for leftover in (part, tmp / f"{name}.zip"):
+                    _unlink_quietly(leftover)
                 return _err(f"The diagnostics bundle failed: {type(exc).__name__}: {exc}", 500)
-            final = tmp / f"{name}.zip"
-            part.replace(final)
             token = diagnostics.register_download(final, f"{name}.zip")
     except diagnostics.Busy as exc:
         return _err(str(exc), 409)
