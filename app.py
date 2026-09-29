@@ -640,11 +640,16 @@ def _instrument_ctx(instrument_id: str, conf: dict, db, data: Path) -> dict:
     return instruments.context(row, conf, data_dir=data)
 
 
-def _revision_ladder(sample: dict, conf: dict, db, data: Path) -> tuple[list, list]:
+_CURRENT = object()
+
+
+def _revision_ladder(sample: dict, conf: dict, db, data: Path,
+                     rev: Any = _CURRENT) -> tuple[list, list]:
     """``(times, carbons)`` for labelling a sample's carbon ranges: the anchor
-    pairs its current revision was computed with (``calibration_used``), else
-    the instrument's calibration ladder."""
-    rev = store.get_revision(sample["id"], db=db) if sample.get("current_revision") else None
+    pairs its revision (the current one, or ``rev``) was computed with
+    (``calibration_used``), else its own instrument's calibration ladder."""
+    if rev is _CURRENT:
+        rev = store.get_revision(sample["id"], db=db) if sample.get("current_revision") else None
     cal = _json_col(rev.get("calibration_used"), {}) if rev else {}
     anchors = cal.get("anchors") if isinstance(cal, dict) else None
     if anchors and len(anchors) >= 2:
@@ -1754,16 +1759,33 @@ def _requested_revision(sample: dict, db) -> Optional[dict]:
 #  API: Chromatogram trace
 # ===================================================================== #
 
+def _trace_ladder(sample: dict, rev: Optional[dict], db, data: Path) -> tuple[list, list]:
+    """The carbon markers for a trace: that revision's ladder (its own
+    instrument's, never gc1's), ``([], [])`` when there is none."""
+    try:
+        times, carbons = _revision_ladder(sample, settings_mod.load_settings(), db, data, rev=rev)
+        n = min(len(times), len(carbons))
+        return [float(x) for x in times[:n]], [int(c) for c in carbons[:n]]
+    except Exception:  # noqa: BLE001 - labels are optional; the trace is not
+        LOGGER.exception("No carbon ladder for sample %s", sample.get("id"))
+        return [], []
+
+
 @app.route("/api/samples/<int:sample_id>/trace", methods=["GET"])
 def api_sample_trace(sample_id: int):
     """The chromatogram of the CDF the (current or ``?revision=``) revision was
-    computed from; the sample's stored file when it has no revision."""
+    computed from; the sample's stored file when it has no revision. With
+    ``cal_times``/``cal_carbons``: that revision's ladder, which the page's
+    carbon markers use (a gc2 sample is labelled with gc2's anchors)."""
     data, db = _hub()
     s = _sample_or_404(sample_id, db, from_path=True)
-    p = _revision_cdf(s, _requested_revision(s, db), data)
+    rev = _requested_revision(s, db)
+    p = _revision_cdf(s, rev, data)
     try:
         t, y = distill.gc_xy_from_cdf(p)
-        return jsonify({"sample_id": s["id"], "x": t.tolist(), "y": y.tolist(), "name": s["lab_id"]})
+        cal_times, cal_carbons = _trace_ladder(s, rev, db, data)
+        return jsonify({"sample_id": s["id"], "x": t.tolist(), "y": y.tolist(), "name": s["lab_id"],
+                        "cal_times": cal_times, "cal_carbons": cal_carbons})
     except Exception as exc:
         return _error(str(exc), 500)
 
