@@ -38,7 +38,9 @@ COMMENTS = [
     {"id": 7, "text": "Sample appears to be gasoline.", "initials": "RB",
      "created_at": "2026-09-29T10:00:00", "t0": None, "t1": None},
     {"id": 8, "text": "<img src=file:///etc/passwd> & more", "initials": "AB",
-     "created_at": "2026-09-29T11:00:00", "t0": 1.9, "t1": 2.1},
+     "created_at": "2026-09-29T11:00:00", "t0": 1.3, "t1": 2.1},
+    {"id": 9, "text": "Narrow mark", "initials": "CD",
+     "created_at": "2026-09-29T12:00:00", "t0": 1.9, "t1": 2.1},
 ]
 
 

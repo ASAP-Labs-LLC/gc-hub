@@ -1091,7 +1091,9 @@ def _generate_comparison_html(
 def _comment_line(c: dict, ladder) -> str:
     """One comment as printed in a report (plain text; the HTML escapes it):
     ``text (initials, date)``, or for an annotation ``text (Cx–Cy, a–b min;
-    initials, date)``. Initials only, never the IP."""
+    initials, date)`` with the report's ladder (``Cx`` when both ends round
+    to one carbon, as the default annotation label). Initials only, never
+    the IP."""
     who = f"{c.get('initials') or '?'}, {str(c.get('created_at') or '')[:10]}"
     t0, t1 = c.get("t0"), c.get("t1")
     if t0 is None or t1 is None:
@@ -1101,7 +1103,8 @@ def _comment_line(c: dict, ladder) -> str:
         try:
             c0 = round(analysis_core.ladder_time_to_carbon(float(t0), ladder))
             c1 = round(analysis_core.ladder_time_to_carbon(float(t1), ladder))
-            span = f"C{c0}–C{c1}, {span}"
+            carbons = f"C{c0}" if c0 == c1 else f"C{c0}–C{c1}"
+            span = f"{carbons}, {span}"
         except ValueError:
             pass
     return f"{c.get('text', '')} ({span}; {who})"
