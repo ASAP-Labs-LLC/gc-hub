@@ -284,3 +284,40 @@ def test_admin_page_shows_the_history_import_section(admin_hub):
     port, _h, _pw = admin_hub
     html = get_text(port, "/admin/hub")
     assert 'id="ih-inst"' in html and 'id="btn-ih-start"' in html and 'id="btn-ih-stop"' in html
+
+
+# ── the admin page (v3.0.1: the dry run is a polled job) ─────────────────────
+
+def test_admin_page_dry_run_polls_the_job_and_shows_the_summary(admin_hub, tmp_path):
+    webdriver = pytest.importorskip("selenium.webdriver")
+    from selenium.webdriver.chrome.options import Options
+    from bootapp import browser_sign_in
+    port, _h, pw = admin_hub
+    processed = tmp_path / "page" / "processed_cdfs2"
+    sample(processed, "PG-1", datetime(2026, 9, 19, 10, 0, 0), method=SIMDIS)
+    opts = Options()
+    for arg in ("--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"):
+        opts.add_argument(arg)
+    try:
+        drv = webdriver.Chrome(options=opts)
+    except Exception as exc:  # noqa: BLE001 - no Chrome / driver here
+        pytest.skip(f"headless Chrome unavailable: {exc}")
+    try:
+        browser_sign_in(drv, port)
+        drv.get(f"http://127.0.0.1:{port}/admin/hub")
+        drv.find_element("id", "pw").send_keys(pw)
+        drv.find_element("id", "btn-refresh").click()
+        # the refresh's admin calls finish (one password check per client at a time)
+        assert _poll_until(lambda: drv.execute_script(
+            "return document.querySelectorAll('#ih-inst option').length"
+            " && document.querySelectorAll('#presets li').length") > 0, timeout=30)
+        drv.find_element("id", "ih-processed").send_keys(str(processed))
+        drv.find_element("id", "btn-ih-dryrun").click()
+        assert _poll_until(lambda: "Dry run done (nothing written)"
+                           in drv.find_element("id", "ih-result").text, timeout=60), \
+            drv.find_element("id", "ih-result").text + " | " + drv.find_element("id", "msg").text
+        text = drv.find_element("id", "ih-result").text
+        assert '"dry_run": true' in text
+        assert "Dry run done" in drv.find_element("id", "msg").text
+    finally:
+        drv.quit()
