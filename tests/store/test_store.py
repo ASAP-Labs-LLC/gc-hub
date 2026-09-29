@@ -97,6 +97,16 @@ SPEC_COLUMNS = {
     # 2D (beyond the spec): one row per real history-import run
     "import_runs": {"id", "instrument_id", "started_at", "finished_at", "by", "sources",
                     "counts", "stopped"},
+    # schema v2 (phase 4): comment presets, sample comments, the report log
+    "comment_presets": {"id", "text", "sort", "active", "created_by", "created_at",
+                        "updated_at"},
+    "sample_comments": {"id", "sample_id", "revision", "text", "preset_id", "source", "t0", "t1",
+                        "author_initials", "author_ip", "created_at", "deleted_at",
+                        "deleted_by_initials", "deleted_by_ip"},
+    "report_log": {"id", "sample_id", "revision", "kind", "standard_name", "params_json",
+                   "ranges_json", "windows_json", "bullets_json", "bullets_text", "conclusion",
+                   "conclusion_edited", "comment_ids_json", "app_version", "pdf_sha256",
+                   "created_at", "author_initials", "author_ip"},
 }
 
 
@@ -171,7 +181,7 @@ def test_pre_migrate_backup_is_written(tmp_path):
 
 
 def _wal_v1_with_unflushed_rows(tmp_path):
-    """A v1 database whose 20 settings_kv rows live only in un-checkpointed WAL frames.
+    """A current-schema database whose 20 settings_kv rows live only in un-checkpointed WAL frames.
 
     The writer connection is returned still open: SQLite checkpoints (and on
     Linux deletes) the -wal when the last connection closes, and whether an
@@ -201,33 +211,33 @@ def _wal_v1_with_unflushed_rows(tmp_path):
 def test_pre_migrate_backup_captures_wal_frames(tmp_path, monkeypatch):
     path, holder = _wal_v1_with_unflushed_rows(tmp_path)
     try:
-        v2 = ("CREATE TABLE extra_v2(x)", "INSERT INTO extra_v2 VALUES (1)")
-        monkeypatch.setattr(store, "MIGRATIONS", store.MIGRATIONS + (v2,))
-        assert store.migrate(path) == 2
+        nxt = ("CREATE TABLE extra_next(x)", "INSERT INTO extra_next VALUES (1)")
+        monkeypatch.setattr(store, "MIGRATIONS", store.MIGRATIONS + (nxt,))
+        assert store.migrate(path) == store.SCHEMA_VERSION + 1
     finally:
         holder.close()
-    backups = list((tmp_path / "backups").glob("pre-migrate-1-*.db"))
+    backups = list((tmp_path / "backups").glob(f"pre-migrate-{store.SCHEMA_VERSION}-*.db"))
     assert len(backups) == 1
     copy = sqlite3.connect(backups[0])
     try:
         assert copy.execute("SELECT COUNT(*) FROM settings_kv").fetchone()[0] == 20
-        assert copy.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert copy.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
     finally:
         copy.close()
 
 
 def test_failed_migration_step_is_atomic(tmp_path, monkeypatch):
     path, holder = _wal_v1_with_unflushed_rows(tmp_path)
-    v2 = ("CREATE TABLE extra_v2(x)", "THIS IS NOT SQL")
-    monkeypatch.setattr(store, "MIGRATIONS", store.MIGRATIONS + (v2,))
+    nxt = ("CREATE TABLE extra_next(x)", "THIS IS NOT SQL")
+    monkeypatch.setattr(store, "MIGRATIONS", store.MIGRATIONS + (nxt,))
     try:
         with pytest.raises(sqlite3.OperationalError):
             store.migrate(path)
     finally:
         holder.close()
     with store.connection(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
-        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='extra_v2'").fetchone()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='extra_next'").fetchone()
         assert conn.execute("SELECT COUNT(*) FROM settings_kv").fetchone()[0] == 20
 
 
