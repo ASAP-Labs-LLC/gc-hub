@@ -30,6 +30,8 @@ sending them is just a LAN client with odd headers.
   ``app``'s guard and ``admin_auth`` both use it: one origin rule.
 * ``throttle_key(ip)`` — IPv6 grouped by /64; IPv4-mapped unwrapped.
 * ``https_url()``   — this request's URL with ``https://`` (the 308 target).
+* ``log_safe(text)`` — request-derived text with its control characters
+  escaped, for a log line (``request.path`` is percent-decoded: ``%0A``).
 
 Stdlib + Flask's ``request`` only; reads ``settings.json`` directly (cached on
 its mtime) so it has no import-time side effects and no store access.
@@ -289,6 +291,26 @@ def cross_site_refusal(req=None) -> Optional[str]:
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
+
+def _log_escape(ch: str) -> str:
+    code = ord(ch)
+    if code < 32 or 0x7F <= code <= 0x9F:
+        return f"\\x{code:02x}"
+    if code in (0x2028, 0x2029):
+        return f"\\u{code:04x}"
+    return ch
+
+
+def log_safe(value: Any) -> str:
+    """Request-derived text (a path, a ``Host``, an error text that may echo
+    the request) made safe for one log line: C0/C1 control characters, DEL and
+    U+2028/U+2029 become ``\\xNN``/``\\uNNNN`` escapes, so a percent-decoded
+    ``%0A`` can never start a forged line in app.log. Anything else is kept
+    as is; a value that is not text is logged as its ``repr``."""
+    if not isinstance(value, str):
+        value = repr(value)
+    return "".join(_log_escape(ch) for ch in value)
+
 
 def throttle_key(addr: Any) -> str:
     """A throttle bucket for an address: IPv6 by /64, IPv4 as is."""

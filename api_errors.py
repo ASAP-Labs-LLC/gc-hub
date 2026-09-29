@@ -7,11 +7,17 @@ page, and the front end showed ``SyntaxError: Unexpected token '<'``.
 
 * any ``HTTPException`` on an ``/api/`` path → ``{error, status, ref}`` with
   the exception's own description, its status and headers (``Allow`` on a
-  405), logged at INFO;
+  405, ``Retry-After`` on a 503), logged at INFO (a deliberate 502/503/504
+  keeps its status and is logged at ERROR; a plain 500 is the generic answer
+  below);
 * any uncaught ``Exception`` on an ``/api/`` path → 500 ``{error, status,
   ref}`` with a generic message naming the ref, and the full traceback logged
   at ERROR with the ref, method, path and ``netctx.client_ip()``. Never the
   request body, never internals in the answer.
+
+Every request-derived field in a log line (method, path) goes through
+``netctx.log_safe``: ``request.path`` is percent-decoded, and a ``%0A`` in a
+segment would otherwise write a forged line into ``app.log``.
 
 ``ref`` is a short random id that ties what the person saw to the line in
 ``app.log``. Handlers registered for a specific code or exception class
@@ -64,9 +70,17 @@ def _answer(message: str, status: int, ref: str):
     return resp
 
 
+def _where() -> tuple:
+    """(method, path) for a log line, control characters escaped: the path is
+    percent-decoded, so ``%0A`` in a segment would otherwise start a forged
+    line in app.log."""
+    return netctx.log_safe(request.method), netctx.log_safe(request.path)
+
+
 def _server_error(exc: BaseException):
     ref = new_ref()
-    log.error("unhandled error ref %s on %s %s from %s", ref, request.method, request.path,
+    method, path = _where()
+    log.error("unhandled error ref %s on %s %s from %s", ref, method, path,
               _client(), exc_info=(type(exc), exc, exc.__traceback__))
     return _answer(GENERIC_500.format(ref=ref), 500, ref)
 
@@ -77,11 +91,14 @@ def handle_http_exception(exc: HTTPException):
     original = getattr(exc, "original_exception", None)
     if exc.code >= 500 and original is not None:
         return _server_error(original)          # Flask's wrapper around an uncaught error
-    if exc.code >= 500:
+    if exc.code == 500:
         return _server_error(exc)
     ref = new_ref()
-    log.info("HTTP %s ref %s on %s %s from %s: %s", exc.code, ref, request.method,
-             request.path, _client(), exc.name)
+    method, path = _where()
+    # a deliberate 5xx (502/503/504: upstream or busy) keeps its own status
+    level = logging.ERROR if exc.code >= 500 else logging.INFO
+    log.log(level, "HTTP %s ref %s on %s %s from %s: %s", exc.code, ref, method, path,
+            _client(), exc.name)
     resp = _answer(exc.description or exc.name, exc.code, ref)
     for key, value in exc.get_headers():
         if key.lower() in _KEEP_HEADERS:

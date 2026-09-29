@@ -301,3 +301,20 @@ def test_forwarded_scheme_is_ignored_from_an_untrusted_peer():
 def test_more_cloudflare_headers_make_it_not_local(header):
     with ctx(LOOPBACK, {"Host": "localhost:5560", header: "cloudflare"}):
         assert not netctx.is_local() and netctx.is_proxied()
+
+
+# ── log_safe: request-derived text in a log line ─────────────────────────────
+
+def test_log_safe_escapes_every_control_character():
+    """A percent-decoded path (``%0A``), a Host or an error text must never
+    start a new line in app.log or drive the terminal: C0/C1 controls, DEL and
+    the Unicode line/paragraph separators are written as escapes."""
+    raw = "/api/x/\n2026-01-01 00:00:00 [ERROR] forged\r\x00\x1b[31m\x7f\x85  \t"
+    safe = netctx.log_safe(raw)
+    assert all(not (ord(ch) < 32 or 0x7f <= ord(ch) <= 0x9f) for ch in safe), safe
+    assert " " not in safe and " " not in safe
+    assert safe == ("/api/x/\\x0a2026-01-01 00:00:00 [ERROR] forged\\x0d\\x00\\x1b[31m\\x7f"
+                    "\\x85\\u2028\\u2029\\x09")
+    assert netctx.log_safe("/api/instruments/gc1/é💥") == "/api/instruments/gc1/é💥"
+    assert netctx.log_safe(None) == "None"
+    assert netctx.log_safe(b"a\nb") == "b'a\\nb'"        # not text: its repr, one line

@@ -82,6 +82,19 @@ def make_app():
         request.get_data()
         return jsonify({"ok": True})
 
+    @app.route("/api/things/<name>/only-get")
+    def thing(name):
+        return jsonify({"name": name})
+
+    @app.route("/api/things/<name>/boom", methods=["POST"])
+    def thing_boom(name):
+        raise RuntimeError("boom")
+
+    @app.route("/api/upstream/<int:code>")
+    def upstream(code):
+        from werkzeug.exceptions import abort
+        abort(code)
+
     return app
 
 
@@ -160,6 +173,50 @@ def test_page_errors_keep_the_html_pages(client):
     assert r.status_code == 405 and not r.is_json
 
 
+FORGED = "2026-01-01 00:00:00 [ERROR] forged: x"
+FORGED_PATH = "%0A2026-01-01%2000:00:00%20[ERROR]%20forged:%20x"
+
+
+def _no_forged_line(caplog):
+    for rec in caplog.records:
+        msg = rec.getMessage()
+        assert "\n" not in msg and "\r" not in msg, msg
+    assert not any(line.startswith(FORGED) for line in caplog.text.splitlines()), caplog.text
+
+
+def test_a_percent_encoded_newline_in_the_path_cannot_forge_a_log_line(client, caplog):
+    """``request.path`` is percent-decoded: ``%0A`` in a segment is a real
+    newline. Logged raw, it wrote a whole fake line into app.log."""
+    with caplog.at_level(logging.INFO):
+        r = client.post(f"/api/things/{FORGED_PATH}/only-get")          # 405, logged at INFO
+        assert r.status_code == 405
+        r = client.post(f"/api/things/{FORGED_PATH}/boom")              # 500, logged at ERROR
+        assert r.status_code == 500
+    _no_forged_line(caplog)
+    lines = [rec.getMessage() for rec in caplog.records if rec.name == "api_errors"]
+    assert len(lines) == 2
+    assert all("\\x0a2026-01-01 00:00:00 [ERROR] forged: x" in line for line in lines), lines
+
+
+@pytest.mark.parametrize("code", [502, 503, 504])
+def test_a_5xx_http_exception_keeps_its_own_status(client, caplog, code):
+    """A deliberate 502/503/504 is not an unhandled error: it keeps its status
+    (the front end and the updater can tell "busy" from "broken")."""
+    with caplog.at_level(logging.INFO):
+        r = client.get(f"/api/upstream/{code}")
+    assert r.status_code == code
+    body = r.get_json()
+    assert body["status"] == code and body["ref"] and body["error"]
+    assert any(body["ref"] in rec.getMessage() and str(code) in rec.getMessage()
+               for rec in caplog.records if rec.name == "api_errors"), caplog.text
+
+
+def test_a_plain_500_http_exception_is_still_the_generic_answer(client):
+    r = client.get("/api/upstream/500")
+    assert r.status_code == 500
+    assert GENERIC.match(r.get_json()["error"])
+
+
 def test_every_response_says_it_came_from_the_hub(client):
     """``X-GC-Hub`` tells the front end a page is the hub's own, not
     Cloudflare's (through the tunnel every response carries cf-ray)."""
@@ -221,3 +278,15 @@ def test_the_real_app_keeps_its_json_404_and_html_pages(hub):
     code, h, raw = _raw(port, "GET", "/definitely-not-a-page")
     assert code == 404 and not h["content-type"].startswith("application/json")
     assert h.get("x-gc-hub") == "1"
+
+
+def test_the_real_app_log_has_no_forged_line_from_a_percent_encoded_path(hub):
+    """The critic's proof, on the real app: ``%0A`` in a path segment wrote a
+    whole fake ``[ERROR]`` line into app.log."""
+    port, data = hub
+    code, _h, _body = _raw(port, "POST", f"/api/instruments/{FORGED_PATH}/corrections",
+                           b"{}", {"Content-Type": "application/json"})
+    assert code == 405
+    text = (data / "app.log").read_text(encoding="utf-8", errors="replace")
+    assert "\\x0a2026-01-01 00:00:00 [ERROR] forged: x" in text      # logged, escaped
+    assert not any(line.startswith(FORGED) for line in text.splitlines()), text[-2000:]
