@@ -1775,7 +1775,7 @@ async function autoSelectBestFitStandard(file) {
             const std = state.comparisonStandards.find(s => s.name === res.best_standard);
             if (std && (!state.selectedStandard || state.selectedStandard.name !== std.name)) {
                 state.selectedStandard = std;
-                renderAnalysisStandards();
+                renderComparisonStandards();   // show it selected, as a manual pick does
                 updateAnalysisOverlay();
                 maybeAutoRunAnalysis();
             }
