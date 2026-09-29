@@ -65,7 +65,6 @@ const state = {
     traces: [],             // [{sample_id, name, visible, color, x, y}]
     dcTraces: [],           // [{sample_id, name, visible, color, percent, temperature}]
     tableData: { columns: [], rows: [] },
-    calibration: { peak_times: [], carbon_numbers: [], boiling_points: [] },
     comparisonStandards: [],
     analysisResult: null,
     analysisQueue: [],      // [{sample_id, lab_id, sample_name, standard_name, added_at, ...}]
@@ -448,14 +447,6 @@ async function onInstrumentFilterChange() {
     if (needsServerSearch(q, state.filesTotal, state.files.length)) _serverSearch(q);
 }
 
-async function loadCalibration() {
-    try {
-        state.calibration = await apiGet('/api/calibration');
-    } catch (e) {
-        console.error('Failed to load calibration:', e);
-    }
-}
-
 async function loadTableData() {
     try {
         state.tableData = await apiGet('/api/table');
@@ -480,7 +471,6 @@ async function refreshAll() {
     await Promise.all([
         loadFiles(),
         loadTableData(),
-        loadCalibration(),
         loadComparisonStandards(),
     ]);
     showNotification('Data refreshed', 'success');
@@ -982,29 +972,15 @@ async function loadDashboardData(file) {
             name: traceLabel(file, state.instrumentNames),
             line: { color: '#58a6ff', width: 1.5 },
         }];
-        // Add calibration overlays
-        const calShapes = [];
-        const calAnnotations = [];
-        if (state.calibration.peak_times && state.calibration.peak_times.length > 0) {
-            for (let i = 0; i < state.calibration.peak_times.length; i++) {
-                const rt = state.calibration.peak_times[i];
-                const cn = state.calibration.carbon_numbers ? state.calibration.carbon_numbers[i] : (i + 5);
-                calShapes.push({
-                    type: 'line', x0: rt, x1: rt, y0: 0, y1: 1, yref: 'paper',
-                    line: { color: '#d29922', width: 1, dash: 'dot' },
-                });
-                calAnnotations.push({
-                    x: rt, y: 1, yref: 'paper', text: `C${cn}`,
-                    showarrow: false, font: { color: '#d29922', size: 9 }, yanchor: 'bottom',
-                });
-            }
-        }
+        // Carbon markers: the sample revision's own ladder (served with its
+        // trace), so a gc2 sample is labelled with gc2's calibration
+        const markers = carbonMarkers(traceData.cal_times, traceData.cal_carbons);
         Plotly.react(chromDiv, chromTraces, basePlotlyLayout({
             title: { text: traceLabel(file, state.instrumentNames), font: { size: 14 } },
             xaxis: { title: 'Time (min)', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
             yaxis: { title: 'Intensity', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
-            shapes: calShapes,
-            annotations: calAnnotations,
+            shapes: markers.shapes,
+            annotations: markers.annotations,
         }), PLOTLY_CONFIG);
         }   // end chromatogram block
 
@@ -1180,6 +1156,8 @@ async function addChromatogramTrace(file) {
             color,
             x: data.x,
             y: data.y,
+            cal_times: data.cal_times || [],       // this sample's own ladder
+            cal_carbons: data.cal_carbons || [],
         });
         renderChromatogramChart();
         renderTraceList();
@@ -1197,30 +1175,21 @@ function renderChromatogramChart() {
         name: t.name, line: { color: t.color, width: 1.5 },
     }));
 
-    // Calibration overlays
-    const calShapes = [];
-    const calAnnotations = [];
-    if (state.calibration.peak_times) {
-        for (let i = 0; i < state.calibration.peak_times.length; i++) {
-            const rt = state.calibration.peak_times[i];
-            const cn = state.calibration.carbon_numbers ? state.calibration.carbon_numbers[i] : (i + 5);
-            calShapes.push({
-                type: 'line', x0: rt, x1: rt, y0: 0, y1: 1, yref: 'paper',
-                line: { color: '#d29922', width: 1, dash: 'dot' },
-            });
-            calAnnotations.push({
-                x: rt, y: 1, yref: 'paper', text: `C${cn}`,
-                showarrow: false, font: { color: '#d29922', size: 9 }, yanchor: 'bottom',
-            });
-        }
-    }
+    // Carbon markers: the first visible trace's own ladder; when traces from
+    // another calibration (e.g. gc1 next to gc2) are shown, the title says
+    // whose markers these are
+    const lad = overlayLadder(state.traces);
+    const markers = carbonMarkers(lad.times, lad.carbons);
+    const title = lad.differs
+        ? `Chromatogram Overlay (carbon markers: ${lad.owner})`
+        : 'Chromatogram Overlay';
 
     Plotly.react(div, traces, basePlotlyLayout({
-        title: { text: 'Chromatogram Overlay', font: { size: 14 } },
+        title: { text: title, font: { size: 14 } },
         xaxis: { title: 'Time (min)', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
         yaxis: { title: 'Intensity', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
-        shapes: calShapes,
-        annotations: calAnnotations,
+        shapes: markers.shapes,
+        annotations: markers.annotations,
     }), PLOTLY_CONFIG);
 }
 
@@ -2209,18 +2178,10 @@ function setupAnnotationHandler() {
         if (Math.abs(t_end - t_start) < 0.01) return; // too small
 
         // Carbon range, for the modal's description only (the saved default
-        // label comes from the server, from the sample revision's ladder)
-        const cn = state.calibration.carbon_numbers || [];
-        const pt = state.calibration.peak_times || [];
-        const n = Math.min(cn.length, pt.length);
-        let c_range = '';
-        if (n > 0) {
-            const c_s = linterp(pt.slice(0, n), cn.slice(0, n), t_start);
-            const c_e = linterp(pt.slice(0, n), cn.slice(0, n), t_end);
-            if (!isNaN(c_s) && !isNaN(c_e)) {
-                c_range = `C${Math.round(c_s)}-C${Math.round(c_e)}`;
-            }
-        }
+        // label comes from the server): the rendered analysis's ladder, i.e.
+        // the sample revision's own anchors, with the server's extrapolation
+        const res = state.analysisResult || {};
+        const c_range = carbonSpanText(t_start, t_end, res.cal_times, res.cal_carbons);
 
         const regionDesc = c_range
             ? `${c_range}  (${t_start.toFixed(2)}–${t_end.toFixed(2)} min)`
@@ -4214,7 +4175,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         await Promise.all([
             loadSettings(),
             loadFiles(),
-            loadCalibration(),
             loadComparisonStandards(),
             loadTableData(),
         ]);

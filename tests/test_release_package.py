@@ -204,8 +204,29 @@ class PackageTests(unittest.TestCase):
                      "agent/gc_agent/core.py", "agent/requirements-agent.txt",
                      "templates/index.html", "templates/calibration.html",
                      "templates/hub_admin.html", "static/js/hub_admin.js",
-                     "static/js/app.js", "static/css/style.css", "static/css/badge.css"):
+                     "static/js/app.js", "static/css/style.css", "static/css/badge.css",
+                     # phases 3+4: the bullets engine, comments, their UI modules
+                     "analysis_core.py", "comments.py", "comments_api.py",
+                     "static/js/comments.js", "static/js/report_payload.js",
+                     "static/js/ladder.js"):
             self.assertIn(must, rel)
+
+    def test_every_asset_a_template_loads_ships(self):
+        """Each static file a page references (``filename='js/…'``) is in the
+        zip, so a new frontend module can't be left out."""
+        import re
+        rel = self._rel()
+        refs = set()
+        for tpl in sorted((self.src / "templates").glob("*.html")):
+            refs |= set(re.findall(r"filename='([^']+)'", tpl.read_text(encoding="utf-8")))
+        self.assertTrue({"js/app.js", "js/comments.js", "js/ladder.js"} <= refs, refs)
+        missing = sorted(r for r in refs if f"static/{r}" not in rel)
+        self.assertEqual(missing, [])
+
+    def test_test_fixtures_are_not_shipped(self):
+        rel = self._rel()
+        self.assertEqual(sorted(r for r in rel if r.startswith("tests/")
+                                or r.endswith(".npz") or "fixtures" in r), [])
 
     def test_the_server_docs_ship_with_the_runbooks(self):
         rel = self._rel()
@@ -229,6 +250,7 @@ class PackageTests(unittest.TestCase):
                          "distill.py", "qbench_client.py", "hub.py", "hub_admin.py",
                          "store.py", "pipeline.py", "exports.py", "methods/d2887.py",
                          "jobs/load_folder.py", "import_match.py", "tools/parity_report.py",
+                         "analysis_core.py", "comments.py", "comments_api.py",
                          "agent/agent_main.py", "agent/gc_agent/core.py"} <= closure, closure)
         rel = self._rel()
         missing = sorted(m for m in closure if m not in rel)

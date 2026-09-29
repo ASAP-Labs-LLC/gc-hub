@@ -156,6 +156,20 @@ def test_report_html_escapes_every_interpolated_string(harness):
         assert "Spiky <b>" not in html and "Spiky &lt;b&gt;" in html
 
 
+def test_annotation_comments_print_their_span_with_the_reports_ladder(harness):
+    """Spec: ``text (Cx–Cy, a–b min; initials, date)``, carbons from the
+    report's ladder (the revision's anchors: C5 at 0.5 min, one carbon per
+    0.3 min on this fixture); a span within one carbon reads ``Cx``, as the
+    default annotation label does."""
+    for html in harness["htmls"]:
+        assert ("&lt;img src=file:///etc/passwd&gt; &amp; more "
+                "(C8–C10, 1.30–2.10 min; AB, 2026-09-29)") in html, html[-3000:]
+        assert "Narrow mark (C10, 1.90–2.10 min; CD, 2026-09-29)" in html
+        assert "Sample appears to be gasoline. (RB, 2026-09-29)" in html
+    for path, pdf in harness["pdf_text"].items():
+        assert "Narrow mark (C10, 1.90–2.10 min; CD, 2026-09-29)" in pdf, path
+
+
 def test_report_log_rows_for_every_export(harness):
     rows = harness["log_rows"]
     assert [r["kind"] for r in rows] == ["download", "zip", "qbench"]
@@ -166,7 +180,7 @@ def test_report_log_rows_for_every_export(harness):
         assert r["params"] == content["params_used"]
         assert r["windows"] == content["windows"]
         assert r["ranges"] == content["ranges"]
-        assert r["comment_ids"] == [7, 8]
+        assert r["comment_ids"] == [7, 8, 9]
         assert r["conclusion"] == content["conclusion_generated"]
         assert r["conclusion_edited"] is False
         assert r["db_given"] and r["author_initials"] is None
@@ -199,3 +213,14 @@ def test_every_report_path_goes_through_report_content():
         assert {"_build_report_pdf", "_report_request"} <= calls(route), route
     assert "resolve_report_ranges" in ast.unparse(fns["_report_content"])
     assert "_run_export_analysis" not in fns
+
+
+def test_comments_module_is_a_hard_import():
+    """Phase 4 has merged: reports always carry comments and write report_log
+    rows. The P3 seam's fallback (no comments module → no comments, no log)
+    is gone, so a missing comments.py fails the start instead of silently
+    dropping comments from reports."""
+    tree = ast.parse(_app_src())
+    top_imports = [a.name for n in tree.body if isinstance(n, ast.Import) for a in n.names]
+    assert "comments" in top_imports
+    assert "comments_mod is None" not in _app_src()

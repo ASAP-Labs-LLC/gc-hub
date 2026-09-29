@@ -114,16 +114,9 @@ import instruments
 import pipeline
 import store
 
-# Phase 4's comments module (the seam frozen in the phase 3+4 spec). Until it
-# merges, reports carry no comments and write no report_log rows; the
-# integrator removes this fallback. Only a missing `comments` module is
-# tolerated: an import error inside it still fails the start.
-try:
-    import comments as comments_mod
-except ModuleNotFoundError as _exc:
-    if _exc.name != "comments":
-        raise
-    comments_mod = None  # type: ignore[assignment]
+# Phase 4's comments module (the seam frozen in the phase 3+4 spec): the
+# report builder's comments (`for_report`) and its `report_log` rows.
+import comments as comments_mod
 
 try:
     import qbench_pdf_uploader
@@ -640,11 +633,16 @@ def _instrument_ctx(instrument_id: str, conf: dict, db, data: Path) -> dict:
     return instruments.context(row, conf, data_dir=data)
 
 
-def _revision_ladder(sample: dict, conf: dict, db, data: Path) -> tuple[list, list]:
+_CURRENT = object()
+
+
+def _revision_ladder(sample: dict, conf: dict, db, data: Path,
+                     rev: Any = _CURRENT) -> tuple[list, list]:
     """``(times, carbons)`` for labelling a sample's carbon ranges: the anchor
-    pairs its current revision was computed with (``calibration_used``), else
-    the instrument's calibration ladder."""
-    rev = store.get_revision(sample["id"], db=db) if sample.get("current_revision") else None
+    pairs its revision (the current one, or ``rev``) was computed with
+    (``calibration_used``), else its own instrument's calibration ladder."""
+    if rev is _CURRENT:
+        rev = store.get_revision(sample["id"], db=db) if sample.get("current_revision") else None
     cal = _json_col(rev.get("calibration_used"), {}) if rev else {}
     anchors = cal.get("anchors") if isinstance(cal, dict) else None
     if anchors and len(anchors) >= 2:
@@ -1086,7 +1084,9 @@ def _generate_comparison_html(
 def _comment_line(c: dict, ladder) -> str:
     """One comment as printed in a report (plain text; the HTML escapes it):
     ``text (initials, date)``, or for an annotation ``text (Cx–Cy, a–b min;
-    initials, date)``. Initials only, never the IP."""
+    initials, date)`` with the report's ladder (``Cx`` when both ends round
+    to one carbon, as the default annotation label). Initials only, never
+    the IP."""
     who = f"{c.get('initials') or '?'}, {str(c.get('created_at') or '')[:10]}"
     t0, t1 = c.get("t0"), c.get("t1")
     if t0 is None or t1 is None:
@@ -1096,7 +1096,8 @@ def _comment_line(c: dict, ladder) -> str:
         try:
             c0 = round(analysis_core.ladder_time_to_carbon(float(t0), ladder))
             c1 = round(analysis_core.ladder_time_to_carbon(float(t1), ladder))
-            span = f"C{c0}–C{c1}, {span}"
+            carbons = f"C{c0}" if c0 == c1 else f"C{c0}–C{c1}"
+            span = f"{carbons}, {span}"
         except ValueError:
             pass
     return f"{c.get('text', '')} ({span}; {who})"
@@ -1754,16 +1755,33 @@ def _requested_revision(sample: dict, db) -> Optional[dict]:
 #  API: Chromatogram trace
 # ===================================================================== #
 
+def _trace_ladder(sample: dict, rev: Optional[dict], db, data: Path) -> tuple[list, list]:
+    """The carbon markers for a trace: that revision's ladder (its own
+    instrument's, never gc1's), ``([], [])`` when there is none."""
+    try:
+        times, carbons = _revision_ladder(sample, settings_mod.load_settings(), db, data, rev=rev)
+        n = min(len(times), len(carbons))
+        return [float(x) for x in times[:n]], [int(c) for c in carbons[:n]]
+    except Exception:  # noqa: BLE001 - labels are optional; the trace is not
+        LOGGER.exception("No carbon ladder for sample %s", sample.get("id"))
+        return [], []
+
+
 @app.route("/api/samples/<int:sample_id>/trace", methods=["GET"])
 def api_sample_trace(sample_id: int):
     """The chromatogram of the CDF the (current or ``?revision=``) revision was
-    computed from; the sample's stored file when it has no revision."""
+    computed from; the sample's stored file when it has no revision. With
+    ``cal_times``/``cal_carbons``: that revision's ladder, which the page's
+    carbon markers use (a gc2 sample is labelled with gc2's anchors)."""
     data, db = _hub()
     s = _sample_or_404(sample_id, db, from_path=True)
-    p = _revision_cdf(s, _requested_revision(s, db), data)
+    rev = _requested_revision(s, db)
+    p = _revision_cdf(s, rev, data)
     try:
         t, y = distill.gc_xy_from_cdf(p)
-        return jsonify({"sample_id": s["id"], "x": t.tolist(), "y": y.tolist(), "name": s["lab_id"]})
+        cal_times, cal_carbons = _trace_ladder(s, rev, db, data)
+        return jsonify({"sample_id": s["id"], "x": t.tolist(), "y": y.tolist(), "name": s["lab_id"],
+                        "cal_times": cal_times, "cal_carbons": cal_carbons})
     except Exception as exc:
         return _error(str(exc), 500)
 
@@ -2672,10 +2690,7 @@ def _report_request(src: dict) -> dict:
 
 def _comments_for_report(sample_id: int, db) -> list[dict]:
     """The sample's report comments (``[{id, text, initials, created_at, t0,
-    t1}]``, non-deleted, time order) — phase 4's ``comments.for_report``;
-    ``[]`` until that module is present."""
-    if comments_mod is None:
-        return []
+    t1}]``, non-deleted, time order) — phase 4's ``comments.for_report``."""
     return [dict(c) for c in comments_mod.for_report(sample_id, db)]
 
 
@@ -2683,10 +2698,8 @@ def _log_report(sample: dict, content: dict, params: dict, kind: str, pdf: bytes
                 author_ip: Optional[str], db) -> None:
     """One ``report_log`` row (phase 4's ``comments.log_report``) for a report
     PDF: what was reported, with which parameters, ranges and comments. A
-    no-op until that module is present; a failure is logged, never raised
-    (the PDF has already been delivered or uploaded)."""
-    if comments_mod is None:
-        return
+    failure is logged, never raised (the PDF has already been delivered or
+    uploaded)."""
     import hashlib
     edited = bool(params.get("conclusion")) and \
         params["conclusion"].strip() != content["conclusion_generated"]
