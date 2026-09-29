@@ -118,6 +118,10 @@ are exactly as written in the decorator (module constants resolved).
 | `/api/admin/exports/<instrument_id>/new-path` | POST | new | T5 `hub_admin`: `{password, path}` (absolute `.csv` in an existing folder) |
 | `/api/admin/exports/<instrument_id>/write-fresh` | POST | new | T5 `hub_admin`: `{password, path}` → `{status, rows}`; 409 `exists`/`in-use` |
 | `/admin/hub` | GET | new | T5 `hub_admin`: the admin page (load folder, history import, exports) |
+| `/api/samples/<int:sample_id>/comments` | GET, POST | new | phase 4 `comments_api`: GET → `{comments:[{id, sample_id, revision, text, preset_id, source, t0, t1, initials, created_at}]}` (non-deleted, oldest first; never an IP); POST `{initials, text \| preset_id, t0?, t1?}` (JSON, 64 KiB) → 201 `{comment}`; 400 bad initials (`^[A-Z]{1,4}$` after upper-casing) / text > 500, 404 unknown sample or preset, 409 already 100 comments |
+| `/api/samples/<int:sample_id>/comments/<int:comment_id>/delete` | POST | new | phase 4 `comments_api`: `{initials}` → `{comment}`; soft delete recording `deleted_by_initials`/`deleted_by_ip`; 404 not this sample's comment, 409 already deleted |
+| `/api/comment-presets` | GET | new | phase 4 `comments_api`: → `{presets:[{id, text, sort}]}` (active, in order) |
+| `/api/admin/comment-presets` | POST | new | phase 4 `comments_api` (admin password): `{password, action: list\|create\|update\|reorder\|deactivate\|activate, text?, id?, ids?}` → `{presets, preset?}` (create 201; ≤ 200 chars, ≤ 50 active; reorder names every preset once) |
 | `/instruments` | GET | new | 2A2 `instruments_api` blueprint: the Instruments page |
 | `/api/instruments` | GET | new | 2A2 `instruments_api` blueprint: every instrument + summary (open read) |
 | `/api/instruments/<iid>` | GET | new | 2A2 `instruments_api` blueprint: one instrument with corrections/methods/export (open read) |

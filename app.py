@@ -192,6 +192,8 @@ app.register_blueprint(ingest_api.bp)
 import instruments_api  # noqa: E402  (2A2: the Instruments page)
 app.register_blueprint(instruments_api.bp)
 app.register_blueprint(hub_admin.bp)
+import comments_api  # noqa: E402  (phase 4: sample comments, presets)
+app.register_blueprint(comments_api.bp)
 
 # ---------------------------------------------------------------------------
 # Global state
