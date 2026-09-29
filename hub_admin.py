@@ -143,7 +143,8 @@ class AdminJobs:
                 raise RuntimeError(f"a {self._job['kind']} job is already running")
             job = {"id": next(self._ids), "kind": kind, "state": "running", "params": params,
                    "started_at": _now(), "finished_at": None, "progress": {}, "counts": {},
-                   "recent": [], "summary": None, "error": None, "stop_requested": False}
+                   "recent": [], "summary": None, "result": None, "error": None,
+                   "stop_requested": False}
             self._job = job
         threading.Thread(target=self._run, args=(job, fn), daemon=True,
                          name=f"admin-{kind}").start()
@@ -186,7 +187,8 @@ class AdminJobs:
             summary = getattr(exc, "import_summary", None) or getattr(exc, "load_summary", None)
             state, error = "failed", f"{type(exc).__name__}: {exc}"
         with self._lock:
-            job.update(state=state, error=error, summary=summary, finished_at=_now())
+            job.update(state=state, error=error, summary=summary, finished_at=_now(),
+                       result=None if summary is None else {"summary": summary})
 
 
 def _copy(job: Optional[dict]) -> Optional[dict]:
@@ -311,7 +313,10 @@ def _import_history_params(body: dict):
 @bp.route("/api/admin/import-history/dry-run", methods=["POST"])
 def api_admin_import_history_dry_run():
     """Classify a v1 processed folder and results CSV against the store, without
-    writing anything (``jobs.import_history.import_history(..., dry_run=True)``)."""
+    writing anything (``jobs.import_history.import_history(..., dry_run=True)``),
+    as an admin job (kind ``import-history-dry-run``): over a whole share folder
+    it takes minutes, and Cloudflare ends a request after 100 s (HTTP 524).
+    The request's own errors (400/404) are answered here, before the job."""
     body, err = _admin()
     if err:
         return err
@@ -319,11 +324,23 @@ def api_admin_import_history_dry_run():
     if err:
         return err
     inst, processed_dir, results_csv, aliases, batch_size = params
-    from jobs.import_history import import_history
-    summary = import_history(inst, processed_dir, results_csv, instrument_folder_aliases=aliases,
-                             db=_db(), data_dir=paths.require_data_dir(), dry_run=True,
-                             batch_size=batch_size)
-    return jsonify({"summary": summary})
+
+    def run(progress):
+        from jobs.import_history import import_history
+        return import_history(inst, processed_dir, results_csv, instrument_folder_aliases=aliases,
+                              db=_db(), data_dir=paths.require_data_dir(), progress=progress,
+                              dry_run=True, batch_size=batch_size)
+
+    try:
+        job = JOBS.start("import-history-dry-run", run, {
+            "instrument": inst, "processed_dir": str(processed_dir),
+            "results_csv": str(results_csv) if results_csv else None, "aliases": aliases,
+            "batch_size": batch_size, "by": _who()})
+    except RuntimeError as exc:
+        return _err(str(exc), 409, job=JOBS.current())
+    log.info("admin: import-history dry run %s from %s (csv %s) started by %s", inst,
+             processed_dir, results_csv, _who())
+    return jsonify({"job": job}), 202
 
 
 @bp.route("/api/admin/import-history/start", methods=["POST"])

@@ -1,10 +1,60 @@
 // Hub admin page (2A1 T5): the folder-loader job and the export actions.
 // Every call is a JSON POST carrying the admin password. The DOM is built with
 // textContent only: file names and paths come from the server.
+// The pure helpers are module.exports for the Node tests (tests/js/hub_admin.test.js).
 (function () {
   "use strict";
+
+  // ── pure helpers ──────────────────────────────────────────────────────
+  const PHASES = {
+    match: "Reading CDFs and matching them to the CSV",
+    check: "Checking CDFs",
+    import: "Classifying samples",
+    submit: "Submitting CDFs",
+    commit: "Committing",
+  };
+
+  // One line for a running job's progress event ({phase, done, total}).
+  function progressText(job) {
+    const p = (job && job.progress) || {};
+    if (!p.phase) return "Starting…";
+    if (p.phase === "scan") return "Scanning the folder…";
+    const label = PHASES[p.phase] || p.phase;
+    return (p.total !== undefined && p.total !== null)
+      ? `${label}: ${p.done || 0} of ${p.total}` : `${label}…`;
+  }
+
+  function isDryRun(job) {
+    return !!job && job.kind === "import-history-dry-run";
+  }
+
+  // The history dry run (an admin job since v3.0.1): what the panel shows.
+  function dryRunView(job) {
+    const summary = (job.result && job.result.summary) || job.summary || null;
+    if (job.state === "running") {
+      return {done: false, message: "Dry run running (nothing is written): " + progressText(job),
+              cls: "", summary: null};
+    }
+    if (job.state === "done") {
+      return {done: true, message: "Dry run done (nothing written)", cls: "ok", summary};
+    }
+    if (job.state === "stopped") {
+      return {done: true, message: "Dry run stopped (nothing written); the summary so far is below",
+              cls: "warn", summary};
+    }
+    return {done: true, message: "Dry run failed: " + (job.error || job.state), cls: "err", summary};
+  }
+
+  const pure = {progressText, isDryRun, dryRunView};
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = pure;
+    return;
+  }
+
+  // ── the page ──────────────────────────────────────────────────────────
   const $ = (id) => document.getElementById(id);
   let pollTimer = null;
+  let dryRunJobId = null;       // the dry run this page started
 
   function el(tag, text, cls) {
     const e = document.createElement(tag);
@@ -63,6 +113,9 @@
     try {
       const j = await call("/api/admin/jobs/status");
       renderJob(j.job);
+      if (isDryRun(j.job) && (j.job.state === "running" || j.job.id === dryRunJobId)) {
+        renderDryRun(j.job);
+      }
       if (j.job && j.job.state === "running") pollTimer = setTimeout(pollJob, 1500);
     } catch (e) { say(e.message, "err"); }
   }
@@ -154,13 +207,27 @@
     };
   }
 
-  async function ihDryRun() {
+  // The dry run answers 202 {job} at once (a whole share folder takes longer
+  // than Cloudflare's 100 s); its summary arrives on the finished job.
+  function renderDryRun(job) {
     const box = $("ih-result");
+    const v = dryRunView(job);
     box.textContent = "";
+    box.appendChild(el("p", v.message, v.cls));
+    if (v.summary) box.appendChild(el("pre", JSON.stringify(v.summary, null, 1)));
+    if (v.done && job.id === dryRunJobId) {
+      say(v.message, v.cls);
+      dryRunJobId = null;
+    }
+  }
+
+  async function ihDryRun() {
+    $("ih-result").textContent = "";
     try {
       const j = await call("/api/admin/import-history/dry-run", ihParams());
-      box.appendChild(el("pre", JSON.stringify(j.summary, null, 1)));
-      say("Dry run done (nothing written)", "ok");
+      dryRunJobId = j.job.id;
+      renderDryRun(j.job);
+      pollJob();
     } catch (e) { say(e.message, "err"); }
   }
 
@@ -179,7 +246,8 @@
     try {
       const j = await call("/api/admin/jobs/stop");
       renderJob(j.job);
-      say("Stop requested; the run ends after the batch in progress commits", "ok");
+      say(isDryRun(j.job) ? "Stop requested; the dry run ends at its next step"
+        : "Stop requested; the run ends after the batch in progress commits", "ok");
     } catch (e) { say(e.message, "err"); }
   }
 
