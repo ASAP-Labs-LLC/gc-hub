@@ -114,16 +114,9 @@ import instruments
 import pipeline
 import store
 
-# Phase 4's comments module (the seam frozen in the phase 3+4 spec). Until it
-# merges, reports carry no comments and write no report_log rows; the
-# integrator removes this fallback. Only a missing `comments` module is
-# tolerated: an import error inside it still fails the start.
-try:
-    import comments as comments_mod
-except ModuleNotFoundError as _exc:
-    if _exc.name != "comments":
-        raise
-    comments_mod = None  # type: ignore[assignment]
+# Phase 4's comments module (the seam frozen in the phase 3+4 spec): the
+# report builder's comments (`for_report`) and its `report_log` rows.
+import comments as comments_mod
 
 try:
     import qbench_pdf_uploader
@@ -2697,10 +2690,7 @@ def _report_request(src: dict) -> dict:
 
 def _comments_for_report(sample_id: int, db) -> list[dict]:
     """The sample's report comments (``[{id, text, initials, created_at, t0,
-    t1}]``, non-deleted, time order) — phase 4's ``comments.for_report``;
-    ``[]`` until that module is present."""
-    if comments_mod is None:
-        return []
+    t1}]``, non-deleted, time order) — phase 4's ``comments.for_report``."""
     return [dict(c) for c in comments_mod.for_report(sample_id, db)]
 
 
@@ -2708,10 +2698,8 @@ def _log_report(sample: dict, content: dict, params: dict, kind: str, pdf: bytes
                 author_ip: Optional[str], db) -> None:
     """One ``report_log`` row (phase 4's ``comments.log_report``) for a report
     PDF: what was reported, with which parameters, ranges and comments. A
-    no-op until that module is present; a failure is logged, never raised
-    (the PDF has already been delivered or uploaded)."""
-    if comments_mod is None:
-        return
+    failure is logged, never raised (the PDF has already been delivered or
+    uploaded)."""
     import hashlib
     edited = bool(params.get("conclusion")) and \
         params["conclusion"].strip() != content["conclusion_generated"]

@@ -213,3 +213,14 @@ def test_every_report_path_goes_through_report_content():
         assert {"_build_report_pdf", "_report_request"} <= calls(route), route
     assert "resolve_report_ranges" in ast.unparse(fns["_report_content"])
     assert "_run_export_analysis" not in fns
+
+
+def test_comments_module_is_a_hard_import():
+    """Phase 4 has merged: reports always carry comments and write report_log
+    rows. The P3 seam's fallback (no comments module → no comments, no log)
+    is gone, so a missing comments.py fails the start instead of silently
+    dropping comments from reports."""
+    tree = ast.parse(_app_src())
+    top_imports = [a.name for n in tree.body if isinstance(n, ast.Import) for a in n.names]
+    assert "comments" in top_imports
+    assert "comments_mod is None" not in _app_src()
