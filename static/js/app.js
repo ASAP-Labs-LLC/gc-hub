@@ -1858,25 +1858,20 @@ const debouncedAnalysis = debounce(() => {
 }, 600);
 
 /**
- * Add shaded rectangles + labels for each range overlay to the given shapes/annotations arrays.
- * Uses calibration peak_times/carbon_numbers to map C-number → retention time via interpolation.
+ * Add shaded rectangles + labels for each range window to the given
+ * shapes/annotations arrays. The windows are /api/analysis's: the server's
+ * one carbon→time conversion on the sample revision's ladder, clipped to the
+ * displayed axis — the very windows the bullets were evaluated on. Windows
+ * that could not be evaluated (width 0) draw nothing.
  */
-function addRangeShapes(shapes, annotations) {
-    const peakTimes = state.calibration.peak_times;
-    const carbonNums = state.calibration.carbon_numbers;
-    if (!peakTimes || peakTimes.length === 0) return;
-
-    const cn = carbonNums || peakTimes.map((_, i) => i + 5);
-    const n = Math.min(peakTimes.length, cn.length);
-
-    for (const range of state.rangeOverlays) {
-        // Interpolate carbon numbers to retention times: linterp(xs, ys, target)
-        const t0 = linterp(cn.slice(0, n), peakTimes.slice(0, n), range.c_start);
-        const t1 = linterp(cn.slice(0, n), peakTimes.slice(0, n), range.c_end);
-        if (t0 == null || t1 == null) continue;
+function addRangeShapes(shapes, annotations, windows) {
+    for (const w of (windows || [])) {
+        if (!w.evaluable) continue;
+        const t0 = w.t0, t1 = w.t1;
+        const overlay = state.rangeOverlays[w.index] || {};
 
         // Parse color (stored as #RRGGBBAA)
-        const hex = (range.color || '#3fb95044').replace('#', '');
+        const hex = (overlay.color || w.color || '#3fb95044').replace('#', '');
         const r = parseInt(hex.slice(0, 2), 16);
         const g = parseInt(hex.slice(2, 4), 16);
         const b = parseInt(hex.slice(4, 6), 16);
@@ -1894,7 +1889,7 @@ function addRangeShapes(shapes, annotations) {
         if (annotations) {
             annotations.push({
                 x: (t0 + t1) / 2, y: 1.02, yref: 'paper',
-                text: range.label,
+                text: escapeHtml(w.label),   // Plotly renders pseudo-HTML
                 showarrow: false,
                 font: { color: `rgb(${r},${g},${b})`, size: 9 },
                 yanchor: 'bottom',
@@ -1956,9 +1951,7 @@ async function runAnalysis() {
         sample_id: state.selectedSample.sample_id,
         standard_name: state.selectedStandard.name,
         ...state.analysisParams,
-        ranges: state.rangeOverlays.map(r => ({
-            label: r.label, c_start: r.c_start, c_end: r.c_end
-        })),
+        ranges: rangesForPayload(state.rangeOverlays),   // [] = no ranges
     };
 
     try {
@@ -1986,6 +1979,12 @@ function updateAnalysisOverlay() {
 }
 
 function renderAnalysisResults(result) {
+    // The calibration lines and range boxes are the server's: the sample
+    // revision's ladder (cal_times/cal_carbons) and the report's windows,
+    // never gc1's /api/calibration.
+    const calTimes = result.cal_times || [];
+    const calCarbons = result.cal_carbons || [];
+
     // Trend plot
     const trendDiv = document.getElementById('analysis-trend-plot');
     if (trendDiv && result.trend) {
@@ -2009,26 +2008,23 @@ function renderAnalysisResults(result) {
             });
         }
 
-        // Calibration vertical lines
+        // Calibration vertical lines (the revision's ladder)
         const shapes = [];
         const annotations = [];
-        if (state.calibration.peak_times) {
-            for (let i = 0; i < state.calibration.peak_times.length; i++) {
-                const rt = state.calibration.peak_times[i];
-                const cn = state.calibration.carbon_numbers ? state.calibration.carbon_numbers[i] : (i + 5);
-                shapes.push({
-                    type: 'line', x0: rt, x1: rt, y0: 0, y1: 1, yref: 'paper',
-                    line: { color: '#d29922', width: 0.5, dash: 'dot' },
-                });
-                annotations.push({
-                    x: rt, y: 1, yref: 'paper', text: `C${cn}`,
-                    showarrow: false, font: { color: '#d29922', size: 8 }, yanchor: 'bottom',
-                });
-            }
+        for (let i = 0; i < calTimes.length; i++) {
+            const rt = calTimes[i];
+            shapes.push({
+                type: 'line', x0: rt, x1: rt, y0: 0, y1: 1, yref: 'paper',
+                line: { color: '#d29922', width: 0.5, dash: 'dot' },
+            });
+            annotations.push({
+                x: rt, y: 1, yref: 'paper', text: `C${calCarbons[i]}`,
+                showarrow: false, font: { color: '#d29922', size: 8 }, yanchor: 'bottom',
+            });
         }
 
-        // Dynamic range overlay shading
-        addRangeShapes(shapes, annotations);
+        // Range boxes from the report's windows
+        addRangeShapes(shapes, annotations, result.windows);
 
         Plotly.react(trendDiv, trendTraces, basePlotlyLayout({
             title: { text: 'Trend Comparison', font: { size: 14 } },
@@ -2048,6 +2044,8 @@ function renderAnalysisResults(result) {
         const diffTraces = [];
         const diffX = result.diff.x;
         const diffY = result.diff.y;
+        const p = result.params_used || state.analysisParams;
+        const spikes = result.spikes || [];
 
         if (diffX && diffY) {
             // Positive fill (red above zero)
@@ -2076,10 +2074,50 @@ function renderAnalysisResults(result) {
             });
         }
 
-        // Dynamic range overlays on diff plot too
+        // The spikes the report counted (raw difference, so every "sharp
+        // spike" in a bullet can be found on the graph)
+        if (spikes.length) {
+            diffTraces.push({
+                x: spikes.map(s => s.t), y: spikes.map(s => s.value),
+                type: 'scatter', mode: 'markers', name: 'Counted spikes',
+                marker: {
+                    symbol: spikes.map(s => s.sign > 0 ? 'triangle-up' : 'triangle-down'),
+                    size: 10, color: '#e3b341', line: { color: '#0d1117', width: 1 },
+                },
+                hovertemplate: 'Spike %{x:.2f} min: %{y:.0f}<extra></extra>',
+            });
+        }
+
+        // Range boxes + ±threshold lines (dotted)
         const diffShapes = [];
         const diffAnnotations = [];
-        addRangeShapes(diffShapes, diffAnnotations);
+        addRangeShapes(diffShapes, diffAnnotations, result.windows);
+        const levels = [
+            [p.thresh_marginal, 'marginal', '#7d8590'],
+            [p.thresh_moderate, 'moderate', '#d29922'],
+            [p.thresh_significant, 'significant', '#f85149'],
+        ];
+        for (const [level, name, color] of levels) {
+            for (const sgn of [1, -1]) {
+                diffShapes.push({
+                    type: 'line', xref: 'paper', x0: 0, x1: 1, yref: 'y',
+                    y0: sgn * level, y1: sgn * level,
+                    line: { color, width: 1, dash: 'dot' },
+                });
+            }
+            diffAnnotations.push({
+                xref: 'paper', x: 1, xanchor: 'right', yref: 'y', y: level, yanchor: 'bottom',
+                text: `${name} ±${level}`, showarrow: false, font: { color, size: 9 },
+            });
+        }
+        // Keep the data readable: scale to the data and the spikes, not to
+        // the significant line (lines beyond the data are simply off-scale).
+        let span = Number(p.thresh_marginal) || 1;
+        const xMax = (result.diff.x_range || [])[1];
+        (diffY || []).forEach((v, i) => {
+            if (xMax == null || diffX[i] <= xMax) span = Math.max(span, Math.abs(v));
+        });
+        spikes.forEach(s => { span = Math.max(span, Math.abs(s.value)); });
 
         Plotly.react(diffDiv, diffTraces, basePlotlyLayout({
             title: { text: 'Difference Plot', font: { size: 14 } },
@@ -2088,26 +2126,28 @@ function renderAnalysisResults(result) {
                 gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590',
                 range: result.diff.x_range || undefined,
             },
-            yaxis: { title: 'Difference', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
+            yaxis: { title: 'Difference', gridcolor: '#21262d', zerolinecolor: '#30363d',
+                     color: '#7d8590', range: [-span * 1.15, span * 1.15] },
             shapes: diffShapes,
+            annotations: diffAnnotations,
         }), PLOTLY_CONFIG);
     }
 
-    // Deviation report — format like the desktop version
-    // Store raw bullets separately so the export modal doesn't include the header
-    state._lastReportBullets = result.report || 'No deviations detected.';
+    // Deviation report: the server's bullets, read-only (a <pre>). Operators
+    // change the parameters or ranges, or add a comment, to change them.
+    state._lastReportBullets = result.text || '';
 
     const reportDiv = document.getElementById('analysis-report-text');
     if (reportDiv) {
-        const p = state.analysisParams;
+        const p = result.params_used || state.analysisParams;
         const sampleName = state.selectedSample ? state.selectedSample.name : '?';
-        const stdName = state.selectedStandard ? state.selectedStandard.name : '?';
-        const rangesStr = state.rangeOverlays.map(r => `${r.label}(C${r.c_start}\u2013C${r.c_end})`).join('  ');
+        const stdName = result.standard_name || (state.selectedStandard ? state.selectedStandard.name : '?');
+        const rangesStr = (result.ranges || []).map(r => `${r.label}(C${r.c_start}–C${r.c_end})`).join('  ');
         const header = [
             `Sample:   ${sampleName}`,
             `Standard: ${stdName}`,
             `Params:   baseline=${realToSlider('baseline', p.quantile).toFixed(2)}  detail=${realToSlider('detail', p.window).toFixed(2)}  smoothing=${realToSlider('smoothing', p.sigma).toFixed(2)}`,
-            `Thresholds: marginal\u2265${p.thresh_marginal}  moderate\u2265${p.thresh_moderate}  significant\u2265${p.thresh_significant}`,
+            `Thresholds: marginal≥${p.thresh_marginal}  moderate≥${p.thresh_moderate}  significant≥${p.thresh_significant}`,
             `Ranges:   ${rangesStr || '(none)'}`,
             '',
         ].join('\n');
@@ -2365,7 +2405,10 @@ function addToAnalysisQueue() {
             item.lab_id = state.selectedSample.lab_id || item.lab_id;
         }
         item.standard_name = state.selectedStandard?.name || item.standard_name;
-        item.bullets = state._lastReportBullets || item.bullets;
+        // Bullets are computed by the server from these at export time.
+        item.params = captureReportParams(state.analysisParams);
+        item.ranges = rangesForPayload(state.rangeOverlays);
+        delete item.bullets;
         item.annotations = annotationData.map(a => ({...a}));  // save current annotations
         const conclusionEl = document.getElementById('analysis-conclusion');
         if (conclusionEl) item.conclusion = conclusionEl.value.trim();
@@ -2400,9 +2443,13 @@ function openAnalysisExportModal() {
     }
     if (docNameInput) docNameInput.value = 'GC Analysis';
 
-    // Pull ONLY the deviation bullets (not the header block) from the stored result
+    // A read-only preview of the server's bullets (the export recomputes
+    // them from the parameters and ranges captured with the queue item).
     const conclusionEl = document.getElementById('analysis-conclusion');
-    if (bulletsInput) bulletsInput.value = state._lastReportBullets || '';
+    if (bulletsInput) {
+        bulletsInput.value = (state.analysisResult && state.analysisResult.text) || '';
+        bulletsInput.readOnly = true;
+    }
     if (conclusionInput) conclusionInput.value = conclusionEl ? conclusionEl.value.trim() : '';
 
     // Populate overlay standards checklist
@@ -2449,8 +2496,8 @@ function confirmAddToQueue() {
         });
     }
 
-    // Grab the edited bullets and conclusion from the modal
-    const bullets = (document.getElementById('export-bullets')?.value || '').trim();
+    // The conclusion stays editable; bullets are never sent (the server
+    // computes them from the captured params and ranges).
     const conclusion = (document.getElementById('export-conclusion')?.value || '').trim();
 
     state.analysisQueue.push({
@@ -2458,8 +2505,8 @@ function confirmAddToQueue() {
         sample_name: sampleName,
         sample_id: state.selectedSample ? state.selectedSample.sample_id : null,
         standard_name: state.selectedStandard?.name || '',
-        bullets,
         conclusion,
+        params: captureReportParams(state.analysisParams),  // capture parameters at queue time
         overlay_standards: overlayStds,
         ranges: rangesForPayload(state.rangeOverlays),  // capture regions at queue time
         annotations: annotationData.map(a => ({...a})),  // deep copy
@@ -2653,13 +2700,13 @@ async function exportToPC() {
             // Single file — download PDF directly via browser
             const item = state.analysisQueue[0];
             const resp = await api('POST', '/api/export-analysis-report',
-                buildReportItemPayload(item, state.rangeOverlays));
+                buildReportItemPayload(item, state.rangeOverlays, state.analysisParams));
             await downloadBlob(resp, `${item.lab_id}_analysis.pdf`);
             showNotification('Download complete', 'success');
         } else {
             // Multiple files — download as ZIP via browser
             const items = state.analysisQueue.map(item =>
-                buildReportItemPayload(item, state.rangeOverlays));
+                buildReportItemPayload(item, state.rangeOverlays, state.analysisParams));
             const resp = await api('POST', '/api/export-analysis-reports-zip', { items });
             await downloadBlob(resp, 'analysis_reports.zip');
             showNotification(`Downloaded ${count} reports as ZIP`, 'success');
@@ -2701,7 +2748,9 @@ async function startQBenchUpload() {
         // The server refuses the whole queue (409, nothing queued) if any
         // sample isn't final or is unreleased backfill.
         const resp = await apiPostRefusable('/api/qbench-upload', 'Not uploaded', {
-            queue: state.analysisQueue,
+            // the same payload as the PC export: captured params and ranges, no bullets
+            queue: state.analysisQueue.map(item =>
+                buildReportItemPayload(item, state.rangeOverlays, state.analysisParams)),
             username,
             password,
             api_url: apiUrl,
@@ -3227,6 +3276,11 @@ function openSettingsModal() {
         'set-bestfit-threshold': ['bestfit_threshold', '0.93'],
         'set-bestfit-shift': ['bestfit_shift_tolerance_min', '0.05'],
         'set-bestfit-minfrac': ['bestfit_mix_min_frac', '0.10'],
+        // deviation bullets (phase 3)
+        'set-analysis-min-width': ['analysis_min_width_min', '0.05'],
+        'set-analysis-merge-gap': ['analysis_merge_gap_min', '0.10'],
+        'set-analysis-spike-width': ['analysis_spike_min_width_min', '0.02'],
+        'set-analysis-spike-report': ['analysis_spike_report_threshold', ''],
     };
     for (const [elId, [key, dflt]] of Object.entries(bfMap)) {
         const el = document.getElementById(elId);
@@ -3421,16 +3475,22 @@ async function saveSettings() {
         'set-bestfit-threshold': 'bestfit_threshold',
         'set-bestfit-shift': 'bestfit_shift_tolerance_min',
         'set-bestfit-minfrac': 'bestfit_mix_min_frac',
+        'set-analysis-min-width': 'analysis_min_width_min',
+        'set-analysis-merge-gap': 'analysis_merge_gap_min',
+        'set-analysis-spike-width': 'analysis_spike_min_width_min',
     };
     for (const [elId, key] of Object.entries(bfSaveMap)) {
         const el = document.getElementById(elId);
         if (el && el.value !== '') bf[key] = el.value;
     }
+    // empty is meaningful here (= the moderate threshold)
+    const spikeReport = document.getElementById('set-analysis-spike-report');
+    if (spikeReport) bf.analysis_spike_report_threshold = spikeReport.value.trim();
     const bfChanged = Object.entries(bf).some(
         ([k, v]) => String(v) !== String(state.settings[k] == null ? '' : state.settings[k]));
     if (bfChanged) {
-        const password = adminPassword('change the best-fit settings');
-        if (!password) { showNotification('Best-fit settings not saved (no admin password)', 'info'); }
+        const password = adminPassword('change the best-fit / deviation-bullet settings');
+        if (!password) { showNotification('Best-fit / deviation-bullet settings not saved (no admin password)', 'info'); }
         else { Object.assign(body, bf); body.password = password; }
     }
 
@@ -3945,7 +4005,6 @@ async function exportAnalysisReport() {
     }
 
     const conclusion = document.getElementById('analysis-conclusion')?.value || '';
-    const bullets = document.getElementById('analysis-report-text')?.textContent || '';
     const labId = state.selectedSample.lab_id || state.selectedSample.name;
 
     // Gather overlay standards
@@ -3956,7 +4015,6 @@ async function exportAnalysisReport() {
             sample_id: state.selectedSample.sample_id,
             standard_name: state.selectedStandard.name,
             conclusion,
-            bullets,
             doc_name: 'GC Analysis Report',
             lab_id: labId,
             overlay_standards: overlayStds,
