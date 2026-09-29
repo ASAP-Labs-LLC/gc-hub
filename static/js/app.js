@@ -1983,6 +1983,9 @@ function updateAnalysisOverlay() {
     if (chkSample) chkSample.innerHTML = hasSample ? '&#x2713;' : '&#x200B;';
     if (chkStandard) chkStandard.innerHTML = hasStandard ? '&#x2713;' : '&#x200B;';
     overlay.style.display = (hasSample && hasStandard) ? 'none' : 'flex';
+    if (typeof Comments !== 'undefined') {
+        Comments.setSample(hasSample ? state.selectedSample.sample_id : null);
+    }
 }
 
 function renderAnalysisResults(result) {
@@ -2138,10 +2141,13 @@ function renderAnalysisResults(result) {
 
 /* ===================================================================
    13b. ANNOTATION TOOL
+   Annotations are sample comments (phase 4, static/js/comments.js):
+   saving the modal POSTs one comment {text, t0, t1}; the shapes on the
+   trend plot are drawn from the sample's comments (GET), on every sample
+   change and after each analysis. Nothing is written into the bullets.
    =================================================================== */
 
 let annotationMode = false;
-const annotationData = [];  // [{t_start, t_end, c_range, comment}]
 
 function toggleAnnotationMode() {
     annotationMode = !annotationMode;
@@ -2166,16 +2172,17 @@ function toggleAnnotationMode() {
 
 function setupAnnotationHandler() {
     const trendDiv = document.getElementById('analysis-trend-plot');
-    if (!trendDiv) return;
+    if (!trendDiv || typeof trendDiv.on !== 'function') return;
 
     trendDiv.on('plotly_selected', (eventData) => {
         if (!annotationMode || !eventData || !eventData.range) return;
 
-        const t_start = eventData.range.x[0];
-        const t_end = eventData.range.x[1];
+        const t_start = Math.min(eventData.range.x[0], eventData.range.x[1]);
+        const t_end = Math.max(eventData.range.x[0], eventData.range.x[1]);
         if (Math.abs(t_end - t_start) < 0.01) return; // too small
 
-        // Compute carbon range
+        // Carbon range, for the modal's description only (the saved default
+        // label comes from the server, from the sample revision's ladder)
         const cn = state.calibration.carbon_numbers || [];
         const pt = state.calibration.peak_times || [];
         const n = Math.min(cn.length, pt.length);
@@ -2189,11 +2196,10 @@ function setupAnnotationHandler() {
         }
 
         const regionDesc = c_range
-            ? `${c_range}  (${t_start.toFixed(2)}\u2013${t_end.toFixed(2)} min)`
-            : `(${t_start.toFixed(2)}\u2013${t_end.toFixed(2)} min)`;
+            ? `${c_range}  (${t_start.toFixed(2)}–${t_end.toFixed(2)} min)`
+            : `(${t_start.toFixed(2)}–${t_end.toFixed(2)} min)`;
 
-        // Open annotation modal instead of prompt()
-        _openAnnotationModal(regionDesc, t_start, t_end, c_range, trendDiv);
+        _openAnnotationModal(regionDesc, t_start, t_end, trendDiv);
 
         // Disable annotation mode after one annotation (no endless loop)
         annotationMode = false;
@@ -2204,7 +2210,7 @@ function setupAnnotationHandler() {
     });
 }
 
-function _openAnnotationModal(regionDesc, t_start, t_end, c_range, trendDiv) {
+function _openAnnotationModal(regionDesc, t_start, t_end, trendDiv) {
     const modal = document.getElementById('modal-annotation');
     if (!modal) return;
 
@@ -2219,26 +2225,15 @@ function _openAnnotationModal(regionDesc, t_start, t_end, c_range, trendDiv) {
     // Wire up save/cancel (replace handlers to avoid stacking)
     const saveBtn = document.getElementById('btn-annotation-save');
     const cancelBtn = document.getElementById('btn-annotation-cancel');
+    let busy = false;
 
-    function _save() {
-        const comment = (inputEl ? inputEl.value : '').trim();
-        // Store annotation
-        annotationData.push({ t_start, t_end, c_range, comment });
-        updateAnnotationCount();
-        redrawAnnotations();
-
-        // Append bullet to deviation report (not conclusion)
-        const reportEl = document.getElementById('analysis-report-text');
-        if (reportEl) {
-            const prefix = c_range
-                ? `\u2022 ${c_range} (${t_start.toFixed(2)}\u2013${t_end.toFixed(2)} min):`
-                : `\u2022 (${t_start.toFixed(2)}\u2013${t_end.toFixed(2)} min):`;
-            const bullet = comment ? `${prefix} ${comment}` : prefix;
-            reportEl.textContent = reportEl.textContent.trimEnd() + '\n' + bullet;
-            // Also update the stored bullets so they flow to exports
-            state._lastReportBullets = (state._lastReportBullets || '').trimEnd() + '\n' + bullet;
-        }
-
+    async function _save() {
+        if (busy) return;                        // one POST per save
+        if (!Comments.requireInitials()) return; // keep the modal open
+        busy = true;
+        const text = (inputEl ? inputEl.value : '').trim();
+        const saved = await Comments.add({ text, t0: t_start, t1: t_end });
+        if (!saved) { busy = false; return; }    // refused: the modal stays open
         closeModal(modal);
         Plotly.restyle(trendDiv, { selectedpoints: [null] });
         _cleanup();
@@ -2253,6 +2248,7 @@ function _openAnnotationModal(regionDesc, t_start, t_end, c_range, trendDiv) {
     function _cleanup() {
         if (saveBtn) saveBtn.replaceWith(saveBtn.cloneNode(true));
         if (cancelBtn) cancelBtn.replaceWith(cancelBtn.cloneNode(true));
+        if (inputEl) inputEl.onkeydown = null;
     }
 
     if (saveBtn) saveBtn.addEventListener('click', _save);
@@ -2266,82 +2262,37 @@ function _openAnnotationModal(regionDesc, t_start, t_end, c_range, trendDiv) {
     }
 }
 
+/** Draw the selected sample's annotation comments on the trend plot. When
+    the selected sample changed, its comments are fetched first (the
+    redraw then comes from Comments' onChange). */
 function redrawAnnotations() {
+    const sid = state.selectedSample ? state.selectedSample.sample_id : null;
+    if (typeof Comments === 'undefined') return;
+    if (sid !== Comments.sampleId()) { Comments.setSample(sid); return; }
+    _drawAnnotationShapes(Comments.current());
+}
+
+function _drawAnnotationShapes(list) {
     const trendDiv = document.getElementById('analysis-trend-plot');
     if (!trendDiv || !trendDiv.layout) return;
-
-    // Get existing shapes/annotations and filter out old annotation shapes
-    const existingShapes = (trendDiv.layout.shapes || []).filter(s => !s._annotation);
-    const existingAnnotations = (trendDiv.layout.annotations || []).filter(a => !a._annotation);
-
-    // Add annotation shapes
-    for (const ann of annotationData) {
-        existingShapes.push({
-            _annotation: true,
-            type: 'rect',
-            x0: ann.t_start, x1: ann.t_end,
-            y0: 0, y1: 1, yref: 'paper',
-            fillcolor: 'rgba(88, 166, 255, 0.15)',
-            line: { width: 1, color: 'rgba(88, 166, 255, 0.5)', dash: 'dash' },
-            layer: 'above',
-        });
-        if (ann.comment) {
-            existingAnnotations.push({
-                _annotation: true,
-                x: (ann.t_start + ann.t_end) / 2,
-                y: 0.95, yref: 'paper',
-                text: ann.comment.length > 30 ? ann.comment.slice(0, 30) + '...' : ann.comment,
-                showarrow: false,
-                font: { color: '#58a6ff', size: 9 },
-                bgcolor: 'rgba(13,17,23,0.8)',
-                borderpad: 2,
-            });
-        }
-    }
-
+    // Old annotation shapes are found by their fill/label colours (Plotly may
+    // strip custom properties such as _annotation)
+    const shapes = (trendDiv.layout.shapes || []).filter(s => !Comments.isAnnotationShape(s));
+    const annotations = (trendDiv.layout.annotations || []).filter(a => !Comments.isAnnotationLabel(a));
+    const overlay = Comments.annotationOverlay(list);   // label text escaped for Plotly
     Plotly.relayout(trendDiv, {
-        shapes: existingShapes,
-        annotations: existingAnnotations,
+        shapes: shapes.concat(overlay.shapes),
+        annotations: annotations.concat(overlay.labels),
     });
 }
 
-function updateAnnotationCount() {
-    const el = document.getElementById('annotation-count');
-    if (el) el.textContent = annotationData.length > 0 ? `${annotationData.length} annotation(s)` : '';
-}
-
+/** Clear Annotations: soft-delete the sample's annotation comments, after a
+    confirmation naming the count (Comments.clearAnnotations). */
 function clearAllAnnotations() {
-    annotationData.length = 0;
-    updateAnnotationCount();
-
-    // Force-remove all annotation shapes/labels from the plot
-    const trendDiv = document.getElementById('analysis-trend-plot');
-    if (trendDiv && trendDiv.layout) {
-        // Keep only non-annotation shapes (use fillcolor as marker since
-        // Plotly may strip custom _annotation property)
-        const cleanShapes = (trendDiv.layout.shapes || []).filter(s =>
-            !s._annotation && s.fillcolor !== 'rgba(88, 166, 255, 0.15)'
-        );
-        const cleanAnnotations = (trendDiv.layout.annotations || []).filter(a =>
-            !a._annotation && a.bgcolor !== 'rgba(13,17,23,0.8)'
-        );
-        Plotly.relayout(trendDiv, {
-            shapes: cleanShapes,
-            annotations: cleanAnnotations,
-        });
-    }
-
-    // Strip annotation bullets (lines starting with •) from deviation report
-    const reportEl = document.getElementById('analysis-report-text');
-    if (reportEl) {
-        const lines = reportEl.textContent.split('\n');
-        reportEl.textContent = lines.filter(ln => !ln.startsWith('\u2022') || !ln.includes(' min')).join('\n').trimEnd();
-    }
-    // Also clean stored bullets
-    if (state._lastReportBullets) {
-        const lines = state._lastReportBullets.split('\n');
-        state._lastReportBullets = lines.filter(ln => !ln.startsWith('\u2022') || !ln.includes(' min')).join('\n').trimEnd();
-    }
+    if (typeof Comments === 'undefined') return;
+    const sid = state.selectedSample ? state.selectedSample.sample_id : null;
+    if (sid == null) { showNotification('Select a sample first', 'info'); return; }
+    Comments.setSample(sid).then(() => Comments.clearAnnotations());
 }
 
 /* ===================================================================
@@ -2366,7 +2317,6 @@ function addToAnalysisQueue() {
         }
         item.standard_name = state.selectedStandard?.name || item.standard_name;
         item.bullets = state._lastReportBullets || item.bullets;
-        item.annotations = annotationData.map(a => ({...a}));  // save current annotations
         const conclusionEl = document.getElementById('analysis-conclusion');
         if (conclusionEl) item.conclusion = conclusionEl.value.trim();
 
@@ -2462,7 +2412,6 @@ function confirmAddToQueue() {
         conclusion,
         overlay_standards: overlayStds,
         ranges: rangesForPayload(state.rangeOverlays),  // capture regions at queue time
-        annotations: annotationData.map(a => ({...a})),  // deep copy
         added_at: new Date().toISOString(),
     });
 
@@ -2535,14 +2484,8 @@ function _restoreQueueItem(item, idx) {
     // Change "Send to Queue" button to "Apply Changes"
     _updateQueueButton(true);
 
-    // Restore saved annotations into the global array
-    annotationData.length = 0;
-    if (item.annotations && item.annotations.length > 0) {
-        for (const ann of item.annotations) {
-            annotationData.push({...ann});
-        }
-    }
-    updateAnnotationCount();
+    // Annotations are the sample's comments (not part of the queue item)
+    redrawAnnotations();
 
     // Re-run the analysis so graphs + report load
     if (state.selectedSample && state.selectedStandard) {
@@ -2552,11 +2495,6 @@ function _restoreQueueItem(item, idx) {
             // (runAnalysis overwrites it with the auto-generated one)
             const conclusionEl = document.getElementById('analysis-conclusion');
             if (conclusionEl && item.conclusion) conclusionEl.value = item.conclusion;
-
-            // Redraw restored annotations on the trend plot
-            if (annotationData.length > 0) {
-                redrawAnnotations();
-            }
         });
     }
 
@@ -4183,6 +4121,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Initialize empty charts first (Plotly elements need to exist)
     initCharts();
     setupAnnotationHandler();
+    // Comments section (static/js/comments.js); its changes redraw the
+    // annotation spans on the trend plot
+    if (typeof Comments !== 'undefined') {
+        Comments.init({ onChange: list => _drawAnnotationShapes(list) });
+    }
     console.log('[GC Viewer] Charts initialized');
 
     // Set up event listeners
