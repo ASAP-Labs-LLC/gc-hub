@@ -2677,24 +2677,33 @@ def _log_report(sample: dict, content: dict, params: dict, kind: str, pdf: bytes
     edited = bool(params.get("conclusion")) and \
         params["conclusion"].strip() != content["conclusion_generated"]
     try:
+        # comments.log_report(sample_id, *, kind, revision, standard_name,
+        # params, ranges, windows, bullets, bullets_text, conclusion,
+        # conclusion_edited, comment_ids, pdf_sha256, author_initials,
+        # author_ip, app_version, created_at, db) — phase 4 serialises.
         comments_mod.log_report(
-            sample["id"], db,
-            revision=sample.get("current_revision"),
+            sample["id"],
             kind=kind,
+            revision=sample.get("current_revision"),
             standard_name=content["standard_name"],
-            params_json=json.dumps(content["params_used"]),
-            ranges_json=json.dumps(content["ranges"]),
-            windows_json=json.dumps(content["windows"]),
-            bullets_json=json.dumps(content["items"]),
+            params=content["params_used"],
+            ranges=content["ranges"],
+            windows=content["windows"],
+            bullets=content["items"],
             bullets_text=content["text"],
             conclusion=(params.get("conclusion") or "").strip() or content["conclusion_generated"],
-            conclusion_edited=1 if edited else 0,
-            comment_ids_json=json.dumps([c.get("id") for c in content["comments"]]),
-            app_version=version.APP_VERSION,
+            conclusion_edited=edited,
+            comment_ids=[c["id"] for c in content["comments"]],
             pdf_sha256=hashlib.sha256(pdf).hexdigest(),
             author_initials=None,
             author_ip=author_ip,
+            app_version=version.APP_VERSION,
+            db=db,
         )
+    except TypeError:
+        # A seam mismatch with comments.log_report: a bug, loudly.
+        LOGGER.error("report_log seam mismatch: comments.log_report rejected the call "
+                     "for sample %s (%s)", sample.get("id"), kind, exc_info=True)
     except Exception:
         LOGGER.exception("Could not write the report_log row for sample %s (%s)",
                          sample.get("id"), kind)

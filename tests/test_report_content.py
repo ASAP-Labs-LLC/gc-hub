@@ -159,12 +159,14 @@ def test_report_log_rows_for_every_export(harness):
     content = harness["records"][0]["content"]
     for r in rows:
         assert r["bullets_text"] == content["text"]
-        assert json.loads(r["bullets_json"]) == content["items"]
-        assert json.loads(r["params_json"]) == content["params_used"]
-        assert json.loads(r["windows_json"]) == content["windows"]
-        assert json.loads(r["comment_ids_json"]) == [7, 8]
+        assert r["bullets"] == content["items"]
+        assert r["params"] == content["params_used"]
+        assert r["windows"] == content["windows"]
+        assert r["ranges"] == content["ranges"]
+        assert r["comment_ids"] == [7, 8]
         assert r["conclusion"] == content["conclusion_generated"]
-        assert r["conclusion_edited"] == 0
+        assert r["conclusion_edited"] is False
+        assert r["db_given"] and r["author_initials"] is None
         assert re.fullmatch(r"[0-9a-f]{64}", r["pdf_sha256"])
         assert r["standard_name"] == "Base" and r["revision"] >= 1
         assert r["app_version"]

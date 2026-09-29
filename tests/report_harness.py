@@ -62,8 +62,21 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
     fake = types.ModuleType("comments")
     fake.for_report = lambda sid, db: [dict(c) for c in COMMENTS]
 
-    def log_report(sid, db, **row):
-        log_rows.append(dict(row, sample_id=sid))
+    # Phase 4's exact signature (comments.log_report): keyword-only, so a
+    # call that doesn't match it raises TypeError and the tests see no row.
+    def log_report(sample_id, *, kind, revision=None, standard_name=None, params=None,
+                   ranges=None, windows=None, bullets=None, bullets_text=None,
+                   conclusion=None, conclusion_edited=None, comment_ids=None,
+                   pdf_sha256=None, author_initials=None, author_ip=None,
+                   app_version=None, created_at=None, db=None):
+        log_rows.append(dict(
+            sample_id=sample_id, kind=kind, revision=revision, standard_name=standard_name,
+            params=params, ranges=ranges, windows=windows, bullets=bullets,
+            bullets_text=bullets_text, conclusion=conclusion,
+            conclusion_edited=conclusion_edited, comment_ids=comment_ids,
+            pdf_sha256=pdf_sha256, author_initials=author_initials, author_ip=author_ip,
+            app_version=app_version, created_at=created_at, db_given=db is not None))
+        return len(log_rows)
     fake.log_report = log_report
     sys.modules["comments"] = fake
 
