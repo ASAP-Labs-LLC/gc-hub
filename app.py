@@ -177,6 +177,15 @@ try:
 except OSError:
     LOGGER.exception("Could not create %s", paths.default_export_dir())
 
+# A diagnostics bundle a previous process was building or serving is garbage
+# now (nothing can be using it): clear the temp folder at start-up.
+import diagnostics  # noqa: E402
+
+try:
+    diagnostics.cleanup_tmp(paths.require_data_dir(), max_age=0)
+except Exception:  # noqa: BLE001 - never stop the app starting
+    LOGGER.exception("Could not clear the diagnostics temp folder")
+
 # ---------------------------------------------------------------------------
 # Flask app
 # ---------------------------------------------------------------------------
@@ -818,6 +827,7 @@ def _is_server_idle() -> bool:
       - No HTTP requests in the last AUTO_RESTART_IDLE_SECONDS
       - No user-initiated QBench upload thread running
       - No admin job running (``hub_admin.JOBS``: folder load, history import)
+      - No diagnostics bundle being built, waiting or downloading
       - No Worker job running or due now (``hub.background_busy``; a retry
         scheduled for later, e.g. pending corrections, doesn't count)
 
@@ -834,6 +844,9 @@ def _is_server_idle() -> bool:
     # Block while an admin job (folder load, history import) runs
     job = hub_admin.JOBS.current()
     if job is not None and job.get("state") == "running":
+        return False
+    # Block while a diagnostics bundle is built, waits to be fetched or streams
+    if diagnostics.busy():
         return False
     # Block while the Worker has due jobs (a retry scheduled later doesn't count)
     data = paths.data_dir()

@@ -37,12 +37,25 @@ from hub_boot import build_hub  # noqa: E402
 MARKER = "BOOTSEKRITq9z"
 
 
-def _download(port, body, timeout=120):
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/admin/diagnostics/bundle",
+def _post(port, path, body, timeout=120):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
                                  data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+def _download(port, body, timeout=120):
+    """Build (POST) then fetch the one-time download (GET)."""
+    code, headers, data = _post(port, "/api/admin/diagnostics/bundle", body, timeout)
+    if code != 200:
+        return code, headers, data
+    link = json.loads(data)["download"]
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{link}", timeout=timeout) as r:
             return r.status, dict(r.headers), r.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers), e.read()
@@ -62,7 +75,11 @@ def diag_hub(tmp_path_factory):
                                                   "client_secret": f"sec-{MARKER}"}),
                                       encoding="utf-8")
     store.instruments.upsert({"id": "gc1", "token_hash": f"th-{MARKER}"}, db=hub.db)
+    leftover = hub.data / "diagnostics-tmp" / "gc-diagnostics-killed.zip.part"
+    leftover.parent.mkdir()
+    leftover.write_bytes(b"left by a killed build")
     with booted(tmp) as (port, _proc, data, _home):
+        assert not leftover.exists()                  # cleaned at start-up (M4)
         pw = setup_admin(port, data)
         admin_hash = store.settings_kv.get("admin_password", db=hub.db)
         assert admin_hash
@@ -114,16 +131,31 @@ def test_download_validates_and_holds_no_secret(diag_hub):
 
 def test_estimate_and_gating(diag_hub):
     port, _hub, pw, _h = diag_hub
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/admin/diagnostics/estimate",
-                                 headers={"X-Admin-Password": pw})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        body = json.loads(r.read())
-        assert "no-store" in r.headers["Cache-Control"]
+    code, headers, raw = _post(port, "/api/admin/diagnostics/estimate", {"password": pw})
+    assert code == 200 and "no-store" in headers["Cache-Control"]
+    body = json.loads(raw)
     keys = [o["key"] for o in body["options"]]
     assert keys[0] == "summary" and "all_cdfs" in keys
     assert next(o for o in body["options"] if o["key"] == "all_cdfs")["files"] >= 8
-    code, _h2, _d = _download(port, {"password": "wrong"})
-    assert code == 403
+    assert _post(port, "/api/admin/diagnostics/bundle", {"password": "wrong"})[0] == 403
+    code, _h2, _d = _post(port, "/api/admin/diagnostics/bundle", {"password": pw})
+    link = json.loads(_d)["download"]
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{link}", timeout=60) as r:
+        r.read()
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}{link}", timeout=30)
+        raise AssertionError("a download token worked twice")
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
+
+
+def test_idle_check_waits_for_diagnostics():
+    """M4: the 3 AM auto-restart does not kill a build or a download."""
+    import ast
+    src = (TESTS.parent / "app.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_is_server_idle")
+    assert "diagnostics.busy()" in ast.unparse(fn)
 
 
 def test_the_app_keeps_serving_during_a_build(diag_hub):
@@ -177,12 +209,15 @@ def test_admin_page_diagnostics_panel(diag_hub):
         drv.get(f"http://127.0.0.1:{port}/admin/hub")
         text = drv.find_element("id", "diag-panel").text
         assert "Diagnostics" in text and "Claude" in text
+        assert "soft-deleted comments" in text and "IP addresses" in text     # M6
+        assert "qbenchlogin.txt on the share" in text
         boxes = drv.execute_script(
             "return Array.from(document.querySelectorAll('#diag-options input[type=checkbox]'))"
             ".map(b => [b.dataset.key, b.checked]);")
         assert dict(boxes) == {"summary": True, "logs": True, "tables": True, "settings": True,
                                "database": True, "exports": True, "reports": True,
-                               "problem_cdfs": True, "all_cdfs": False}
+                               "problem_cdfs": True, "calibration": True, "updater": True,
+                               "environment": True, "all_cdfs": False}
         drv.find_element("id", "pw").send_keys(pw)
         drv.find_element("id", "btn-diag-estimate").click()
         assert _wait(lambda: "B" in drv.find_element("id", "diag-total").text), \
@@ -199,7 +234,7 @@ def test_admin_page_diagnostics_panel(diag_hub):
         drv.execute_script("const b = document.querySelector('#diag-options input[data-key=all_cdfs]');"
                            "b.click();")
         drv.find_element("id", "btn-diag-download").click()
-        assert _wait(lambda: "Downloaded" in drv.find_element("id", "diag-msg").text, 90), \
+        assert _wait(lambda: "Download started" in drv.find_element("id", "diag-msg").text, 90), \
             drv.find_element("id", "diag-msg").text
     finally:
         drv.quit()

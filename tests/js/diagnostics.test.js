@@ -26,4 +26,11 @@ module.exports = (t) => {
         'gc-diagnostics-x.zip');
     t.eq(D.filenameFromDisposition(null), 'gc-diagnostics.zip');
     t.eq(D.filenameFromDisposition('attachment; filename="../../evil.zip"'), 'evil.zip');
+
+    // Only the hub's own one-time download path is navigated to.
+    t.eq(D.isDownloadUrl('/api/admin/diagnostics/download/Ab_9-x'), true);
+    t.eq(D.isDownloadUrl('https://evil.example/x'), false);
+    t.eq(D.isDownloadUrl('/api/admin/diagnostics/download/../x'), false);
+    t.eq(D.isDownloadUrl('//evil.example/api/admin/diagnostics/download/x'), false);
+    t.eq(D.isDownloadUrl(null), false);
 };

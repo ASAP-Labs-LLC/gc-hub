@@ -1,8 +1,9 @@
 /* Hub admin "Download diagnostics" (/admin/hub, the Diagnostics panel).
    The pure helpers are module.exports for the Node tests; in the browser the
-   panel is wired up below. Sizes come from GET /api/admin/diagnostics/estimate
-   (password in X-Admin-Password), the zip from POST .../bundle (JSON with the
-   password), saved through a blob URL. DOM text is set with textContent only. */
+   panel is wired up below. Sizes come from POST /api/admin/diagnostics/estimate
+   and the build from POST .../bundle (JSON with the password); the bundle
+   answers a one-time download URL the browser then navigates to, so a large
+   zip streams to disk instead of into memory. DOM text is textContent only. */
 (function () {
     'use strict';
 
@@ -54,8 +55,14 @@
         return name && name !== '.' && name !== '..' ? name : 'gc-diagnostics.zip';
     }
 
+    // Only the hub's own one-time download path is followed.
+    function isDownloadUrl(u) {
+        return typeof u === 'string' &&
+            /^\/api\/admin\/diagnostics\/download\/[A-Za-z0-9_-]+$/.test(u);
+    }
+
     const pure = { formatBytes, chosenOptions, estimateTotal, sizeWarning,
-                   filenameFromDisposition };
+                   filenameFromDisposition, isDownloadUrl };
     if (typeof module !== 'undefined' && module.exports) {
         module.exports = pure;
         return;
@@ -91,7 +98,8 @@
         say('Checking sizes…');
         try {
             const r = await fetch('/api/admin/diagnostics/estimate', {
-                headers: { 'X-Admin-Password': $('pw').value }, cache: 'no-store' });
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+                body: JSON.stringify({ password: $('pw').value }) });
             const j = await r.json().catch(() => ({}));
             if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
             estimateRows = j.options || [];
@@ -116,21 +124,18 @@
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
                 body: JSON.stringify({ password: $('pw').value, options: chosenOptions(boxes()) }),
             });
-            if (!r.ok) {
-                const j = await r.json().catch(() => ({}));
-                throw new Error(j.error || `HTTP ${r.status}`);
-            }
-            const name = filenameFromDisposition(r.headers.get('Content-Disposition'));
-            const blob = await r.blob();
-            const url = URL.createObjectURL(blob);
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+            if (!isDownloadUrl(j.download)) throw new Error('Unexpected answer from the hub');
+            // A navigation, not fetch + blob: the browser streams the zip to disk.
             const a = document.createElement('a');
-            a.href = url;
-            a.download = name;
+            a.href = j.download;
+            a.download = j.name || 'gc-diagnostics.zip';
             document.body.appendChild(a);
             a.click();
             a.remove();
-            setTimeout(() => URL.revokeObjectURL(url), 60000);
-            say(`Downloaded ${name} (${formatBytes(blob.size)})`, 'ok');
+            say(`Download started: ${j.name} (${formatBytes(j.size)}, ${j.files} files` +
+                (j.skipped ? `; ${j.skipped} left out, see summary.txt` : '') + ')', 'ok');
         } catch (e) {
             say(e.message, 'err');
         } finally {
