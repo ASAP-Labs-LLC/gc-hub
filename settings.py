@@ -77,6 +77,18 @@ DEFAULTS: Dict[str, str] = {
     "analysis_oil_c_end": "44",
     "analysis_x_max_min": "7.0",
     "analysis_spike_min_width_min": "0.02",
+    # Deviation bullets (phase 3): a trend run must be this wide (min) to
+    # count; outside-range pieces closer than the merge gap (min) are shown
+    # as one span; a spike counts when it reaches the report threshold
+    # (empty = the moderate threshold in effect).
+    "analysis_min_width_min": "0.05",
+    "analysis_merge_gap_min": "0.10",
+    "analysis_spike_report_threshold": "",
+    # A counted spike must be sharp (full width at half height ≤ this, min)
+    # and dominate the local peaks (|difference at the apex| ≥ this fraction
+    # of the larger of the sample's and the standard's local peak height).
+    "analysis_spike_max_fwhm_min": "0.20",
+    "analysis_spike_min_dominance": "0.6",
     "analysis_range_overlays": "",
     "analysis_report_logo": "",
     "analysis_export_last_dir": "",
@@ -91,6 +103,10 @@ DEFAULTS: Dict[str, str] = {
     "bestfit_threshold": "0.93",
     "bestfit_shift_tolerance_min": "0.05",
     "bestfit_mix_min_frac": "0.10",
+    # D10: where the Instruments page's LEM machine dropdown comes from
+    # (lem_machines.py; read-only GET <lem_url>/api/machines). A bare
+    # http(s)://host[:port]; the LEM_URL environment variable wins.
+    "lem_url": "https://lem.asaplabs.net",
 }
 
 # ---------------------------------------------------------------------------
@@ -125,6 +141,11 @@ ADMIN_KEYS = (
     "analysis_thresh_marginal", "analysis_thresh_moderate", "analysis_thresh_significant",
     "analysis_gas_c_start", "analysis_gas_c_end", "analysis_oil_c_start", "analysis_oil_c_end",
     "analysis_x_max_min", "analysis_spike_min_width_min", "analysis_range_overlays",
+    "analysis_min_width_min", "analysis_merge_gap_min", "analysis_spike_report_threshold",
+    "analysis_spike_max_fwhm_min", "analysis_spike_min_dominance",
+    # D10: the hub fetches from this address server-side, so only an admin
+    # may point it elsewhere (validated in app.api_save_settings).
+    "lem_url",
 )
 
 

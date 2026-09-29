@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hub admin</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=2">
+  <script src="{{ url_for('static', filename='js/session.js') }}?v=1"></script>
   <style>
     :root{
       --bg:#0d1117; --panel:#161b22; --line:#30363d;
@@ -31,6 +32,12 @@
     table{width:100%;border-collapse:collapse;font-size:13px}
     th,td{text-align:left;border-bottom:1px solid var(--line);padding:5px 6px;vertical-align:top}
     .err{color:var(--danger)} .ok{color:var(--green)} .muted{color:var(--muted)} .warn{color:var(--warn)}
+    ul.presets{list-style:none;margin:8px 0;padding:0}
+    ul.presets li{display:flex;gap:6px;align-items:center;border-bottom:1px solid var(--line);
+      padding:4px 0}
+    ul.presets li input.preset-text{flex:1}
+    ul.presets li.inactive input.preset-text{color:var(--muted);text-decoration:line-through}
+    ul.presets li button{margin:0;padding:3px 8px}
     pre{white-space:pre-wrap;background:var(--bg);border:1px solid var(--line);border-radius:6px;
       padding:8px;font-size:12px;max-height:240px;overflow:auto}
   </style>
@@ -45,6 +52,28 @@
     <span id="msg" role="status"></span>
     <p style="margin-top:8px">Every action below needs the admin password (set once at
       <a href="/admin/setup">/admin/setup</a>). <a href="/">Back to the app</a></p>
+  </div>
+
+  <div class="panel">
+    <h2>Hub address</h2>
+    <p>The address the GC PCs' agents and the hub tray's "Open in browser" use:
+      <strong id="hub-url-effective">{{ hub_url_effective }}</strong>. New agent installers get it
+      (with this machine's LAN address as their fallback). Empty = https://gc.asaplabs.net;
+      http:// only for a lab-network name or IP.</p>
+    <input id="hub-url" class="wide" type="text" value="{{ hub_url }}"
+      placeholder="https://gc.asaplabs.net">
+    <button id="btn-hub-url">Save hub address</button>
+  </div>
+
+  <div class="panel">
+    <h2>Signed-in sessions</h2>
+    <p>Who is signed in (browser sessions; idle ones end after 12 hours, all after 14 days,
+      7 through gc.asaplabs.net). Revoke signs that browser out at once.</p>
+    <button id="btn-sessions">Load sessions</button>
+    <table>
+      <thead><tr><th>Name</th><th>Method</th><th>Address</th><th>Last seen</th><th></th></tr></thead>
+      <tbody id="sessions"></tbody>
+    </table>
   </div>
 
   <div class="panel">
@@ -81,6 +110,19 @@
   </div>
 
   <div class="panel">
+    <h2>Comment presets</h2>
+    <p>The one-click comments on the Analysis tab. Their text is copied into a sample's comment
+      when it is added (editing a preset later does not change existing comments), and comments
+      print in reports that may reach customers: word them for a report. At most 50 active,
+      200 characters each. Deactivated presets are kept and can be reactivated.</p>
+    <button id="btn-presets-load">Load presets</button>
+    <ul id="presets" class="presets"></ul>
+    <input id="preset-new-text" class="wide" type="text" maxlength="200"
+      placeholder="New preset text">
+    <button id="btn-preset-add">Add preset</button>
+  </div>
+
+  <div class="panel">
     <h2>Exports</h2>
     <p>Each instrument's results CSV (append-only; LEM tails it). A refused file is never
       written until it is adopted or the export is moved to another path. Never point LEM at
@@ -90,10 +132,49 @@
       <tbody id="exports"></tbody>
     </table>
   </div>
+
+  <div class="panel" id="diag-panel">
+    <h2>Diagnostics</h2>
+    <p>Download one zip with what is needed to debug this hub: version and runtime state, logs,
+      the store's tables, a copy of the database, export health, parity reports, calibration
+      files, the updater's log and state, and the CDFs of samples that are held or in error.
+      Secrets are left out or replaced by <code>[REDACTED]</code>: the admin password (and its
+      hash), agent tokens, the setup code, the QBench API credentials, the QBench web login
+      (<code>qbenchlogin.txt</code> on the share) and GitHub tokens. The hub keeps working while
+      it builds; one bundle at a time.</p>
+    <p class="warn">The database copy holds everything in the store, including soft-deleted
+      comments and the operators' IP addresses (internal lab addresses), as well as sample IDs,
+      results and CDFs. Treat the zip as lab data.</p>
+    <p><strong>To have Claude look at it:</strong> save the zip where Claude can read it (for
+      example the Downloads folder of the computer you run Claude Code on, or a folder you give
+      Claude access to), then tell Claude its path, e.g. <em>"debug the GC hub from
+      ~/Downloads/gc-diagnostics-&hellip;.zip"</em>. Don't email it or post it anywhere
+      public.</p>
+    <table>
+      <thead><tr><th></th><th>Include</th><th>Expected size</th></tr></thead>
+      <tbody id="diag-options">
+        {% for o in diag_options %}
+        <tr data-key="{{ o.key }}">
+          <td><input type="checkbox" id="diag-opt-{{ o.key }}" data-key="{{ o.key }}"
+                     {% if o.default %}checked{% endif %}></td>
+          <td><label for="diag-opt-{{ o.key }}">{{ o.label }}</label></td>
+          <td class="diag-size muted"></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p id="diag-total" class="muted" style="margin-top:8px"></p>
+    <p id="diag-warning" class="warn"></p>
+    <button id="btn-diag-estimate">Check sizes</button>
+    <button id="btn-diag-download">Download diagnostics</button>
+    <span id="diag-msg" role="status"></span>
+  </div>
 </main>
-<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=3"></script>
+<script src="{{ url_for('static', filename='js/diagnostics.js') }}?v=2"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>
+{% include "_signed_in.html" %}
 </body>
 </html>

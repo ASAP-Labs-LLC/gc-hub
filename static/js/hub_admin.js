@@ -129,6 +129,7 @@
       await refreshExports();
       await pollJob();
     } catch (e) { say(e.message, "err"); }
+    await loadPresets();
   }
 
   async function startLoad() {
@@ -201,6 +202,141 @@
     } catch (e) { say(e.message, "err"); }
   }
 
+  // ── comment presets (phase 4) ─────────────────────────────────────────
+  // One admin route, /api/admin/comment-presets {action, ...}; every answer
+  // carries the full list, which is re-rendered (inputs are set with .value,
+  // labels with textContent: preset text is data, never markup).
+
+  let shownPresets = [];
+
+  // Unsaved edits in the list ({id: text}), so a reorder or (de)activation of
+  // another preset doesn't throw them away. A saved preset drops its own.
+  function unsavedEdits() {
+    const out = {};
+    document.querySelectorAll("#presets li").forEach((li) => {
+      const p = shownPresets.find((q) => String(q.id) === li.dataset.id);
+      const v = li.querySelector("input.preset-text").value;
+      if (p && v !== p.text) out[p.id] = v;
+    });
+    return out;
+  }
+
+  async function presetCall(action, extra) {
+    const edits = unsavedEdits();
+    const j = await call("/api/admin/comment-presets", Object.assign({action}, extra || {}));
+    if (action === "update" && extra) delete edits[extra.id];
+    renderPresets(j.presets || [], edits);
+    return j;
+  }
+
+  function renderPresets(presets, edits) {
+    shownPresets = presets;
+    const ul = $("presets");
+    ul.textContent = "";
+    presets.forEach((p, i) => {
+      const li = el("li", null, p.active ? "" : "inactive");
+      li.dataset.id = String(p.id);
+      const input = document.createElement("input");
+      input.type = "text";
+      input.maxLength = 200;
+      input.className = "preset-text";
+      input.value = (edits && edits[p.id] !== undefined) ? edits[p.id] : p.text;
+      li.appendChild(input);
+      const btn = (label, cls, fn, disabled) => {
+        const b = el("button", label, cls);
+        b.disabled = !!disabled;
+        b.addEventListener("click", () => fn().catch((e) => say(e.message, "err")));
+        li.appendChild(b);
+      };
+      btn("Save", "preset-save", async () => {
+        await presetCall("update", {id: p.id, text: input.value});
+        say("Preset saved", "ok");
+      });
+      btn("\u2191", "preset-up", () => move(presets, i, -1), i === 0);
+      btn("\u2193", "preset-down", () => move(presets, i, +1), i === presets.length - 1);
+      btn(p.active ? "Deactivate" : "Activate", "preset-toggle warn",
+          () => presetCall(p.active ? "deactivate" : "activate", {id: p.id}));
+      ul.appendChild(li);
+    });
+  }
+
+  function move(presets, i, delta) {
+    const ids = presets.map((p) => p.id);
+    const j = i + delta;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    return presetCall("reorder", {ids});
+  }
+
+  async function loadPresets() {
+    try { await presetCall("list"); } catch (e) { say(e.message, "err"); }
+  }
+
+  async function addPreset() {
+    const input = $("preset-new-text");
+    try {
+      await presetCall("create", {text: input.value});
+      input.value = "";
+      say("Preset added", "ok");
+    } catch (e) { say(e.message, "err"); }
+  }
+
+  // ── hub address and sessions ──
+  async function saveHubUrl() {
+    try {
+      const j = await call("/api/admin/hub-url", {hub_url: $("hub-url").value.trim()});
+      $("hub-url-effective").textContent = j.effective || j.hub_url || "https://gc.asaplabs.net";
+      say("Hub address saved: " + $("hub-url-effective").textContent, "ok");
+    } catch (e) { say(e.message, "err"); }
+  }
+
+  function renderSessions(rows) {
+    const tb = $("sessions");
+    tb.textContent = "";
+    for (const s of rows || []) {
+      const tr = document.createElement("tr");
+      for (const v of [s.name, s.method, s.ip || "", (s.last_seen || "").replace("T", " ").slice(0, 19)]) {
+        const td = document.createElement("td");
+        td.textContent = v;
+        tr.appendChild(td);
+      }
+      const td = document.createElement("td");
+      const one = document.createElement("button");
+      one.textContent = "Revoke";
+      one.className = "warn";
+      one.addEventListener("click", () => sessionCall("revoke", {id: s.id}));
+      const all = document.createElement("button");
+      all.textContent = "Revoke all for this name";
+      all.className = "warn";
+      all.addEventListener("click", () => {
+        if (confirm("Sign out every session of " + s.name + "?")) sessionCall("revoke-name", {name: s.name});
+      });
+      td.appendChild(one);
+      td.appendChild(all);
+      tr.appendChild(td);
+      tb.appendChild(tr);
+    }
+    if (!rows || !rows.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 5;
+      td.textContent = "No active sessions.";
+      tr.appendChild(td);
+      tb.appendChild(tr);
+    }
+  }
+
+  async function sessionCall(action, extra) {
+    try {
+      const j = await call("/api/admin/sessions", Object.assign({action}, extra || {}));
+      renderSessions(j.sessions);
+      if (action !== "list") say("Done", "ok");
+    } catch (e) { say(e.message, "err"); }
+  }
+
+  $("btn-hub-url").addEventListener("click", saveHubUrl);
+  $("btn-sessions").addEventListener("click", () => sessionCall("list"));
+  $("btn-presets-load").addEventListener("click", loadPresets);
+  $("btn-preset-add").addEventListener("click", addPreset);
   $("btn-refresh").addEventListener("click", refresh);
   $("btn-load").addEventListener("click", startLoad);
   $("btn-ih-last").addEventListener("click", ihLastRun);

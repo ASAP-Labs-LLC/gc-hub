@@ -23,7 +23,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bootapp import ROOT, booted, get, post, wait_for  # noqa: E402
+from bootapp import get_text, ROOT, booted, get, post, wait_for  # noqa: E402
 
 sys.path.insert(0, str(ROOT))
 
@@ -270,7 +270,7 @@ class RestartRouteTests(unittest.TestCase):
                 _, body = post(port, "/api/restart", {"dry_run": True})
                 self.assertEqual((body["mode"], body["tag"]), ("restart", None))
                 # The Settings modal carries the Restart button and its helpers.
-                html = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read().decode()
+                html = get_text(port, "/")
                 self.assertIn('id="btn-restart"', html)
                 self.assertIn("js/restart.js", html)
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/static/js/restart.js",
@@ -427,6 +427,25 @@ class PolicyDecisionTests(unittest.TestCase):
             (d / "switching").unlink()
             (d / "switch-requested").write_text(json.dumps({"at": time.time()}))
             self.assertFalse(restart_policy.should_respawn(d, env=env))
+
+    def test_an_explicit_stop_never_respawns(self):
+        # Stop (hub_control) writes the updater's `paused` marker so the
+        # updater leaves the hub down; a paused updater normally means "respawn
+        # yourself", so an explicit stop must override that.
+        import restart_policy
+        env = {"GC_DATA_DIR": "x"}
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            (d / "paused").write_text("")
+            self.assertTrue(restart_policy.should_respawn(d, env=env))
+            restart_policy.request_stop()
+            try:
+                self.assertTrue(restart_policy.stop_requested())
+                self.assertFalse(restart_policy.should_respawn(d, env=env))
+            finally:
+                restart_policy._reset_stop_for_tests()
+            self.assertFalse(restart_policy.stop_requested())
+            self.assertTrue(restart_policy.should_respawn(d, env=env))
 
     def test_auto_restart_decision(self):
         import restart_policy as rp

@@ -17,7 +17,7 @@ pytest.importorskip("flask")
 import ingest_api  # noqa: E402
 import instruments  # noqa: E402
 import store  # noqa: E402
-from bootapp import booted, get, send, setup_admin  # noqa: E402
+from bootapp import get_text, booted, get, send, setup_admin  # noqa: E402
 
 ADMIN_ROUTES = [
     "/api/admin/instruments",
@@ -87,9 +87,8 @@ def test_instruments_blueprint(tmp_path):
         c = Client(port, pw)
 
         # ── the page
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/instruments", timeout=10) as r:
-            html = r.read().decode()
-        assert r.status == 200 and "instruments.js" in html and "instruments_logic.js" in html
+        html = get_text(port, "/instruments", timeout=10)
+        assert "instruments.js" in html and "instruments_logic.js" in html
 
         # ── list and detail
         code, body = c.get("/api/instruments")
@@ -149,7 +148,7 @@ def test_instruments_blueprint(tmp_path):
                             {"values": ELEVEN, "reason": "first entry"})
         assert code == 200 and body["changed"] == 11
         code, body = c.get("/api/instruments/gc3/corrections")
-        assert body["values"] == ELEVEN and body["audit"][0]["changed_by"].startswith("admin@")
+        assert body["values"] == ELEVEN and body["audit"][0]["changed_by"] == "Test Operator (127.0.0.1)"
         # T5: hub.start seeds gc1 from the phase-1 file at the first start, so
         # the one-time admin seed finds it done.
         rec = store.corrections.read("gc1", db=hub.db)

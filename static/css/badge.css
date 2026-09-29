@@ -24,6 +24,27 @@
   opacity: 0.55;
 }
 
+/* ── Signed in as <name> · Sign out ──────────────────────────────────
+   Just left of the version badge, on every page (templates/_signed_in.html,
+   wired by static/js/session.js). Clickable, unlike the badge. */
+#signed-in {
+  position: fixed;
+  bottom: 4px;
+  right: 64px;
+  z-index: 60;
+  font-size: 11px;
+  color: var(--text-muted, var(--muted, #7d8590));
+  opacity: 0.8;
+}
+#signed-in #signed-in-name { color: var(--text, var(--txt, #e6edf3)); }
+#signed-in #sign-out {
+  all: unset;
+  cursor: pointer;
+  color: var(--accent, #388bfd);
+  text-decoration: underline;
+}
+#signed-in #sign-out:disabled { opacity: 0.5; cursor: default; }
+
 @media print {
-  #app-version { display: none; }
+  #app-version, #signed-in { display: none; }
 }

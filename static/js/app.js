@@ -65,7 +65,6 @@ const state = {
     traces: [],             // [{sample_id, name, visible, color, x, y}]
     dcTraces: [],           // [{sample_id, name, visible, color, percent, temperature}]
     tableData: { columns: [], rows: [] },
-    calibration: { peak_times: [], carbon_numbers: [], boiling_points: [] },
     comparisonStandards: [],
     analysisResult: null,
     analysisQueue: [],      // [{sample_id, lab_id, sample_name, standard_name, added_at, ...}]
@@ -344,30 +343,10 @@ async function loadSettings() {
         if (s.analysis_thresh_moderate) p.thresh_moderate = parseFloat(s.analysis_thresh_moderate);
         if (s.analysis_thresh_significant) p.thresh_significant = parseFloat(s.analysis_thresh_significant);
         if (s.analysis_x_max_min) p.x_max_min = parseFloat(s.analysis_x_max_min);
-        // Sync range overlays from settings
-        if (s.analysis_range_overlays) {
-            try {
-                const saved = typeof s.analysis_range_overlays === 'string'
-                    ? JSON.parse(s.analysis_range_overlays) : s.analysis_range_overlays;
-                if (Array.isArray(saved) && saved.length > 0) {
-                    state.rangeOverlays = saved.map((r, i) => ({
-                        id: i + 1, label: r.label, c_start: r.c_start, c_end: r.c_end,
-                        color: r.color || '#3fb95044'
-                    }));
-                    state.nextRangeId = state.rangeOverlays.length + 1;
-                }
-            } catch (_) { /* fall through to legacy keys */ }
-        } else {
-            // Legacy: only Gas/Oil by name
-            if (s.analysis_gas_c_start && s.analysis_gas_c_end) {
-                const gas = state.rangeOverlays.find(r => r.label === 'Gas');
-                if (gas) { gas.c_start = parseInt(s.analysis_gas_c_start); gas.c_end = parseInt(s.analysis_gas_c_end); }
-            }
-            if (s.analysis_oil_c_start && s.analysis_oil_c_end) {
-                const oil = state.rangeOverlays.find(r => r.label === 'Oil');
-                if (oil) { oil.c_start = parseInt(s.analysis_oil_c_start); oil.c_end = parseInt(s.analysis_oil_c_end); }
-            }
-        }
+        // Range overlays from settings, as the server resolves them
+        // ("[]" saved = no ranges; nothing saved = the legacy Gas/Oil keys)
+        state.rangeOverlays = overlaysFromSettings(s);
+        state.nextRangeId = state.rangeOverlays.length + 1;
         // Update UI inputs
         populateAnalysisParamInputs();
     } catch (e) {
@@ -468,14 +447,6 @@ async function onInstrumentFilterChange() {
     if (needsServerSearch(q, state.filesTotal, state.files.length)) _serverSearch(q);
 }
 
-async function loadCalibration() {
-    try {
-        state.calibration = await apiGet('/api/calibration');
-    } catch (e) {
-        console.error('Failed to load calibration:', e);
-    }
-}
-
 async function loadTableData() {
     try {
         state.tableData = await apiGet('/api/table');
@@ -500,7 +471,6 @@ async function refreshAll() {
     await Promise.all([
         loadFiles(),
         loadTableData(),
-        loadCalibration(),
         loadComparisonStandards(),
     ]);
     showNotification('Data refreshed', 'success');
@@ -1002,29 +972,15 @@ async function loadDashboardData(file) {
             name: traceLabel(file, state.instrumentNames),
             line: { color: '#58a6ff', width: 1.5 },
         }];
-        // Add calibration overlays
-        const calShapes = [];
-        const calAnnotations = [];
-        if (state.calibration.peak_times && state.calibration.peak_times.length > 0) {
-            for (let i = 0; i < state.calibration.peak_times.length; i++) {
-                const rt = state.calibration.peak_times[i];
-                const cn = state.calibration.carbon_numbers ? state.calibration.carbon_numbers[i] : (i + 5);
-                calShapes.push({
-                    type: 'line', x0: rt, x1: rt, y0: 0, y1: 1, yref: 'paper',
-                    line: { color: '#d29922', width: 1, dash: 'dot' },
-                });
-                calAnnotations.push({
-                    x: rt, y: 1, yref: 'paper', text: `C${cn}`,
-                    showarrow: false, font: { color: '#d29922', size: 9 }, yanchor: 'bottom',
-                });
-            }
-        }
+        // Carbon markers: the sample revision's own ladder (served with its
+        // trace), so a gc2 sample is labelled with gc2's calibration
+        const markers = carbonMarkers(traceData.cal_times, traceData.cal_carbons);
         Plotly.react(chromDiv, chromTraces, basePlotlyLayout({
             title: { text: traceLabel(file, state.instrumentNames), font: { size: 14 } },
             xaxis: { title: 'Time (min)', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
             yaxis: { title: 'Intensity', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
-            shapes: calShapes,
-            annotations: calAnnotations,
+            shapes: markers.shapes,
+            annotations: markers.annotations,
         }), PLOTLY_CONFIG);
         }   // end chromatogram block
 
@@ -1200,6 +1156,8 @@ async function addChromatogramTrace(file) {
             color,
             x: data.x,
             y: data.y,
+            cal_times: data.cal_times || [],       // this sample's own ladder
+            cal_carbons: data.cal_carbons || [],
         });
         renderChromatogramChart();
         renderTraceList();
@@ -1217,30 +1175,21 @@ function renderChromatogramChart() {
         name: t.name, line: { color: t.color, width: 1.5 },
     }));
 
-    // Calibration overlays
-    const calShapes = [];
-    const calAnnotations = [];
-    if (state.calibration.peak_times) {
-        for (let i = 0; i < state.calibration.peak_times.length; i++) {
-            const rt = state.calibration.peak_times[i];
-            const cn = state.calibration.carbon_numbers ? state.calibration.carbon_numbers[i] : (i + 5);
-            calShapes.push({
-                type: 'line', x0: rt, x1: rt, y0: 0, y1: 1, yref: 'paper',
-                line: { color: '#d29922', width: 1, dash: 'dot' },
-            });
-            calAnnotations.push({
-                x: rt, y: 1, yref: 'paper', text: `C${cn}`,
-                showarrow: false, font: { color: '#d29922', size: 9 }, yanchor: 'bottom',
-            });
-        }
-    }
+    // Carbon markers: the first visible trace's own ladder; when traces from
+    // another calibration (e.g. gc1 next to gc2) are shown, the title says
+    // whose markers these are
+    const lad = overlayLadder(state.traces);
+    const markers = carbonMarkers(lad.times, lad.carbons);
+    const title = lad.differs
+        ? `Chromatogram Overlay (carbon markers: ${lad.owner})`
+        : 'Chromatogram Overlay';
 
     Plotly.react(div, traces, basePlotlyLayout({
-        title: { text: 'Chromatogram Overlay', font: { size: 14 } },
+        title: { text: title, font: { size: 14 } },
         xaxis: { title: 'Time (min)', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
         yaxis: { title: 'Intensity', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
-        shapes: calShapes,
-        annotations: calAnnotations,
+        shapes: markers.shapes,
+        annotations: markers.annotations,
     }), PLOTLY_CONFIG);
 }
 
@@ -1858,25 +1807,20 @@ const debouncedAnalysis = debounce(() => {
 }, 600);
 
 /**
- * Add shaded rectangles + labels for each range overlay to the given shapes/annotations arrays.
- * Uses calibration peak_times/carbon_numbers to map C-number → retention time via interpolation.
+ * Add shaded rectangles + labels for each range window to the given
+ * shapes/annotations arrays. The windows are /api/analysis's: the server's
+ * one carbon→time conversion on the sample revision's ladder, clipped to the
+ * displayed axis — the very windows the bullets were evaluated on. Windows
+ * that could not be evaluated (width 0) draw nothing.
  */
-function addRangeShapes(shapes, annotations) {
-    const peakTimes = state.calibration.peak_times;
-    const carbonNums = state.calibration.carbon_numbers;
-    if (!peakTimes || peakTimes.length === 0) return;
-
-    const cn = carbonNums || peakTimes.map((_, i) => i + 5);
-    const n = Math.min(peakTimes.length, cn.length);
-
-    for (const range of state.rangeOverlays) {
-        // Interpolate carbon numbers to retention times: linterp(xs, ys, target)
-        const t0 = linterp(cn.slice(0, n), peakTimes.slice(0, n), range.c_start);
-        const t1 = linterp(cn.slice(0, n), peakTimes.slice(0, n), range.c_end);
-        if (t0 == null || t1 == null) continue;
+function addRangeShapes(shapes, annotations, windows) {
+    for (const w of (windows || [])) {
+        if (!w.evaluable) continue;
+        const t0 = w.t0, t1 = w.t1;
+        const overlay = state.rangeOverlays[w.index] || {};   // fallback colour only
 
         // Parse color (stored as #RRGGBBAA)
-        const hex = (range.color || '#3fb95044').replace('#', '');
+        const hex = (w.color || overlay.color || '#3fb95044').replace('#', '');
         const r = parseInt(hex.slice(0, 2), 16);
         const g = parseInt(hex.slice(2, 4), 16);
         const b = parseInt(hex.slice(4, 6), 16);
@@ -1894,7 +1838,7 @@ function addRangeShapes(shapes, annotations) {
         if (annotations) {
             annotations.push({
                 x: (t0 + t1) / 2, y: 1.02, yref: 'paper',
-                text: range.label,
+                text: escapeHtml(w.label),   // Plotly renders pseudo-HTML
                 showarrow: false,
                 font: { color: `rgb(${r},${g},${b})`, size: 9 },
                 yanchor: 'bottom',
@@ -1939,6 +1883,8 @@ function _setAnalysisLoading(on) {
     if (statusEl) statusEl.textContent = on ? 'Running analysis...' : 'Ready';
 }
 
+let _analysisSeq = 0;
+
 async function runAnalysis() {
     if (!state.selectedSample) {
         showNotification('Select a sample first', 'info');
@@ -1956,19 +1902,22 @@ async function runAnalysis() {
         sample_id: state.selectedSample.sample_id,
         standard_name: state.selectedStandard.name,
         ...state.analysisParams,
-        ranges: state.rangeOverlays.map(r => ({
-            label: r.label, c_start: r.c_start, c_end: r.c_end
-        })),
+        ranges: rangesForPayload(state.rangeOverlays),   // [] = no ranges
     };
 
+    // Only the latest request renders: a slow earlier analysis (another
+    // sample or other parameters) must not draw over a newer one.
+    const seq = ++_analysisSeq;
     try {
         const result = await apiPost('/api/analysis', body);
+        if (seq !== _analysisSeq) return;
         state.analysisResult = result;
+        state._renderedAnalysisSampleId = body.sample_id;
         renderAnalysisResults(result);
     } catch (e) {
-        showNotification('Analysis failed: ' + e.message, 'error');
+        if (seq === _analysisSeq) showNotification('Analysis failed: ' + e.message, 'error');
     } finally {
-        _setAnalysisLoading(false);
+        if (seq === _analysisSeq) _setAnalysisLoading(false);
     }
 }
 
@@ -1983,9 +1932,18 @@ function updateAnalysisOverlay() {
     if (chkSample) chkSample.innerHTML = hasSample ? '&#x2713;' : '&#x200B;';
     if (chkStandard) chkStandard.innerHTML = hasStandard ? '&#x2713;' : '&#x200B;';
     overlay.style.display = (hasSample && hasStandard) ? 'none' : 'flex';
+    if (typeof Comments !== 'undefined') {
+        Comments.setSample(hasSample ? state.selectedSample.sample_id : null);
+    }
 }
 
 function renderAnalysisResults(result) {
+    // The calibration lines and range boxes are the server's: the sample
+    // revision's ladder (cal_times/cal_carbons) and the report's windows,
+    // never gc1's /api/calibration.
+    const calTimes = result.cal_times || [];
+    const calCarbons = result.cal_carbons || [];
+
     // Trend plot
     const trendDiv = document.getElementById('analysis-trend-plot');
     if (trendDiv && result.trend) {
@@ -2009,26 +1967,23 @@ function renderAnalysisResults(result) {
             });
         }
 
-        // Calibration vertical lines
+        // Calibration vertical lines (the revision's ladder)
         const shapes = [];
         const annotations = [];
-        if (state.calibration.peak_times) {
-            for (let i = 0; i < state.calibration.peak_times.length; i++) {
-                const rt = state.calibration.peak_times[i];
-                const cn = state.calibration.carbon_numbers ? state.calibration.carbon_numbers[i] : (i + 5);
-                shapes.push({
-                    type: 'line', x0: rt, x1: rt, y0: 0, y1: 1, yref: 'paper',
-                    line: { color: '#d29922', width: 0.5, dash: 'dot' },
-                });
-                annotations.push({
-                    x: rt, y: 1, yref: 'paper', text: `C${cn}`,
-                    showarrow: false, font: { color: '#d29922', size: 8 }, yanchor: 'bottom',
-                });
-            }
+        for (let i = 0; i < calTimes.length; i++) {
+            const rt = calTimes[i];
+            shapes.push({
+                type: 'line', x0: rt, x1: rt, y0: 0, y1: 1, yref: 'paper',
+                line: { color: '#d29922', width: 0.5, dash: 'dot' },
+            });
+            annotations.push({
+                x: rt, y: 1, yref: 'paper', text: `C${calCarbons[i]}`,
+                showarrow: false, font: { color: '#d29922', size: 8 }, yanchor: 'bottom',
+            });
         }
 
-        // Dynamic range overlay shading
-        addRangeShapes(shapes, annotations);
+        // Range boxes from the report's windows
+        addRangeShapes(shapes, annotations, result.windows);
 
         Plotly.react(trendDiv, trendTraces, basePlotlyLayout({
             title: { text: 'Trend Comparison', font: { size: 14 } },
@@ -2048,6 +2003,8 @@ function renderAnalysisResults(result) {
         const diffTraces = [];
         const diffX = result.diff.x;
         const diffY = result.diff.y;
+        const p = result.params_used || state.analysisParams;
+        const spikes = result.spikes || [];
 
         if (diffX && diffY) {
             // Positive fill (red above zero)
@@ -2076,10 +2033,50 @@ function renderAnalysisResults(result) {
             });
         }
 
-        // Dynamic range overlays on diff plot too
+        // The spikes the report counted (raw difference, so every "sharp
+        // spike" in a bullet can be found on the graph)
+        if (spikes.length) {
+            diffTraces.push({
+                x: spikes.map(s => s.t), y: spikes.map(s => s.value),
+                type: 'scatter', mode: 'markers', name: 'Counted spikes',
+                marker: {
+                    symbol: spikes.map(s => s.sign > 0 ? 'triangle-up' : 'triangle-down'),
+                    size: 10, color: '#e3b341', line: { color: '#0d1117', width: 1 },
+                },
+                hovertemplate: 'Spike %{x:.2f} min: %{y:.0f}<extra></extra>',
+            });
+        }
+
+        // Range boxes + ±threshold lines (dotted)
         const diffShapes = [];
         const diffAnnotations = [];
-        addRangeShapes(diffShapes, diffAnnotations);
+        addRangeShapes(diffShapes, diffAnnotations, result.windows);
+        const levels = [
+            [p.thresh_marginal, 'marginal', '#7d8590'],
+            [p.thresh_moderate, 'moderate', '#d29922'],
+            [p.thresh_significant, 'significant', '#f85149'],
+        ];
+        for (const [level, name, color] of levels) {
+            for (const sgn of [1, -1]) {
+                diffShapes.push({
+                    type: 'line', xref: 'paper', x0: 0, x1: 1, yref: 'y',
+                    y0: sgn * level, y1: sgn * level,
+                    line: { color, width: 1, dash: 'dot' },
+                });
+            }
+            diffAnnotations.push({
+                xref: 'paper', x: 1, xanchor: 'right', yref: 'y', y: level, yanchor: 'bottom',
+                text: `${name} ±${level}`, showarrow: false, font: { color, size: 9 },
+            });
+        }
+        // Keep the data readable: scale to the data and the spikes, not to
+        // the significant line (lines beyond the data are simply off-scale).
+        let span = Number(p.thresh_marginal) || 1;
+        const xMax = (result.diff.x_range || [])[1];
+        (diffY || []).forEach((v, i) => {
+            if (xMax == null || diffX[i] <= xMax) span = Math.max(span, Math.abs(v));
+        });
+        spikes.forEach(s => { span = Math.max(span, Math.abs(s.value)); });
 
         Plotly.react(diffDiv, diffTraces, basePlotlyLayout({
             title: { text: 'Difference Plot', font: { size: 14 } },
@@ -2088,26 +2085,28 @@ function renderAnalysisResults(result) {
                 gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590',
                 range: result.diff.x_range || undefined,
             },
-            yaxis: { title: 'Difference', gridcolor: '#21262d', zerolinecolor: '#30363d', color: '#7d8590' },
+            yaxis: { title: 'Difference', gridcolor: '#21262d', zerolinecolor: '#30363d',
+                     color: '#7d8590', range: [-span * 1.15, span * 1.15] },
             shapes: diffShapes,
+            annotations: diffAnnotations,
         }), PLOTLY_CONFIG);
     }
 
-    // Deviation report — format like the desktop version
-    // Store raw bullets separately so the export modal doesn't include the header
-    state._lastReportBullets = result.report || 'No deviations detected.';
+    // Deviation report: the server's bullets, read-only (a <pre>). Operators
+    // change the parameters or ranges, or add a comment, to change them.
+    state._lastReportBullets = result.text || '';
 
     const reportDiv = document.getElementById('analysis-report-text');
     if (reportDiv) {
-        const p = state.analysisParams;
+        const p = result.params_used || state.analysisParams;
         const sampleName = state.selectedSample ? state.selectedSample.name : '?';
-        const stdName = state.selectedStandard ? state.selectedStandard.name : '?';
-        const rangesStr = state.rangeOverlays.map(r => `${r.label}(C${r.c_start}\u2013C${r.c_end})`).join('  ');
+        const stdName = result.standard_name || (state.selectedStandard ? state.selectedStandard.name : '?');
+        const rangesStr = (result.ranges || []).map(r => `${r.label}(C${r.c_start}–C${r.c_end})`).join('  ');
         const header = [
             `Sample:   ${sampleName}`,
             `Standard: ${stdName}`,
             `Params:   baseline=${realToSlider('baseline', p.quantile).toFixed(2)}  detail=${realToSlider('detail', p.window).toFixed(2)}  smoothing=${realToSlider('smoothing', p.sigma).toFixed(2)}`,
-            `Thresholds: marginal\u2265${p.thresh_marginal}  moderate\u2265${p.thresh_moderate}  significant\u2265${p.thresh_significant}`,
+            `Thresholds: marginal≥${p.thresh_marginal}  moderate≥${p.thresh_moderate}  significant≥${p.thresh_significant}`,
             `Ranges:   ${rangesStr || '(none)'}`,
             '',
         ].join('\n');
@@ -2138,10 +2137,13 @@ function renderAnalysisResults(result) {
 
 /* ===================================================================
    13b. ANNOTATION TOOL
+   Annotations are sample comments (phase 4, static/js/comments.js):
+   saving the modal POSTs one comment {text, t0, t1}; the shapes on the
+   trend plot are drawn from the sample's comments (GET), on every sample
+   change and after each analysis. Nothing is written into the bullets.
    =================================================================== */
 
 let annotationMode = false;
-const annotationData = [];  // [{t_start, t_end, c_range, comment}]
 
 function toggleAnnotationMode() {
     annotationMode = !annotationMode;
@@ -2166,34 +2168,29 @@ function toggleAnnotationMode() {
 
 function setupAnnotationHandler() {
     const trendDiv = document.getElementById('analysis-trend-plot');
-    if (!trendDiv) return;
+    if (!trendDiv || typeof trendDiv.on !== 'function') return;
 
     trendDiv.on('plotly_selected', (eventData) => {
         if (!annotationMode || !eventData || !eventData.range) return;
 
-        const t_start = eventData.range.x[0];
-        const t_end = eventData.range.x[1];
+        const t_start = Math.min(eventData.range.x[0], eventData.range.x[1]);
+        const t_end = Math.max(eventData.range.x[0], eventData.range.x[1]);
         if (Math.abs(t_end - t_start) < 0.01) return; // too small
 
-        // Compute carbon range
-        const cn = state.calibration.carbon_numbers || [];
-        const pt = state.calibration.peak_times || [];
-        const n = Math.min(cn.length, pt.length);
-        let c_range = '';
-        if (n > 0) {
-            const c_s = linterp(pt.slice(0, n), cn.slice(0, n), t_start);
-            const c_e = linterp(pt.slice(0, n), cn.slice(0, n), t_end);
-            if (!isNaN(c_s) && !isNaN(c_e)) {
-                c_range = `C${Math.round(c_s)}-C${Math.round(c_e)}`;
-            }
-        }
+        // Carbon range, for the modal's description only (the saved default
+        // label comes from the server): the rendered analysis's ladder, i.e.
+        // the sample revision's own anchors, with the server's extrapolation
+        const res = state.analysisResult || {};
+        const c_range = carbonSpanText(t_start, t_end, res.cal_times, res.cal_carbons);
 
         const regionDesc = c_range
-            ? `${c_range}  (${t_start.toFixed(2)}\u2013${t_end.toFixed(2)} min)`
-            : `(${t_start.toFixed(2)}\u2013${t_end.toFixed(2)} min)`;
+            ? `${c_range}  (${t_start.toFixed(2)}–${t_end.toFixed(2)} min)`
+            : `(${t_start.toFixed(2)}–${t_end.toFixed(2)} min)`;
 
-        // Open annotation modal instead of prompt()
-        _openAnnotationModal(regionDesc, t_start, t_end, c_range, trendDiv);
+        // The sample whose analysis the trend plot shows (else the selection)
+        const sid = state._renderedAnalysisSampleId != null ? state._renderedAnalysisSampleId
+            : (state.selectedSample ? state.selectedSample.sample_id : null);
+        _openAnnotationModal(regionDesc, t_start, t_end, trendDiv, sid);
 
         // Disable annotation mode after one annotation (no endless loop)
         annotationMode = false;
@@ -2204,7 +2201,7 @@ function setupAnnotationHandler() {
     });
 }
 
-function _openAnnotationModal(regionDesc, t_start, t_end, c_range, trendDiv) {
+function _openAnnotationModal(regionDesc, t_start, t_end, trendDiv, sampleId) {
     const modal = document.getElementById('modal-annotation');
     if (!modal) return;
 
@@ -2219,26 +2216,22 @@ function _openAnnotationModal(regionDesc, t_start, t_end, c_range, trendDiv) {
     // Wire up save/cancel (replace handlers to avoid stacking)
     const saveBtn = document.getElementById('btn-annotation-save');
     const cancelBtn = document.getElementById('btn-annotation-cancel');
+    let busy = false;
 
-    function _save() {
-        const comment = (inputEl ? inputEl.value : '').trim();
-        // Store annotation
-        annotationData.push({ t_start, t_end, c_range, comment });
-        updateAnnotationCount();
-        redrawAnnotations();
-
-        // Append bullet to deviation report (not conclusion)
-        const reportEl = document.getElementById('analysis-report-text');
-        if (reportEl) {
-            const prefix = c_range
-                ? `\u2022 ${c_range} (${t_start.toFixed(2)}\u2013${t_end.toFixed(2)} min):`
-                : `\u2022 (${t_start.toFixed(2)}\u2013${t_end.toFixed(2)} min):`;
-            const bullet = comment ? `${prefix} ${comment}` : prefix;
-            reportEl.textContent = reportEl.textContent.trimEnd() + '\n' + bullet;
-            // Also update the stored bullets so they flow to exports
-            state._lastReportBullets = (state._lastReportBullets || '').trimEnd() + '\n' + bullet;
+    async function _save() {
+        if (busy) return;                        // one POST per save
+        const current = state.selectedSample ? state.selectedSample.sample_id : null;
+        if (sampleId == null || current !== sampleId) {
+            // Drawn on one sample, another is selected now: never save it there
+            showNotification('The selected sample changed since this region was drawn. ' +
+                'Select that sample again to save it, or Cancel.', 'error');
+            return;                              // the modal stays open
         }
-
+        busy = true;
+        const text = (inputEl ? inputEl.value : '').trim();
+        await Comments.setSample(sampleId);
+        const saved = await Comments.add({ text, t0: t_start, t1: t_end }, sampleId);
+        if (!saved) { busy = false; return; }    // refused: the modal stays open
         closeModal(modal);
         Plotly.restyle(trendDiv, { selectedpoints: [null] });
         _cleanup();
@@ -2253,6 +2246,7 @@ function _openAnnotationModal(regionDesc, t_start, t_end, c_range, trendDiv) {
     function _cleanup() {
         if (saveBtn) saveBtn.replaceWith(saveBtn.cloneNode(true));
         if (cancelBtn) cancelBtn.replaceWith(cancelBtn.cloneNode(true));
+        if (inputEl) inputEl.onkeydown = null;
     }
 
     if (saveBtn) saveBtn.addEventListener('click', _save);
@@ -2266,82 +2260,38 @@ function _openAnnotationModal(regionDesc, t_start, t_end, c_range, trendDiv) {
     }
 }
 
+/** Draw the selected sample's annotation comments on the trend plot. When
+    the selected sample changed, its comments are fetched first (the
+    redraw then comes from Comments' onChange). */
 function redrawAnnotations() {
+    const sid = state.selectedSample ? state.selectedSample.sample_id : null;
+    if (typeof Comments === 'undefined') return;
+    if (sid !== Comments.sampleId()) { Comments.setSample(sid); return; }
+    _drawAnnotationShapes(Comments.current());
+}
+
+function _drawAnnotationShapes(list) {
     const trendDiv = document.getElementById('analysis-trend-plot');
     if (!trendDiv || !trendDiv.layout) return;
-
-    // Get existing shapes/annotations and filter out old annotation shapes
-    const existingShapes = (trendDiv.layout.shapes || []).filter(s => !s._annotation);
-    const existingAnnotations = (trendDiv.layout.annotations || []).filter(a => !a._annotation);
-
-    // Add annotation shapes
-    for (const ann of annotationData) {
-        existingShapes.push({
-            _annotation: true,
-            type: 'rect',
-            x0: ann.t_start, x1: ann.t_end,
-            y0: 0, y1: 1, yref: 'paper',
-            fillcolor: 'rgba(88, 166, 255, 0.15)',
-            line: { width: 1, color: 'rgba(88, 166, 255, 0.5)', dash: 'dash' },
-            layer: 'above',
-        });
-        if (ann.comment) {
-            existingAnnotations.push({
-                _annotation: true,
-                x: (ann.t_start + ann.t_end) / 2,
-                y: 0.95, yref: 'paper',
-                text: ann.comment.length > 30 ? ann.comment.slice(0, 30) + '...' : ann.comment,
-                showarrow: false,
-                font: { color: '#58a6ff', size: 9 },
-                bgcolor: 'rgba(13,17,23,0.8)',
-                borderpad: 2,
-            });
-        }
-    }
-
+    // Old annotation shapes are found by their fill/label colours (Plotly may
+    // strip custom properties such as _annotation)
+    const shapes = (trendDiv.layout.shapes || []).filter(s => !Comments.isAnnotationShape(s));
+    const annotations = (trendDiv.layout.annotations || []).filter(a => !Comments.isAnnotationLabel(a));
+    const overlay = Comments.annotationOverlay(list);   // label text escaped for Plotly
     Plotly.relayout(trendDiv, {
-        shapes: existingShapes,
-        annotations: existingAnnotations,
+        shapes: shapes.concat(overlay.shapes),
+        annotations: annotations.concat(overlay.labels),
     });
 }
 
-function updateAnnotationCount() {
-    const el = document.getElementById('annotation-count');
-    if (el) el.textContent = annotationData.length > 0 ? `${annotationData.length} annotation(s)` : '';
-}
-
+/** Clear Annotations: soft-delete the sample's annotation comments, after a
+    confirmation naming the count (Comments.clearAnnotations). */
 function clearAllAnnotations() {
-    annotationData.length = 0;
-    updateAnnotationCount();
-
-    // Force-remove all annotation shapes/labels from the plot
-    const trendDiv = document.getElementById('analysis-trend-plot');
-    if (trendDiv && trendDiv.layout) {
-        // Keep only non-annotation shapes (use fillcolor as marker since
-        // Plotly may strip custom _annotation property)
-        const cleanShapes = (trendDiv.layout.shapes || []).filter(s =>
-            !s._annotation && s.fillcolor !== 'rgba(88, 166, 255, 0.15)'
-        );
-        const cleanAnnotations = (trendDiv.layout.annotations || []).filter(a =>
-            !a._annotation && a.bgcolor !== 'rgba(13,17,23,0.8)'
-        );
-        Plotly.relayout(trendDiv, {
-            shapes: cleanShapes,
-            annotations: cleanAnnotations,
-        });
-    }
-
-    // Strip annotation bullets (lines starting with •) from deviation report
-    const reportEl = document.getElementById('analysis-report-text');
-    if (reportEl) {
-        const lines = reportEl.textContent.split('\n');
-        reportEl.textContent = lines.filter(ln => !ln.startsWith('\u2022') || !ln.includes(' min')).join('\n').trimEnd();
-    }
-    // Also clean stored bullets
-    if (state._lastReportBullets) {
-        const lines = state._lastReportBullets.split('\n');
-        state._lastReportBullets = lines.filter(ln => !ln.startsWith('\u2022') || !ln.includes(' min')).join('\n').trimEnd();
-    }
+    if (typeof Comments === 'undefined') return;
+    const sid = state.selectedSample ? state.selectedSample.sample_id : null;
+    if (sid == null) { showNotification('Select a sample first', 'info'); return; }
+    const label = state.selectedSample.lab_id || state.selectedSample.name || String(sid);
+    Comments.setSample(sid).then(() => Comments.clearAnnotations(sid, label));
 }
 
 /* ===================================================================
@@ -2365,8 +2315,10 @@ function addToAnalysisQueue() {
             item.lab_id = state.selectedSample.lab_id || item.lab_id;
         }
         item.standard_name = state.selectedStandard?.name || item.standard_name;
-        item.bullets = state._lastReportBullets || item.bullets;
-        item.annotations = annotationData.map(a => ({...a}));  // save current annotations
+        // Bullets are computed by the server from these at export time.
+        item.params = captureReportParams(state.analysisParams);
+        item.ranges = rangesForPayload(state.rangeOverlays);
+        delete item.bullets;
         const conclusionEl = document.getElementById('analysis-conclusion');
         if (conclusionEl) item.conclusion = conclusionEl.value.trim();
 
@@ -2400,9 +2352,13 @@ function openAnalysisExportModal() {
     }
     if (docNameInput) docNameInput.value = 'GC Analysis';
 
-    // Pull ONLY the deviation bullets (not the header block) from the stored result
+    // A read-only preview of the server's bullets (the export recomputes
+    // them from the parameters and ranges captured with the queue item).
     const conclusionEl = document.getElementById('analysis-conclusion');
-    if (bulletsInput) bulletsInput.value = state._lastReportBullets || '';
+    if (bulletsInput) {
+        bulletsInput.value = (state.analysisResult && state.analysisResult.text) || '';
+        bulletsInput.readOnly = true;
+    }
     if (conclusionInput) conclusionInput.value = conclusionEl ? conclusionEl.value.trim() : '';
 
     // Populate overlay standards checklist
@@ -2449,8 +2405,8 @@ function confirmAddToQueue() {
         });
     }
 
-    // Grab the edited bullets and conclusion from the modal
-    const bullets = (document.getElementById('export-bullets')?.value || '').trim();
+    // The conclusion stays editable; bullets are never sent (the server
+    // computes them from the captured params and ranges).
     const conclusion = (document.getElementById('export-conclusion')?.value || '').trim();
 
     state.analysisQueue.push({
@@ -2458,11 +2414,10 @@ function confirmAddToQueue() {
         sample_name: sampleName,
         sample_id: state.selectedSample ? state.selectedSample.sample_id : null,
         standard_name: state.selectedStandard?.name || '',
-        bullets,
         conclusion,
+        params: captureReportParams(state.analysisParams),  // capture parameters at queue time
         overlay_standards: overlayStds,
         ranges: rangesForPayload(state.rangeOverlays),  // capture regions at queue time
-        annotations: annotationData.map(a => ({...a})),  // deep copy
         added_at: new Date().toISOString(),
     });
 
@@ -2535,14 +2490,8 @@ function _restoreQueueItem(item, idx) {
     // Change "Send to Queue" button to "Apply Changes"
     _updateQueueButton(true);
 
-    // Restore saved annotations into the global array
-    annotationData.length = 0;
-    if (item.annotations && item.annotations.length > 0) {
-        for (const ann of item.annotations) {
-            annotationData.push({...ann});
-        }
-    }
-    updateAnnotationCount();
+    // Annotations are the sample's comments (not part of the queue item)
+    redrawAnnotations();
 
     // Re-run the analysis so graphs + report load
     if (state.selectedSample && state.selectedStandard) {
@@ -2552,11 +2501,6 @@ function _restoreQueueItem(item, idx) {
             // (runAnalysis overwrites it with the auto-generated one)
             const conclusionEl = document.getElementById('analysis-conclusion');
             if (conclusionEl && item.conclusion) conclusionEl.value = item.conclusion;
-
-            // Redraw restored annotations on the trend plot
-            if (annotationData.length > 0) {
-                redrawAnnotations();
-            }
         });
     }
 
@@ -2653,13 +2597,13 @@ async function exportToPC() {
             // Single file — download PDF directly via browser
             const item = state.analysisQueue[0];
             const resp = await api('POST', '/api/export-analysis-report',
-                buildReportItemPayload(item, state.rangeOverlays));
+                buildReportItemPayload(item, state.rangeOverlays, state.analysisParams));
             await downloadBlob(resp, `${item.lab_id}_analysis.pdf`);
             showNotification('Download complete', 'success');
         } else {
             // Multiple files — download as ZIP via browser
             const items = state.analysisQueue.map(item =>
-                buildReportItemPayload(item, state.rangeOverlays));
+                buildReportItemPayload(item, state.rangeOverlays, state.analysisParams));
             const resp = await api('POST', '/api/export-analysis-reports-zip', { items });
             await downloadBlob(resp, 'analysis_reports.zip');
             showNotification(`Downloaded ${count} reports as ZIP`, 'success');
@@ -2701,7 +2645,9 @@ async function startQBenchUpload() {
         // The server refuses the whole queue (409, nothing queued) if any
         // sample isn't final or is unreleased backfill.
         const resp = await apiPostRefusable('/api/qbench-upload', 'Not uploaded', {
-            queue: state.analysisQueue,
+            // the same payload as the PC export: captured params and ranges, no bullets
+            queue: state.analysisQueue.map(item =>
+                buildReportItemPayload(item, state.rangeOverlays, state.analysisParams)),
             username,
             password,
             api_url: apiUrl,
@@ -2999,6 +2945,9 @@ function connectUploadSSE() {
     };
     uploadSSE.onerror = () => {
         if (uploadSSE) { uploadSSE.close(); uploadSSE = null; }
+        // An EventSource can't see a 401: ask /api/session, which sends the
+        // page to /login when the session has ended (session.js).
+        if (window.GCSession && window.GCSession.check) window.GCSession.check();
         const startBtn = document.getElementById('btn-qbench-start');
         if (startBtn) { startBtn.disabled = false; startBtn.textContent = 'Start Upload'; }
         _updateUploadIndicator('error', 'Upload connection lost');
@@ -3227,6 +3176,13 @@ function openSettingsModal() {
         'set-bestfit-threshold': ['bestfit_threshold', '0.93'],
         'set-bestfit-shift': ['bestfit_shift_tolerance_min', '0.05'],
         'set-bestfit-minfrac': ['bestfit_mix_min_frac', '0.10'],
+        // deviation bullets (phase 3)
+        'set-analysis-min-width': ['analysis_min_width_min', '0.05'],
+        'set-analysis-merge-gap': ['analysis_merge_gap_min', '0.10'],
+        'set-analysis-spike-width': ['analysis_spike_min_width_min', '0.02'],
+        'set-analysis-spike-report': ['analysis_spike_report_threshold', ''],
+        'set-analysis-spike-fwhm': ['analysis_spike_max_fwhm_min', '0.20'],
+        'set-analysis-spike-dominance': ['analysis_spike_min_dominance', '0.6'],
     };
     for (const [elId, [key, dflt]] of Object.entries(bfMap)) {
         const el = document.getElementById(elId);
@@ -3421,16 +3377,24 @@ async function saveSettings() {
         'set-bestfit-threshold': 'bestfit_threshold',
         'set-bestfit-shift': 'bestfit_shift_tolerance_min',
         'set-bestfit-minfrac': 'bestfit_mix_min_frac',
+        'set-analysis-min-width': 'analysis_min_width_min',
+        'set-analysis-merge-gap': 'analysis_merge_gap_min',
+        'set-analysis-spike-width': 'analysis_spike_min_width_min',
+        'set-analysis-spike-fwhm': 'analysis_spike_max_fwhm_min',
+        'set-analysis-spike-dominance': 'analysis_spike_min_dominance',
     };
     for (const [elId, key] of Object.entries(bfSaveMap)) {
         const el = document.getElementById(elId);
         if (el && el.value !== '') bf[key] = el.value;
     }
+    // empty is meaningful here (= the moderate threshold)
+    const spikeReport = document.getElementById('set-analysis-spike-report');
+    if (spikeReport) bf.analysis_spike_report_threshold = spikeReport.value.trim();
     const bfChanged = Object.entries(bf).some(
         ([k, v]) => String(v) !== String(state.settings[k] == null ? '' : state.settings[k]));
     if (bfChanged) {
-        const password = adminPassword('change the best-fit settings');
-        if (!password) { showNotification('Best-fit settings not saved (no admin password)', 'info'); }
+        const password = adminPassword('change the best-fit / deviation-bullet settings');
+        if (!password) { showNotification('Best-fit / deviation-bullet settings not saved (no admin password)', 'info'); }
         else { Object.assign(body, bf); body.password = password; }
     }
 
@@ -3945,7 +3909,6 @@ async function exportAnalysisReport() {
     }
 
     const conclusion = document.getElementById('analysis-conclusion')?.value || '';
-    const bullets = document.getElementById('analysis-report-text')?.textContent || '';
     const labId = state.selectedSample.lab_id || state.selectedSample.name;
 
     // Gather overlay standards
@@ -3956,7 +3919,6 @@ async function exportAnalysisReport() {
             sample_id: state.selectedSample.sample_id,
             standard_name: state.selectedStandard.name,
             conclusion,
-            bullets,
             doc_name: 'GC Analysis Report',
             lab_id: labId,
             overlay_standards: overlayStds,
@@ -4183,6 +4145,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Initialize empty charts first (Plotly elements need to exist)
     initCharts();
     setupAnnotationHandler();
+    // Comments section (static/js/comments.js); its changes redraw the
+    // annotation spans on the trend plot
+    if (typeof Comments !== 'undefined') {
+        Comments.init({ onChange: list => _drawAnnotationShapes(list) });
+    }
     console.log('[GC Viewer] Charts initialized');
 
     // Set up event listeners
@@ -4210,7 +4177,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         await Promise.all([
             loadSettings(),
             loadFiles(),
-            loadCalibration(),
             loadComparisonStandards(),
             loadTableData(),
         ]);

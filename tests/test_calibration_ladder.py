@@ -337,11 +337,10 @@ class AppUsesLadderTests(unittest.TestCase):
         # Phase 2 T4: the analysis routes, both report exports and the QBench
         # upload label ranges with the sample revision's calibration anchors
         # (_revision_ladder), which falls back to distill.calibration_ladder.
-        # (T5: the QBench upload goes through _run_export_analysis, so the
-        # report path is one call: its definition, /api/analysis and
-        # _run_export_analysis.)
-        self.assertGreaterEqual(src.count("_revision_ladder("), 3)
-        self.assertGreaterEqual(src.count("_run_export_analysis("), 4)
+        # (Phase 3: /api/analysis and every report export go through
+        # _report_content, the one caller of _revision_ladder.)
+        self.assertGreaterEqual(src.count("_revision_ladder("), 2)
+        self.assertGreaterEqual(src.count("_report_content("), 3)
         self.assertIn("distill.calibration_ladder(", src)
 
     def test_app_has_no_leftover_length_slicing(self):

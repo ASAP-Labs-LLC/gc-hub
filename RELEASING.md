@@ -150,10 +150,13 @@ every transitive one in a `# --- transitive` block frozen from a clean Python
 3.14 venv built from the direct pins alone, plus a small platform block with
 environment markers (`tzdata` on Windows, which a macOS freeze cannot show).
 `tests/test_release_package.py` requires `==` on every line, and checks that
-the hub neither pins nor imports the tray packages (`pystray`, `watchdog`:
-v1's `run.pyw` only; the agent declares its own deps in
-`agent/requirements-agent.txt`). `Pillow` stays pinned as a transitive
-dependency of `reportlab`/`xhtml2pdf`.
+the hub process never imports the tray packages (`pystray`, `PIL`,
+`watchdog`). `pystray` is pinned again (2026-09-29), **Windows only**, for
+the hub tray (`tray/`, which runs with the release's `.venv`; see DEPLOY.md
+"Hub tray on ASAPSV1"), and `psutil` for the process CPU/RSS in
+`/api/hub/status`; `watchdog` stays out (v1's `run.pyw` only; the agent
+declares its own deps in `agent/requirements-agent.txt`). `Pillow` stays
+pinned as a transitive dependency of `reportlab`/`xhtml2pdf` (and pystray's).
 
 The updater builds each release's venv with **its own interpreter**:
 `build_venv` runs `sys.executable -m venv`, then `pip install --quiet -r

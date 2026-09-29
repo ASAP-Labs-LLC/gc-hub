@@ -25,11 +25,24 @@ modules and are skipped automatically if the dep is absent.
 | `test_qbench_import.py` | The fix: `qbench_client.py` is vendored in `webapp/` and imports locally; **no** code depends on the dead `…\COA Reviewer\V2\Past Data Manager\API` share path; the uploader keeps `LoginFailedError` + post-upload verification that `app.py` relies on. |
 | `test_app_routes.py` | The `@app.route` endpoints the frontend calls are still registered (AST scan — never imports app.py, which starts the hub's threads). `test_route_fates.py` pins every registered route against the T4 plan's route-fate table. |
 | `test_hub_start.py` | `hub.start`: migrate, gc1 bootstrap, gc1 corrections seeded once (never zeros), the Worker (hub-owned corrections by default), the exporter woken on each final, the nightly backup and job prune; a booted hub turns a submitted CDF into an appended export row with no worker in the test; no `GC_DATA_DIR`, no start. |
+| `test_hub_pause.py`, `test_hub_control.py`, `test_hub_control_boot.py`, `tray/` | The hub tray: `HubRuntime.pause/resume` (threads stop, ingest queues, persisted flag honoured at start); `hub_control`'s routes in process (loopback only via a faked `REMOTE_ADDR`, then same-origin, JSON, 64 KiB, password; pause notice; Stop writes the updater's `paused` marker; the status snapshot and CPU sampler); booted: pause survives a restart, Stop exits with nothing respawning on the port, `/healthz` keeps its contract and carries `hub`; `tray/` (stdlib + pytest, also on Windows in `tray-ci.yml`): status → colour/text/menu, busy rule, config, client against a fake hub, the actions (password kept in memory only, Start via the updater's `resume` with fallbacks), the menu with a stub pystray, autostart and single instance. |
 | `test_hub_admin.py` | The admin folder-loader job and the export actions (adopt, new path, write fresh), booted, admin-gated. |
+| `test_netctx.py` | Sign-in D4: `client_ip` believes `CF-Connecting-IP` only from a trusted proxy (loopback + `trusted_proxies`), spoofed headers from the LAN are ignored, `is_https`/`is_proxied`/`is_local` (the tunnel is never local), the one cross-site rule (https origin through the tunnel, no hub-URL-on-another-Host exception), IPv6 throttle keys by /64. |
+| `test_labcore_auth.py` (+ `labcore_stub.py`) | LabLink sign-in against a local LabCore stub: canonical name, card as both fields, `User-Agent: gc-hub/…`, and the rev 2 classification (only a JSON 4xx is a failed sign-in; 5xx, 429, `cf-mitigated`, `error code: 1010`, non-JSON 200, timeouts are `LabCoreUnavailable`). |
+| `store/test_store_v3.py` | Schema v3 is one additive step (the v2 step untouched): `web_sessions` (token_hash UNIQUE and nullable), the name columns; v2.0.0's frozen store.py starts on it; the session helpers (revoke, revoke by name/method, active, prune). |
+| `test_web_auth.py` | Sign-in in process (bare Flask app wired like app.py): the gate's classes and refusals (302 `next`, 401 marker, 503 on a store error), password/card/break-glass sign-in, cookies (`__Host-` + Secure through the tunnel, 7-day limit), 308 to https, HSTS, the throttles (5 per user+address, 30 per address, 100 hub-wide through Cloudflare only, IPv6 /64, card keys), revocation, idle/absolute expiry, `last_seen` off the request path, the tray's local paths, setup through the tunnel (session + code + https Host rule). |
+| `test_tunnel_boot.py` | The booted app through a simulated gc.asaplabs.net with a stub LabCore: LabLink sign-in → admin setup with the code → create GC-2 → installer (hub_url https://gc.asaplabs.net, lan_url) → history dry run, logged by name; what the tunnel never allows (http, the break-glass, the tray's controls, cross-site posts, `/healthz` internals). |
+| `store/test_store_v2.py`, `test_comments.py`, `test_comments_api.py`, `test_ui_comments.py` | Phase 4: schema v2 is additive, seeds the presets exactly once, and v2.0.0's store.py (frozen in `store/v2_0_0/`) starts on it; the comment/preset rules (the signed-in author and derived initials, limits, preset text copied, soft delete), `comments.for_report`'s shape and `comments.log_report`; the routes booted (JSON only, 64 KiB, cross-site guard, admin gate); in headless Chrome, escaping, annotation → one comment, shapes redrawn from GET, Clear Annotations, the presets admin panel. |
 | `test_distill.py` | Core science: cumulative-area→percent, boiling-point interpolation, the ASTM D86 X4 polynomial, and the CSV upsert/dedup. |
 | `test_settings.py` | `DEFAULTS` surface (incl. the `early_signal_*` keys) and a save/load round-trip in a temp folder; v1's per-port settings and instance seeding are gone. |
 | `test_instance.py` | `instance.py` — port resolution precedence (`PORT` > `--port` > `GC_PORT` > 5560), validation and the port-in-use probe. Stdlib-only. |
 | `test_paths.py` | Every state location under `GC_DATA_DIR`; without it every location refuses (`DataDirMissing`). |
+| `test_analysis_bullets.py` | Phase 3 deviation bullets: `range_windows` (one carbon↔time conversion, extrapolation, clipping, not-evaluable), `report_params`, spikes, every rule of `build_deviation_report` and a golden string for every `render_bullets` template, the conclusion, the ranges + 1 bound. |
+| `test_bullets_regression.py` | `fixtures/diesel_pair.npz` (synthetic diesel pair on the real calibration axis, built by `fixtures/make_diesel_pair.py`): the old per-excursion text gave 29 bullets, the range-driven report ≤ ranges + 1; the same-product pair and its retention-shift/±50% variants report no deviation, diesel + 1/2/5% gasoline flags Gas only. |
+| `test_analysis_settings_routes.py` | Deviation-bullet admin settings are validated when saved (400, nothing written); Set as Default keeps the saved overlays unless sent. |
+| `test_report_content.py` | `app._report_content` is identical across `/api/analysis`, the direct export, the ZIP and the QBench PDF (`report_harness.py` drives all four in one app process in a subprocess, with fake `comments` and QBench uploader); PDFs print the computed bullets, never client ones; escaping, footer, `report_log` rows; annotation comments print `text (Cx–Cy, a–b min; initials, date)` from the report's ladder; `comments` is a hard import. |
+| `test_ui_ladder_per_instrument.py` | Carbon labels per instrument: `/api/samples/<id>/trace` serves the (current or `?revision=`) revision's ladder; in headless Chrome, a gc2 sample whose anchors differ from gc1's is labelled with its own ladder on the dashboard, in the Chromatogram overlay (first visible trace's, named when traces disagree) and in the annotation modal; no `(i + 5)` fallback, no `/api/calibration` read. |
+| `test_ui_analysis_smoke.py` | Headless Chrome: range boxes from the analysis windows, threshold lines and spike markers, read-only bullets, queue items capture params and carry no bullets. |
 
 ## Not covered here
 
@@ -41,11 +54,12 @@ smoke test against a real sample.
 
 ## Frontend (JS) pure-logic tests
 
-Pure, DOM-free helpers in `static/js/selection.js` (multi-select range +
-selection-to-files resolution) are unit-tested under Node:
+Pure, DOM-free helpers in `static/js/` (`selection.js`, `report_payload.js`,
+`samples.js`, `flagrules.js`, `restart.js`, `qbench_api.js`,
+`instruments_logic.js`, `comments.js`, `ladder.js`) are unit-tested under Node:
 
 ```bash
-node tests/js/run.js        # requires Node; tests static/js/selection.js
+node tests/js/run.js        # requires Node
 ```
 
 The runner (`tests/js/run.js`) is zero-dependency (uses Node's `assert`). Keep

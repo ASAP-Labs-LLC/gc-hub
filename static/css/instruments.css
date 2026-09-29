@@ -46,6 +46,9 @@ details.add summary{cursor:pointer;color:var(--muted)}
 form label{display:block;margin:6px 0;color:var(--muted);font-size:12px}
 form label input,form label select{display:block;width:100%;margin-top:2px}
 .hint{font-size:11px;color:var(--muted);margin:6px 0}
+.lem-picker select,.lem-picker input{display:block;width:100%;margin-top:2px}
+.lem-picker .hint{display:block;margin:3px 0 0}
+.lem-picker [hidden]{display:none}
 .empty{color:var(--muted);text-align:center;padding:40px}
 section.card{border:1px solid var(--line2);border-radius:6px;padding:10px;margin-bottom:12px}
 section.card h3{font-size:13px;margin:0 0 8px;font-weight:600;display:flex;gap:8px;align-items:center}

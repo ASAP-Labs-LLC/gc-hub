@@ -222,7 +222,7 @@ def corrections_provider(db: store.Db = None):
 
 
 def startup(app_conf: Dict[str, str], notifier=None, *, db: store.Db = None,
-            data_dir: Optional[Path] = None, conf_fn=None, **worker_kw):
+            data_dir: Optional[Path] = None, conf_fn=None, start: bool = True, **worker_kw):
     """Start the hub's processing: migrate the store, create ``gc1`` from
     ``app_conf`` (``settings.json``) if needed, then start the one
     ``pipeline.Worker`` (sweep ``.incoming``, requeue, thread) and return it.
@@ -234,7 +234,8 @@ def startup(app_conf: Dict[str, str], notifier=None, *, db: store.Db = None,
     settings per job. ``format_line`` defaults to ``exports.format_line``
     (the frozen v1 export line) and ``corrections_provider`` to
     ``corrections_provider(db)`` (hub corrections; gc1's file until seeded).
-    Other keywords go to ``pipeline.Worker``.
+    Other keywords go to ``pipeline.Worker``. ``start=False`` builds the
+    Worker without starting it (the hub starting with processing paused).
     """
     import exports
     import pipeline  # deferred: pipeline imports this module
@@ -248,5 +249,6 @@ def startup(app_conf: Dict[str, str], notifier=None, *, db: store.Db = None,
     bootstrap_gc1(app_conf, db=db)
     worker_kw.setdefault("corrections_provider", corrections_provider(db))
     worker = pipeline.Worker(db=db, data_dir=data, conf_fn=conf_fn, notifier=notifier, **worker_kw)
-    worker.start()
+    if start:
+        worker.start()
     return worker

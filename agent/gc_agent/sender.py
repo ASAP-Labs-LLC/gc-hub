@@ -7,6 +7,12 @@
 | 400, 409, 413, 415             | rejected with the hub's reason (retry-rejected only)|
 | 401, 403, 404, 405, other 4xx  | hold: queue kept, retry after 300 s or config change|
 | 429, 5xx, network error, bad 2xx body | back off 5 s doubling to 300 s              |
+| blocked by Cloudflare (any status)    | back off, like a network error (transient)  |
+
+A 524 (Cloudflare gave up waiting for the hub) is a 5xx: retried, and the hub
+dedupes the re-upload by sha256. A Cloudflare block (``cf-mitigated``, or a
+403/503 challenge page) is never the hub's verdict on the file, so it never
+rejects or holds.
 """
 from __future__ import annotations
 
@@ -130,6 +136,8 @@ class Sender:
 
     def _handle(self, key, sha, r):
         name = os.path.basename(key[0])
+        if getattr(r, "cloudflare_blocked", False):
+            return self._backoff("HTTP %d: %s" % (r.status, r.error_text()))
         if r.status in OK_STATUSES:
             if not isinstance(r.json, dict) or not isinstance(r.json.get("sha256"), str):
                 return self._backoff("HTTP %d with an unreadable body" % r.status)

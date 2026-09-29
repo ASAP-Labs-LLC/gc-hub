@@ -24,6 +24,11 @@ order, and ``HubRuntime.stop()`` undoes it:
    ``PRUNE_DAYS`` (``store.jobs.prune_done``, once per day). A failed
    backup is notified once and retried after ``BACKUP_RETRY``.
 
+``HubRuntime.pause()``/``resume()`` stop and restart the Worker, exporter and
+maintenance threads while the runtime stays (the hub tray's "Pause
+processing", ``hub_control``); ``set_processing_paused`` persists the choice
+in ``settings_kv`` and ``start`` honours it (``paused=``).
+
 ``start_with_retry(start_fn)`` is how the app calls it: retried with backoff
 (``START_BACKOFF``), notified after ``START_NOTIFY_AFTER`` failures.
 ``background_busy(db)`` tells the auto-restart whether the Worker has work.
@@ -46,6 +51,7 @@ actions (their refusal state lives in the exporter).
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import threading
 import time
@@ -141,7 +147,7 @@ def default_notifier() -> Optional[Notifier]:
 
 
 class Maintenance:
-    """The nightly backup, the job-table prune and, while gc1 has no hub
+    """The nightly backup, the job-table and sign-in-session prunes and, while gc1 has no hub
     corrections, the seed retry every ``SEED_RETRY`` (``run_once`` is one
     pass). ``conf_fn`` supplies ``settings.json`` for the seed (default
     ``settings.load_settings``); ``seed_attempted_at`` is when the start-up
@@ -159,6 +165,7 @@ class Maintenance:
         self._failed_at: Optional[datetime] = None
         self._notified_day: Optional[str] = None
         self._pruned_day: Optional[str] = None
+        self._sessions_pruned: Optional[int] = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -197,6 +204,14 @@ class Maintenance:
         if self._pruned_day == day:
             return None
         cutoff = (now - timedelta(days=PRUNE_DAYS)).astimezone(timezone.utc)
+        try:   # sign-in sessions that ended (revoked, expired, idle) over 30 days ago
+            self._sessions_pruned = store.web_sessions.prune(
+                older_than_days=store.WEB_SESSION_PRUNE_DAYS,
+                idle_seconds=store.WEB_SESSION_IDLE_SECONDS, db=self.db)
+            if self._sessions_pruned:
+                log.info("hub: pruned %d ended sign-in session(s)", self._sessions_pruned)
+        except Exception:  # noqa: BLE001
+            log.exception("hub: pruning old sign-in sessions failed")
         try:
             n = store.jobs.prune_done(cutoff, db=self.db)
         except Exception:  # noqa: BLE001
@@ -229,11 +244,21 @@ class Maintenance:
         except Exception:  # noqa: BLE001 - never stops the backup
             log.exception("hub: gc1 corrections seed retry failed")
             seeded = False
-        return {"seeded": seeded, "backup": self._backup(now), "pruned": self._prune(now)}
+        self._sessions_pruned = None
+        return {"seeded": seeded, "backup": self._backup(now), "pruned": self._prune(now),
+                "sessions_pruned": self._sessions_pruned}
 
-    def start(self, interval: float = MAINTENANCE_INTERVAL_SECONDS) -> None:
+    def start(self, interval: float = MAINTENANCE_INTERVAL_SECONDS,
+              join_timeout: float = 60.0) -> None:
+        """Start the loop; a previous thread whose ``stop`` timed out is
+        waited for first (``RuntimeError`` if it is still running after
+        ``join_timeout``), so two loops never run at once."""
         if self._thread is not None and self._thread.is_alive():
-            return
+            if not self._stop.is_set():
+                return
+            self._thread.join(join_timeout)
+            if self._thread.is_alive():
+                raise RuntimeError("the previous maintenance thread is still running")
         self._stop.clear()
 
         def loop() -> None:
@@ -251,23 +276,43 @@ class Maintenance:
         return self._thread is not None and self._thread.is_alive()
 
     def stop(self, timeout: float = 10.0) -> None:
+        """A thread still busy after ``timeout`` is kept (``is_alive``) and
+        finishes on its own; ``start`` waits for it."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout)
-            self._thread = None
+            if not self._thread.is_alive():
+                self._thread = None
 
 
 class HubRuntime:
-    """What ``start`` started: ``worker``, ``exporter``, ``maintenance``."""
+    """What ``start`` started: ``worker``, ``exporter``, ``maintenance``.
+
+    ``pause()`` stops those three threads while the runtime (and the web app
+    around it) stays up; ``resume()`` starts them again. Ingest keeps
+    accepting meanwhile: ``pipeline.submit`` only needs the store, and the
+    queued jobs run on resume. ``paused`` says which it is. The persisted
+    choice (``set_processing_paused``) is the caller's business."""
 
     def __init__(self, data_dir: Path, db: Path, worker, exporter: exports.HubExporter,
-                 maintenance: Optional[Maintenance], notifier: Optional[Notifier]) -> None:
+                 maintenance: Optional[Maintenance], notifier: Optional[Notifier], *,
+                 export_interval: float = exports.FLUSH_INTERVAL_SECONDS,
+                 maintenance_enabled: bool = True,
+                 maintenance_interval: float = MAINTENANCE_INTERVAL_SECONDS,
+                 conf_fn: Optional[Callable[[], dict]] = None,
+                 paused: bool = False) -> None:
         self.data_dir = data_dir
         self.db = db
         self.worker = worker
         self.exporter = exporter
         self.maintenance = maintenance
         self.notifier = notifier
+        self.export_interval = export_interval
+        self.maintenance_enabled = maintenance_enabled
+        self.maintenance_interval = maintenance_interval
+        self.conf_fn = conf_fn
+        self.paused = paused
+        self._pause_lock = threading.Lock()
 
     def wake_exports(self) -> None:
         """Flush now: call after anything writes a ledger row outside the
@@ -276,6 +321,36 @@ class HubRuntime:
 
     def exporter_alive(self) -> bool:
         return self.exporter.is_alive()
+
+    def pause(self, timeout: float = 10.0) -> None:
+        """Stop the Worker, exporter and maintenance threads (each finishes
+        what it is doing first); idempotent."""
+        with self._pause_lock:
+            if self.paused:
+                return
+            self.paused = True
+            if self.maintenance is not None:
+                self.maintenance.stop(timeout)
+            self.worker.stop(timeout)
+            self.exporter.stop(timeout)
+        log.warning("hub: processing paused (the Worker, exports and maintenance are stopped)")
+
+    def resume(self) -> None:
+        """Start the threads ``pause`` stopped (or a paused start never
+        started); idempotent."""
+        with self._pause_lock:
+            if not self.paused:
+                return
+            self.worker.start()
+            self.exporter.start(self.export_interval)
+            if self.maintenance_enabled:
+                if self.maintenance is None:
+                    self.maintenance = Maintenance(self.db, self.data_dir, notifier=self.notifier,
+                                                   conf_fn=self.conf_fn,
+                                                   seed_attempted_at=datetime.now())
+                self.maintenance.start(self.maintenance_interval)
+            self.paused = False
+        log.warning("hub: processing resumed")
 
     def stop(self, timeout: float = 10.0) -> None:
         global _running
@@ -317,6 +392,7 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
           export_interval: float = exports.FLUSH_INTERVAL_SECONDS,
           maintenance: bool = True,
           maintenance_interval: float = MAINTENANCE_INTERVAL_SECONDS,
+          paused: Optional[bool] = None,
           **worker_kw) -> HubRuntime:
     """Start the hub (see the module docstring) and return its runtime.
 
@@ -325,6 +401,10 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
     ``settings.load_settings``). ``notifier`` defaults to the notification
     store's ``add`` (``None`` = log only). ``RuntimeError`` if a runtime is
     already running in this process.
+
+    ``paused`` (default: the persisted ``processing_paused`` flag) builds
+    the Worker, exporter and maintenance without starting their threads;
+    ``HubRuntime.resume()`` starts them.
     """
     global _running
     data = Path(data_dir) if data_dir is not None else paths.require_data_dir()
@@ -338,6 +418,8 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
         if _running is not None:
             raise RuntimeError("the hub is already running in this process")
         store.migrate(db)
+        if paused is None:
+            paused = processing_paused(db) is not None
         instruments.bootstrap_gc1(app_conf, db=db)
         exporter = exports.HubExporter(db, data_dir=data, notifier=notifier)
 
@@ -350,13 +432,26 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
         # unseeded gc1 waits for the seed (below, then Maintenance).
         worker_kw.setdefault("corrections_provider", corrections_provider(db))
         worker = instruments.startup(app_conf, notifier, db=db, data_dir=data, conf_fn=conf_fn,
-                                     on_final=final_hook, **worker_kw)
-        try:
-            exporter.start(export_interval)
-        except BaseException:
-            worker.stop()
-            raise
-        rt = _running = HubRuntime(data, db, worker, exporter, None, notifier)
+                                     on_final=final_hook, start=not paused, **worker_kw)
+        if paused:
+            # Worker.start (which requeues) will not run until resume, so a
+            # job left `running` by a dead process is put back now: nothing
+            # is running while paused. Idempotent with the Worker's own
+            # requeue on resume (jobs are deduplicated per sample).
+            import pipeline
+            counts = pipeline.requeue_on_start(db=db)
+            log.info("hub: starting paused; requeued %s", counts)
+        if not paused:
+            try:
+                exporter.start(export_interval)
+            except BaseException:
+                worker.stop()
+                raise
+        rt = _running = HubRuntime(data, db, worker, exporter, None, notifier,
+                                   export_interval=export_interval,
+                                   maintenance_enabled=maintenance,
+                                   maintenance_interval=maintenance_interval,
+                                   conf_fn=conf_fn, paused=bool(paused))
     _share_exporter(exporter)
     # The seed reads the corrections file (often on the share, which can
     # stall), so it runs outside the lock; the Worker is already up and gc1's
@@ -367,11 +462,52 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
     except Exception:  # noqa: BLE001 - Maintenance retries it
         log.exception("hub: gc1 corrections seed failed")
     if maintenance:
-        rt.maintenance = Maintenance(db, data, notifier=notifier, conf_fn=conf_fn,
-                                     seed_attempted_at=seeded_at)
-        rt.maintenance.start(maintenance_interval)
-    log.info("hub: started (data %s)", data)
+        with rt._pause_lock:
+            rt.maintenance = Maintenance(db, data, notifier=notifier, conf_fn=conf_fn,
+                                         seed_attempted_at=seeded_at)
+            if not rt.paused:
+                rt.maintenance.start(maintenance_interval)
+    log.info("hub: started (data %s)%s", data,
+             " with processing PAUSED (resume it from the hub tray or the admin API)"
+             if rt.paused else "")
     return rt
+
+
+# ── Processing paused (persisted) ─────────────────────────────────────────
+# The hub tray's "Pause processing" (hub_control) keeps the web app serving
+# and ingest accepting while the Worker, exporter and maintenance are
+# stopped. The choice outlives a restart: ``start`` reads it.
+
+PROCESSING_PAUSED_KEY = "hub_processing_paused"
+
+
+def processing_paused(db) -> Optional[dict]:
+    """``{"since", "by"}`` while processing is paused, else None."""
+    return parse_processing_paused(store.settings_kv.get(PROCESSING_PAUSED_KEY, db=db))
+
+
+def parse_processing_paused(raw) -> Optional[dict]:
+    """``processing_paused`` from the stored value (hub_control reads the
+    row itself, with a short timeout)."""
+    if not raw:
+        return None
+    try:
+        val = json.loads(raw)
+    except ValueError:
+        val = None
+    if not isinstance(val, dict):
+        val = {}
+    return {"since": val.get("since"), "by": val.get("by")}
+
+
+def set_processing_paused(db, paused: bool, *, by: Optional[str] = None) -> None:
+    """Persist (``paused``) or clear the flag ``start`` honours."""
+    if paused:
+        store.settings_kv.set(PROCESSING_PAUSED_KEY, json.dumps({
+            "since": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "by": by}), db=db)
+    else:
+        store.settings_kv.delete(PROCESSING_PAUSED_KEY, db=db)
 
 
 START_BACKOFF = (5, 10, 20, 40, 80, 160, 300)     # seconds; then every 300 s
@@ -414,13 +550,19 @@ def background_busy(db, *, now: Optional[datetime] = None) -> bool:
     """True while the Worker has work now: a job ``running``, or ``queued``
     and due (``not_before`` unset or passed). A retry scheduled later (e.g.
     ``pending_corrections`` every 5 minutes) is not work now. False when the
-    store can't be read (never blocks a restart on an error)."""
+    store can't be read (never blocks a restart on an error). While
+    processing is paused, due jobs cannot run, so only a ``running`` one
+    counts (a paused hub must not skip its 3 AM restart forever)."""
     stamp = store._ts((now or datetime.now()).astimezone())
     try:
+        paused = processing_paused(db) is not None
         with store.connection(db) as conn:
-            r = conn.execute("SELECT 1 FROM jobs WHERE state='running' OR (state='queued' AND "
-                             "(not_before IS NULL OR not_before <= ?)) LIMIT 1",
-                             (stamp,)).fetchone()
+            if paused:
+                r = conn.execute("SELECT 1 FROM jobs WHERE state='running' LIMIT 1").fetchone()
+            else:
+                r = conn.execute(
+                    "SELECT 1 FROM jobs WHERE state='running' OR (state='queued' AND "
+                    "(not_before IS NULL OR not_before <= ?)) LIMIT 1", (stamp,)).fetchone()
     except Exception:  # noqa: BLE001
         log.exception("hub: could not read the job queue")
         return False

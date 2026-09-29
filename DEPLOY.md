@@ -238,7 +238,10 @@ refused with a message pointing to `/admin/setup`.
 2. In a browser, open `http://asapsv1:5560/admin/setup` (the hub's own name
    or IP address; setup is refused under any other host name). Enter the code
    and the new password (at least 8 characters). The code file is deleted
-   once the password is set.
+   once the password is set. **From v3.0** this page is open without signing
+   in only on the lab network and only until a password is set; through
+   `https://gc.asaplabs.net` it needs a LabLink sign-in first (and still the
+   code). Once a password is set, setup is closed everywhere.
 
 **Forgotten password (reset).** Stop nothing; on ASAPSV1 run, from the
 current release folder with its venv's Python:
@@ -268,11 +271,14 @@ entries if present.
 **The share copies are v1.x.** They have no hub store and keep their own
 behaviour until cutover; the hub's admin password does not apply to them.
 
-**Agent installers need the hub URL.** Before the first "Download
-installer", set the address the GC PCs use to reach the hub: Instruments
-page > *Hub URL for installers*, `http://asapsv1:5560` (or
-`POST /api/admin/hub-url {password, hub_url}`). A download from `localhost`
-or `127.0.0.1` on the server itself is refused until it is set.
+**Agent installers and the hub URL.** From v3.0 an installer always points
+at the **hub address**: the one set on Hub admin > *Hub address* (or the
+Instruments page's *Hub URL for installers*, the same setting;
+`POST /api/admin/hub-url {password, hub_url}`), else `https://gc.asaplabs.net`.
+It also carries this machine's lab-network address (`http://<ASAPSV1>:5560`)
+as `lan_url`, which the agent uses only when gc.asaplabs.net can't be reached
+at all. An `http://` hub address is accepted only for a lab-network name or IP.
+(v2.0–v3.0 refused a download from `localhost` until the URL was set.)
 
 ## Upgrading to v2 (the hub)
 
@@ -358,6 +364,111 @@ Then continue with "Before cutover" below. What the admin pages do:
   samples), **conflicts** (*Keep existing* / *Replace*), the comparison
   standards per instrument, and the agent panel (status, clock skew, queue,
   last error, commands, *Download installer*, *Revoke token*).
+
+## Upgrading to v3 (deviation bullets and comments)
+
+v3.0.0 changes how analysis reports read (one bullet per deviating range,
+sharp-peak rules, comments); no D2887/D86 number or results CSV changes. Read
+the v3.0.0 release notes first. Nothing needs editing on the server:
+
+- On the first v3 start the database is migrated to schema v2 (three new
+  tables, nothing existing changed) after a copy to
+  `data\backups\pre-migrate-1-<time>.db`; `app.log` says so.
+- The four comment presets are seeded once; review or reword them on
+  **Hub admin > Comment presets** (admin password) before operators use
+  them, since QBench PDFs may reach customers.
+- The Instruments page's **LEM machine** dropdown reads LEM's public list from
+  `https://lem.asaplabs.net` (read-only). To point it elsewhere, set `lem_url`
+  (a bare `http(s)://host[:port]`, not this machine or a link-local address)
+  with the admin password: `POST /api/settings` with JSON
+  `{"lem_url": "https://…", "password": "…"}`; or set the `LEM_URL`
+  environment variable for the hub, which wins over the setting.
+- The deviation-bullet thresholds were tuned on synthetic data. Before
+  relying on them, run the Analysis tab on a few real runs whose answer is
+  known and adjust Settings > **Deviation Bullets** (admin password) if
+  needed.
+- **Rollback** (`updater.py rollback --app gc`) to v2.0.0 is safe: it starts
+  on the migrated database, but its reports omit comments and use v2's
+  bullets, and it writes no `report_log` rows. Comments made under v3 are
+  kept and reappear after upgrading again.
+
+## Sign-in and gc.asaplabs.net (v3.0)
+
+From v3.0.0 every page and API needs a signed-in session (LabLink, as in COA
+Reviewer), on the lab network and through `https://gc.asaplabs.net` alike.
+Exceptions: `/healthz` (the updater), the sign-in routes, the agents'
+bearer-token paths (`/api/ingest`, `/api/agent/heartbeat|results|package|
+package.zip`), and the hub tray's own calls from ASAPSV1 itself. Read the
+v3.0.0 release notes; then, **before** installing it:
+
+**1. The tunnel.** `gc.asaplabs.net` is a Cloudflare tunnel (cloudflared,
+same account as `coa.asaplabs.net`). Its ingress for `gc.asaplabs.net` must
+point at `http://localhost:5560` (the hub). The hub trusts Cloudflare's
+`CF-Connecting-IP` and `X-Forwarded-Proto` only from **loopback**, so with
+cloudflared on ASAPSV1 there is nothing to set. If cloudflared runs on another
+machine, add its address to `C:\ASAPApps\gc\data\settings.json` and restart
+the hub:
+
+```json
+"trusted_proxies": ["10.0.0.7"]
+```
+
+(a list of IPs or CIDRs; a comma-separated string also works). Without it,
+every tunnel user shares that machine's address, and the tunnel counts as
+the lab network (no https redirect, the admin break-glass offered).
+
+**2. Cloudflare settings for gc.asaplabs.net** (dashboard, the
+`asaplabs.net` zone):
+
+- **SSL/TLS > Edge Certificates > Always Use HTTPS: on.** The hub also
+  redirects plain `http://` through the tunnel to `https://` (308) and sends
+  HSTS, but `http://gc.asaplabs.net` must never be served. (The hub learns the
+  scheme from cloudflared's `X-Forwarded-Proto` or `CF-Visitor`; if neither
+  arrives, sign-in through the tunnel is refused with "Sign in over https".)
+- **The agents' WAF skip rule.** Agents call `/api/ingest` and `/api/agent/…`
+  with their bearer token, not a browser; a Cloudflare challenge would stop
+  them (the agent tray then says "Cloudflare blocked the agent: add the WAF
+  skip rule in DEPLOY.md"). Security > WAF > Custom rules > Create rule:
+  *Skip GC agents*; expression
+  `(http.host eq "gc.asaplabs.net" and (starts_with(http.request.uri.path, "/api/ingest") or starts_with(http.request.uri.path, "/api/agent/")))`;
+  action **Skip**, and tick: all remaining custom rules, **Browser Integrity
+  Check**, **Security Level**, and (Security > Bots) **Super Bot Fight Mode**
+  for these requests. Place it first. Those paths stay bearer-token protected
+  by the hub. (Cloudflare refuses urllib's default User-Agent with `403 error
+  code: 1010`; the agent and the hub send their own, `gc-agent/<version>` and
+  `gc-hub/<version>`.)
+- Uploads are capped at 25 MB by the hub, under Cloudflare's 100 MB limit; an
+  upload slower than Cloudflare's 100 s is answered 524 and retried by the
+  agent (the hub drops the duplicate).
+
+**3. LabLink sign-in.** The hub asks LabVision (`https://labvision.asaplabs.net`,
+or `LABCORE_URL`) with `POST /api/login`, the endpoint COA uses; it keeps no
+LabLink password. Failed sign-ins are throttled in the hub (per address and
+user 5 in 10 minutes, per address 30, and 100 hub-wide through Cloudflare;
+a restart clears them), and **LabCore's own lockout is shared with COA
+Reviewer**: someone who mistypes here also counts there.
+
+**4. The admin password is the break-glass.** When LabVision is down, "Sign in
+with the admin password" works on the lab network and on ASAPSV1 itself,
+never through gc.asaplabs.net. Admin actions still need the admin password on
+top of any session. Changing it signs every break-glass session out.
+
+**5. After the update.** Everyone signs in once. On Hub admin, *Signed-in
+sessions* lists who is signed in (Revoke, Revoke all for this name);
+Maintenance deletes sessions that ended more than 30 days ago. `app.log`
+records every sign-in (name, method, address) and failed sign-in (address,
+method, a hash of the username; never a password or card code).
+
+**Rollback warning.** Schema v3 adds a sessions table and three name columns;
+older releases start on it, **but a release before v3.0.0 has no login**:
+rolling back makes everything at gc.asaplabs.net public again. **Before**
+`updater.py rollback --app gc`, pause the `gc.asaplabs.net` public hostname
+(Zero Trust > Networks > Tunnels > the tunnel > Public hostnames: delete or
+disable it), and restore it only after upgrading to v3.0+ again.
+
+**Diagnostics.** The bundle's database copy keeps the sessions (name, method,
+address, times) with every token hash nulled; its download link needs a
+signed-in session.
 
 ## Before cutover (once, for both GCs)
 
@@ -614,6 +725,116 @@ If Ryan approves copying a fix onto a share copy:
    folder is not configured") while the instrument folder (`watch_dir`) is
    unreachable, for example when the share or the GC PC's folder is offline.
    They work again once the folder is reachable; nothing needs restarting.
+
+## Hub tray on ASAPSV1
+
+The hub runs in the background under the updater (a scheduled task, launched
+with `DETACHED_PROCESS`, as SYSTEM or the updater's service account), so it
+has no window and no icon: a tray icon inside it would sit in session 0,
+where nobody sees it. The **hub tray** (`tray\hub_tray.pyw`, shipped in every
+release) is a separate small program for the admin logged on to ASAPSV1. It
+shows how the hub is doing and lets you pause it or stop it if it is slowing
+the server down. It talks to the hub at `http://127.0.0.1:5560` only (from
+v3.0 its pause/stop/restart calls need no sign-in because they come from
+ASAPSV1 itself, and they are refused through gc.asaplabs.net). "Open in
+browser" opens the hub address from the hub's status (`https://gc.asaplabs.net`
+unless set otherwise on Hub admin), else `hub_url` in the tray's config, else
+`http://localhost:5560`.
+
+**Install (once, as the admin who uses ASAPSV1).** Log on to ASAPSV1 (RDP),
+open a command prompt (not elevated) and run, via the `current` junction so
+autostart follows every update:
+
+```
+C:\ASAPApps\gc\current\.venv\Scripts\pythonw.exe C:\ASAPApps\gc\current\tray\hub_tray.pyw --install
+```
+
+This registers the tray to start at **your** logon
+(`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value
+`ASAPLabs GC Hub Tray`) and starts it now. Only one tray runs per logon
+session (a `Local\` mutex: a second start in the same session exits; two
+RDP sessions each get their own). `--uninstall` removes the autostart (a running tray
+stays until *Exit tray*). The tray runs with the release's own `.venv`:
+`requirements.txt` pins `pystray` (Windows only) and `psutil`, next to the
+`Pillow` and `six` pins that were already there, so nothing else is
+installed. When the updater switches to a new release, the tray notices the
+new version and restarts itself from `current` (so the old release folder is
+not held open when the updater prunes it). Its log is
+`%LOCALAPPDATA%\ASAPLabs\gc-hub-tray.log`. Settings are optional: copy
+`tray\tray.example.json` to `%APPDATA%\ASAPLabs\gc-hub-tray.json` and keep
+only what you change (port, the updater's paths, the amber thresholds).
+Without a `port` there, the tray uses the `gc` entry's port from the
+updater's `config.json` when it can read it, else 5560.
+
+**The icon.** Green: running. Amber: busy (the hub process has used more
+than half a CPU core for a whole minute, or more than 25 jobs are due) or
+processing is paused. Red: stopped or not answering. It polls
+`GET /api/hub/status` every 5 s, and less often (up to once a minute) while
+the hub does not answer. The status is cheap and never waits on the
+database: its queue numbers come from a cache the hub refreshes every 5 s
+(`stale: true` if that could not be read for 15 s), so a busy or locked
+store can never slow the updater's `/healthz`, which carries the same numbers
+under `hub`. Polling it is not activity, so it never blocks the 3 AM
+restart (nor does a paused hub's waiting queue).
+
+**The menu (right-click).**
+
+| Item | What it does |
+|---|---|
+| Status line | Version · running/processing paused/stopped · CPU (share of one core) · RAM · jobs queued |
+| Open in browser | `http://localhost:5560` |
+| Pause processing / Resume processing | Stops (starts) the hub's background work: the Worker, the export to the results CSVs and the nightly maintenance (a job or an append in progress finishes first; the icon changes when it has). The web app keeps serving and the agents keep sending: new samples wait as *received* and are processed on Resume. It survives a restart (stored in `gc.db`) and a notification stays up in the app while paused. Admin password |
+| Restart (Restart & install vX) | Same as Settings > Restart: a plain restart, or installs the staged release |
+| Stop hub | Stops the hub completely (below). If it is in the middle of something (a QBench upload, a processing job, an export append, an admin job or a diagnostics build), the tray names it and asks whether to **stop anyway**. Admin password |
+| Start hub | Runs the updater's `resume` (below) |
+| Exit tray | Closes the icon only; the hub is not touched |
+
+The admin password is asked for when an action needs it and kept **in
+memory** until it has not been used for 15 minutes (never on disk; set
+`remember_password` to false to be asked every time). Pause, Resume and Stop
+are refused from any other machine: they answer only on loopback
+(`127.0.0.1`/`::1`) with a loopback `Host` (so a web page cannot reach them
+by DNS rebinding), with the admin password, as JSON. The pause notice and
+the `paused` file name the Windows user who did it, e.g.
+`paused by ryan (127.0.0.1)`.
+
+**Why Stop pauses the updater.** The updater restarts any app that stops
+serving within ~20 s (`supervise()`), so simply exiting would be undone. Stop
+therefore writes the updater's own hold, `C:\ASAPApps\gc\data\paused` (the
+file `updater.py pause --app gc` writes; the text says who stopped it and
+when), then stops the hub's threads and exits. A paused updater normally
+makes the hub start its own replacement when it restarts; an explicit Stop
+never does. While the file exists, the updater leaves gc alone (it still
+stages new releases, but does not switch or start them).
+
+Not handled, because they are narrow and a person is at the keyboard: a Stop
+in the seconds while the updater itself is switching releases or answering a
+*Restart & install* (the updater's `switching` hold and the new release's
+start can race the exit; if the hub comes back, stop it again), and a Stop
+while Settings > Restart is already restarting the hub (the restart never
+respawns after a Stop, but the updater may already have been asked to
+switch).
+
+**How Start works.** *Start hub* runs
+`updater.py resume --app gc --config C:\ASAPApps\updater\config.json` (with
+the release's Python; the updater needs nothing else), which deletes
+`paused`; the updater's next supervision pass (within ~20 s) starts the hub,
+and the icon turns green once it answers. The data folder and the updater
+are Administrators-only, so from an unelevated tray this usually needs
+elevation: the tray tries the command, then removing the file itself, and
+then offers to run the command as an administrator (a UAC prompt). By hand,
+from an elevated prompt:
+
+```
+"C:\Program Files\Python314\python.exe" C:\ASAPApps\updater\updater.py resume --app gc --config C:\ASAPApps\updater\config.json
+```
+
+(use the updater's own Python, see *Before you start*). The same caveat means
+an unelevated tray may show a stopped hub as "not responding" rather than
+"stopped (updater paused)": it cannot see the `paused` file; the menu offers
+Start hub either way, and then only says the hub *should* start within
+~20 s if the updater is running (if it stays red, check the updater's
+scheduled task and `updater.log`).
 
 ## After setup
 

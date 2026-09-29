@@ -69,7 +69,8 @@ module.exports = (t) => {
     const c = L.installerOutcome(409, { needs_confirm: true, error: 'has a token', hub_url: 'http://sv1:5560' });
     t.eq(c.kind, 'confirm');
     t.eq(c.message.includes('http://sv1:5560'), true);
-    t.eq(L.installerOutcome(409, { needs_hub_url: true, error: 'set it' }).kind, 'needs_hub_url');
+    // rev 2: the installer always has a hub URL (the admin-set one, else https://gc.asaplabs.net)
+    t.eq(L.installerOutcome(409, { needs_hub_url: true, error: 'set it' }).kind, 'error');
     t.eq(L.installerOutcome(403, { error: 'Incorrect password' }), { kind: 'error', message: 'Incorrect password' });
     t.eq(L.installerOutcome(500, null).kind, 'error');
 

@@ -3,7 +3,7 @@
 the saved range overlays, exactly as ``/api/export-analysis-report``.
 
 The upload itself (Selenium, a live QBench) is never run in a test, so the
-wiring is pinned by AST (the upload goes through ``_run_export_analysis`` and
+wiring is pinned by AST (the upload goes through ``_build_report_pdf`` and
 no longer computes a trend-only difference) and the shared analysis is
 checked end to end through the report route: a narrow spike that only the
 spike channel sees, inside a saved overlay, shows in the PDF's text.
@@ -43,8 +43,8 @@ def _called(fn: ast.AST) -> set:
 
 def test_qbench_upload_builds_its_pdf_with_the_export_analysis():
     calls = _called(_function("api_qbench_upload"))
-    assert "_run_export_analysis" in calls
-    assert "_generate_analysis_report_pdf" in calls
+    # phase 3: one report builder for every export (_report_content inside)
+    assert {"_build_report_pdf", "_report_request"} <= calls
     # the old trend-only path is gone
     assert not calls & {"compute_trend_line", "detect_deviation_segments"}
 
@@ -57,7 +57,7 @@ def test_the_shared_analysis_reports_a_spike_in_a_saved_overlay():
 
     import cdf_fixtures as fx
     import hub_boot
-    from bootapp import booted, wait_for
+    from bootapp import cookie_header, booted, wait_for
 
     tmp = Path(tempfile.mkdtemp(prefix="gc-t5-qb-"))
     try:
@@ -79,12 +79,13 @@ def test_the_shared_analysis_reports_a_spike_in_a_saved_overlay():
             req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/api/export-analysis-report",
                 data=json.dumps({"sample_id": hub.ids["final"], "standard_name": "Base"}).encode(),
-                method="POST", headers={"Content-Type": "application/json"})
+                method="POST", headers={"Content-Type": "application/json",
+                                        **cookie_header(port)})
             with urllib.request.urlopen(req, timeout=120) as r:
                 pdf = r.read()
         text = "\n".join(p.extract_text() or "" for p in pypdf.PdfReader(io.BytesIO(pdf)).pages)
         flat = " ".join(text.split())
-        assert "higher intensity than Base" in flat, flat[:2000]
+        assert "Spiky (C9–C11): HIGHER than Base" in flat, flat[:2000]
         assert "spiky range" in flat.lower(), flat[:2000]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

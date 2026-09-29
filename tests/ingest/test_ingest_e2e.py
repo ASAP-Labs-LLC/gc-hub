@@ -38,7 +38,7 @@ pytest.importorskip("netCDF4")
 import corrections  # noqa: E402
 import distill  # noqa: E402
 import store  # noqa: E402
-from bootapp import booted, setup_admin  # noqa: E402
+from bootapp import booted, cookie_header, setup_admin  # noqa: E402
 from pipeline_helpers import Hub  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
@@ -60,7 +60,8 @@ def _installer(port, password):
     import urllib.request
     req = urllib.request.Request(f"http://127.0.0.1:{port}/api/admin/instruments/gc1/installer",
                                  data=json.dumps({"password": password}).encode(), method="POST",
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json",
+                                          **cookie_header(port)})
     with urllib.request.urlopen(req, timeout=60) as r:
         return zipfile.ZipFile(io.BytesIO(r.read()))
 

@@ -20,9 +20,16 @@ needs ``{password, setup_code}``; the code is compared with
 ``hmac.compare_digest`` and the file is deleted on success. Resetting a
 forgotten password = deleting the ``settings_kv`` row on the server; the next
 start (or setup page view) writes and logs a new code. The setup route also
-refuses a ``Host`` header that isn't an IP literal, ``localhost``, one of the
-machine's own names or the configured ``hub_url`` host (``host_allowed``):
-defence in depth against DNS rebinding, on top of the cross-site guard.
+refuses a ``Host`` header that isn't an IP literal, ``localhost`` or one of the
+machine's own names (``host_allowed``) — the hub URL's host (by default
+gc.asaplabs.net) only for an https request with a signed-in session, i.e.
+setup through the Cloudflare tunnel, where the session gate also demands a
+LabLink session: defence in depth against DNS rebinding, on top of the
+cross-site guard (``netctx.is_cross_site``).
+
+**Client and "local"** come from ``netctx``: the throttle key is the
+request's ``client_ip()`` (the real client through the tunnel, IPv6 by /64)
+and the hub-wide budget's exemption is ``is_local()`` (never the tunnel).
 
 API::
 
@@ -83,6 +90,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import netctx
 import paths
 import store
 
@@ -90,6 +98,7 @@ log = logging.getLogger("admin_auth")
 
 KEY = "admin_password"
 HUB_URL_KEY = "hub_url"
+DEFAULT_HUB_URL = "https://gc.asaplabs.net"   # the effective hub_url when none is set
 ALGO = "pbkdf2_sha256"
 ITERATIONS = 310_000
 SALT_BYTES = 16
@@ -237,9 +246,11 @@ _clock = time.monotonic
 
 
 def _is_loopback(client: Optional[str]) -> bool:
-    """A request from the hub machine itself (RDP + http://localhost:5560).
-    Loopback is exempt from the hub-wide budget, so no LAN host can lock the
-    admin out; its per-address backoff still applies."""
+    """Outside a request: is ``client`` a loopback address. In a request the
+    exemption is ``netctx.is_local()`` instead (the tunnel's peer is loopback
+    too, and must never be exempt). The server's own console is exempt from
+    the hub-wide budget, so no LAN or internet host can lock the admin out;
+    its per-address backoff still applies."""
     try:
         return ipaddress.ip_address((client or "").split("%")[0]).is_loopback
     except ValueError:
@@ -263,13 +274,16 @@ class _Throttle:
             st = self._state.get(client)
             return max(0.0, st["locked_until"] - _clock()) if st else 0.0
 
-    def begin(self, client: str):
+    def begin(self, client: str, local: Optional[bool] = None):
         """Reserve one attempt: ``(ticket, 0, '')`` or ``(None, wait, message)``.
-        The attempt counts as a failure until ``finish`` says otherwise."""
+        The attempt counts as a failure until ``finish`` says otherwise.
+        ``local``: the server's own console (``netctx.is_local()``); outside a
+        request it defaults to "the client is a loopback address"."""
         with self._lock:
             now = _clock()
             self._prune(now)
-            local = _is_loopback(client)
+            if local is None:
+                local = _is_loopback(client)
             if not local and len(self._global) >= GLOBAL_FAILURE_BUDGET:
                 wait = self._global[0][0] + GLOBAL_WINDOW_SECONDS - now
                 return None, max(wait, 1.0), (f"Too many wrong admin passwords on this hub. "
@@ -328,6 +342,34 @@ _throttle = _Throttle()
 def reset_throttle() -> None:
     """Forget every client's failures (tests)."""
     _throttle.clear()
+
+
+def _request_context(client: Optional[str]):
+    """``(client, local)`` for a throttle reservation: in a request, the
+    client is ``netctx.throttle_key(netctx.client_ip())`` unless given, and
+    ``local`` is ``netctx.is_local()``; outside one, ``(client, None)``."""
+    try:
+        from flask import has_request_context
+        in_request = has_request_context()
+    except ImportError:  # pragma: no cover
+        in_request = False
+    if not in_request:
+        return client, None
+    if client is None:
+        client = netctx.throttle_key(netctx.client_ip())
+    return client, netctx.is_local()
+
+
+def _who(client: Optional[str]) -> str:
+    """The signed-in name and address in a request, else ``client``."""
+    try:
+        from flask import has_request_context
+        if has_request_context():
+            import web_auth
+            return web_auth.actor()
+    except Exception:  # noqa: BLE001
+        pass
+    return client or "?"
 
 
 # ── the one-time setup code ─────────────────────────────────────────────────
@@ -441,22 +483,72 @@ def is_ip_literal(name: str) -> bool:
         return False
 
 
-def configured_hub_host(*, db=None) -> Optional[str]:
+def configured_hub_url(*, db=None) -> Optional[str]:
+    """The admin-set hub URL (``settings_kv["hub_url"]``), or None."""
+    return store.settings_kv.get(HUB_URL_KEY, db=_db(db)) or None
+
+
+def effective_hub_url(*, db=None) -> str:
+    """The hub's address: the admin-set hub URL, else ``DEFAULT_HUB_URL``
+    (https://gc.asaplabs.net). Agents, installers and the tray use it."""
     try:
-        url = store.settings_kv.get(HUB_URL_KEY, db=_db(db))
-    except Exception:  # noqa: BLE001
-        return None
+        return configured_hub_url(db=db) or DEFAULT_HUB_URL
+    except Exception:  # noqa: BLE001 - no store yet: the default
+        return DEFAULT_HUB_URL
+
+
+def configured_hub_host(*, db=None) -> Optional[str]:
+    """The effective hub URL's host name."""
+    url = effective_hub_url(db=db)
     return _hostname(urllib.parse.urlsplit(url).netloc) if url else None
+
+
+_LAN_SUFFIXES = (".local", ".lan", ".internal", ".home.arpa", ".localdomain")
+
+
+def is_lan_host(name: Optional[str]) -> bool:
+    """A name or address that only means something on the lab network: an IP
+    literal, a single-label name (``asapsv1``), a ``.local``-style suffix,
+    ``localhost`` or one of this machine's names."""
+    if not name:
+        return False
+    name = name.lower().rstrip(".")
+    if is_ip_literal(name) or "." not in name or name.endswith(_LAN_SUFFIXES):
+        return True
+    return name == "localhost" or is_machine_name(name)
+
+
+def valid_hub_url(url: Any) -> Optional[str]:
+    """``url`` normalised (no trailing slash) if it is a bare
+    ``http(s)://host[:port]`` that is https unless its host is a LAN name or
+    IP; else None."""
+    if not isinstance(url, str) or not url.strip():
+        return None
+    url = url.strip()
+    try:
+        parts = urllib.parse.urlsplit(url)
+        parts.port      # noqa: B018 - raises ValueError on a bad port
+    except ValueError:
+        return None
+    if not (parts.scheme in ("http", "https") and parts.hostname
+            and "@" not in parts.netloc and parts.path in ("", "/")
+            and not parts.query and not parts.fragment):
+        return None
+    if parts.scheme == "http" and not is_lan_host(parts.hostname):
+        return None
+    return url.rstrip("/")
 
 
 def is_machine_name(name: str) -> bool:
     return name in _machine_names()
 
 
-def host_allowed(host: Any, *, db=None) -> bool:
+def host_allowed(host: Any, *, db=None, tunnel_session: bool = False) -> bool:
     """Is ``host`` (a ``Host`` header) one this hub answers to: an IP literal
     (a rebinding attack arrives under the attacker's *name*), ``localhost``,
-    one of this machine's names, or the configured ``hub_url``'s host."""
+    one of this machine's names — or, only with ``tunnel_session`` (the
+    request is https and signed in: setup through gc.asaplabs.net), the
+    effective ``hub_url``'s host."""
     name = _hostname(host)
     if name is None:
         return False
@@ -466,7 +558,7 @@ def host_allowed(host: Any, *, db=None) -> bool:
         return False
     if name == "localhost" or is_machine_name(name):
         return True
-    return name == configured_hub_host(db=db)
+    return bool(tunnel_session) and name == configured_hub_host(db=db)
 
 
 # ── public API ──────────────────────────────────────────────────────────────
@@ -482,7 +574,8 @@ def setup(password: Any, setup_code: Any, *, db=None, client: Optional[str] = No
     db = _db(db)
     if is_set(db=db):
         raise AlreadySet("An admin password is already set.")
-    ticket, _wait, message = _throttle.begin(client or "?")
+    client, local = _request_context(client)
+    ticket, _wait, message = _throttle.begin(client or "?", local)
     if ticket is None:
         raise SetupCodeError(message)
     outcome = "fail"
@@ -491,7 +584,7 @@ def setup(password: Any, setup_code: Any, *, db=None, client: Optional[str] = No
         supplied = (_utf8(setup_code) if isinstance(setup_code, str) else None) or b""
         good = bool(expected) and hmac.compare_digest(supplied, expected.encode("utf-8"))
         if not good:
-            log.warning("admin setup refused from %s: wrong setup code", client or "?")
+            log.warning("admin setup refused from %s: wrong setup code", _who(client))
             raise SetupCodeError(WRONG_CODE_MESSAGE)
         try:
             encoded = _encode(password)
@@ -508,12 +601,15 @@ def setup(password: Any, setup_code: Any, *, db=None, client: Optional[str] = No
     finally:
         _throttle.finish(ticket, outcome)
     _remove_code(path)
-    log.warning("admin password set (first use, from %s)", client or "?")
+    log.warning("admin password set (first use, by %s)", _who(client))
 
 
 def check(password: Any, client: Optional[str] = None, *, db=None) -> CheckResult:
-    """Check ``password`` against the stored hash, with the throttling above."""
-    ticket, wait, message = _throttle.begin(client or "?")
+    """Check ``password`` against the stored hash, with the throttling above.
+    In a request, ``client`` defaults to the request's client address
+    (``netctx``) and the hub-wide budget exemption is ``netctx.is_local()``."""
+    client, local = _request_context(client)
+    ticket, wait, message = _throttle.begin(client or "?", local)
     if ticket is None:
         return CheckResult(False, "throttled", message, wait)
     outcome = "refund"
@@ -536,7 +632,7 @@ def check(password: Any, client: Optional[str] = None, *, db=None) -> CheckResul
             outcome = "ok"
             return CheckResult(True, "ok")
         outcome = "fail"
-        log.warning("wrong admin password from %s", client or "?")
+        log.warning("wrong admin password from %s", _who(client))
         return CheckResult(False, "wrong", "Incorrect password")
     finally:
         _throttle.finish(ticket, outcome)
@@ -558,7 +654,7 @@ def change(current: Any, new: Any, *, db=None, client: Optional[str] = None) -> 
             if store.settings_kv.get(KEY, db=conn) != before:
                 raise PasswordError("The admin password was changed meanwhile; try again.")
             store.settings_kv.set(KEY, encoded, db=conn)
-    log.warning("admin password changed (from %s)", client or "?")
+    log.warning("admin password changed (by %s)", _who(client))
 
 
 def check_admin_body(body: Any, *, db=None, client: Optional[str] = None) -> bool:
@@ -568,8 +664,6 @@ def check_admin_body(body: Any, *, db=None, client: Optional[str] = None) -> boo
     try:
         from flask import g, has_request_context, request
         in_request = has_request_context()
-        if in_request and client is None:
-            client = request.remote_addr
     except ImportError:  # pragma: no cover - flask is a hub dependency
         pass
     res = check(supplied, client, db=db)
@@ -660,19 +754,9 @@ def _json_body():
 
 
 def _cross_site() -> bool:
-    """Same rule as app's guard (which already covers /api/), kept here so the
-    setup route is same-origin whatever its path."""
-    site = (request.headers.get("Sec-Fetch-Site") or "").strip().lower()
-    if site and site not in ("same-origin", "none"):
-        return True
-    origin = request.headers.get("Origin")
-    if origin is not None:
-        try:
-            parts = urllib.parse.urlsplit(origin.strip())
-        except ValueError:
-            return True
-        return parts.scheme not in ("http", "https") or parts.netloc.lower() != request.host.lower()
-    return False
+    """The app guard's rule (``netctx.is_cross_site``: one origin rule), kept
+    here so the setup route is same-origin whatever its path."""
+    return netctx.is_cross_site()
 
 
 @bp.after_app_request
@@ -704,11 +788,22 @@ def admin_setup_page():
                            min_length=MIN_LENGTH, code_file=SETUP_CODE_FILE)
 
 
+def _tunnel_session() -> bool:
+    """Setup through gc.asaplabs.net: https and a signed-in (LabLink) session."""
+    if not netctx.is_https():
+        return False
+    try:
+        import web_auth
+        return web_auth.current_user() is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _refuse_host():
-    if host_allowed(request.host):
+    if host_allowed(request.host, tunnel_session=_tunnel_session()):
         return None
     log.warning("refused %s from %s: Host %r is not this hub", request.path,
-                request.remote_addr, request.host)
+                netctx.client_ip(), request.host)
     return jsonify({"error": "This request's Host is not this hub's address. Open the hub by "
                              "its own name or IP address."}), 403
 
@@ -724,7 +819,7 @@ def api_admin_setup():
     if err:
         return err
     try:
-        setup(body.get("password"), body.get("setup_code"), client=request.remote_addr)
+        setup(body.get("password"), body.get("setup_code"))
     except NoStore:
         return jsonify({"error": NO_STORE_MESSAGE}), 503
     except AlreadySet:
@@ -745,11 +840,19 @@ def api_admin_password():
     if err:
         return err
     try:
-        change(body.get("password"), body.get("new_password"), client=request.remote_addr)
+        change(body.get("password"), body.get("new_password"))
     except NoStore:
         return jsonify({"error": NO_STORE_MESSAGE}), 503
     except WrongPassword as exc:
         return jsonify({"error": str(exc)}), 403
     except PasswordError as exc:
         return jsonify({"error": str(exc)}), 400
-    return jsonify({"ok": True})
+    revoked = []
+    try:   # a new admin password ends every break-glass session
+        import web_auth
+        revoked = web_auth.revoke_method("admin")
+    except Exception:  # noqa: BLE001
+        log.exception("could not revoke the admin (break-glass) sessions")
+    if revoked:
+        log.warning("admin password changed: revoked %d break-glass session(s)", len(revoked))
+    return jsonify({"ok": True, "revoked_admin_sessions": len(revoked)})

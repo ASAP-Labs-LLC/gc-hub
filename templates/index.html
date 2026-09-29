@@ -11,7 +11,8 @@
 
   <!-- App stylesheet (cache-bust) -->
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=38">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=2">
+  <script src="{{ url_for('static', filename='js/session.js') }}?v=1"></script>
 
   <!-- Inline critical layout styles (structural only; visual polish lives in style.css) -->
   <style>
@@ -235,6 +236,21 @@
     /* ── Annotation crosshair toggle ──────────────────────────────── */
     .annotation-toggle { padding: 4px 10px; font-size: 11px; }
     .annotation-toggle.active { background: #58a6ff; color: #fff; border-color: #58a6ff; }
+
+    /* ── Comments (phase 4) ───────────────────────────────────────── */
+    #analysis-comments-panel .panel-body { display:flex; flex-direction:column; gap:6px; }
+    .comment-author { margin-left:auto; font-size:10px; color:#7d8590; font-weight:normal; }
+    .comment-chips { display:flex; flex-wrap:wrap; gap:4px; }
+    .comment-chip { font-size:10px; padding:2px 8px; border:1px solid #30363d; border-radius:12px; background:#161b22; color:#c9d1d9; cursor:pointer; text-align:left; }
+    .comment-chip:hover { border-color:#58a6ff; color:#fff; }
+    .comment-add { display:flex; gap:4px; }
+    .comment-add input { flex:1; font-size:11px; padding:3px 6px; }
+    #comment-list { list-style:none; margin:0; padding:0; max-height:140px; overflow:auto; font-size:11px; }
+    #comment-list li { display:flex; align-items:baseline; gap:6px; padding:3px 2px; border-bottom:1px solid #21262d; }
+    #comment-list li.muted { color:#7d8590; }
+    #comment-list .comment-text { flex:1; color:#c9d1d9; white-space:pre-wrap; word-break:break-word; }
+    #comment-list .comment-meta { color:#7d8590; font-size:10px; white-space:nowrap; }
+    #comment-list .comment-delete { background:none; border:none; color:#f85149; cursor:pointer; font-size:13px; line-height:1; padding:0 2px; }
   </style>
 </head>
 <body>
@@ -736,6 +752,21 @@
                 <textarea id="analysis-conclusion" rows="3" style="width:100%; font-size:12px;" placeholder="Enter conclusion..."></textarea>
               </div>
             </div>
+            <!-- Comments (phase 4, static/js/comments.js): saved on the sample, printed in its reports -->
+            <div class="panel" id="analysis-comments-panel" style="flex-shrink:0;">
+              <div class="panel-header" style="display:flex; align-items:center;">
+                <span>Comments</span>
+                <span class="comment-author" id="comment-author" title="Comments are saved with your signed-in name; reports print its initials"></span>
+              </div>
+              <div class="panel-body">
+                <div id="comment-presets" class="comment-chips"></div>
+                <div class="comment-add">
+                  <input id="comment-free-text" type="text" maxlength="500" placeholder="Add a comment for the report...">
+                  <button class="btn btn-secondary" id="btn-comment-add" style="font-size:11px; padding:2px 10px;">Add</button>
+                </div>
+                <ul id="comment-list"></ul>
+              </div>
+            </div>
           </div>
 
           <!-- Queue -->
@@ -852,6 +883,36 @@
         <p style="font-size:11px; color:#7d8590; margin-top:4px;">Each parsed sample is compared to every comparison standard (amplitude-normalized, small retention shifts allowed). A score at or above the threshold names the fuel; otherwise a two-component blend is tried (&ldquo;Mix: A + B (80/20)&rdquo;), else the sample is labeled &ldquo;Mix&rdquo;. Results are written to the CSV and shown in sample lists.</p>
       </div>
 
+      <!-- Deviation bullets (admin) -->
+      <div style="margin-top:12px; border-top:1px solid #21262d; padding-top:10px;">
+        <span style="font-size:12px; font-weight:600; color:#c9d1d9; display:block; margin-bottom:6px;">Deviation Bullets</span>
+        <div class="form-row">
+          <label for="set-analysis-min-width">Minimum run width (min)</label>
+          <input type="number" id="set-analysis-min-width" step="0.01" min="0" max="1" style="max-width:100px;">
+        </div>
+        <div class="form-row">
+          <label for="set-analysis-merge-gap">Merge gap outside ranges (min)</label>
+          <input type="number" id="set-analysis-merge-gap" step="0.01" min="0" max="2" style="max-width:100px;">
+        </div>
+        <div class="form-row">
+          <label for="set-analysis-spike-width">Spike minimum width (min)</label>
+          <input type="number" id="set-analysis-spike-width" step="0.005" min="0" max="0.5" style="max-width:100px;">
+        </div>
+        <div class="form-row">
+          <label for="set-analysis-spike-fwhm">Spike maximum width at half height (min)</label>
+          <input type="number" id="set-analysis-spike-fwhm" step="0.01" min="0" max="2" style="max-width:100px;">
+        </div>
+        <div class="form-row">
+          <label for="set-analysis-spike-dominance">Spike minimum dominance (0&ndash;1)</label>
+          <input type="number" id="set-analysis-spike-dominance" step="0.05" min="0" max="1" style="max-width:100px;">
+        </div>
+        <div class="form-row">
+          <label for="set-analysis-spike-report">Spike report threshold (empty = moderate)</label>
+          <input type="number" id="set-analysis-spike-report" step="10" min="0" style="max-width:100px;">
+        </div>
+        <p style="font-size:11px; color:#7d8590; margin-top:4px;">One bullet per deviating range plus one for everything outside the ranges. A trend run counts when it is at least the minimum width above the marginal threshold; a sharp peak counts when it reaches the spike report threshold, is no wider than the maximum width at half height, and its difference is at least the dominance fraction of the local peak (so a height difference of a peak both runs share is not a sharp peak). Changing these needs the admin password.</p>
+      </div>
+
       <!-- Comparison standards list inside settings -->
       <div style="margin-top:12px; border-top:1px solid #21262d; padding-top:10px;">
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
@@ -955,8 +1016,8 @@
       </div>
 
       <div style="margin-top:10px;">
-        <label style="font-size:12px; color:#c9d1d9; font-weight:600; display:block; margin-bottom:4px;">Bullet Points</label>
-        <textarea id="export-bullets" rows="5" style="width:100%;" placeholder="Enter analysis bullet points..."></textarea>
+        <label for="export-bullets" style="font-size:12px; color:#c9d1d9; font-weight:600; display:block; margin-bottom:4px;">Bullet Points <span style="font-weight:400; color:#7d8590;">(computed from the parameters and ranges; read-only)</span></label>
+        <textarea id="export-bullets" rows="5" style="width:100%; opacity:0.85;" readonly></textarea>
       </div>
 
       <div style="margin-top:10px;">
@@ -1073,15 +1134,18 @@
      APP SCRIPT
      ================================================================== -->
 <script src="{{ url_for('static', filename='js/selection.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/report_payload.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/report_payload.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/samples.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=47"></script>
+<script src="{{ url_for('static', filename='js/comments.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/ladder.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=49"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>
+{% include "_signed_in.html" %}
 
 </body>
 </html>

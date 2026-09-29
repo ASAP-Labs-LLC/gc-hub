@@ -23,7 +23,7 @@ pytest.importorskip("flask")
 pytest.importorskip("netCDF4")
 
 import store  # noqa: E402
-from bootapp import booted, post, send, setup_admin, wait_for  # noqa: E402
+from bootapp import get_text, booted, post, send, setup_admin, wait_for  # noqa: E402
 from hub_boot import Hub  # noqa: E402
 from import_history_testlib import (  # noqa: E402
     ALIASES, SIMDIS, one, row, sample, samples, src, table_counts, write_csv)
@@ -186,7 +186,7 @@ def test_last_run_defaults_the_form_and_warns_on_a_different_csv(admin_hub, tmp_
     assert last["results_csv"] and Path(last["results_csv"]).is_file()
     assert last["processed_dir"] and Path(last["processed_dir"]).is_dir()
     # the run records the admin who started it, like other admin actions
-    assert last["by"] == "admin@127.0.0.1", last
+    assert last["by"] == "Test Operator (127.0.0.1)", last     # the signed-in name
 
     # a different CSV path than last time is not refused, only warned about
     other_csv = Path(last["results_csv"]).with_name("other.csv")
@@ -265,5 +265,5 @@ def test_stop_refuses_when_no_job_is_running(admin_hub):
 def test_admin_page_shows_the_history_import_section(admin_hub):
     import urllib.request
     port, _h, _pw = admin_hub
-    html = urllib.request.urlopen(f"http://127.0.0.1:{port}/admin/hub", timeout=5).read().decode()
+    html = get_text(port, "/admin/hub")
     assert 'id="ih-inst"' in html and 'id="btn-ih-start"' in html and 'id="btn-ih-stop"' in html

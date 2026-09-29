@@ -84,6 +84,8 @@
         const form = $('hub-url-form');
         const hubInput = form && form.elements.namedItem('hub_url');
         if (hubInput && document.activeElement !== hubInput) hubInput.value = STATE.hubUrl || '';
+        const eff = $('hub-url-effective');
+        if (eff) eff.textContent = body.hub_url_effective || '';
         renderList();
         const want = keepSelection ? STATE.selected : (new URLSearchParams(location.search).get('instrument')
             || (STATE.list[0] && STATE.list[0].id));
@@ -146,6 +148,65 @@
         await loadList(true);
     }
 
+    // ── LEM machine dropdown (D10) ─────────────────────────────────────────
+    // One GET /api/lem/machines per page load (and per Refresh) once it has
+    // given a list; a failed answer is not kept, so the next picker asks
+    // again. The hub fetches from LEM and caches it. Titles and uids from LEM
+    // are untrusted: option texts are set with textContent (h's `text`).
+    let LEM_ANSWER = null;
+    function lemMachines(refresh) {
+        if (!LEM_ANSWER || refresh) {
+            const pending = getJSON('/api/lem/machines')
+                .then(r => (r.status === 200 ? r.body : null))
+                .catch(() => null)
+                .then(answer => {
+                    if (!L.lemAnswerCacheable(answer) && LEM_ANSWER === pending) LEM_ANSWER = null;
+                    return answer;
+                });
+            LEM_ANSWER = pending;
+        }
+        return LEM_ANSWER;
+    }
+
+    // A <select> of LEM's machines for `saved` (a uid or ''), with "Other…"
+    // revealing a text box. value() is the uid to save (the saved one until
+    // the list has loaded).
+    function lemPicker(saved) {
+        const start = saved || '';
+        const select = h('select', { disabled: true, 'aria-label': 'LEM machine' },
+            h('option', { text: 'Loading LEM machines…' }));
+        const other = h('input', { maxlength: 128, value: start, hidden: true,
+                                   placeholder: 'LEM machine uid', 'aria-label': 'LEM machine uid' });
+        const note = h('span', { className: 'hint', hidden: true });
+        let options = null;
+        const chosen = () => (options ? options[select.selectedIndex] : null);
+        function sync() {
+            const o = chosen();
+            other.hidden = !(o && o.other);
+            if (!other.hidden) other.focus();
+        }
+        select.addEventListener('change', sync);
+        lemMachines().then(answer => {
+            const r = L.lemMachineOptions(answer, start);
+            options = r.options;
+            select.replaceChildren(...options.map(o => h('option', { text: o.text })));
+            select.selectedIndex = r.selected;
+            select.disabled = false;
+            note.textContent = r.note || '';
+            note.hidden = !r.note;
+            other.hidden = true;
+        });
+        return {
+            el: h('span', { className: 'lem-picker' }, select, other, note),
+            value: () => (options ? L.lemPickerValue(chosen(), other.value) : start),
+            reset() {
+                other.value = '';
+                other.hidden = true;
+                if (options) select.selectedIndex = 0;
+            },
+        };
+    }
+
     // settings: name, enabled, method, live_since, lem_machine_uid
     function settingsCard(d) {
         const inst = d.instrument;
@@ -154,14 +215,14 @@
         const method = h('select', {}, ...STATE.hubMethods.map(m => h('option', { value: m, text: m })));
         method.value = inst.method;
         const live = h('input', { type: 'datetime-local', step: 1, value: L.liveSinceInput(inst.live_since) });
-        const uid = h('input', { value: inst.lem_machine_uid || '', maxlength: 128 });
+        const uid = lemPicker(inst.lem_machine_uid || '');
         const warnings = h('div');
         for (const w of d.live_since_warnings || []) warnings.appendChild(h('p', { className: 'warnline', text: w }));
         async function save() {
             const ls = L.liveSinceValue(live.value);
             if (ls.error) { flash(ls.error, 'err'); return; }
             const payload = { name: name.value, enabled: enabled.checked, method: method.value,
-                              lem_machine_uid: uid.value };
+                              lem_machine_uid: uid.value() };
             if (ls.value !== (inst.live_since || '')) {
                 const ask = L.liveSinceConfirm(inst.live_since, ls.value, L.localNow());
                 if (ask && !confirm(ask)) return;
@@ -178,7 +239,7 @@
                 h('label', {}, 'Method', method),
                 h('label', { title: "Injections before this (the GC's local clock) are backfill (D11)" },
                     'Live since (GC local time)', live),
-                h('label', { title: 'Informational: LabStation routing only' }, 'LEM machine uid', uid),
+                h('label', { title: 'Informational: LabStation routing only' }, 'LEM machine', uid.el),
                 h('label', {}, enabled, ' Enabled (a disabled instrument\'s agent is refused)')),
             warnings,
             h('p', { className: 'hint', text: 'live_since applies to samples received from now on; ' +
@@ -244,9 +305,6 @@
             await afterChange('Installer downloaded. It holds the new token: copy it to the GC PC and run install.pyw.');
         } else if (out.kind === 'confirm') {
             if (confirm(out.message)) await installer(id, true);
-        } else if (out.kind === 'needs_hub_url') {
-            flash(out.message + ' Set it under "Hub URL for installers" (left).', 'err');
-            $('hub-url-box').open = true;
         } else {
             flash(out.message, 'err');
         }
@@ -540,12 +598,22 @@
     }
 
     // ── left column forms ──────────────────────────────────────────────────
+    // Rebuilt on Refresh (keeping what was chosen), like the edit form's.
+    let ADD_LEM = null;
+    function buildAddLem() {
+        ADD_LEM = lemPicker(ADD_LEM ? ADD_LEM.value() : '');
+        $('add-lem').replaceChildren(ADD_LEM.el);
+    }
+    buildAddLem();
+
     $('add-form').addEventListener('submit', async (ev) => {
         ev.preventDefault();
         const f = ev.target;
-        const r = await adminPost('/api/admin/instruments', { id: f.elements.namedItem('id').value.trim(), name: f.elements.namedItem('name').value.trim() });
+        const r = await adminPost('/api/admin/instruments', { id: f.elements.namedItem('id').value.trim(), name: f.elements.namedItem('name').value.trim(),
+                                                              lem_machine_uid: ADD_LEM.value() });
         if (r && r.status === 201) {
             f.reset();
+            ADD_LEM.reset();
             STATE.selected = r.body.instrument.id;
             await afterChange('Instrument ' + r.body.instrument.name + ' added. Set its calibration, corrections and live_since next.');
         }
@@ -554,10 +622,10 @@
     $('hub-url-form').addEventListener('submit', async (ev) => {
         ev.preventDefault();
         const r = await adminPost('/api/admin/hub-url', { hub_url: ev.target.elements.namedItem('hub_url').value.trim() });
-        if (r && r.status === 200) await afterChange(r.body.hub_url ? 'Hub URL set to ' + r.body.hub_url + '.' : 'Hub URL cleared.');
+        if (r && r.status === 200) await afterChange(r.body.hub_url ? 'Hub URL set to ' + r.body.hub_url + '.' : 'Hub URL cleared: installers use ' + (r.body.effective || 'https://gc.asaplabs.net') + '.');
     });
 
-    $('btn-refresh').addEventListener('click', () => loadList(true));
+    $('btn-refresh').addEventListener('click', () => { lemMachines(true); buildAddLem(); loadList(true); });
 
     loadList(false);
 })();
