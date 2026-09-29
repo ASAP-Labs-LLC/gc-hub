@@ -116,6 +116,7 @@ Ryan asked for this: "trying for the user to remember the LEM UID is insane, ple
   - timeout 8 s;
   - the answer is cached for 60 s, and the last good answer is served stale when LEM fails;
   - it returns `{machines: [{uid, title, status, closed}], source: "live"|"cached"|"unavailable", age_seconds, error?}`, sorted by title, with only those fields.
+  - As built, it also passes through LEM's own `stale` and `labcore_online` flags (`null` when LEM gives none).
   - Titles and uids are untrusted, so they are length-capped and inserted with textContent.
 - **The Instruments page** replaces the `LEM machine uid` text box, in both the edit and create forms, with a `<select>`:
   - "— none —";

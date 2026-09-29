@@ -149,6 +149,7 @@ are exactly as written in the decorator (module constants resolved).
 | `/api/admin/conflicts/<cid>/replace` | POST | new | 2A2 `instruments_api` blueprint: admin: pipeline.resolve_conflict_replace |
 | `/api/standards` | GET | new | 2A2 `instruments_api` blueprint: D12 standards, `for_instrument` picker order (open read) |
 | `/api/admin/standards/<sid>/instrument` | POST | new | 2A2 `instruments_api` blueprint: admin: tag a standard |
+| `/api/lem/machines` | GET | new | D10 `instruments_api` blueprint: LEM's machine list for the LEM machine dropdown, fetched server-side by `lem_machines` (60 s cache, stale on failure; read-only, never writes to LEM) |
 | `/api/hub/status` | GET | new | hub tray `hub_control`: `status_snapshot()` (version, pid, uptime, state, processing/updater paused, queue sizes, exporter pending rows, CPU %, RSS, staged update); open, read-only, not activity |
 | `/api/admin/hub/pause-processing` | POST | new | hub tray `hub_control` (loopback only + admin password, JSON, 64 KiB): stop the Worker/exporter/maintenance, persisted in `settings_kv`; ingest keeps queueing |
 | `/api/admin/hub/resume-processing` | POST | new | hub tray `hub_control` (loopback only + admin password): start them again |

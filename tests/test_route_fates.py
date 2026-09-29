@@ -130,8 +130,14 @@ class RouteFateTests(unittest.TestCase):
 
     def test_blueprint_routes_are_seen(self):
         registered = registered_routes()
-        for path in ("/api/ingest", "/api/agent/heartbeat", "/api/admin/setup"):
+        for path in ("/api/ingest", "/api/agent/heartbeat", "/api/admin/setup",
+                     "/api/lem/machines"):
             self.assertIn(path, registered)
+
+    def test_lem_machines_is_a_get_only_new_route(self):
+        rows = {p: (m, fate) for p, m, fate in plan_table()}
+        self.assertEqual(rows.get("/api/lem/machines"), (frozenset({"GET"}), "new"))
+        self.assertEqual(registered_routes().get("/api/lem/machines"), frozenset({"GET"}))
 
     def test_removed_routes_are_not_registered(self):
         registered = registered_routes()

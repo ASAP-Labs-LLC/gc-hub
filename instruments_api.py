@@ -34,6 +34,7 @@ Routes::
     POST /api/admin/conflicts/<cid>/replace                  {}
     GET  /api/standards[?instrument=|for_instrument=]        D12
     POST /api/admin/standards/<sid>/instrument               {instrument_id | null}
+    GET  /api/lem/machines                                   D10: LEM's machines (dropdown)
 
 **The open GETs** (by design, like ``/api/agents``: the hub has no login and
 listens on the lab LAN) show instrument settings, correction values and their
@@ -62,6 +63,7 @@ from flask import Blueprint, jsonify, render_template, request
 import admin_auth
 import ingest_api
 import instrument_admin as ia
+import lem_machines
 import paths
 import standards
 import store
@@ -454,3 +456,16 @@ def api_standard_instrument(sid):
     except LookupError as exc:
         return _err(str(exc), 404)
     return jsonify({"standard": row})
+
+
+# ── LEM machines (D10) ──────────────────────────────────────────────────────
+
+@bp.route("/api/lem/machines", methods=["GET"])
+def api_lem_machines():
+    """LEM's machine list for the LEM machine dropdown, fetched server-side
+    (``lem_machines``: 60 s cache, stale on failure, never writes to LEM).
+    ``{machines: [{uid, title, status, closed}], source: live|cached|unavailable,
+    age_seconds, error?}``; ``error`` is generic (no URL, no internals)."""
+    resp = jsonify(lem_machines.machines(lem_machines.resolve_url(_conf())))
+    resp.headers["Cache-Control"] = "no-store"
+    return resp

@@ -202,5 +202,23 @@ class DeviationBulletSettingsTests(unittest.TestCase):
             self.assertIn(key, names)
 
 
+class LemUrlSettingTests(unittest.TestCase):
+    """D10: where the LEM machine list comes from; admin password only."""
+
+    def test_default(self) -> None:
+        self.assertEqual(settings_mod.DEFAULTS.get("lem_url"), "https://lem.asaplabs.net")
+
+    def test_admin_gated(self) -> None:
+        self.assertIn("lem_url", settings_mod.ADMIN_KEYS)
+        self.assertNotIn("lem_url", settings_mod.OPERATOR_KEYS)
+
+    def test_settings_route_validates_it(self) -> None:
+        import ast
+        src = (WEBAPP_DIR / "app.py").read_text(encoding="utf-8")
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "api_save_settings")
+        self.assertIn("lem_machines.valid_setting_url", ast.unparse(fn))
+
+
 if __name__ == "__main__":
     unittest.main()

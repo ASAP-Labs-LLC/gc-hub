@@ -6,7 +6,7 @@
   <title>Instruments</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=1">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/instruments.css') }}?v=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/instruments.css') }}?v=2">
 </head>
 <body>
   <div class="topbar">
@@ -30,6 +30,7 @@
         <form id="add-form" autocomplete="off">
           <label>Id <input name="id" placeholder="gc3" required></label>
           <label>Name <input name="name" placeholder="GC-3" required></label>
+          <label title="Informational: LabStation routing only">LEM machine <span id="add-lem"></span></label>
           <p class="hint">The id can't be changed later. Until live_since is set, everything
             the instrument sends is backfill (never exported automatically).</p>
           <button class="btn primary" type="submit">Add</button>
@@ -50,8 +51,8 @@
     </main>
   </div>
 
-  <script src="{{ url_for('static', filename='js/instruments_logic.js') }}?v=1"></script>
-  <script src="{{ url_for('static', filename='js/instruments.js') }}?v=1"></script>
+  <script src="{{ url_for('static', filename='js/instruments_logic.js') }}?v=3"></script>
+  <script src="{{ url_for('static', filename='js/instruments.js') }}?v=3"></script>
 
   <!-- Which build is running, bottom-right. Same string /healthz reports. -->
   <div id="app-version" aria-hidden="true">{{ app_version }}</div>

@@ -371,6 +371,12 @@ the v3.0.0 release notes first. Nothing needs editing on the server:
 - The four comment presets are seeded once; review or reword them on
   **Hub admin > Comment presets** (admin password) before operators use
   them, since QBench PDFs may reach customers.
+- The Instruments page's **LEM machine** dropdown reads LEM's public list from
+  `https://lem.asaplabs.net` (read-only). To point it elsewhere, set `lem_url`
+  (a bare `http(s)://host[:port]`, not this machine or a link-local address)
+  with the admin password: `POST /api/settings` with JSON
+  `{"lem_url": "https://…", "password": "…"}`; or set the `LEM_URL`
+  environment variable for the hub, which wins over the setting.
 - The deviation-bullet thresholds were tuned on synthetic data. Before
   relying on them, run the Analysis tab on a few real runs whose answer is
   known and adjust Settings > **Deviation Bullets** (admin password) if
