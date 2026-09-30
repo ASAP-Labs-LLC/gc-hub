@@ -14,12 +14,20 @@
                            added later gets its own {reset: true} at once).
                            update = {reset, samples: [ids], instruments: [ids],
                                      kinds: [event kinds], agents: [{instrument_id,
-                                     last_seen, version, host, status}],
-                                     notifications_unread, hub: {state, staged_update},
-                                     version, version_changed}
+                                     name, enabled, last_seen, version, host, status,
+                                     live, last_seen_age_s}],
+                                     notifications_unread, hub: {state, staged_update,
+                                     processing_paused, queue, exports_pending,
+                                     paused_by, paused_since},
+                                     version, version_changed, tasks, boot}
+                           (v4.0 lane E: `live` is the server's one liveness
+                           rule; an agent's age alone changing is not an
+                           update; `tasks` is the running-now feed; `boot` the
+                           hub process's boot id, from the cursor.)
                            On reset, reload your data: samples/instruments are
                            then empty (the ring could not say what changed).
      agents()              the latest agent snapshot (a copy).
+     tasks(), hub()        the latest running-now tasks and hub state (copies).
      status()              {connected, last_ok_at (ms), error}; statusText()
                            turns it into "Live · updated 12 s ago" /
                            "Reconnecting… · last update 40 s ago".
@@ -54,7 +62,7 @@
 
     function initialState() {
         return { cursor: null, agents: [], notifications_unread: null, hub: null, version: null,
-                 seen: false };
+                 tasks: [], seen: false };
     }
 
     function _same(a, b) {
@@ -63,6 +71,24 @@
 
     function _arr(v) {
         return Array.isArray(v) ? v.slice() : [];
+    }
+
+    function _copyAll(list) {
+        return (list || []).map(a => Object.assign({}, a));
+    }
+
+    /** The agents without their age, which ticks on every poll (v4.0 lane E). */
+    function _agentsKey(agents) {
+        return JSON.stringify((agents || []).map(a => {
+            const o = Object.assign({}, a);
+            delete o.last_seen_age_s;
+            return o;
+        }));
+    }
+
+    function _boot(cursor) {
+        const i = typeof cursor === 'string' ? cursor.indexOf(':') : -1;
+        return i > 0 ? cursor.slice(0, i) : null;
     }
 
     /** Fold one /api/live answer into the state: {state, update}; update is
@@ -79,8 +105,10 @@
             : (state.notifications_unread == null ? 0 : state.notifications_unread);
         const h = response.hub && typeof response.hub === 'object' ? response.hub
             : (state.hub || {});
-        const hub = { state: h.state == null ? null : h.state,
-                      staged_update: h.staged_update == null ? null : h.staged_update };
+        const hub = Object.assign({}, h, { state: h.state == null ? null : h.state,
+                                           staged_update: h.staged_update == null ? null : h.staged_update });
+        const tasks = Array.isArray(response.tasks) ? _copyAll(response.tasks)
+            : _copyAll(state.tasks);
         const version = typeof response.version === 'string' ? response.version : state.version;
         const versionChanged = !!(state.version && version && version !== state.version);
         const reset = !!response.reset || !state.seen;
@@ -88,14 +116,16 @@
         const instruments = reset ? [] : _arr(response.instruments);
         const kinds = _arr(response.kinds);
         const changed = reset || samples.length > 0 || instruments.length > 0 || kinds.length > 0
-            || versionChanged || !_same(state.agents, agents)
-            || state.notifications_unread !== unread || !_same(state.hub, hub);
+            || versionChanged || _agentsKey(state.agents) !== _agentsKey(agents)
+            || state.notifications_unread !== unread || !_same(state.hub, hub)
+            || !_same(state.tasks || [], tasks);
         const next = { cursor: response.cursor, agents, notifications_unread: unread, hub,
-                       version, seen: true };
+                       version, tasks, seen: true };
         const update = changed
             ? { reset, samples, instruments, kinds, agents: agents.map(a => Object.assign({}, a)),
                 notifications_unread: unread, hub: Object.assign({}, hub), version,
-                version_changed: versionChanged }
+                version_changed: versionChanged, tasks: _copyAll(tasks),
+                boot: _boot(response.cursor) }
             : null;
         return { state: next, update };
     }
@@ -243,7 +273,8 @@
                                agents: state.agents.map(a => Object.assign({}, a)),
                                notifications_unread: state.notifications_unread,
                                hub: Object.assign({}, state.hub), version: state.version,
-                               version_changed: false };
+                               version_changed: false, tasks: _copyAll(state.tasks),
+                               boot: _boot(state.cursor) };
                 Promise.resolve().then(() => {        // after subscribe() has returned
                     if (subs.includes(fn)) { try { fn(snap); } catch (_) { /* its problem */ } }
                 });
@@ -254,6 +285,8 @@
         return {
             start, stop, subscribe, pollNow,
             agents: () => state.agents.map(a => Object.assign({}, a)),
+            tasks: () => _copyAll(state.tasks),
+            hub: () => (state.hub ? Object.assign({}, state.hub) : null),
             status: () => Object.assign({}, status),
         };
     }
@@ -279,7 +312,8 @@
 
     const api = {
         start: () => page.start(), stop: () => page.stop(), subscribe: fn => page.subscribe(fn),
-        agents: () => page.agents(), status: () => page.status(), pollNow: () => page.pollNow(),
+        agents: () => page.agents(), tasks: () => page.tasks(), hub: () => page.hub(),
+        status: () => page.status(), pollNow: () => page.pollNow(),
         bgFetch, nextDelay, initialState, applyResponse, pollUrl, statusText, agoText, createPoller,
     };
     root.GCLive = api;

@@ -139,6 +139,13 @@ def test_live_hub_carries_queue_counts_and_the_pause(db):
     assert h["processing_paused"] is True
     assert h["paused_by"] == "Ryan C"               # never the address
     assert h["paused_since"]
+    # the tray without a user name records only an address: no "who" then
+    hub.set_processing_paused(db, True, by="127.0.0.1")
+    assert hub_control.refresh_cache()
+    assert hub_control.live_hub()["paused_by"] is None
+    hub.set_processing_paused(db, True, by="::1")
+    assert hub_control.refresh_cache()
+    assert hub_control.live_hub()["paused_by"] is None
 
 
 # ── live.poll ───────────────────────────────────────────────────────────────

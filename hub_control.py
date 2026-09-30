@@ -348,7 +348,12 @@ def _by_name(by: Any) -> Optional[str]:
     """``"Ryan C (10.0.0.5)"`` -> ``"Ryan C"``: who, never the address."""
     if not isinstance(by, str) or not by.strip():
         return None
-    return re.sub(r"\s*\([^()]*\)\s*$", "", by.strip())[:64] or None
+    name = re.sub(r"\s*\([^()]*\)\s*$", "", by.strip())[:64]
+    try:
+        ipaddress.ip_address(name)      # the tray without a user: only an address
+        return None
+    except ValueError:
+        return name or None
 
 
 def _live_hub_now() -> dict:

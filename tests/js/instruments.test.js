@@ -14,15 +14,31 @@ module.exports = (t) => {
     t.eq(L.skewWarning(null), null);
     t.eq(L.skewWarning(200, 300), null);
 
-    // ── agent health: never / stale (15 min) / paused / error / ok
+    // ── agent health: never / stale / paused / error / ok. v4.0 lane E: live
+    //    is the server's one rule (seen within 90 s on the hub's clock); the
+    //    page's own 15-minute rule is gone, and the browser's clock is not used.
     const now = Date.parse('2026-09-28T12:00:00Z');
+    const seen = '2026-09-28T11:59:30+00:00';
     t.eq(L.agentHealth(null, now).level, 'never');
     t.eq(L.agentHealth({ last_seen: null }, now).level, 'never');
-    t.eq(L.agentHealth({ last_seen: '2026-09-28T11:40:00+00:00', state: 'idle' }, now).level, 'stale');
-    t.eq(L.agentHealth({ last_seen: '2026-09-28T11:59:00+00:00', state: 'paused' }, now).level, 'paused');
-    t.eq(L.agentHealth({ last_seen: '2026-09-28T11:59:00+00:00', state: 'idle', last_error: 'x' }, now).level, 'error');
-    t.eq(L.agentHealth({ last_seen: '2026-09-28T11:59:30+00:00', state: 'idle' }, now).level, 'ok');
-    t.eq(L.agentHealth({ last_seen: 'garbage' }, now).level, 'never');
+    t.eq(L.agentHealth({ last_seen: seen, live: false, last_seen_age_s: 1200, state: 'idle' }, now),
+         { level: 'stale', text: 'Not seen for 20 min' });
+    t.eq(L.agentHealth({ last_seen: seen, live: false, last_seen_age_s: 95, state: 'idle' }, now).text,
+         'Not seen for 2 min');
+    t.eq(L.agentHealth({ last_seen: seen, live: true, last_seen_age_s: 30, state: 'paused' }, now).level, 'paused');
+    t.eq(L.agentHealth({ last_seen: seen, live: true, last_seen_age_s: 30, state: 'idle', last_error: 'x' }, now).level, 'error');
+    t.eq(L.agentHealth({ last_seen: seen, live: true, last_seen_age_s: 30, state: 'idle' }, now).level, 'ok');
+    // the browser's clock never decides: an hour-old stamp the hub calls live is live
+    t.eq(L.agentHealth({ last_seen: '2026-09-28T11:00:00+00:00', live: true, last_seen_age_s: 5,
+                         state: 'idle' }, now).level, 'ok');
+    // no server verdict (an older hub): not live, never guessed
+    t.eq(L.agentHealth({ last_seen: seen, state: 'idle' }, now).level, 'stale');
+    t.eq(L.agentHealth({ last_seen: seen, state: 'idle' }, now).text, 'Not seen recently');
+    t.eq(L.STALE_MINUTES, undefined);
+    // "Last seen" text from the hub's age plus the time since it was read
+    t.eq(L.lastSeenAge({ last_seen_age_s: 30 }, 0, 12000), 42);
+    t.eq(L.lastSeenAge({ last_seen_age_s: null }, 0, 12000), null);
+    t.eq(L.lastSeenAge({}, 0, 12000), null);
 
     // ── corrections inputs (mirrors corrections.validate_values)
     const cuts = ['IBP', '5%', '10%', '20%', '30%', '50%', '70%', '80%', '90%', '95%', 'FBP'];
