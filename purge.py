@@ -580,6 +580,44 @@ def _summary(journal: dict) -> dict:
     return out
 
 
+_PUBLIC_KEYS = ("instrument", "instrument_name", "scope", "state", "samples", "tables",
+                "appended", "started_at", "committed_at", "finished_at", "nothing_to_do",
+                "completed_with_warnings", "recovered")
+
+
+def public_summary(summary: Optional[dict]) -> Optional[dict]:
+    """What any signed-in user may see of a purge (``GET /api/purge/status``):
+    state, counts and times, and who by name only. Never a server path (backup,
+    purged folder, results CSV, kept files), a lab ID, an address, or free text
+    that could hold them (warnings, reasons, errors: counted only)."""
+    if not summary:
+        return None
+    out = {k: summary.get(k) for k in _PUBLIC_KEYS if k in summary}
+    out["by"] = _who(summary.get("by") or "") if summary.get("by") else None
+    files = summary.get("files") or {}
+    out["files"] = {k: files.get(k) for k in ("moved", "missing", "outside", "kept")
+                    if k in files}
+    out["files"]["failed"] = files.get("failed_total", len(files.get("failed") or []))
+    out["warnings"] = len(summary.get("warnings") or [])
+    out["kept_samples"] = len(summary.get("kept_samples") or [])
+    return out
+
+
+def public_job(job: Optional[dict]) -> Optional[dict]:
+    """``public_summary`` for an ``AdminJobs`` purge job."""
+    if not job:
+        return None
+    params = job.get("params") or {}
+    prog = {k: v for k, v in (job.get("progress") or {}).items() if k != "file"}
+    return {"id": job.get("id"), "kind": job.get("kind"), "state": job.get("state"),
+            "started_at": job.get("started_at"), "finished_at": job.get("finished_at"),
+            "progress": prog, "params": {"instrument": params.get("instrument"),
+                                         "scope": params.get("scope")},
+            "by": _who(params.get("by") or "") if params.get("by") else None,
+            "failed": job.get("state") == "failed",
+            "summary": public_summary(job.get("summary"))}
+
+
 def latest_journal(data_dir) -> Optional[dict]:
     """The newest purge's journal (summary form), for the admin page."""
     root = Path(data_dir) / PURGED_DIR
@@ -979,9 +1017,12 @@ def run(instrument_id: Any, scope: Any, *, confirm_text: Any, by: str, db=None, 
 
 # ── recovery (hub.start) ────────────────────────────────────────────────────
 
-def recover(*, db=None, data_dir=None, notifier=None, exporter=None) -> list:
+def recover(*, db=None, data_dir=None, notifier=None, exporter=None,
+            skip_instruments=()) -> list:
     """Finish or abandon every purge a crash interrupted (see the module
-    docstring). Called by ``hub.start`` before the exporter starts. Safe to run
+    docstring). Called by ``hub.start`` before the exporter starts, once per
+    process. A journal of a purge running in this process (its instrument is
+    paused, or it is in ``skip_instruments``) is never touched. Safe to run
     again at any point: every step is idempotent."""
     data_dir = Path(data_dir) if data_dir is not None else paths.require_data_dir()
     db = db if db is not None else data_dir / store.DB_FILENAME
@@ -997,6 +1038,11 @@ def recover(*, db=None, data_dir=None, notifier=None, exporter=None) -> list:
             continue
         state = journal.get("state")
         if state not in ("pending", "committed"):
+            continue
+        inst = journal.get("instrument")
+        if (pipeline.instrument_paused(inst) or inst in skip_instruments
+                or "*" in skip_instruments):
+            log.info("purge: %s belongs to a purge running in this process; left alone", jpath)
             continue
         if state == "pending":
             ids = [int(i) for i in journal.get("sample_ids") or []]

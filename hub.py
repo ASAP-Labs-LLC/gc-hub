@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import logging
 import threading
 import time
@@ -420,11 +421,12 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
         store.migrate(db)
         if paused is None:
             paused = processing_paused(db) is not None
-        instruments.bootstrap_gc1(app_conf, db=db)
         # A purge the process died in is finished (or abandoned) before the
-        # exporter can flush: its sidecar must be unlinked first (purge.py).
-        recover_purges(db, data, notifier)
-        mark_interrupted_imports(db, data, notifier)
+        # exporter can flush (its sidecar must be unlinked first), and an
+        # interrupted import is marked: once per process and data folder, and
+        # admin jobs are refused until it has run (hub_admin.job_refusal).
+        run_startup_recovery(db, data, notifier)
+        instruments.bootstrap_gc1(app_conf, db=db)
         exporter =exports.HubExporter(db, data_dir=data, notifier=notifier)
 
         def final_hook(sample_id: int) -> None:
@@ -477,13 +479,64 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
     return rt
 
 
+_recovery_lock = threading.Lock()
+_recovered_dirs: set = set()
+
+
+def _dir_key(data_dir) -> str:
+    return os.path.normcase(str(Path(data_dir).resolve()))
+
+
+def startup_recovered(data_dir) -> bool:
+    """Whether this process has run the start-up recovery for ``data_dir``
+    (``hub_admin`` refuses admin jobs until then)."""
+    with _recovery_lock:
+        return _dir_key(data_dir) in _recovered_dirs
+
+
+def forget_startup_recovery(data_dir) -> None:
+    """Tests only: as if this process had not recovered ``data_dir`` yet."""
+    with _recovery_lock:
+        _recovered_dirs.discard(_dir_key(data_dir))
+
+
+def run_startup_recovery(db, data_dir, notifier: Optional[Notifier]) -> Optional[dict]:
+    """``recover_purges`` + ``mark_interrupted_imports``, once per process and
+    data folder: ``hub.start`` runs again on a retry or after a failed
+    respawn, while jobs may be running, and must never recover them. Returns
+    ``None`` when it had already run."""
+    with _recovery_lock:
+        key = _dir_key(data_dir)
+        if key in _recovered_dirs:
+            return None
+        out = {"purges": recover_purges(db, data_dir, notifier),
+               "imports": mark_interrupted_imports(db, data_dir, notifier)}
+        _recovered_dirs.add(key)
+        return out
+
+
+def _live_job_instruments(kinds: tuple) -> set:
+    """Instruments an admin job of ``kinds`` running in this process owns."""
+    try:
+        import hub_admin
+        job = hub_admin.JOBS.current()
+    except Exception:  # noqa: BLE001
+        return set()
+    if job is None or job.get("state") != "running" or job.get("kind") not in kinds:
+        return set()
+    inst = (job.get("params") or {}).get("instrument")
+    return {inst} if inst else {"*"}
+
+
 def recover_purges(db, data_dir, notifier: Optional[Notifier]) -> list:
-    """``purge.recover`` (interrupted purges; v3.1). A failure is logged and
-    notified, never a failed start: the hub still serves, and the next start
-    tries again (every recovery step is idempotent)."""
+    """``purge.recover`` (interrupted purges; v3.1), skipping any purge live in
+    this process (its instrument is paused, or an admin purge job owns it). A
+    failure is logged and notified, never a failed start: the hub still
+    serves, and the next start tries again (every recovery step is idempotent)."""
     try:
         import purge
-        return purge.recover(db=db, data_dir=data_dir, notifier=notifier)
+        return purge.recover(db=db, data_dir=data_dir, notifier=notifier,
+                             skip_instruments=_live_job_instruments(("purge",)))
     except Exception as exc:  # noqa: BLE001
         log.exception("hub: recovering an interrupted purge failed")
         _notify(notifier, "error", f"An interrupted purge could not be finished at start-up "
@@ -497,7 +550,9 @@ def mark_interrupted_imports(db, data_dir, notifier: Optional[Notifier]) -> list
     died in is marked interrupted and announced (never a failed start)."""
     try:
         from jobs import import_history
-        return import_history.mark_interrupted(db=db, data_dir=data_dir, notifier=notifier)
+        return import_history.mark_interrupted(
+            db=db, data_dir=data_dir, notifier=notifier,
+            skip_instruments=_live_job_instruments(("import-history",)))
     except Exception:  # noqa: BLE001
         log.exception("hub: marking interrupted history imports failed")
         return []

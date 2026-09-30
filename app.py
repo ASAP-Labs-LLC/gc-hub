@@ -3829,6 +3829,9 @@ def _stop_busy() -> list:
 
 hub_control.configure(runtime=lambda: _hub_runtime, shutdown=_shutdown_for_stop,
                       started_at=_server_start_time, busy_extra=_stop_busy)
+# No admin job starts once this process has claimed its restart (Restart &
+# install waiting for the updater's answer, the 3 AM restart about to exit).
+hub_admin.set_restart_claimed(lambda: _restart_claimed)
 
 
 def _wake_exports() -> None:

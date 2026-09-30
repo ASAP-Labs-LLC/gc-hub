@@ -65,8 +65,11 @@ panel)::
            instrument's results file. Progress and the summary come through
            ``/api/admin/jobs/status``.
     GET  /api/purge/status          (session, no password) → {job, journal}: the
-         running or last purge job and the newest purge journal, so the
-         admin page shows a purge in progress as soon as it opens
+         running or last purge job and the newest purge journal, reduced to
+         state, phase, counts, times and a name, so the admin page shows a
+         purge in progress as soon as it opens
+    POST /api/admin/purge/status    {password} → the same in full (paths,
+         warnings, files not moved, kept samples and files)
 
 Exports (need the running ``exports.HubExporter``: ``set_exporter`` is
 called by ``hub.start``; 503 until then)::
@@ -150,6 +153,48 @@ class JobStopped(RuntimeError):
     re-raise it with the summary so far attached."""
 
 
+class JobRefused(RuntimeError):
+    """``AdminJobs.start`` refused before starting anything (``status``: the
+    HTTP status the route answers)."""
+
+    def __init__(self, message: str, status: int = 409):
+        super().__init__(message)
+        self.status = status
+
+
+def _no_restart_claimed() -> bool:
+    return False
+
+
+_restart_claimed: Callable[[], bool] = _no_restart_claimed
+
+
+def set_restart_claimed(fn: Callable[[], bool]) -> None:
+    """``app.py``: whether this process has claimed its restart (Restart &
+    install waiting for the updater, the 3 AM restart about to exit)."""
+    global _restart_claimed
+    _restart_claimed = fn
+
+
+def job_refusal(kind: str, *, startup: bool = True) -> Optional[JobRefused]:
+    """Why no admin job may start now, or None: the hub has not finished its
+    start-up recovery for this data folder (503: it must never recover a job
+    it just started), or a restart is under way (409: the job would be cut
+    short)."""
+    data = paths.data_dir()
+    if startup and data is not None:
+        import hub
+        if not hub.startup_recovered(data):
+            return JobRefused("The hub is still starting; try again shortly.", 503)
+    try:
+        claimed = bool(_restart_claimed())
+    except Exception:  # noqa: BLE001
+        claimed = False
+    if claimed:
+        return JobRefused("A restart is under way; start this again once the hub is back.", 409)
+    return None
+
+
 class AdminJobs:
     """One admin job at a time, run on a daemon thread, its progress kept in
     memory for polling."""
@@ -158,6 +203,8 @@ class AdminJobs:
         self._lock = threading.Lock()
         self._ids = itertools.count(1)
         self._job: Optional[dict] = None
+        # kind -> JobRefused | None, checked before a job starts (job_refusal)
+        self.refuse: Optional[Callable[[str], Optional[JobRefused]]] = None
 
     def current(self) -> Optional[dict]:
         with self._lock:
@@ -165,7 +212,12 @@ class AdminJobs:
 
     def start(self, kind: str, fn: Callable[..., dict], params: dict) -> dict:
         """Run ``fn(progress=callback)`` in the background. ``RuntimeError``
-        if a job is running."""
+        if a job is running; ``JobRefused`` (a subclass) when ``refuse`` says
+        no job may start now."""
+        if self.refuse is not None:
+            refused = self.refuse(kind)
+            if refused is not None:
+                raise refused
         with self._lock:
             if self._job is not None and self._job["state"] == "running":
                 raise RuntimeError(f"a {self._job['kind']} job is already running")
@@ -230,6 +282,7 @@ def _copy(job: Optional[dict]) -> Optional[dict]:
 
 
 JOBS = AdminJobs()
+JOBS.refuse = job_refusal
 
 
 def _err(message: str, status: int, **extra):
@@ -280,7 +333,7 @@ def api_admin_load_folder():
         job = JOBS.start("load-folder", run, {"instrument": inst, "folder": str(folder),
                                               "backfill": backfill, "by": _who()})
     except RuntimeError as exc:
-        return _err(str(exc), 409, job=JOBS.current())
+        return _err(str(exc), getattr(exc, "status", 409), job=JOBS.current())
     log.info("admin: load-folder %s from %s (backfill %s) started by %s", inst, folder,
              backfill, _who())
     return jsonify({"job": job}), 202
@@ -365,7 +418,7 @@ def api_admin_import_history_dry_run():
             "results_csv": str(results_csv) if results_csv else None, "aliases": aliases,
             "batch_size": batch_size, "by": _who()})
     except RuntimeError as exc:
-        return _err(str(exc), 409, job=JOBS.current())
+        return _err(str(exc), getattr(exc, "status", 409), job=JOBS.current())
     log.info("admin: import-history dry run %s from %s (csv %s) started by %s", inst,
              processed_dir, results_csv, _who())
     return jsonify({"job": job}), 202
@@ -400,7 +453,7 @@ def api_admin_import_history_start():
             "results_csv": str(results_csv) if results_csv else None, "aliases": aliases,
             "batch_size": batch_size, "by": _who()})
     except RuntimeError as exc:
-        return _err(str(exc), 409, job=JOBS.current())
+        return _err(str(exc), getattr(exc, "status", 409), job=JOBS.current())
     log.info("admin: import-history %s from %s (csv %s) started by %s", inst, processed_dir,
              results_csv, _who())
     return jsonify({"job": job}), 202
@@ -447,12 +500,7 @@ def api_admin_purge_preview():
     return jsonify({"preview": pv})
 
 
-@bp.route("/api/purge/status", methods=["GET"])
-def api_purge_status():
-    """The running or last purge, for the admin page to show without the
-    password (signed-in session only; read-only): ``{job}`` when the current
-    or last admin job is a purge, and ``journal``, the newest purge journal
-    (also one a restart finished or abandoned)."""
+def _purge_status() -> tuple:
     import purge
     job = JOBS.current()
     if job is not None and job.get("kind") != "purge":
@@ -464,6 +512,29 @@ def api_purge_status():
     except Exception:  # noqa: BLE001 - informational
         log.exception("purge status: could not read the journals")
         journal = None
+    return job, journal
+
+
+@bp.route("/api/purge/status", methods=["GET"])
+def api_purge_status():
+    """The running or last purge for any signed-in user (no password), so the
+    admin page shows it as soon as it opens: ``{job, journal}`` reduced to
+    state, phase, counts, times and the name of who started it
+    (``purge.public_job``/``public_summary``). Paths, kept files, lab IDs,
+    addresses and warning texts are only in ``POST /api/admin/purge/status``."""
+    import purge
+    job, journal = _purge_status()
+    return jsonify({"job": purge.public_job(job), "journal": purge.public_summary(journal)})
+
+
+@bp.route("/api/admin/purge/status", methods=["POST"])
+def api_admin_purge_status():
+    """``{job, journal}`` in full (admin password): the backup and purged
+    folder, warnings, files not moved, kept samples and files."""
+    _body, err = _admin()
+    if err:
+        return err
+    job, journal = _purge_status()
     return jsonify({"job": job, "journal": journal})
 
 
@@ -506,7 +577,7 @@ def api_admin_purge_start():
         job = JOBS.start("purge", run, {"instrument": row["id"], "scope": scope,
                                         "new_results_path": raw_path or None, "by": by})
     except RuntimeError as exc:
-        return _err(str(exc), 409, job=JOBS.current())
+        return _err(str(exc), getattr(exc, "status", 409), job=JOBS.current())
     log.warning("admin: purge of %s (%s) started by %s", row["id"], scope, by)
     return jsonify({"job": job}), 202
 
@@ -653,6 +724,7 @@ def _bundle_name() -> str:
 #: ``diagnostics.exclusive``), independent of the import/load jobs so a long
 #: history import never blocks a bundle.
 DIAG_JOBS = AdminJobs()
+DIAG_JOBS.refuse = lambda kind: job_refusal(kind, startup=False)
 
 
 @bp.route("/api/admin/diagnostics/bundle", methods=["POST"])
@@ -696,7 +768,7 @@ def api_admin_diagnostics_bundle():
         job = DIAG_JOBS.start("diagnostics-bundle", run, {"options": options, "by": who})
     except RuntimeError as exc:
         hold.__exit__(None, None, None)
-        return _err(str(exc), 409, job=DIAG_JOBS.current())
+        return _err(str(exc), getattr(exc, "status", 409), job=DIAG_JOBS.current())
     log.info("admin: diagnostics bundle %s (options %s) started by %s", name, options, who)
     return _no_store(jsonify({"job": job})), 202
 

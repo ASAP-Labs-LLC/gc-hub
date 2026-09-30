@@ -79,4 +79,16 @@ module.exports = (t) => {
         { id: 'gc3' }] }), [{ value: 'gc1', text: 'GC-1 (gc1)' }, { value: 'gc2', text: 'gc2' },
         { value: 'gc3', text: 'gc3' }]);
     t.eq(P.instrumentOptions(null), []);
+
+    // Without the admin password the status is reduced (GET /api/purge/status):
+    // counts instead of texts and paths, the name without the address.
+    const pub = { kind: 'purge', state: 'done', params: { instrument: 'gc1', scope: 'all' },
+        by: 'Ryan C', summary: { samples: 4, files: { moved: 3, failed: 1 }, warnings: 2,
+            completed_with_warnings: true } };
+    t.eq(P.jobLine(pub),
+        'Purge gc1 (all): completed with warnings — 4 samples purged, 3 files moved, by Ryan C');
+    t.eq(P.finishedLines(pub.summary), [
+        { text: '2 warnings and 1 file not moved: enter the admin password and press Show ' +
+            'progress to see them', cls: 'warn' }]);
+    t.eq(P.finishedLines({ warnings: 0, files: { failed: 0 } }), []);
 };

@@ -7,6 +7,7 @@ waits for its instrument's running jobs), which the test then marks done.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tempfile
@@ -143,6 +144,19 @@ def test_purge_job_ingest_503_then_201_and_one_job_at_a_time(purge_hub):
     code, st = get(port, "/api/purge/status")
     assert st["job"]["state"] == "done" and st["journal"]["state"] == "done"
     assert st["journal"]["samples"] == summary["samples"]
+    # without the password: state, phase, counts, times and the name; no path,
+    # lab ID or address
+    text = json.dumps(st)
+    for secret in (str(h.data), "pre-purge", "127.0.0.1", "cdf/", "kept_files", "40304",
+                   "backup", "purged_folder"):
+        assert secret not in text, secret
+    assert st["job"]["by"] == "Test Operator" and st["journal"]["by"] == "Test Operator"
+    assert st["journal"]["files"]["moved"] == summary["files"]["moved"]
+    # with it: everything
+    code, full = post(port, "/api/admin/purge/status", {"password": pw})
+    assert code == 200 and full["journal"]["backup"] == summary["backup"]
+    assert full["job"]["params"]["by"].endswith("(127.0.0.1)")
+    assert post(port, "/api/admin/purge/status", {"password": "wrong"})[0] == 403
     assert summary["samples"] > 0 and Path(summary["backup"]).is_file()
     assert not ph.instrument_sample_ids(h.db, "gc1")
     after = {t: [r for r in rows if r.get("instrument_id") == "gc2"]

@@ -85,8 +85,10 @@
         if (sum && job.state === 'done') {
             s += sum.nothing_to_do ? ' — nothing to purge'
                 : ` — ${plural(sum.samples, 'sample')} purged, ` +
-                  `${plural((sum.files || {}).moved, 'file')} moved to ${sum.purged_folder}; ` +
-                  `backup ${sum.backup}`;
+                  `${plural((sum.files || {}).moved, 'file')} moved` +
+                  (sum.purged_folder ? ` to ${sum.purged_folder}` : '') +
+                  (sum.backup ? `; backup ${sum.backup}` : '');
+            if (job.by) s += `, by ${job.by}`;
         }
         if (job.error) s += ` — ${job.error}`;
         return s;
@@ -95,6 +97,17 @@
     // [{text, cls}]: a finished purge's warnings and the files not moved.
     function finishedLines(summary) {
         if (!summary) return [];
+        const failed = (summary.files || {}).failed;
+        if (typeof summary.warnings === 'number') {       // the reduced (no password) view
+            const n = summary.warnings;
+            const f = typeof failed === 'number' ? failed : 0;
+            if (!n && !f) return [];
+            const parts = [];
+            if (n) parts.push(plural(n, 'warning'));
+            if (f) parts.push(`${plural(f, 'file')} not moved`);
+            return [{ text: `${parts.join(' and ')}: enter the admin password and press ` +
+                'Show progress to see them', cls: 'warn' }];
+        }
         const out = (summary.warnings || []).map((w) => ({ text: `Warning: ${w}`, cls: 'warn' }));
         for (const f of (summary.files || {}).failed || []) {
             out.push({ text: `Not moved: ${f.path} (${f.error})`, cls: 'warn' });
@@ -204,16 +217,23 @@
         }
     }
 
-    // GET /api/purge/status needs no password: the page shows a running (or
-    // the last) purge as soon as it loads, and follows it until it ends.
+    // The page shows a running (or the last) purge as soon as it loads, and
+    // follows it until it ends.
     async function poll() {
         clearTimeout(timer);
         try {
-            // a background poll: never counted as someone using the hub
-            const r = await fetch('/api/purge/status', {
-                cache: 'no-store', headers: { 'X-GC-Background': '1' } });
-            const j = (await window.GCSession.readJson(r)).body || {};
-            if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+            // With the admin password typed in: the full status (paths,
+            // warnings, files not moved). Without: the reduced one, a
+            // background poll never counted as someone using the hub.
+            let j;
+            if ($('pw').value) {
+                j = await call('/api/admin/purge/status');
+            } else {
+                const r = await fetch('/api/purge/status', {
+                    cache: 'no-store', headers: { 'X-GC-Background': '1' } });
+                j = (await window.GCSession.readJson(r)).body || {};
+                if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+            }
             if (j.job || j.journal) renderJob(j.job, j.journal);
             if (j.job && j.job.state === 'running') timer = setTimeout(poll, 1500);
         } catch (e) { say(e.message, 'err'); }

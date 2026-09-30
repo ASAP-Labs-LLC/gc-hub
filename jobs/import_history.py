@@ -171,7 +171,9 @@ The summary is JSON-ready: ``instrument``, ``processed_dir``,
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import json
+import threading
 import logging
 import math
 import os
@@ -641,10 +643,12 @@ def import_history(instrument_id: str, processed_dir, results_csv, *, instrument
             "compare_dirs": [str(d) for d in compare_dirs]}, db=db)
         summary["run_id"] = ctx.run_id
     rec = _Recorder(summary, examples)
+    live = running(ctx.run_id) if ctx.run_id is not None else contextlib.nullcontext()
     try:
-        _run(summary, rec, ctx, root=root, results_csv=results_csv, aliases=aliases, db=db,
-             progress=progress, dry_run=dry_run, batch_size=max(1, int(batch_size)), mm=mm,
-             compare_dirs=compare_dirs)
+        with live:
+            _run(summary, rec, ctx, root=root, results_csv=results_csv, aliases=aliases,
+                 db=db, progress=progress, dry_run=dry_run,
+                 batch_size=max(1, int(batch_size)), mm=mm, compare_dirs=compare_dirs)
     except BaseException as exc:
         summary["stopped"] = f"{type(exc).__name__}: {exc}"
         summary["seconds"] = round(time.monotonic() - started, 3)
@@ -1175,20 +1179,41 @@ def format_summary(summary: dict, *, examples: int = 5) -> str:
 
 INTERRUPTED = "interrupted by a restart"
 
+_live_lock = threading.Lock()
+_live_runs: set = set()         # run ids importing in this process right now
 
-def mark_interrupted(*, db: store.Db, data_dir, notifier=None) -> list:
+
+@contextlib.contextmanager
+def running(run_id: int):
+    """Mark ``run_id`` live in this process (``mark_interrupted`` skips it)."""
+    with _live_lock:
+        _live_runs.add(int(run_id))
+    try:
+        yield
+    finally:
+        with _live_lock:
+            _live_runs.discard(int(run_id))
+
+
+def mark_interrupted(*, db: store.Db, data_dir, notifier=None, skip_instruments=()) -> list:
     """Start-up (``hub.start``): a run the process died in (no ``finished_at``;
     admin jobs die with the process) is marked ``stopped: interrupted by a
     restart``, the importer's staged copies in ``cdf/.incoming`` are removed
-    (no import can be running yet), and one notification says how far it got.
+    (only when no import runs in this process: a live run, or one an admin
+    job owns, ``skip_instruments``, is never touched), and one notification
+    says how far it got.
 
     Nothing is lost: every batch is one transaction, so the batch in flight
     rolled back; its staged copies are removed here, and a file it had already
     moved into place is written again, byte for byte, when Start resumes (the
     same sample id and name). Returns the runs marked."""
-    runs = store.import_runs.unfinished(db=db)
+    with _live_lock:
+        live = set(_live_runs)
+    runs = [r for r in store.import_runs.unfinished(db=db)
+            if r["id"] not in live and r["instrument_id"] not in skip_instruments
+            and "*" not in skip_instruments]
     incoming = Path(data_dir) / "cdf" / pipeline.INCOMING_DIR
-    if incoming.is_dir():
+    if incoming.is_dir() and not live and not skip_instruments:   # nothing staging here
         for p in incoming.glob("import-*.CDF"):
             try:
                 p.unlink()

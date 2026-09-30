@@ -870,22 +870,29 @@ purge, or not at all. Afterwards, load any runs received since the backup
 again with **Hub admin > Load CDFs from a folder** (from the GC PC's data
 folder, copied to the server).
 
-1. **Stop the hub**: hub tray > *Stop hub* (or `updater.py pause --app gc
+1. **Check the purge has finished**: `manifest.json` in
+   `data\purged\<instrument>-<time>\` must say `"state": "done"` (or
+   `"abandoned"`: then nothing was removed and there is nothing to restore).
+   If it says `pending` or `committed`, the hub stopped in the middle: start
+   it once and let it finish (a notification says "finished after a
+   restart"), then continue. Restoring over a half-finished purge would leave
+   its files split between `cdf\` and the purged folder.
+2. **Stop the hub**: hub tray > *Stop hub* (or `updater.py pause --app gc
    --config C:\ASAPApps\updater\config.json`, then stop the process). Check
    `http://localhost:5560/healthz` no longer answers.
-2. **Keep the current database** aside: move `data\gc.db`, and
+3. **Keep the current database** aside: move `data\gc.db`, and
    `data\gc.db-wal` and `data\gc.db-shm` if they are there, into a new folder
    `data\backups\after-purge-<time>\`. None of the three may stay next to the
    restored file: SQLite would apply a leftover `-wal` to it.
-3. **Copy the backup over the database**: copy
+4. **Copy the backup over the database**: copy
    `data\backups\pre-purge-<instrument>-<time>.db` to `data\gc.db`.
-4. **Move the files back**: move the `cdf` folder inside
+5. **Move the files back**: move the `cdf` folder inside
    `data\purged\<instrument>-<time>\` into `data\`, merging with the existing
    `data\cdf` (no file there has the same name: the purge only moved files
    whose rows it deleted). Leave `manifest.json` behind.
-5. **Start the hub**: tray > *Start hub* (or `updater.py resume --app gc
+6. **Start the hub**: tray > *Start hub* (or `updater.py resume --app gc
    --config C:\ASAPApps\updater\config.json`).
-6. **Check every instrument's results file** on **Hub admin > Exports**, not
+7. **Check every instrument's results file** on **Hub admin > Exports**, not
    only the purged one's: any instrument that appended rows after the backup
    (GC-2 included) now shows *refused: ledger-mismatch*, because the restored
    database does not know those rows. For each one, open its CSV, check that
@@ -908,6 +915,14 @@ anyway* / *Stop anyway* interrupts it. **A purge can never be interrupted**:
 restart and stop are refused until it has finished. While any of that work
 runs, `/healthz` reports `idle_seconds: 0`, so the updater never installs an
 update in the middle of an import.
+
+These checks are the hub's own: **the updater's command line does not ask**.
+`updater.py pause`, `stop` or a `switch` run by hand (and Windows shutting
+down, or a power cut) end the process whatever it is doing. Nothing is lost
+that way either: a purge is finished or abandoned from its journal at the next
+start, and an interrupted history import is marked and resumes (below). Admin
+jobs cannot start until the hub has done that at start-up ("the hub is still
+starting; try again shortly"), nor while a restart is under way.
 
 A history import interrupted anyway (a forced restart, a power cut) loses
 nothing: each batch is saved as a whole, and the next start marks the run

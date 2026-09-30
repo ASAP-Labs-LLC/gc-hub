@@ -42,7 +42,7 @@ LONG_WORK = {"/api/admin/load-folder", "/api/admin/import-history/start",
              "/api/export-analysis-reports-zip", "/api/admin/purge/start"}
 # ... and the routes that poll them or fetch what they built.
 POLLED_BY = {"/api/admin/jobs/status": {"POST"}, "/api/admin/diagnostics/status": {"POST"},
-             "/api/purge/status": {"GET"},
+             "/api/purge/status": {"GET"}, "/api/admin/purge/status": {"POST"},
              "/api/admin/diagnostics/download/<token>": {"GET"},
              "/api/export-analysis-reports-zip/<job_id>": {"GET"},
              "/api/export-analysis-reports-zip/<job_id>/download": {"GET"}}
