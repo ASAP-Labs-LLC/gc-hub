@@ -147,6 +147,18 @@ PAIRS = [
     ("--text", ["--bg-elevated", "--bg-sunken"], TEXT, "the queue sheet's sign-in-again box"),
     ("--text-muted-sunken", ["--bg-elevated", "--bg-sunken"], TEXT, "the empty queue, sign-in labels"),
     ("--text", ["--bg-elevated", "--bg-hover"], TEXT, "a menu item on hover (Clear annotations)"),
+    # v5.0 lane R: Results, Settings, Help, the notifications panel (results.css,
+    # settings.css, controls.css, notifications.css)
+    ("--st-error", ["--bg-elevated"], TEXT, "an error notification's level"),
+    ("--warn-text", ["--bg-elevated"], TEXT, "a warning notification's level"),
+    ("--text-muted", ["--bg-elevated"], TEXT, "a notification's time"),
+    ("--ink-fg", ["--ink"], TEXT, "a pressed filter chip"),
+    ("--pill-final-fg", ["--bg"], TEXT, "a saved setting's line"),
+    ("--st-error", ["--bg"], TEXT, "a field's error"),
+    ("--text", ["--bg-card"], TEXT, "results numbers"),
+    ("--text-muted", ["--bg-card"], TEXT, "a held run's reason and empty cells"),
+    ("--text-muted-sunken", ["--bg-card", "--bg-sunken"], TEXT, "backfill and flag tags"),
+    ("--text", ["--bg-sunken"], TEXT, "keys on the help page"),
     ("--accent", ["--bg"], UI, "focus ring"),
     ("--accent", ["--sidebar-bg"], UI, "focus ring in the sidebar"),
     ("--accent", ["--bg-sunken"], UI, "focus ring on sunken fields"),
@@ -194,7 +206,10 @@ def test_the_version_badge_is_readable():
 # colour (no literal colours), and only token pairs listed above for text.
 PAGE_CSS = [ROOT / "static" / "css" / "admin.css", ROOT / "static" / "css" / "calibration.css",
             ROOT / "static" / "css" / "samples.css",
-            ROOT / "static" / "css" / "compare.css", ROOT / "static" / "css" / "report_queue.css"]
+            ROOT / "static" / "css" / "compare.css", ROOT / "static" / "css" / "report_queue.css",
+            # v5.0 lane R
+            ROOT / "static" / "css" / "results.css", ROOT / "static" / "css" / "settings.css",
+            ROOT / "static" / "css" / "controls.css", ROOT / "static" / "css" / "notifications.css"]
 CHECKED_FG = {p[0] for p in PAIRS}
 
 

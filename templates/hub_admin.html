@@ -10,7 +10,7 @@
     #ih-job, #purge-job, btn-*-stop, unlock-form). Page code: hub_admin.js,
     purge.js, diagnostics.js, admin_page.js (the sub-nav and Server). -#}
 {% block title %}Admin{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/admin.css') }}?v=1">{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/admin.css') }}?v=2">{% endblock %}
 {% block topbar %}
   <h1>Admin</h1>
   <span class="spacer"></span>
@@ -254,8 +254,22 @@
         <p class="intro">The hub process on ASAPSV1. Pause, resume and stop live on the hub tray there.</p></div>
       <div class="body">
         <dl class="adm-facts" id="server-facts"><dt>Status</dt><dd class="muted">Checking…</dd></dl>
-        <p class="caption">Read-only here. Restart (and install a staged update) from Settings on the
-          Samples page or from the tray; the hub also restarts itself at 3 AM when idle.</p>
+        {#- v5.0 lane R: Restart lives here (it left the classic Settings form) -#}
+        <div class="adm-actions" id="restart-box" data-testid="admin-restart">
+          <button type="button" class="btn" id="btn-restart" data-testid="restart-button">Restart the hub…</button>
+          <span id="restart-msg" class="msg" role="status"></span>
+        </div>
+        <div class="restart-confirm" id="restart-confirm" hidden data-testid="restart-confirm">
+          <p id="restart-text"></p>
+          <ul id="restart-busy"></ul>
+          <div class="adm-actions">
+            <button type="button" class="btn btn-primary" id="btn-restart-go">Restart now</button>
+            <button type="button" class="btn btn-ghost" id="btn-restart-cancel">Cancel</button>
+          </div>
+        </div>
+        <p class="caption">Restarting installs a staged update when there is one. Everyone is disconnected for a
+          moment; pages reconnect by themselves. Pause, resume and stop are on the tray; the hub also restarts
+          itself at 3 AM when idle.</p>
       </div>
     </div>
   </section>
@@ -286,4 +300,6 @@
 <script src="{{ url_for('static', filename='js/diagnostics.js') }}?v=5"></script>
 <script src="{{ url_for('static', filename='js/purge.js') }}?v=6"></script>
 <script src="{{ url_for('static', filename='js/admin_page.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/restart.js') }}?v=4"></script>
+<script src="{{ url_for('static', filename='js/admin_restart.js') }}?v=1"></script>
 {% endblock %}

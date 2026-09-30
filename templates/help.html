@@ -1,0 +1,78 @@
+{% extends "_layout.html" %}
+{#- v5.0 lane R: a short, plain-language help page (the classic Help modal,
+    brought up to date: per-GC correction factors, the hub, no hijacked keys). -#}
+{% block title %}Help{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/gc_pages.css') }}?v=2">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}?v=1">{% endblock %}
+{% block topbar %}<h1>Help</h1>{% endblock %}
+{% block content %}
+<main class="content help" id="main" data-testid="help-page">
+  <p class="lead">The GC Hub collects every run from the lab's gas chromatographs, works out its simulated
+    distillation (ASTM D2887) and the matching D86 temperatures, and writes each final result to the
+    file LEM reads. Nothing here needs a refresh: new runs and changes appear by themselves.</p>
+
+  <section aria-labelledby="h-samples">
+    <h2 id="h-samples">Samples</h2>
+    <p>Pick a run to see its chromatogram, its results and how it compares with a standard. The list is
+      newest first, grouped by day; you can sort it by lab ID instead.</p>
+    <p>Every run has its own link. <b>Copy link</b> gives an address anyone signed in can open, on the
+      lab network or from anywhere. Other apps link to a lab ID with <span class="mono">/lab/&lt;lab ID&gt;</span>,
+      which opens its newest run.</p>
+  </section>
+
+  <section aria-labelledby="h-status">
+    <h2 id="h-status">What the marks mean</h2>
+    <ul class="glyph-list">
+      <li><span class="glyph final" aria-hidden="true"></span><span><b>Final</b>: the result is done and written to the results file.</span></li>
+      <li><span class="glyph held" aria-hidden="true"></span><span><b>Held</b>: waiting for something, which the row names (the GC's calibration, its
+        correction factors, or a method to map). It carries on by itself once that is set.</span></li>
+      <li><span class="glyph error" aria-hidden="true"></span><span><b>Error</b>: the file could not be read or worked out; the row says why.</span></li>
+      <li><span class="glyph working" aria-hidden="true"></span><span><b>Processing</b>: just arrived, being worked out now.</span></li>
+    </ul>
+    <p class="caption">A run marked <b>backfill</b> came from before its GC went live. It is kept, but not written to the
+      results file unless someone releases it on the GC's page.</p>
+  </section>
+
+  <section aria-labelledby="h-results">
+    <h2 id="h-results">Results</h2>
+    <p><a class="link" href="/results">Results</a> shows every run's D2887 and D86 temperatures side by side.
+      <b>Key points</b> shows IBP, 10 %, 50 %, 90 % and FBP; <b>All points</b> shows every cut. Filters stay in
+      the address, so you can bookmark or send a filtered view. <b>Download CSV</b> saves what the filters
+      show, with every cut.</p>
+    <p>Tick up to six runs to draw their distillation curves on one chart. Each run's lab ID opens its full numbers.</p>
+  </section>
+
+  <section aria-labelledby="h-d86">
+    <h2 id="h-d86">Corrected D86</h2>
+    <p>D86 temperatures are converted from D2887 (ASTM D86 Appendix X4). <b>Corrected</b> adds that GC's
+      correction factors, set on its page under Instruments; these are the numbers in the results file.
+      Turned off, you see the conversion before the factors.</p>
+    <p>Appendix X4 has no 40 % or 60 % equation, so those two are the midpoints of the 30/50 and 50/70
+      conversions. No correction factor applies to them; hover the number to see this.</p>
+    <p class="caption">These are approximations for screening, not an ASTM-certified distillation.</p>
+  </section>
+
+  <section aria-labelledby="h-compare">
+    <h2 id="h-compare">Compare and reports</h2>
+    <p>Compare lays a run over a comparison standard (by default the best fit) and lists where it differs,
+      range by range. Add comments or mark a region; they go into the report. Export a PDF, or add runs to
+      the report queue to download them together or attach them to their QBench samples.</p>
+  </section>
+
+  <section aria-labelledby="h-admin">
+    <h2 id="h-admin">Admin changes</h2>
+    <p>Changes that affect every result (calibration, correction factors, best fit and findings settings,
+      standards) ask for the admin password. It is asked once and kept in that browser tab for 15 minutes,
+      never saved. <a class="link" href="/settings">Settings</a> shows which sections need it.</p>
+  </section>
+
+  <section aria-labelledby="h-notes">
+    <h2 id="h-notes">When something needs you</h2>
+    <p>The bell at the bottom of the sidebar lists what the hub wants a person to see: a GC that stopped
+      checking in, a results file it could not write, a job that failed. Each has a link to where it is
+      fixed. Work in progress (imports, report downloads) shows just above it, under "Running now".</p>
+    <p>If something looks wrong, open <a class="link" href="/admin/hub#diagnostics">Admin · Diagnostics</a> and
+      download the diagnostics file to send along. <kbd>Esc</kbd> closes any open menu or dialog.</p>
+  </section>
+</main>
+{% endblock %}
