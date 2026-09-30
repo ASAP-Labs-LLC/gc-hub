@@ -205,7 +205,8 @@ def poll(cursor: Any, *, bus: Optional[Bus] = None,
          agents: Optional[Callable[[], list]] = None,
          unread: Optional[Callable[[], int]] = None,
          hub: Optional[Callable[[], dict]] = None,
-         tasks: Optional[Callable[[], list]] = None) -> dict:
+         tasks: Optional[Callable[[], list]] = None,
+         now: Optional[Callable[[], datetime]] = None) -> dict:
     """``GET /api/live``'s answer: ``{cursor, reset, samples, instruments,
     kinds, agents, notifications_unread, hub: {state, staged_update, ...},
     version, tasks}`` (``version``: this process's, so an open tab can offer a
@@ -217,6 +218,7 @@ def poll(cursor: Any, *, bus: Optional[Bus] = None,
     h = h if isinstance(h, dict) else {}
     hub_out = {"state": h.get("state"), "staged_update": h.get("staged_update")}
     hub_out.update({k: h[k] for k in HUB_KEYS if k in h})
+    stamp = _safe(now, None) or datetime.now().astimezone()
     return {
         "cursor": s["cursor"],
         "reset": s["reset"],
@@ -228,6 +230,9 @@ def poll(cursor: Any, *, bus: Optional[Bus] = None,
         "hub": hub_out,
         "version": _version(),
         "tasks": list(_safe(tasks, [])),
+        # v4.0 lane E: the hub's own clock and date (day headings, "today")
+        "server_now": stamp.isoformat(timespec="seconds"),
+        "server_today": stamp.date().isoformat(),
     }
 
 

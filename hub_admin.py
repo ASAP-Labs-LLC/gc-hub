@@ -242,10 +242,21 @@ class AdminJobs:
             self._registry().update(tid, done=event.get("done"), total=event.get("total"),
                                     text=tasks.phase_text(event))
 
+    @staticmethod
+    def _task_counts(job: dict) -> dict:
+        """The few numbers the outcome line names (never paths or text)."""
+        s = job.get("summary") if isinstance(job.get("summary"), dict) else {}
+        c = s.get("counts") if isinstance(s.get("counts"), dict) else {}
+        out = {"done": (job.get("progress") or {}).get("done"),
+               "classified": c.get("cdfs_read"), "imported": c.get("imported"),
+               "created": s.get("created"), "duplicate": s.get("duplicate"),
+               "bytes": s.get("size"), "samples": c.get("samples", s.get("samples"))}
+        return {k: v for k, v in out.items() if isinstance(v, int) and not isinstance(v, bool)}
+
     def _task_finish(self, job: dict) -> None:
         tid = self._task_ids.pop(job["id"], None)
         if tid is not None:
-            self._registry().finish(tid, job["state"])
+            self._registry().finish(tid, job["state"], counts=self._task_counts(job))
 
     def current(self) -> Optional[dict]:
         with self._lock:

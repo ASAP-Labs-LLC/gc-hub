@@ -297,7 +297,8 @@ def _upload_task_end() -> None:
     state = "stopped" if _upload_stop.is_set() else ("failed" if failed else "done")
     tasks.REGISTRY.finish(_upload_task_id, state, done=done, total=total,
                           text=f"{ok} of {total} uploaded" + (f" · {failed} failed"
-                                                              if failed else ""))
+                                                              if failed else ""),
+                          counts={"ok": ok, "failed": failed})
 
 # ── Activity tracking & auto-restart ─────────────────────────────────
 _last_activity: float = time.time()
@@ -3819,6 +3820,10 @@ def _start_hub() -> None:
     app serves: /healthz answers, and ingest keeps accepting (samples queue).
     Then primes ``sample_cache``."""
     global _hub_runtime
+    try:   # v4.0 lane E: imports a restart cut short show as interrupted tasks
+        tasks.note_unfinished_imports(paths.require_data_dir() / store.DB_FILENAME)
+    except Exception:  # noqa: BLE001 - never stop the hub starting
+        LOGGER.exception("Could not note interrupted imports")
     rt = hub.start_with_retry(
         lambda: hub.start(settings_mod.load_settings(), on_final=_on_sample_final),
         notifier=hub.default_notifier())

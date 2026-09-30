@@ -78,7 +78,7 @@ def phase_text(progress: Any) -> Optional[str]:
 
 
 def _plural(n: Any, one: str, many: str) -> str:
-    return f"{n} {one if n == 1 else many}"
+    return f"{n} {one if n in (1, '1') else many}"
 
 
 def _title(kind: str, instrument: Optional[str], total: Any, names: dict) -> str:
@@ -104,6 +104,96 @@ def _title(kind: str, instrument: Optional[str], total: Any, names: dict) -> str
                                if isinstance(total, int) else "")
     words = str(kind or "task").replace("-", " ").replace("_", " ").strip()
     return words[:1].upper() + words[1:]
+
+
+def _fmt(n: int) -> str:
+    return f"{n:,}"
+
+
+def _size(n: int) -> str:
+    if n >= 1024 * 1024:
+        return f"{round(n / (1024 * 1024))} MB"
+    return f"{max(1, round(n / 1024))} KB"
+
+
+def _outcome(kind: str, state: str, instrument: Optional[str], counts: dict,
+             names: dict, why: str) -> str:
+    """One line for an ended task: what happened, with its counts, never a
+    repeat of its title and progress (v4.0 lane E review)."""
+    name = names.get(instrument) or instrument or "the GC"
+    c = {k: v for k, v in (counts or {}).items() if isinstance(v, int)}
+    n = lambda k: c.get(k, 0)  # noqa: E731
+    if state == "interrupted":
+        base = {"load-folder": f"Loading CDFs into {name}",
+                "import-history": f"{name} history import",
+                "import-history-dry-run": f"{name} dry run",
+                "purge": f"{name} purge", "diagnostics-bundle": "Diagnostics bundle",
+                "reports-zip": "Report ZIP", "qbench-upload": "QBench upload",
+                "reprocess": "Re-process"}.get(kind) or _title(kind, None, None, names)
+        return base + (" stopped without finishing" if why == "crash"
+                       else " interrupted by a restart")
+    if kind == "import-history-dry-run":
+        if state == "done":
+            return f"{name} dry run finished" + (
+                f" · {_fmt(n('classified'))} classified" if "classified" in c else "")
+        return f"{name} dry run {'stopped' if state == 'stopped' else 'failed'}"
+    if kind == "import-history":
+        if state == "done":
+            return f"{name} history imported · {_plural(_fmt(n('imported')), 'sample', 'samples')}"
+        if state == "stopped":
+            return f"{name} history import stopped" + (
+                f" after {_fmt(n('done'))}" if "done" in c else "")
+        return f"{name} history import failed"
+    if kind == "load-folder":
+        if state == "done":
+            out = f"Loaded {_fmt(n('created'))} {'CDF' if n('created') == 1 else 'CDFs'} into {name}"
+            return out + (f" · {_fmt(n('duplicate'))} already there" if n("duplicate") else "")
+        return f"Loading CDFs into {name} {'stopped' if state == 'stopped' else 'failed'}"
+    if kind == "purge":
+        if state == "done":
+            return f"Purged {name}" + (f" · {_plural(_fmt(n('samples')), 'sample', 'samples')}"
+                                       if "samples" in c else "")
+        return f"{name} purge {'stopped' if state == 'stopped' else 'failed'}"
+    if kind == "diagnostics-bundle":
+        if state == "done":
+            return "Diagnostics ready" + (f" · {_size(n('bytes'))}" if "bytes" in c else "")
+        return f"Diagnostics bundle {'stopped' if state == 'stopped' else 'failed'}"
+    if kind == "reports-zip":
+        if state == "done":
+            return "Report ZIP ready" + (f" · {_plural(_fmt(n('reports')), 'report', 'reports')}"
+                                         if "reports" in c else "")
+        return "Report ZIP failed"
+    if kind == "qbench-upload":
+        if state == "stopped":
+            return f"QBench upload stopped after {_plural(_fmt(n('ok')), 'report', 'reports')}"
+        if state in ("done", "failed") and n("ok"):
+            return (f"Uploaded {_plural(_fmt(n('ok')), 'report', 'reports')} to QBench"
+                    + (f" · {_fmt(n('failed'))} failed" if n("failed") else ""))
+        return "QBench upload failed" + (f" · {_plural(_fmt(n('failed')), 'report', 'reports')}"
+                                         if n("failed") else "")
+    if kind == "reprocess":
+        if n("ok") or state == "done" and not n("failed"):
+            return (f"Re-processed {_plural(_fmt(n('ok')), 'sample', 'samples')}"
+                    + (f" · {_fmt(n('failed'))} failed" if n("failed") else ""))
+        return "Re-process failed" + (f" · {_plural(_fmt(n('failed')), 'sample', 'samples')}"
+                                      if n("failed") else "")
+    verb = {"done": "finished", "stopped": "stopped"}.get(state, "failed")
+    return f"{_title(kind, instrument, None, names)} {verb}"
+
+
+def _counts(v: Any) -> dict:
+    """Only whole, non-negative numbers: an outcome never carries text."""
+    if not isinstance(v, dict):
+        return {}
+    return {str(k)[:32]: int(x) for k, x in v.items()
+            if isinstance(x, int) and not isinstance(x, bool) and x >= 0}
+
+
+def _local_url(u: Any) -> Optional[str]:
+    """A path on this hub ("/..."), never "//host" or "/\\host" (another site)."""
+    if isinstance(u, str) and u.startswith("/") and not u.startswith(("//", "/\\")):
+        return u
+    return None
 
 
 def _iso(ts: Optional[float]) -> Optional[str]:
@@ -157,9 +247,9 @@ class Registry:
                     "state": "running", "done": None, "total": _num(total),
                     "text": _text(text), "by": _name(by),
                     "owner": _name(owner) or _name(by), "started": now, "ended": None,
-                    "open_url": open_url if isinstance(open_url, str) and
-                    open_url.startswith("/") else None,
-                    "download": None, "download_until": None, "alive": alive}
+                    "open_url": _local_url(open_url),
+                    "download": None, "download_until": None, "alive": alive,
+                    "counts": {}, "why": "restart"}
             with self._lock:
                 self._tasks[tid] = task
                 self._prune(now)
@@ -190,7 +280,7 @@ class Registry:
 
     def finish(self, tid: str, state: str, *, done: Any = None, total: Any = None,
                text: Any = None, download: Optional[str] = None,
-               download_until: Optional[float] = None) -> None:
+               download_until: Optional[float] = None, counts: Any = None) -> None:
         """The task ended (``done | failed | stopped | interrupted``; anything
         else counts as failed). ``download``: the owner's one-time link, valid
         until ``download_until``."""
@@ -203,7 +293,8 @@ class Registry:
                 self._set_progress(t, done, total, text)
                 t["state"] = state if state in STATES and state != "running" else "failed"
                 t["ended"] = now
-                if isinstance(download, str) and download.startswith("/"):
+                t["counts"] = _counts(counts)
+                if _local_url(download):
                     t["download"] = download
                     t["download_until"] = download_until
                 self._watches.pop(tid, None)
@@ -218,10 +309,18 @@ class Registry:
             with self._lock:
                 t = self._tasks.get(tid)
                 if t is not None:
-                    t["download"] = url if isinstance(url, str) and url.startswith("/") else None
+                    t["download"] = _local_url(url)
                     t["download_until"] = until
         except Exception:  # noqa: BLE001
             log.exception("tasks: set_download failed")
+
+    def note_interrupted(self, kind: str, *, instrument: Optional[str] = None,
+                         by: Optional[str] = None, open_url: Optional[str] = None) -> str:
+        """Start-up recovery found work a restart cut short (an import, a
+        purge): show it as an ended, interrupted task for ``RETAIN_SECONDS``."""
+        tid = self.begin(kind, by=by, instrument=instrument, open_url=open_url)
+        self.finish(tid, "interrupted")
+        return tid
 
     # ── watched tasks (a reprocess batch: its jobs finish on the Worker) ──
     def watch(self, tid: str, probe: Callable[[], dict], *, start: bool = True) -> None:
@@ -251,7 +350,7 @@ class Registry:
             state = out.get("state")
             if state:
                 self.finish(tid, state, done=out.get("done"), total=out.get("total"),
-                            text=out.get("text"))
+                            text=out.get("text"), counts=out.get("counts"))
             else:
                 self.update(tid, done=out.get("done"), total=out.get("total"),
                             text=out.get("text"))
@@ -311,7 +410,7 @@ class Registry:
                     except Exception:  # noqa: BLE001
                         dead = False
                     if dead:
-                        t["state"], t["ended"] = "interrupted", now
+                        t["state"], t["ended"], t["why"] = "interrupted", now, "crash"
                         self._watches.pop(t["id"], None)
             rows = [dict(t) for t in rows]
         running = sorted((t for t in rows if t["state"] == "running"),
@@ -333,6 +432,8 @@ class Registry:
                 "instrument": t["instrument"], "state": t["state"], "progress": progress,
                 "by": t["by"], "started_at": _iso(t["started"]), "ended_at": _iso(t["ended"]),
                 "open_url": t["open_url"], "download_url": download, "mine": mine,
+                "outcome": None if t["state"] == "running" else _outcome(
+                    t["kind"], t["state"], t["instrument"], t["counts"], names, t["why"]),
             })
         return out
 
@@ -372,12 +473,40 @@ def jobs_probe(job_ids: Iterable[Any], db: Path, *, timeout: float = 0.25) -> Ca
         finished = sum(1 for s in states if s in FINISHED_JOB_STATES)
         failed = sum(1 for s in states if s == "failed")
         text = f"{finished} of {total} re-processed" + (f" · {failed} failed" if failed else "")
-        out = {"done": finished, "total": total, "text": text}
+        out = {"done": finished, "total": total, "text": text,
+               "counts": {"ok": finished - failed, "failed": failed}}
         if finished == total:
             out["state"] = "failed" if total and failed == total else "done"
         return out
 
     return probe
+
+
+def note_unfinished_imports(db: Path, *, registry: Optional[Registry] = None) -> int:
+    """At start-up, before the hub runs anything (v4.0 lane E review): every
+    real history import the store says started but never finished was cut
+    short by the restart (admin jobs die with the process). Each shows as an
+    interrupted task for ``RETAIN_SECONDS``. Read-only; a missing or locked
+    store notes nothing. Returns how many were noted."""
+    reg = registry or REGISTRY
+    p = Path(db)
+    if not p.is_file():
+        return 0
+    try:
+        conn = sqlite3.connect(f"{p.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+        try:
+            rows = conn.execute('SELECT instrument_id, "by" FROM import_runs '
+                                "WHERE finished_at IS NULL").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        log.warning("tasks: could not read unfinished import runs", exc_info=True)
+        return 0
+    for inst, by in rows:
+        name = by.rsplit(" (", 1)[0] if isinstance(by, str) and by.endswith(")") else by
+        reg.note_interrupted("import-history", instrument=inst, by=name,
+                             open_url="/admin/hub#import-history")
+    return len(rows)
 
 
 __all__ = ["REGISTRY", "Registry", "jobs_probe", "phase_text", "RETAIN_SECONDS"]

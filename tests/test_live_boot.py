@@ -39,7 +39,8 @@ def test_live_end_to_end(tmp_path):
         first = _live(port)
         assert first["reset"] is True
         assert set(first) == {"cursor", "reset", "samples", "instruments", "kinds", "agents",
-                              "notifications_unread", "hub", "version", "tasks"}
+                              "notifications_unread", "hub", "version", "tasks",
+                        "server_now", "server_today"}
         boot, _, seq = first["cursor"].partition(":")
         assert boot and seq.isdigit()
         # v4.0 lane E: the queue counts and the processing pause too

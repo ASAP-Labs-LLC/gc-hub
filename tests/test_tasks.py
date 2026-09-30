@@ -38,7 +38,7 @@ def reg(clock):
 
 
 PUBLIC = {"id", "kind", "title", "instrument", "state", "progress", "by", "started_at",
-          "ended_at", "open_url", "download_url", "mine"}
+          "ended_at", "open_url", "download_url", "mine", "outcome"}
 
 
 def test_begin_update_finish_and_the_public_shape(reg, clock):
@@ -218,7 +218,8 @@ def test_reprocess_probe_counts_job_states(tmp_path):
                      [(1, "done"), (2, "running"), (3, "queued"), (4, "failed")])
     conn.commit()
     probe = tasks.jobs_probe([1, 2, 3, 4, 99], db)
-    assert probe() == {"done": 2, "total": 4, "text": "2 of 4 re-processed · 1 failed"}
+    assert probe() == {"done": 2, "total": 4, "text": "2 of 4 re-processed · 1 failed",
+                       "counts": {"ok": 1, "failed": 1}}
     conn.execute("UPDATE jobs SET state='superseded' WHERE id IN (2, 3)")
     conn.commit()
     out = probe()

@@ -44,7 +44,7 @@ def test_an_admin_job_is_a_task_with_progress_and_no_parameters():
         progress({"phase": "match", "done": 500, "total": 12000,
                   "file": r"\\ASAPServer\secret\x.CDF"})
         assert release.wait(10)
-        return {"counts": {"new": 3}, "processed_dir": r"\\ASAPServer\secret"}
+        return {"counts": {"new": 3, "cdfs_read": 40}, "processed_dir": r"\\ASAPServer\secret"}
 
     job = runner.start("import-history-dry-run", fn,
                        {"instrument": "gc2", "processed_dir": r"\\ASAPServer\secret",
@@ -60,6 +60,9 @@ def test_an_admin_job_is_a_task_with_progress_and_no_parameters():
     assert _wait(lambda: reg.snapshot(None)[0]["state"] == "done")
     feed = repr(reg.snapshot(None))
     assert "ASAPServer" not in feed and "10.0.0.5" not in feed and "counts" not in feed
+    # one outcome line, with its count (v4.0 lane E review)
+    assert reg.snapshot(None, names={"gc2": "GC-2"})[0]["outcome"] == \
+        "GC-2 dry run finished · 40 classified"
     assert runner.current()["id"] == job["id"]
 
 
@@ -78,14 +81,17 @@ def test_failed_and_stopped_jobs_end_their_task_without_the_error_text():
     gate = threading.Event()
 
     def slow(progress):
+        progress({"phase": "commit", "done": 400, "total": 900})
         gate.wait(10)
-        progress({"phase": "submit", "done": 400, "total": 900})
+        progress({"phase": "commit", "done": 500, "total": 900})    # raises: stopped
         return {}
 
     runner.start("import-history", slow, {"instrument": "gc1"})
+    assert _wait(lambda: (reg.snapshot(None)[0]["progress"] or {}).get("done") == 400)
     runner.request_stop()
     gate.set()
     assert _wait(lambda: reg.snapshot(None)[0]["state"] == "stopped")
+    assert reg.snapshot(None)[0]["outcome"] == "gc1 history import stopped after 400"
 
 
 def test_the_diagnostics_runner_opens_the_diagnostics_panel():
@@ -117,6 +123,7 @@ def test_a_report_zip_is_a_task_whose_download_goes_to_its_owner_once(tmp_path):
     assert job["id"] not in repr(reg.snapshot("Jo"))          # the id is the link
     release.set()
     assert _wait(lambda: reg.snapshot("Ryan C")[0]["state"] == "done")
+    assert reg.snapshot("Ryan C")[0]["outcome"] == "Report ZIP ready · 2 reports"
     assert reg.snapshot("Ryan C")[0]["download_url"] == \
         f"/api/export-analysis-reports-zip/{job['id']}/download"
     assert reg.snapshot("Jo")[0]["download_url"] is None
@@ -176,3 +183,27 @@ def test_the_report_zips_the_qbench_upload_and_reprocess_feed_the_registry():
     assert "_upload_task_progress(" in up and "_upload_task_end()" in up
     assert "tasks.REGISTRY.finish(" in _func("_upload_task_end")
     assert "_upload_task_progress()" in _func("api_qbench_skip_item")
+
+
+def test_admin_job_outcomes_carry_their_counts():
+    cases = [
+        ("load-folder", {"created": 12, "duplicate": 3, "folder": "C:\\x"},
+         "Loaded 12 CDFs into gc1 · 3 already there"),
+        ("import-history", {"counts": {"imported": 1198}}, "gc1 history imported · 1,198 samples"),
+        ("diagnostics-bundle", {"size": 12 * 1024 * 1024, "download": "/api/x/secret"},
+         "Diagnostics ready · 12 MB"),
+        ("purge", {"counts": {"samples": 5}}, "Purged gc1 · 5 samples"),
+    ]
+    for kind, summary, want in cases:
+        reg = tasks.Registry()
+        runner = hub_admin.AdminJobs(tasks=reg)
+        runner.start(kind, lambda progress, s=summary: s, {"instrument": "gc1"})
+        assert _wait(lambda: reg.snapshot(None)[0]["state"] == "done")
+        t = reg.snapshot(None)[0]
+        assert t["outcome"] == want, (kind, t)
+        assert "secret" not in repr(t)
+
+
+def test_the_qbench_upload_ends_with_its_counts():
+    src = _func("_upload_task_end")
+    assert "counts=" in src

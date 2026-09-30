@@ -156,8 +156,11 @@ class DownloadJobs:
             if job.get("_task") is not None:
                 url = (self._download_url(job["id"])
                        if state == "done" and self._download_url is not None else None)
+                written = (result or {}).get("written") if isinstance(result, dict) else None
                 self._tasks.finish(job["_task"], state, download=url,
-                                   download_until=job["_ended"] + self.ttl)
+                                   download_until=job["_ended"] + self.ttl,
+                                   counts={"reports": written if isinstance(written, int)
+                                           else job.get("done")})
 
     def status(self, job_id: str, owner: str) -> Optional[dict]:
         """The job, or None (unknown, expired, or someone else's)."""

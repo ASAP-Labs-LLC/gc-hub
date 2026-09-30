@@ -162,6 +162,17 @@ def test_poll_carries_tasks_and_the_full_hub_state():
     assert out["hub"] == {k: v for k, v in hub.items() if k != "junk"}
 
 
+def test_poll_carries_the_hubs_date_for_day_headings():
+    """The list's Today/Yesterday follow the hub's calendar, not the browser's."""
+    b = live.Bus(boot_id="b00t")
+    fixed = datetime(2026, 9, 30, 23, 59, 58).astimezone()
+    out = live.poll(None, bus=b, now=lambda: fixed)
+    assert out["server_today"] == "2026-09-30"
+    assert out["server_now"] == fixed.isoformat(timespec="seconds")
+    real = live.poll(None, bus=b)
+    assert real["server_today"] == datetime.now().astimezone().date().isoformat()
+
+
 def test_poll_without_tasks_or_with_a_broken_feed():
     b = live.Bus(boot_id="b00t")
 
