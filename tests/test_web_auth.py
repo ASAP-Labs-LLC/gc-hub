@@ -230,7 +230,8 @@ def test_password_sign_in_over_the_lan(env):
     assert ck and "HttpOnly" in ck and "SameSite=Lax" in ck and "Path=/" in ck
     assert "Secure" not in ck and f"Max-Age={14 * 86400}" in ck
     assert cookie_of(r, "__Host-gc_session") is None
-    assert get(c, "/api/session").get_json() == {"name": "Ryan C", "method": "password"}
+    assert get(c, "/api/session").get_json() == {"name": "Ryan C", "method": "password",
+                                                 "link_url": "https://gc.asaplabs.net"}
     assert get(c, "/instruments").status_code == 200
     assert get(c, "/api/thing").get_json() == {"who": "Ryan C (10.0.0.25)"}
     row = store.web_sessions.list_active(db=env["db"])[0]

@@ -171,12 +171,17 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/healthz` | GET | unchanged | open | |
 | `/` | GET | unchanged | session | |
 | `/calibration` | GET | unchanged | session | |
+| `/lab/<lab_id>` | GET | new | session | v3.1 `sample_links` (sendable links): the classic page with the lab ID's newest run selected (latest `injection_dt`, final runs first, any instrument; exact then case-insensitive match; decoded once); other runs listed on the page; 404 friendly "No GC result for lab ID … yet" page |
+| `/samples/<int:sample_id>` | GET | new | session | v3.1 `sample_links`: the classic page, that run selected, Dashboard tab; 404 friendly page |
+| `/samples/<int:sample_id>/compare` | GET | new | session | v3.1 `sample_links`: as above, Analysis tab; `?standard=<name>` picks the comparison standard |
+| `/samples/<int:sample_id>/data` | GET | new | session | v3.1 `sample_links`: as above, Distillation Data tab |
+| `/api/lab/<lab_id>` | GET | new | session | v3.1 `sample_links`: → `{lab_id, sample_id, runs:[{sample_id, lab_id, instrument, instrument_name, injection_dt, status}]}` (newest first); 404 `{error, lab_id}` |
 | `/login` | GET | new | open | the sign-in page (`web_auth`): card, LabLink username/password, and on the LAN the admin-password break-glass; `?next=` (sanitised) where to go after; a signed-in visitor is redirected there |
 | `/api/login` | POST | new | open | `{username, password, next?}` → LabCore `POST /api/login`; 200 `{ok, name, method: "password", next}` + the session cookie; 401 wrong, 429 throttled, 503 `{labcore_unavailable}`; through Cloudflare https only |
 | `/api/login/card` | POST | new | open | `{code, next?}` (the card code as both LabCore fields) → as `/api/login`, method `card`; the code is never logged |
 | `/api/login/admin` | POST | new | open | `{password, next?}` → the break-glass session `Admin (break-glass)`, method `admin`; 403 through Cloudflare; `admin_auth.check` and its throttle |
 | `/api/logout` | POST | new | open | revokes the session, clears the cookies → `{ok: true}` |
-| `/api/session` | GET | new | session | → `{name, method}` of the signed-in person (the gate's 401 otherwise); the SSE stream's check |
+| `/api/session` | GET | new | session | → `{name, method, link_url}` of the signed-in person (`link_url` = `admin_auth.sendable_hub_url()`, the base of a copied sample link: the hub URL unless it is LAN-only, then https://gc.asaplabs.net) (the gate's 401 otherwise); the SSE stream's check |
 | `/api/admin/sessions` | POST | new | session | admin password; `{action: list\|revoke\|revoke-name, id?, name?}` → `{sessions: [{id, name, method, ip, created_at, last_seen, user_agent}]}` (never a token hash) |
 <!-- route-fates:end -->
 

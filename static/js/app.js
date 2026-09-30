@@ -1109,6 +1109,9 @@ function showContextMenu(e, file) {
         });
     }
 
+    // "Copy link" (static/js/deeplink.js): <hub_url>/samples/<id>
+    if (typeof DeepLink !== 'undefined') DeepLink.wireContextItem(file);
+
     // Remove on click elsewhere
     const handler = (ev) => {
         if (!menu.contains(ev.target)) {
@@ -1573,8 +1576,14 @@ function renderDistillTable() {
         return;
     }
 
-    for (const row of displayRows) {
+    // Each row's sample id (sample_ids runs parallel to rows): a /data link
+    // marks its sample's row (static/js/deeplink.js).
+    const idOfRow = new Map(rows.map((r, i) => [r, (state.tableData.sample_ids || [])[i]]));
+    displayRows.forEach((row, ri) => {
         const tr = document.createElement('tr');
+        const sid = idOfRow.get(sortedRows[ri]);
+        if (sid != null) tr.dataset.sampleId = sid;
+        if (sid != null && sid === state.linkedTableSampleId) tr.classList.add('linked-row');
         row.forEach((cell, ci) => {
             const td = document.createElement('td');
             const cls = DistillView.columnClass(columns[ci]);   // the same group as its header
@@ -1583,7 +1592,7 @@ function renderDistillTable() {
             tr.appendChild(td);
         });
         tbody.appendChild(tr);
-    }
+    });
 
     // Attach sort handlers on header
     if (thead) {
@@ -1772,7 +1781,7 @@ async function autoSelectBestFitStandard(file) {
             const std = state.comparisonStandards.find(s => s.name === res.best_standard);
             if (std && (!state.selectedStandard || state.selectedStandard.name !== std.name)) {
                 state.selectedStandard = std;
-                renderAnalysisStandards();
+                renderComparisonStandards();   // show it selected, as a manual pick does
                 updateAnalysisOverlay();
                 maybeAutoRunAnalysis();
             }
@@ -1813,6 +1822,8 @@ function showStandardContextMenu(e, std) {
     if (reprocItem) reprocItem.style.display = 'none';
     const limsItem = document.getElementById('ctx-export-lims');
     if (limsItem) limsItem.style.display = 'none';
+    const copyItem = document.getElementById('ctx-copy-link');
+    if (copyItem) copyItem.style.display = 'none';
 
     // Show rename + remove options
     const renameItem = document.getElementById('ctx-rename-standard');
@@ -4453,6 +4464,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.error('Initialization error:', e);
         showNotification('Some data failed to load on startup', 'error');
     }
+
+    // Sendable links (/lab/<id>, /samples/<id>[/compare|/data]): select the
+    // linked sample and tab once the list is loaded (static/js/deeplink.js).
+    if (typeof DeepLink !== 'undefined') DeepLink.start();
 
     showNotification('GC Viewer ready', 'success');
 
