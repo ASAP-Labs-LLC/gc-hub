@@ -105,3 +105,24 @@ details.more[open] > summary { margin-bottom: var(--s2); }
 .gstep .form .wide { grid-column: 1 / -1; }
 .lem-picker { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
 .lem-picker select { min-width: 220px; }
+
+/* ── Backfill: select many (v4.0.1) ───────────────────────────────────── */
+.bf-bar { display: flex; align-items: center; gap: var(--s3); min-height: 44px; padding: var(--s1) 0 var(--s1) var(--s3); border-top: 1px solid var(--border-light); border-bottom: 1px solid var(--border-light); margin-bottom: calc(-1 * var(--s4)); }
+.bf-bar .count { font-size: var(--fs-sm); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.bf-bar[data-some="true"] .count { color: var(--text); font-weight: 500; }
+.bf-bar .spacer { flex: 1; }
+.bf-progress { display: inline-flex; align-items: center; gap: var(--s2); }
+.bf-progress[hidden] { display: none; }
+.bf-progress .progress { width: 140px; }
+.bf-progress .caption { font-variant-numeric: tabular-nums; }
+.tbl.bf th.sel, .tbl.bf td.sel { width: 1%; padding-right: 0; user-select: none; -webkit-user-select: none; }
+.tbl.bf td.sel { touch-action: none; }             /* a finger drags down the boxes instead of scrolling */
+.tbl.bf input[type="checkbox"] { width: 16px; height: 16px; margin: 0; vertical-align: middle; accent-color: var(--ink); cursor: pointer; }
+.tbl.bf input[type="checkbox"]:disabled { cursor: default; }
+.tbl.bf tr.can { cursor: pointer; }
+.tbl.bf tr.can:hover td { background: var(--bg-hover); }
+.tbl.bf tr.is-sel td, .tbl.bf tr.is-sel:hover td { background: var(--bg-active); }
+.tbl.bf .lab { display: block; font-weight: 500; }
+.tbl.bf .why { display: block; margin-top: 2px; font-size: var(--fs-xs); color: var(--text-muted); }
+.tbl.bf tr.can:hover .why, .tbl.bf tr.is-sel .why { color: var(--text-muted-sunken); }
+.tbl.bf.dragging, .tbl.bf.dragging * { user-select: none; -webkit-user-select: none; }
