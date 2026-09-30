@@ -191,7 +191,7 @@ def test_the_version_badge_is_readable():
 # v4.0 lane E2: the new pages' stylesheets use only the checked tokens for
 # colour (no literal colours), and only token pairs listed above for text.
 PAGE_CSS = [ROOT / "static" / "css" / "admin.css", ROOT / "static" / "css" / "calibration.css",
-            ROOT / "static" / "css" / "compare.css", ROOT / "static" / "css" / "report_queue.css"]
+            ROOT / "static" / "css" / "compare.css", ROOT / "static" / "css" / "report_queue.css",
             # v5.0 lane R
             ROOT / "static" / "css" / "results.css", ROOT / "static" / "css" / "settings.css",
             ROOT / "static" / "css" / "controls.css", ROOT / "static" / "css" / "notifications.css"]
