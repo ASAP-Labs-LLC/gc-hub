@@ -36,6 +36,7 @@ EXPECTED_ROUTES = {
     "/api/export-lims",
     "/api/export-pdf",
     "/api/files",
+    "/api/live",
     "/api/notifications",
     "/api/notifications/<notif_id>/dismiss",
     "/api/notifications/dismiss-all",

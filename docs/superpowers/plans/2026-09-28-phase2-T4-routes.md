@@ -90,6 +90,7 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/api/settings` | GET, POST | unchanged | session | GET shows the gc1 row's `calibration_cdf` and the fixed standards/export folders; POST (JSON only) changes only `settings.OPERATOR_KEYS`, and `settings.ADMIN_KEYS` with the admin `password` (403 without); any other changed key → 400 (T5 review C1) |
 | `/api/save-analysis-defaults` | POST | unchanged | session | |
 | `/api/notifications` | GET | unchanged | session | |
+| `/api/live` | GET | new | session | v3.1 live updates (`live.py`, `static/js/live.js`): `?since=<boot_id>:<seq>` → `{cursor, reset, samples, instruments, agents, notifications_unread, hub: {state, staged_update}}`, answered from memory (the event ring, `hub_control`'s cache, the notification store); never SQLite; not activity |
 | `/api/notifications/<notif_id>/dismiss` | POST | unchanged | session | |
 | `/api/notifications/dismiss-all` | POST | unchanged | session | |
 | `/api/restart` | POST | unchanged | local | |

@@ -518,6 +518,20 @@ def test_search_method_and_backfill_filters(gc1):
     assert store.samples.count(backfill=False, method_name="", db=gc1) == 1
 
 
+def test_search_ids_filter(gc1):
+    """v3.1 live updates: ``/api/files?ids=`` fetches only the changed rows."""
+    a = _sample(gc1, lab_id="A", dt="2026-09-01 10:00:00")
+    b = _sample(gc1, lab_id="B", dt="2026-09-02 10:00:00")
+    _sample(gc1, lab_id="C", dt="2026-09-03 10:00:00")
+    store.samples.set_status(a, "final", db=gc1)
+    assert [r["id"] for r in store.samples.search(ids=[a, b], db=gc1)] == [b, a]
+    assert store.samples.count(ids=[a, b], db=gc1) == 2
+    assert [r["id"] for r in store.samples.search(ids=[a, b], status="final", db=gc1)] == [a]
+    assert store.samples.search(ids=[999999], db=gc1) == []
+    assert store.samples.search(ids=[], db=gc1) == []          # an empty list matches nothing
+    assert store.samples.count(ids=[], db=gc1) == 0
+
+
 # ── revisions ───────────────────────────────────────────────────────────────
 
 def test_add_revision_increments_and_sets_current(gc1):

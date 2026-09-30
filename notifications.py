@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import live
 import paths
 
 LOGGER = logging.getLogger(__name__)
@@ -75,7 +76,13 @@ class NotificationStore:
         with self._lock:
             self._items.insert(0, entry)
             self._save()
+        live.publish("notification")
         return entry
+
+    def count(self) -> int:
+        """How many notifications the tray holds (the badge; in memory)."""
+        with self._lock:
+            return len(self._items)
 
     def list_all(self) -> list[dict]:
         with self._lock:
@@ -89,7 +96,9 @@ class NotificationStore:
             removed = len(self._items) != before
             if removed:
                 self._save()
-            return removed
+        if removed:
+            live.publish("notification")
+        return removed
 
     def dismiss_all(self) -> int:
         """Clear all notifications. Returns how many were removed."""
@@ -98,7 +107,9 @@ class NotificationStore:
             if count:
                 self._items = []
                 self._save()
-            return count
+        if count:
+            live.publish("notification")
+        return count
 
 
 # Module-level default instance used by the app.

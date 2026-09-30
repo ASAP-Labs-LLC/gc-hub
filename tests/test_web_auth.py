@@ -668,3 +668,42 @@ def test_no_redirect_loop_when_the_proxy_names_no_scheme(env):
     r = post(c, "/api/login", {"username": "ryan c", "password": "labpass-1"}, environ=LOCAL,
              headers=ok)
     assert r.status_code == 200 and cookie_of(r, "__Host-gc_session")
+
+
+# ── v3.1 live updates: a tab's background GETs never touch the session ──
+
+def test_a_background_get_does_not_touch_last_seen(env):
+    c = env["client"]
+    login(c)
+    web_auth._seen.clear()
+    web_auth._pending.clear()
+    assert get(c, "/api/thing", headers={web_auth.BACKGROUND_HEADER: "1"}).status_code == 200
+    assert web_auth._pending == {}
+    assert get(c, "/api/thing").status_code == 200           # the same GET, not background
+    assert len(web_auth._pending) == 1
+
+
+def test_a_post_with_the_header_still_refreshes_the_session(env):
+    c = env["client"]
+    login(c)
+    web_auth._seen.clear()
+    web_auth._pending.clear()
+    r = post(c, "/api/thing", {}, headers={web_auth.BACKGROUND_HEADER: "1"})
+    assert r.status_code == 200
+    assert len(web_auth._pending) == 1                      # a POST always counts
+
+
+def test_is_background_request():
+    app = Flask("bg")
+    h = web_auth.BACKGROUND_HEADER
+    with app.test_request_context("/api/files", headers={h: "1"}):
+        assert web_auth.is_background_request() is True
+    with app.test_request_context("/api/files", method="HEAD", headers={h: "1"}):
+        assert web_auth.is_background_request() is True
+    with app.test_request_context("/api/files", headers={h: "0"}):
+        assert web_auth.is_background_request() is False
+    with app.test_request_context("/api/files"):
+        assert web_auth.is_background_request() is False
+    for m in ("POST", "PUT", "PATCH", "DELETE"):
+        with app.test_request_context("/api/x", method=m, headers={h: "1"}):
+            assert web_auth.is_background_request() is False

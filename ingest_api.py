@@ -30,6 +30,7 @@ from flask import Blueprint, Response, jsonify, request
 
 import admin_auth
 import distill
+import live
 import netctx
 import paths
 import pipeline
@@ -74,6 +75,7 @@ def mint_token(instrument_id: str, *, db=None, token: Optional[str] = None,
             store.instruments.upsert({"id": instrument_id, "token_hash": token_hash(token),
                                       "token_issued_at": store.now_iso()}, db=conn)
     log.warning("agent token minted for %s (any previous token is revoked)", instrument_id)
+    live.publish("instrument", {"instrument_id": instrument_id})
     return token
 
 
@@ -87,6 +89,7 @@ def revoke_token(instrument_id: str, *, db=None) -> None:
             store.instruments.upsert({"id": instrument_id, "token_hash": None,
                                       "token_issued_at": None}, db=conn)
     log.warning("agent token revoked for %s", instrument_id)
+    live.publish("instrument", {"instrument_id": instrument_id})
 
 
 def verify_token(token: Any, *, db=None) -> Optional[dict]:
@@ -201,12 +204,15 @@ def _heartbeat_values(body: Any) -> dict:
 
 
 def record_heartbeat(instrument_id: str, values: dict, *, db=None,
-                     take_command: bool = True) -> Optional[str]:
+                     take_command: bool = True, publish: bool = True) -> Optional[str]:
     """Upsert the instrument's ``agents`` row from a heartbeat and take its
     pending command (delivered once: cleared in the same transaction). With
-    ``take_command=False`` (a disabled instrument) the command stays queued."""
+    ``take_command=False`` (a disabled instrument) the command stays queued.
+    Then (unless ``publish=False``) the live agent snapshot is updated and an
+    ``agent`` event published (``hub_control.note_agent``)."""
     cols = ["version", "package_sha256", "state", "queue_size", "rejected_count", "last_file",
             "last_error", "host", "agent_time", "results_seq"]
+    seen = store.now_iso()
     with store.connection(_db(db)) as conn:
         with store.write_txn(conn):
             conn.execute(
@@ -214,17 +220,29 @@ def record_heartbeat(instrument_id: str, values: dict, *, db=None,
                 f"VALUES (?, {', '.join('?' for _ in cols)}, ?) "
                 f"ON CONFLICT(instrument_id) DO UPDATE SET "
                 + ", ".join(f"{c}=excluded.{c}" for c in cols + ["last_seen"]),
-                [instrument_id, *(values.get(c) for c in cols), store.now_iso()])
+                [instrument_id, *(values.get(c) for c in cols), seen])
             row = conn.execute("SELECT pending_command FROM agents WHERE instrument_id=?",
                                (instrument_id,)).fetchone()
             command = row["pending_command"] if row and take_command else None
             if command is not None:
                 conn.execute("UPDATE agents SET pending_command=NULL WHERE instrument_id=?",
                              (instrument_id,))
+    if publish:
+        _note_live_agent(instrument_id, values, seen)
     if command is not None and command not in AGENT_COMMANDS:
         log.warning("dropping unknown pending command %r for %s", command, instrument_id)
         return None
     return command
+
+
+def _note_live_agent(instrument_id: str, values: dict, seen: str) -> None:
+    """The live agent snapshot and ``agent`` event (never breaks a heartbeat)."""
+    try:
+        import hub_control
+        hub_control.note_agent(instrument_id, values, seen)
+    except Exception:  # noqa: BLE001
+        log.exception("heartbeat: live update failed")
+        live.publish("agent", {"instrument_id": instrument_id})
 
 
 def set_agent_command(instrument_id: str, command: str, *, db=None) -> None:
@@ -238,6 +256,7 @@ def set_agent_command(instrument_id: str, command: str, *, db=None) -> None:
             conn.execute("INSERT INTO agents(instrument_id, pending_command) VALUES (?, ?) "
                          "ON CONFLICT(instrument_id) DO UPDATE SET "
                          "pending_command=excluded.pending_command", (instrument_id, command))
+    live.publish("agent", {"instrument_id": instrument_id})
 
 
 def clock_skew_seconds(agent_time: Optional[str], last_seen: Optional[str]) -> Optional[float]:
