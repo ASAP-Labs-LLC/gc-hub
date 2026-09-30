@@ -268,6 +268,17 @@ The site-wide UX review (session scratchpad `ui/UX-REVIEW.md`) drives this secti
   - a server-side elevation flag for the "Unlocked" chip, after a security review;
   - classic and dead code removed.
 
+## Next major release: direction from Ryan (2026-09-30)
+
+- **Main page and Analysis.** Ryan: "don't just theme it, redesign it, same with the analysis tab". Rebuild them from the instrument-detail template (`/instruments/<id>`): the shell, sections with a left title and intro, hairline rows, and System/Light/Dark. This replaces the "opt-in /next then default" phasing, so the redesigned Samples page (Overview · Compare · Data) and a Results page become the main UI in the next major release. `/classic` stays for one release as a fallback.
+- **The address bar is the link.** Every view has a URL that the page keeps current with `history.pushState`:
+  - `/samples/<id>`, `/samples/<id>/compare?standard=<name>`, `/samples/<id>/data`;
+  - `/samples?instrument=gc2&status=held&q=403` for filters and search;
+  - `/results?…`.
+
+  Back and Forward navigate views, and reloading restores the view. Links are relative to the host in use, so `http://asapsv1:5560/...` works on the lab network and `https://gc.asaplabs.net/...` works anywhere. "Copy link" keeps copying the gc.asaplabs.net form, and the address bar gives the local form. `/lab/<lab_id>` resolves as today.
+- **Dynamic themes on every page:** System (the default; follows the OS live), Light and Dark.
+
 ## Build rules
 
 - No build step: window globals plus `module.exports`, as today; `package_release.sh` ships tracked source only.
