@@ -115,4 +115,14 @@ module.exports = (t) => {
     t.eq(D.findFile(files, '3'), files[0]);
     t.eq(D.findFile(files, 5), null);
     t.eq(D.findFile(null, 5), null);
+
+    // ── wiring (source checks: the browser hook is not loaded under node) ──
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../../static/js/deeplink.js'), 'utf8');
+    // every answer is parsed with GCSession.readJson, never resp.json()
+    t.eq(/\.json\(\)/.test(src), false);
+    t.eq((src.match(/GCSession\.readJson\(/g) || []).length >= 2, true);
+    // the start-up warm-up of /api/session is the page's own fetch: a
+    // background GET (not activity); the lookups a link asks for are not
+    t.eq(/_loadSession\(true\)/.test(src), true);
+    t.eq(/GCLive\.bgFetch\('\/api\/session'/.test(src), true);
 };

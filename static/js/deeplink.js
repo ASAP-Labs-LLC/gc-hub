@@ -133,11 +133,18 @@
 
     let _session = null;
 
-    async function _loadSession() {
+    /** GET /api/session once. ``background``: the start-up warm-up, which the
+        page makes on its own (GCLive.bgFetch: not activity); a Copy link
+        click that finds nothing cached asks with a plain fetch. */
+    async function _loadSession(background) {
         if (!_session) {
             try {
-                const r = await fetch('/api/session', { cache: 'no-store' });
-                if (r.ok) _session = await r.json();
+                const opts = { cache: 'no-store', headers: { Accept: 'application/json' } };
+                const r = (background && root.GCLive)
+                    ? await GCLive.bgFetch('/api/session', opts)
+                    : await fetch('/api/session', opts);
+                const res = await GCSession.readJson(r);
+                if (r.ok && res.body && !res.body.error) _session = res.body;
             } catch (_) { /* linkFromSession falls back to the default */ }
         }
         return _session;
@@ -218,9 +225,10 @@
     }
 
     async function _json(url) {
-        const r = await fetch(url, { cache: 'no-store' });
-        const body = await r.json().catch(() => ({}));
-        return { ok: r.ok, body };
+        // the lookups the opened link asks for (not background work)
+        const r = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
+        const res = await GCSession.readJson(r);
+        return { ok: r.ok, body: res.body || {} };
     }
 
     /** Make ``file`` the one selected sample, as a plain click would. */
@@ -336,7 +344,7 @@
     async function start() {
         const btn = document.getElementById('btn-copy-link');
         if (btn) btn.addEventListener('click', () => copyLink(state.selectedFile));
-        _loadSession();                             // warm: copying stays in the click
+        _loadSession(true);                         // warm: copying stays in the click
         api.started = true;
         const target = parseLocation(location.pathname, location.search);
         if (!target) return;
