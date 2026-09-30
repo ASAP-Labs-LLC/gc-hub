@@ -29,7 +29,7 @@ def test_no_fetch_answer_is_parsed_with_resp_json():
 def test_the_pages_that_parse_answers_use_read_json():
     for rel in ("templates/admin_setup.html", "static/js/login.js", "static/js/hub_admin.js",
                 "static/js/instruments.js", "static/js/diagnostics.js", "static/js/comments.js",
-                "static/js/app.js", "templates/calibration.html"):
+                "static/js/app.js", "static/js/calibration.js"):
         assert "GCSession.readJson(" in (ROOT / rel).read_text(encoding="utf-8"), rel
 
 

@@ -12,6 +12,7 @@ PAGE_JS = ROOT / "static" / "js" / "instruments.js"
 LOGIC_JS = ROOT / "static" / "js" / "instruments_logic.js"
 TEMPLATE = ROOT / "templates" / "instruments.html"
 CAL = ROOT / "templates" / "calibration.html"
+CAL_JS = ROOT / "static" / "js" / "calibration.js"   # v4.0 lane E2: the page code moved here
 
 HTML_SINKS = re.compile(r"\.(innerHTML|outerHTML)\b|insertAdjacentHTML|document\.write|"
                         r"\beval\s*\(|new\s+Function\s*\(")
@@ -54,6 +55,6 @@ def test_review_minors_in_the_page():
 
 
 def test_calibration_page_escapes_interpolated_errors():
-    src = CAL.read_text(encoding="utf-8")
+    src = CAL.read_text(encoding="utf-8") + CAL_JS.read_text(encoding="utf-8")
     assert "${e.message}" not in src
     assert "instrument" in src and "/api/instruments/" in src

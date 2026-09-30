@@ -112,14 +112,18 @@
     const STEP_BADGE = { done: 'Done', current: 'Now', waiting: 'Waiting', blocked: 'Blocked' };
     function stepBadge(status) { return STEP_BADGE[status] || ''; }
 
-    // The sidebar's "Setup guide · Step N": the first enabled, unfinished
-    // instrument (by id), or null when every instrument is ready.
-    function setupNav(instruments) {
+    // The sidebar's "Setup guide" item names the GC ("GC-2 · 5/8"): every
+    // enabled, unfinished instrument, the one being viewed (`preferId`) first,
+    // then the furthest along (then by id); null when every instrument is ready.
+    function setupNav(instruments, preferId) {
         const open = (instruments || []).filter(i => i && i.enabled && i.setup && !i.setup.ready && i.setup.step)
-            .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+            .sort((a, b) => ((b.id === preferId) - (a.id === preferId)) ||
+                ((b.setup.done || 0) - (a.setup.done || 0)) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
         if (!open.length) return null;
+        const one = (i) => (i.name || i.id) + ' · ' + (i.setup.done || 0) + '/' + i.setup.total;
         const sm = open[0].setup;
-        return { instrument_id: open[0].id, step: sm.step, text: 'Setup · ' + sm.done + '/' + sm.total };
+        return { instrument_id: open[0].id, step: sm.step, text: open.map(one).join(', '),
+                 title: 'Setup: ' + open.map(i => (i.name || i.id) + ' · ' + setupLabel(i.setup)).join('; ') };
     }
 
     // ── the Activity feed ──────────────────────────────────────────────────

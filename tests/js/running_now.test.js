@@ -50,7 +50,12 @@ module.exports = (t) => {
 
     // ── the collapsed indicator: most urgent first ──
     t.eq(R.summary([]), null);
-    t.eq(R.summary([T()]), { text: 'Importing GC-2 history · 3,000/12,000', glyph: 'spinner',
+    // the phase names its count, so a count restarting in the next phase reads right (lane E2 review)
+    t.eq(R.summary([T({ progress: { done: 3000, total: 12000, text: null } })]).text,
+        'Importing GC-2 history · 3,000/12,000');
+    t.eq(R.summary([T({ progress: { done: 1500, total: 5000, text: 'Reading CDFs' } })]).text,
+        'Importing GC-2 history · Reading CDFs 1,500/5,000');
+    t.eq(R.summary([T()]), { text: 'Importing GC-2 history · Classifying samples 3,000/12,000', glyph: 'spinner',
                              state: 'running', count: 1 });
     t.eq(R.summary([T({ progress: { done: null, total: null, text: 'Scanning the folder' } })]).text,
          'Importing GC-2 history · Scanning the folder');
@@ -114,15 +119,15 @@ module.exports = (t) => {
     // ── the strip is one compact chip: "2/2 GCs live" (the toolbar must fit) ──
     const two = [A(), A({ instrument_id: 'gc2', name: 'GC-2', live: false, last_seen_age_s: 400 }),
                  A({ instrument_id: 'gc3', name: 'GC-3', enabled: false })];
-    t.eq(R.gcStrip(two, NOW), { text: '1/2 GCs live', glyph: '○', cls: 'quiet',
+    t.eq(R.gcStrip(two, NOW), { text: '1 of 2 GCs live', glyph: '○', cls: 'quiet',
                                 title: 'GC-1: Live · GC-2: Not seen for 6 min · GC-3: Disabled' });
-    t.eq(R.gcStrip([A(), A({ instrument_id: 'gc2', name: 'GC-2' })], NOW).text, '2/2 GCs live');
+    t.eq(R.gcStrip([A(), A({ instrument_id: 'gc2', name: 'GC-2' })], NOW).text, '2 of 2 GCs live');
     t.eq(R.gcStrip([A(), A({ instrument_id: 'gc2', name: 'GC-2' })], NOW).glyph, '●');
-    t.eq(R.gcStrip([A()], NOW).text, '1/1 GC live');
+    t.eq(R.gcStrip([A()], NOW).text, '1 of 1 GC live');
     t.eq(R.gcStrip([A({ live: false, last_seen: null, last_seen_age_s: null })], NOW).cls, 'never');
     t.eq(R.gcStrip([], NOW), null);
-    t.eq(R.gcSummary(two, NOW), '1 of 2 GCs connected');
-    t.eq(R.gcSummary([A()], NOW), '1 of 1 GC connected');
+    t.eq(R.gcSummary(two, NOW), '1 of 2 GCs live');
+    t.eq(R.gcSummary([A()], NOW), '1 of 1 GC live');
     t.eq(R.gcSummary([], NOW), '');
 
     // ── the processing-paused banner ──

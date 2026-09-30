@@ -13,10 +13,6 @@
   <div class="topbar">
     <h1>Instruments</h1>
     <span class="spacer"></span>
-    <label class="pw" title="Needed for every change on this page. Kept in this tab only.">
-      Admin password
-      <input type="password" id="admin-pw" autocomplete="off" spellcheck="false">
-    </label>
     <a class="btn" href="/calibration">Calibration</a>
     <a class="btn" href="/">&larr; Back to app</a>
   </div>
@@ -55,7 +51,8 @@
 
   <script src="{{ url_for('static', filename='js/instruments_logic.js') }}?v=5"></script>
   <script src="{{ url_for('static', filename='js/live.js') }}?v=5"></script>
-  <script src="{{ url_for('static', filename='js/instruments.js') }}?v=8"></script>
+  <script src="{{ url_for('static', filename='js/admin_unlock.js') }}?v=3"></script>
+  <script src="{{ url_for('static', filename='js/instruments.js') }}?v=9"></script>
 
   <!-- Which build is running, bottom-right. Same string /healthz reports. -->
   <div id="app-version" aria-hidden="true">{{ app_version }}</div>

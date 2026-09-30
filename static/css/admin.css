@@ -1,0 +1,125 @@
+/* admin.css (v4.0 lane E2): the Hub admin page inside the shell, on tokens.css
+   + shell.css. A sticky left sub-nav, then one column of anchored sections:
+   title and a one-line intro on the left, the controls on the right, hairline
+   rules between. Buttons that hub_admin.js / purge.js build (class "primary",
+   "quiet", preset buttons) get the shell's pill look here. Colours are tokens
+   only (tests/test_ui_contrast.py). */
+
+/* ── the top bar: one unlock ─────────────────────────────────────────── */
+.topbar { height: auto; min-height: var(--topbar-h); flex-wrap: wrap; row-gap: var(--s1); padding-top: var(--s2); padding-bottom: var(--s2); }
+.adm-unlock { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: var(--s2); min-width: 0; }
+.adm-unlock-form { display: flex; align-items: center; gap: var(--s2); }
+.adm-unlock-form input { width: 200px; height: 32px; }
+.adm-unlock .msg { flex-basis: 100%; text-align: right; }
+.adm-unlock .msg:empty { display: none; }
+
+/* ── frame: sub-nav + sections ───────────────────────────────────────── */
+.adm { display: flex; align-items: flex-start; min-width: 0; }
+.adm-nav {
+    position: sticky; top: calc(var(--topbar-h) + var(--s4)); flex: 0 0 196px;
+    display: flex; flex-direction: column; gap: 2px; padding: var(--s5) var(--s3) var(--s5) var(--s4);
+}
+.adm-nav a {
+    display: flex; align-items: center; gap: var(--s3); height: 34px; padding: 0 var(--s3);
+    border-radius: var(--radius-md); color: var(--text); text-decoration: none; font-size: var(--fs-sm); white-space: nowrap;
+}
+.adm-nav a:hover { background: var(--bg-hover); }
+.adm-nav a.active { background: var(--bg-active); font-weight: 600; }
+.adm-nav svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; color: var(--text-muted); }
+.adm-nav a.active svg { color: var(--text); }
+
+.adm-main { flex: 1; min-width: 0; max-width: 1080px; padding: var(--s2) var(--s6) calc(var(--badge-room) + var(--s7)) var(--s4); }
+.adm-sec { padding: var(--s6) 0; border-top: 1px solid var(--border-light); scroll-margin-top: calc(var(--topbar-h) + var(--s2)); }
+.adm-sec:first-child { border-top: 0; }
+.adm-grid { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: var(--s6); }
+.adm-grid > .about h2 { font-size: var(--fs-lg); margin-bottom: var(--s2); }
+.adm-grid > .about .intro { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); }
+.adm-grid > .body { min-width: 0; display: grid; gap: var(--s3); align-content: start; }
+.adm-grid > .body > p { margin: 0; }
+
+@media (max-width: 1240px) {
+    .adm-grid { grid-template-columns: minmax(0, 1fr); gap: var(--s3); }
+}
+
+/* ── fields, actions, messages ───────────────────────────────────────── */
+.adm-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s3) var(--s4); align-items: end; }
+.adm-fields .wide { grid-column: 1 / -1; }
+.adm-fields .field select, .adm-fields .field input { width: 100%; }
+.adm-check { font-size: var(--fs-sm); color: var(--text); min-height: 36px; }
+.adm-last:empty { display: none; }
+.adm-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.adm-actions input[type="text"] { flex: 1 1 260px; }
+.adm .msg { font-size: var(--fs-sm); color: var(--text-muted); }
+.adm .ok, .adm .msg.ok { color: var(--pill-final-fg); }
+.adm .err, .adm .msg.err { color: var(--st-error); }
+.adm .warn { color: var(--warn-text); }
+.adm p.warn:empty, .adm .caption:empty { display: none; }
+.adm-note { padding: var(--s3) var(--s4); border-radius: var(--radius-md); background: var(--bg-sunken); color: var(--text-muted-sunken); font-size: var(--fs-sm); }
+.adm code { font-family: var(--mono); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+
+.adm-more summary { cursor: pointer; font-size: var(--fs-sm); color: var(--text-muted); width: fit-content; }
+.adm-more summary:hover { color: var(--text); }
+.adm-more p { margin: var(--s2) 0 0; font-size: var(--fs-sm); color: var(--text-muted); max-width: 72ch; }
+
+/* ── running work ────────────────────────────────────────────────────── */
+.adm-tasks { list-style: none; margin: 0; padding: 0; }
+.adm-tasks li { padding: var(--s2) 0; border-bottom: 1px solid var(--border-light); font-size: var(--fs-sm); }
+.adm-tasks li:last-child { border-bottom: 0; }
+.adm-tasks li strong { font-weight: 600; }
+
+/* ── a job's line and its counts (never JSON) ────────────────────────── */
+.job:empty { display: none; }
+.job { padding: var(--s3) var(--s4); border-radius: var(--radius-md); border: 1px solid var(--border-light); background: var(--bg-card); font-size: var(--fs-sm); }
+.job p { margin: 0 0 var(--s1); }
+.job .job-line { color: var(--text); font-weight: 550; }
+.job .job-line.ok { color: var(--pill-final-fg); }
+.job .job-line.err { color: var(--st-error); }
+.job .muted { color: var(--text-muted); }
+.job .warn { color: var(--pill-held-fg); }
+table.counts { border-collapse: collapse; margin: var(--s2) 0 0; min-width: 260px; font-size: var(--fs-sm); }
+table.counts td { padding: 3px 0; border-bottom: 1px solid var(--border-light); }
+table.counts td:last-child { text-align: right; padding-left: var(--s6); font-variant-numeric: tabular-nums; }
+.adm-preview:empty { display: none; }
+.adm-preview p { margin: 0 0 var(--s1); font-size: var(--fs-sm); }
+
+/* ── tables ──────────────────────────────────────────────────────────── */
+.adm-table { overflow-x: auto; }
+.adm-table:has(tbody:empty) table { display: none; }
+.adm-table:has(tbody:empty)::after { content: attr(data-empty); display: block; padding: var(--s3) var(--s4); border-radius: var(--radius-md); background: var(--bg-sunken); color: var(--text-muted-sunken); font-size: var(--fs-sm); }
+.adm .tbl th { white-space: nowrap; }
+.adm .tbl td.path { font-family: var(--mono); font-size: var(--fs-xs); overflow-wrap: anywhere; min-width: 200px; }
+.adm .tbl td.actions { white-space: nowrap; text-align: right; }
+.adm .tbl td .quiet + .quiet { margin-left: var(--s1); }
+.adm .tbl tr.path-edit td { background: var(--bg-sunken); color: var(--text-muted-sunken); }
+.adm .tbl tr.path-edit label { display: block; font-size: var(--fs-sm); margin-bottom: var(--s2); }
+.adm .tbl tr.path-edit input { width: 100%; margin-bottom: var(--s2); }
+.adm .tbl tr.path-edit .msg { margin-left: var(--s2); }
+.adm .tbl tr.path-edit .msg.err { color: var(--pill-error-fg); }
+.adm-diag td:first-child { width: 36px; }
+.adm-diag .num, .adm-diag td.num { text-align: right; white-space: nowrap; }
+.adm-diag label { color: var(--text); }
+
+/* ── presets ─────────────────────────────────────────────────────────── */
+.adm-presets { list-style: none; margin: 0; padding: 0; }
+.adm-presets li { display: flex; align-items: center; gap: var(--s2); padding: var(--s2) 0; border-bottom: 1px solid var(--border-light); }
+.adm-presets li input.preset-text { flex: 1; min-width: 0; }
+.adm-presets li.inactive input.preset-text { color: var(--text-muted); text-decoration: line-through; }
+
+/* ── server facts ────────────────────────────────────────────────────── */
+.adm-facts { display: grid; grid-template-columns: 140px minmax(0, 1fr); margin: 0; font-size: var(--fs-sm); }
+.adm-facts dt, .adm-facts dd { margin: 0; padding: var(--s2) 0; border-bottom: 1px solid var(--border-light); }
+.adm-facts dt { color: var(--text-muted); }
+.adm-facts dd { display: flex; align-items: center; gap: var(--s1); overflow-wrap: anywhere; }
+
+/* ── buttons the scripts build: the shell's pill look ────────────────── */
+.adm-main button:not(.btn) {
+    display: inline-flex; align-items: center; justify-content: center; height: 30px; padding: 0 var(--s3);
+    border-radius: var(--radius-pill); border: 1px solid var(--border); background: var(--bg-card); color: var(--text);
+    font: inherit; font-size: var(--fs-sm); font-weight: 550; cursor: pointer; white-space: nowrap;
+}
+.adm-main button:not(.btn):hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.adm-main button:not(.btn).primary { background: var(--ink); border-color: var(--ink); color: var(--ink-fg); }
+.adm-main button:not(.btn).primary:hover { background: var(--ink-hover); }
+.adm-main button:not(.btn).quiet { border-color: transparent; background: transparent; }
+.adm-main button:not(.btn).quiet:hover { background: var(--bg-hover); }
+.adm-main button:disabled { opacity: 0.5; cursor: default; }

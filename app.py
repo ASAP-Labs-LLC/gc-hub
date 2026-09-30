@@ -3788,7 +3788,7 @@ def index():
 def calibration_page():
     from flask import render_template
     try:
-        return render_template("calibration.html", app_version=version.APP_VERSION)
+        return render_template("calibration.html", app_version=version.APP_VERSION, nav="instruments")
     except Exception:
         return (
             "<h1>Calibration</h1>"

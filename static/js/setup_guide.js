@@ -246,7 +246,7 @@
 
     function renderPicker(current) {
         const pick = $('picker');
-        const opts = (LIST.instruments || []).map(i => h('option', { value: i.id, text: i.name + (i.setup && !i.setup.ready ? ' · ' + i.setup.done + ' of ' + i.setup.total + ' done' : '') }));
+        const opts = (LIST.instruments || []).map(i => h('option', { value: i.id, text: i.name + (i.setup && !i.setup.ready ? ' · ' + U.setupLabel(i.setup) : '') }));
         opts.push(h('option', { value: NEW, text: 'Add a new GC' }));
         pick.replaceChildren(...opts);
         pick.value = current;

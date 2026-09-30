@@ -74,3 +74,29 @@ class NotificationStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NotificationDedupeTests(unittest.TestCase):
+    """v4.0 lane E2 review: a message already in the tray (not dismissed) is
+    not added again, e.g. "GC-1 has no correction factors" on every boot."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "notifications.json"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_an_identical_undismissed_message_is_not_added_again(self) -> None:
+        s = notifications.NotificationStore(self.path)
+        first = s.add("error", "GC-1 has no correction factors")
+        again = notifications.NotificationStore(self.path).add("error", "GC-1 has no correction factors")
+        self.assertEqual(again["id"], first["id"])
+        self.assertEqual(len(notifications.NotificationStore(self.path).list_all()), 1)
+        # another level or text is its own notification; a dismissed one comes back
+        s = notifications.NotificationStore(self.path)
+        s.add("warning", "GC-1 has no correction factors")
+        self.assertEqual(len(s.list_all()), 2)
+        s.dismiss_all()
+        s.add("error", "GC-1 has no correction factors")
+        self.assertEqual(len(s.list_all()), 1)

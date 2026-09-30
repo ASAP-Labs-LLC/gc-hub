@@ -169,8 +169,14 @@
 
   const CALL_TIMEOUT_MS = 30000;     // a hung request never blocks the admin-call queue
 
+  // Follow the feed with an admin poll only when a task is there and moved:
+  // a finished task dropping off needs no POST (it would count as activity).
+  function shouldFollow(before, now) {
+    return !!now && JSON.stringify(before) !== JSON.stringify(now);
+  }
+
   const pure = {progressText, isDryRun, dryRunView, cardFor, label, summaryRows, summaryWarnings,
-                jobView, jobEnded, stopEnabled, feedTaskFor, feedLine, CALL_TIMEOUT_MS};
+                jobView, jobEnded, stopEnabled, feedTaskFor, feedLine, shouldFollow, CALL_TIMEOUT_MS};
   if (typeof module !== "undefined" && module.exports) {
     module.exports = pure;
     return;
@@ -497,8 +503,7 @@
     renderStatus(u);
     // a job started elsewhere (or this page's own) moved: follow it
     const now = feedTaskFor("lf", feed) || feedTaskFor("ih", feed);
-    const moved = JSON.stringify(before) !== JSON.stringify(now);
-    if (moved && unlock.isUnlocked() && !(lastJob && lastJob.state === "running")) {
+    if (shouldFollow(before, now) && unlock.isUnlocked() && !(lastJob && lastJob.state === "running")) {
       pollJob().catch(() => {});
     }
     renderCards();

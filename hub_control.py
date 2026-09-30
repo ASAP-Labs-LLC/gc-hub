@@ -329,8 +329,9 @@ def refresh_cache() -> bool:
         before = _cache.get("agents")
         # a heartbeat noted (note_agent) after this read began is newer: keep it
         newer = {a["instrument_id"]: a for a in before or []}
+        # (its heartbeat fields; the name and enabled flag are the store's)
         fresh["agents"] = [
-            newer[a["instrument_id"]]
+            dict(newer[a["instrument_id"]], name=a.get("name"), enabled=a.get("enabled", True))
             if (newer.get(a["instrument_id"]) or {}).get("last_seen") and
             str(newer[a["instrument_id"]]["last_seen"]) > str(a.get("last_seen") or "")
             else a for a in fresh["agents"]]
@@ -418,18 +419,22 @@ def live_hub() -> dict:
     return dict(h)
 
 
-def note_agent(instrument_id: str, values: dict, last_seen: Optional[str]) -> None:
+def note_agent(instrument_id: str, values: dict, last_seen: Optional[str], *,
+               name: Optional[str] = None, enabled: Optional[bool] = None) -> None:
     """A heartbeat just landed: update that agent in the cache and publish
-    ``agent`` (``ingest_api``). Never raises."""
+    ``agent`` (``ingest_api``, which passes the instrument's ``name`` and
+    ``enabled``, so a first check-in is named at once). Never raises."""
     try:
         entry = _agent_view({"instrument_id": instrument_id, "last_seen": last_seen,
                              "version": values.get("version"), "host": values.get("host"),
-                             "status": values.get("state")})
+                             "status": values.get("state"), "name": name,
+                             "enabled": enabled})
         with _cache_lock:
             agents = list(_cache.get("agents") or [])
             for i, a in enumerate(agents):
                 if a.get("instrument_id") == instrument_id:
-                    entry["name"], entry["enabled"] = a.get("name"), a.get("enabled", True)
+                    entry["name"] = name or a.get("name")
+                    entry["enabled"] = enabled if enabled is not None else a.get("enabled", True)
                     agents[i] = entry
                     break
             else:

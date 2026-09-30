@@ -24,7 +24,7 @@
     <a class="nav-item{% if nav == 'setup' %} active{% endif %}" href="/setup" id="nav-setup" data-nav="setup" data-testid="nav-setup" title="Setup guide"{% if nav == 'setup' %} aria-current="page"{% else %} hidden{% endif %}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7l2 2 3-4M4 16l2 2 3-4M13 7h7M13 16h7"/></svg>
       <span class="sb-label">Setup guide</span><span class="nav-meta" id="nav-setup-step"></span></a>
-    <a class="nav-item" href="/admin/hub" data-nav="admin" title="Admin">
+    <a class="nav-item{% if nav == 'admin' %} active{% endif %}" href="/admin/hub" data-nav="admin" title="Admin"{% if nav == 'admin' %} aria-current="page"{% endif %}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></svg>
       <span class="sb-label">Admin</span></a>
   </nav>

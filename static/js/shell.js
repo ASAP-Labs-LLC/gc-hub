@@ -87,7 +87,11 @@
     }
 
     // ── the admin password: in this closure only, for 15 minutes ────────────
-    const gate = U.makeAdminGate({ ttlMs: 15 * 60 * 1000 });
+    // v4.0 lane E2: ONE unlock per page. With admin_unlock.js loaded (the
+    // layout loads it first) the gate is a view of GCAdminUnlock.page, so the
+    // shell's dialog, Hub admin's Unlock and Calibration's Save share it.
+    const AU = window.GCAdminUnlock;
+    const gate = AU && AU.gateFor ? AU.gateFor(AU.page) : U.makeAdminGate({ ttlMs: 15 * 60 * 1000 });
     let chipTimer = null;
     function syncUnlockChip() {
         const chip = $('unlock-chip');
@@ -96,7 +100,9 @@
         chip.hidden = left <= 0;
         $('unlock-text').textContent = 'Admin unlocked · ' + Math.max(1, Math.ceil(left / 60000)) + ' min';
         if (left <= 0 && chipTimer) { clearInterval(chipTimer); chipTimer = null; }
+        if (left > 0 && !chipTimer) chipTimer = setInterval(syncUnlockChip, 15000);
     }
+    if (gate.onChange) gate.onChange(() => syncUnlockChip());
 
     function askPassword(reason, error) {
         const dlg = $('admin-dialog');
@@ -158,8 +164,8 @@
             }
             if (fresh) {
                 gate.set(pw);
+                if (AU && AU.accepted) AU.accepted(pw);
                 syncUnlockChip();
-                if (!chipTimer) chipTimer = setInterval(syncUnlockChip, 15000);
             }
             if (opts && opts.raw) return r;
             const body = (await window.GCSession.readJson(r)).body;
@@ -190,10 +196,14 @@
     function syncSetupNav(list) {
         const item = $('nav-setup');
         if (!item) return;
-        const nav = U.setupNav(list);
+        // the instrument this page is about comes first (instrument page, guide, calibration)
+        const main = document.querySelector('main[data-instrument]');
+        const viewing = (main && main.dataset.instrument) || new URLSearchParams(location.search).get('instrument');
+        const nav = U.setupNav(list, viewing);
         const here = document.body.dataset.nav === 'setup';
         item.hidden = !nav && !here;
         $('nav-setup-step').textContent = nav ? nav.text : '';
+        item.title = nav ? nav.title : 'Setup guide';
         if (nav && !here) item.setAttribute('href', '/setup?instrument=' + encodeURIComponent(nav.instrument_id));
     }
 
@@ -237,7 +247,8 @@
         $('bell-clear').hidden = !notes.length;
     }
     async function dismiss(id) {
-        await fetch('/api/notifications/' + encodeURIComponent(id) + '/dismiss', { method: 'POST' });
+        const r = await fetch('/api/notifications/' + encodeURIComponent(id) + '/dismiss', { method: 'POST' });
+        if (!r.ok) toast('Could not dismiss it (HTTP ' + r.status + ').', 'err');
         loadNotes();
     }
 
@@ -322,10 +333,13 @@
             if (window.GCSession && window.GCSession.signOut) window.GCSession.signOut($('menu-signout'));
         });
         $('bell-clear').addEventListener('click', async () => {
-            await fetch('/api/notifications/dismiss-all', { method: 'POST' });
+            const r = await fetch('/api/notifications/dismiss-all', { method: 'POST' });
+            if (!r.ok) toast('Could not dismiss them (HTTP ' + r.status + ').', 'err');
             loadNotes();
         });
-        $('unlock-lock').addEventListener('click', () => { gate.clear(); syncUnlockChip(); toast('Admin locked.'); });
+        if ($('unlock-lock')) {
+            $('unlock-lock').addEventListener('click', () => { gate.clear(); syncUnlockChip(); toast('Admin locked.'); });
+        }
 
         renderRecent();
         loadNotes();

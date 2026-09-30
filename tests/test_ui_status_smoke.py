@@ -166,12 +166,12 @@ def test_the_gc_strip_follows_heartbeats_and_the_list_order(tmp_path):
             drv.get(f"http://127.0.0.1:{port}/")
             strip = lambda: _js(drv, "const b = document.getElementById('gc-strip');"  # noqa: E731
                                      "return b.hidden ? '' : b.textContent;")
-            assert _wait(lambda: strip() == "\u25cb0/2 GCs live"), strip()
+            assert _wait(lambda: strip() == "\u25cb0 of 2 GCs live"), strip()
             _js(drv, "window.__sameDocument = true;")
 
             code, _ = _heartbeat(port, token)
             assert code == 200
-            assert _wait(lambda: strip() == "\u25cb1/2 GCs live"), strip()
+            assert _wait(lambda: strip() == "\u25cb1 of 2 GCs live"), strip()
             assert _js(drv, "return window.__sameDocument === true;")
 
             # click: each GC with its status and a link to its page
@@ -187,7 +187,7 @@ def test_the_gc_strip_follows_heartbeats_and_the_list_order(tmp_path):
             # review blocker: with no new answer, the age keeps going (it used to
             # freeze at "Not seen for 1 min"): stop polling, move the clock on 3 min
             _js(drv, "GCLive.stop(); const t0 = Date.now(); Date.now = () => t0 + 180000;")
-            assert _wait(lambda: strip() == "\u25cb0/2 GCs live", timeout=25), strip()
+            assert _wait(lambda: strip() == "\u25cb0 of 2 GCs live", timeout=25), strip()
             drv.find_element("id", "gc-strip").click()
             drv.find_element("id", "gc-strip").click()
             assert _wait(lambda: "Not seen for 3 min" in {r[0]: r for r in rows_()}["gc1"][1]), rows_()
@@ -267,9 +267,9 @@ def test_hub_admin_unlocks_once_and_starts_a_folder_load(tmp_path):
         browser_sign_in(drv, port)
         try:
             drv.get(f"http://127.0.0.1:{port}/admin/hub")
-            home = drv.find_element("css selector", "[data-testid='back-home']")
-            assert home.text.startswith("← Back to GC Hub") and home.is_displayed()
-            assert home.get_attribute("href").endswith("/")
+            # v4.0 lane E2: the page is in the shell; the sidebar's mark leads home
+            home = drv.find_element("css selector", "#sidebar .sb-mark")
+            assert home.is_displayed() and home.get_attribute("href").endswith("/")
             # the instrument selects are filled without the password (the old bug)
             assert _wait(lambda: _js(drv, "return document.querySelectorAll('#lf-inst option')"
                                           ".length;") >= 2)
@@ -336,7 +336,7 @@ def test_hub_admin_unlocks_once_and_starts_a_folder_load(tmp_path):
 
 def test_the_shell_sidebar_shows_running_work_and_live_gcs(tmp_path):
     """The v3.1 shell pages (here /instruments) carry the same running-now row
-    and "N of M GCs connected" in the sidebar footer, and the paused banner."""
+    and "N of M GCs live" in the sidebar footer, and the paused banner."""
     hub = build_hub(tmp_path)
     token = ingest_api.mint_token("gc1", db=hub.db)
     with booted(tmp_path) as (port, _proc, _data, _home):
@@ -346,10 +346,10 @@ def test_the_shell_sidebar_shows_running_work_and_live_gcs(tmp_path):
             drv.get(f"http://127.0.0.1:{port}/instruments")
             gcs = lambda: _js(drv, "const a = document.getElementById('gc-summary');"  # noqa: E731
                                    "return a.hidden ? '' : a.textContent;")
-            assert _wait(lambda: gcs().endswith("0 of 2 GCs connected")), gcs()
+            assert _wait(lambda: gcs().endswith("0 of 2 GCs live")), gcs()
             code, _ = _heartbeat(port, token)
             assert code == 200
-            assert _wait(lambda: gcs().endswith("1 of 2 GCs connected")), gcs()
+            assert _wait(lambda: gcs().endswith("1 of 2 GCs live")), gcs()
 
             code, body = post(port, "/api/reprocess", {"sample_ids": [hub.ids["final"]]})
             assert code == 200, body

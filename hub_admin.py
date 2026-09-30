@@ -947,6 +947,6 @@ def admin_hub_page():
         configured = None
     diag_options = [{"key": k, "label": diagnostics.LABELS[k], "default": diagnostics.OPTIONS[k]}
                     for k in diagnostics.OPTION_KEYS]
-    return render_template("hub_admin.html", app_version=version.APP_VERSION,
+    return render_template("hub_admin.html", app_version=version.APP_VERSION, nav="admin",
                            diag_options=diag_options, hub_url=configured or "",
                            hub_url_effective=configured or admin_auth.DEFAULT_HUB_URL)

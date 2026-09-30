@@ -54,25 +54,32 @@
         return { status: r.status, body };
     }
 
-    function password() {
-        const pw = $('admin-pw').value;
-        if (!pw) { flash('Enter the admin password (top right) first.', 'err'); return null; }
-        return pw;
-    }
-
+    // v4.0 lane E2: the page's one 15-minute unlock (admin_unlock.js), asked
+    // for in its masked dialog; no password box of its own.
     async function adminPost(path, payload, opts) {
-        const pw = password();
-        if (pw === null) return null;
-        const r = await fetch(path, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(Object.assign({}, payload || {}, { password: pw })),
-        });
-        if (opts && opts.raw) return r;
-        const body = (await window.GCSession.readJson(r)).body;
-        if (r.status >= 400 && !(opts && opts.quiet)) {
-            flash((body && body.error) || ('HTTP ' + r.status), 'err');
+        const U = window.GCAdminUnlock;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const pw = await U.ask('change this instrument');
+            if (!pw) { flash('Not changed: the admin password is needed.', 'err'); return null; }
+            const r = await fetch(path, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(Object.assign({}, payload || {}, { password: pw })),
+            });
+            if (r.status === 403) {
+                const b = (await window.GCSession.readJson(r.clone())).body;
+                U.refused({ status: 403 });
+                if (attempt === 0 && b && /incorrect password/i.test(b.error || '')) continue;
+            } else if (r.status < 400) {
+                U.accepted(pw);
+            }
+            if (opts && opts.raw) return r;
+            const body = (await window.GCSession.readJson(r)).body;
+            if (r.status >= 400 && !(opts && opts.quiet)) {
+                flash((body && body.error) || ('HTTP ' + r.status), 'err');
+            }
+            return { status: r.status, body };
         }
-        return { status: r.status, body };
+        return null;
     }
 
     const enc = encodeURIComponent;
