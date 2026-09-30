@@ -312,10 +312,14 @@ def test_the_user_menu_opens_settings_and_help_on_the_classic_page(tmp_path):
         browser_sign_in(drv, port)
         try:
             for what in ("settings", "help"):
-                drv.get(f"http://127.0.0.1:{port}/?open={what}")
+                # v5.0.0: the classic page is at /classic, and ?open= still opens its modals there
+                drv.get(f"http://127.0.0.1:{port}/classic?open={what}")
                 assert _wait(lambda: _js(drv, f"return document.getElementById('modal-{what}')"
                                               ".classList.contains('open');"), timeout=30), what
                 # the address no longer says ?open=, so a reload doesn't reopen it
                 assert "open=" not in drv.current_url
+                # the old /?open= link goes to the new Settings / Help page
+                drv.get(f"http://127.0.0.1:{port}/?open={what}")
+                assert _wait(lambda: drv.current_url.endswith(f"/{what}")), drv.current_url
         finally:
             drv.quit()
