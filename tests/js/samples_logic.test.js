@@ -173,7 +173,10 @@ module.exports = async (t) => {
     const ticks = L.carbonTicks([0.2, 0.3, 0.5, 0.8, 1.1], [6, 7, 8, 9, 10], { ink: '#111', axis: '#666' }, 3);
     t.eq(ticks.shapes.length, 5);
     t.eq(ticks.shapes[0].line.color, '#666');
-    t.eq(ticks.annotations.map(a => a.text), ['C6', 'C8', 'C10']);
+    // labels at least span/maxLabels apart (the ladder's span unless the chart's is given)
+    t.eq(ticks.annotations.map(a => a.text), ['C6', 'C8', 'C9', 'C10']);
+    t.eq(L.carbonTicks([0.2, 0.3, 0.5, 0.8, 1.1], [6, 7, 8, 9, 10], { axis: '#666' }, 3, 1.2).annotations.map(a => a.text),
+         ['C6', 'C9']);
     t.eq(L.carbonTicks([], [], {}, 3), { shapes: [], annotations: [] });
 
     // ── the Plotly template from the tokens ──────────────────────────────

@@ -129,7 +129,7 @@ def page(tmp_path_factory):
         drv = _driver()
         browser_sign_in(drv, port)
         try:
-            drv.get(f"http://127.0.0.1:{port}/")
+            drv.get(f"http://127.0.0.1:{port}/classic")
             assert _wait(lambda: _js(drv, "return state.files.length") >= 5)
             assert _js(drv, "return window.Plotly.__recording === true")
             yield drv, hub, port, pw
@@ -335,7 +335,7 @@ if (!window.__delayInstalled) {
 
 def _home(drv, port):
     if not drv.current_url.rstrip("/").endswith(str(port)):
-        drv.get(f"http://127.0.0.1:{port}/")
+        drv.get(f"http://127.0.0.1:{port}/classic")
     assert _wait(lambda: _js(drv, "return state.files.length") >= 5)
 
 
@@ -441,5 +441,5 @@ def test_admin_reorder_keeps_unsaved_edits(page):
                                   "${arguments[0]}'] input.preset-text`).value", ids[0])
                  == "unsaved edit")
     assert store.comment_presets.get(ids[0], db=hub.db)["text"] != "unsaved edit"
-    drv.get(f"http://127.0.0.1:{port}/")
+    drv.get(f"http://127.0.0.1:{port}/classic")
     assert _wait(lambda: _js(drv, "return state.files.length") >= 5)

@@ -160,7 +160,7 @@ def test_the_page_polls_the_job_then_fetches_the_zip(hub_app):
     drv = _driver()
     try:
         browser_sign_in(drv, port)
-        drv.get(f"http://127.0.0.1:{port}/")
+        drv.get(f"http://127.0.0.1:{port}/classic")
         deadline = time.time() + 30
         while drv.execute_script("return typeof exportToPC") != "function":
             assert time.time() < deadline

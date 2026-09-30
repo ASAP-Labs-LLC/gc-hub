@@ -70,7 +70,7 @@ def test_clicking_a_sample_selects_the_best_fit_standard_and_runs_the_analysis(t
         drv = _driver()
         try:
             browser_sign_in(drv, port)
-            drv.get(f"http://127.0.0.1:{port}/")
+            drv.get(f"http://127.0.0.1:{port}/classic")
             # the page has finished starting up (lists, standards, settings)
             assert wait_for(drv, lambda: drv.execute_script(
                 "return !!(window.DeepLink && DeepLink.started) && state.files.length > 0"

@@ -56,13 +56,15 @@ routes also need the admin password in the body, as before. `—` = removed.
 <!-- route-fates:begin -->
 | Route | Methods | Fate | Auth | Request → response |
 |---|---|---|---|---|
-| `/api/files` | GET | migrated | session | query `instrument, status (comma list), q, date_from, date_to, method, backfill (0/1), limit (default 500, max 5000), offset` → `{samples:[{sample_id, instrument, lab_id, display_name, injection_dt, status, error, flags, best_fit:{label,score}\|null, backfill, released, time_corrected, method_name, current_revision, review_note}], total, limit, offset, instruments:[id], cache_pending}`; never reads a CDF |
+| `/api/files` | GET | migrated | session | query `instrument, status (comma list), q, date_from, date_to, method, backfill (0/1), notsent (1: final and not uploaded to QBench; v5.0.0), limit (default 500, max 5000), offset` → `{samples:[{sample_id, instrument, lab_id, display_name, injection_dt, status, error, flags, best_fit:{label,score}\|null, backfill, released, time_corrected, method_name, current_revision, review_note, qbench_uploaded_at, received_at}], total, limit, offset, instruments:[id], cache_pending}`; never reads a CDF |
+| `/api/files/ids` | GET | new | session | v5.0.0 (read-only): the `/api/files` filters (and `notsent=1`) → `{ids, total, capped}`: the matching sample ids in list order, at most 20,000; the Samples page's "Select all N matching this filter" |
 | `/api/files/refresh` | POST | removed | — | 404 |
 | `/api/metadata/<path:filepath>` | GET | removed | — | 404; see `/api/samples/<int:sample_id>/metadata` |
 | `/api/samples/<int:sample_id>/metadata` | GET | new | session | → `{sample_id, instrument, lab_id, sample_name, injection_datetime, injection_dt_source, legacy_injection_dt, time_corrected, method_name, source_name, status, error, review_note, backfill, released_at, current_revision, qbench_revision, qbench_uploaded_at, revisions:[{revision, reason, by, processed_at}]}`; 404 unknown id |
 | `/api/trace` | GET | removed | — | 404; see `/api/samples/<int:sample_id>/trace` |
 | `/api/samples/<int:sample_id>/trace` | GET | new | session | → `{sample_id, x, y, name}` from the sample's stored CDF; 404 unknown id or no CDF |
 | `/api/distillation-curve` | GET | removed | — | 404; see `/api/samples/<int:sample_id>/distillation-curve` |
+| `/api/samples/<int:sample_id>/cdf` | GET | new | session | v5.0.0 (read-only): the current revision's stored CDF as an attachment (`<lab_id>.CDF`); 404 unknown id or no CDF |
 | `/api/samples/<int:sample_id>/distillation-curve` | GET | new | session | query `revision` (default current) → `{sample_id, revision, percent, temperature, d2887, d86, d86_uncorrected, blank_used, calibration:{cdf, anchors}}`; the curve is rebuilt from **that revision's** `calibration_used` anchors and `blank_used` sample's CDF; the numbers are the revision's `results`/`d86_uncorrected` (never recomputed); 404 unknown id, 409 no revision |
 | `/api/table` | GET | migrated | session | → `{columns: CSV_HEADER, rows:[[str...]], sample_ids:[...]}`: the current revision of every sample that has one, oldest injection first, cells as the CSV writes them |
 | `/api/calibration` | GET, POST | migrated | session | same shapes; reads/writes the `gc1` row (`calibration_cdf`, `calibration_assignments` list, `calibration_sensitivity`). POST adds `queued` (= `pipeline.on_calibration_saved('gc1')`) |
@@ -179,12 +181,18 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/api/admin/hub/resume-processing` | POST | new | local | hub tray `hub_control` (loopback only + admin password): start them again |
 | `/api/admin/hub/stop` | POST | new | local | hub tray `hub_control` (loopback only + admin password): write the updater's `paused` marker, stop the hub, exit without a respawn → 202 |
 | `/healthz` | GET | unchanged | open | |
-| `/` | GET | unchanged | session | |
+| `/` | GET | migrated | session | v5.0.0: the Samples page (`templates/samples.html`, lane S); `?open=settings\|help` (the classic modals' old links) → 302 `/classic?open=…` |
+| `/samples` | GET | new | session | v5.0.0: the Samples page; filters, search and sort in the query (`instrument, status, q, sort, notsent`) |
+| `/classic` | GET | new | session | v5.0.0: the classic main page (`templates/index.html`), kept for this release only |
+| `/classic/lab/<lab_id>` | GET | new | session | v5.0.0 `sample_links`: the classic page with the lab ID's newest run selected (as `/lab/<lab_id>` was in v4.0); 404 friendly page |
+| `/classic/samples/<int:sample_id>` | GET | new | session | v5.0.0 `sample_links`: the classic page, that run selected, Dashboard tab; 404 friendly page |
+| `/classic/samples/<int:sample_id>/compare` | GET | new | session | v5.0.0 `sample_links`: as above, Analysis tab; `?standard=<name>` |
+| `/classic/samples/<int:sample_id>/data` | GET | new | session | v5.0.0 `sample_links`: as above, Distillation Data tab |
 | `/calibration` | GET | unchanged | session | |
-| `/lab/<lab_id>` | GET | new | session | v3.1 `sample_links` (sendable links): the classic page with the lab ID's newest run selected (latest `injection_dt`, final runs first, any instrument; exact then case-insensitive match; decoded once); other runs listed on the page; 404 friendly "No GC result for lab ID … yet" page |
-| `/samples/<int:sample_id>` | GET | new | session | v3.1 `sample_links`: the classic page, that run selected, Dashboard tab; 404 friendly page |
-| `/samples/<int:sample_id>/compare` | GET | new | session | v3.1 `sample_links`: as above, Analysis tab; `?standard=<name>` picks the comparison standard |
-| `/samples/<int:sample_id>/data` | GET | new | session | v3.1 `sample_links`: as above, Distillation Data tab |
+| `/lab/<lab_id>` | GET | new | session | v3.1 `sample_links` (sendable links): the lab ID's newest run (latest `injection_dt`, final runs first, any instrument; exact then case-insensitive match; decoded once); v5.0.0: 302 to `/samples/<id>`, whose Overview lists the other runs; 404 friendly "No GC result for lab ID … yet" page |
+| `/samples/<int:sample_id>` | GET | new | session | v3.1 `sample_links`; v5.0.0: the Samples page, that run, Overview; 404 friendly page |
+| `/samples/<int:sample_id>/compare` | GET | new | session | v3.1 `sample_links`; v5.0.0: as above, Compare; `?standard=<name>` picks the comparison standard |
+| `/samples/<int:sample_id>/data` | GET | new | session | v3.1 `sample_links`; v5.0.0: as above, Data |
 | `/api/lab/<lab_id>` | GET | new | session | v3.1 `sample_links`: → `{lab_id, sample_id, runs:[{sample_id, lab_id, instrument, instrument_name, injection_dt, status}]}` (newest first); 404 `{error, lab_id}` |
 | `/login` | GET | new | open | the sign-in page (`web_auth`): card, LabLink username/password, and on the LAN the admin-password break-glass; `?next=` (sanitised) where to go after; a signed-in visitor is redirected there |
 | `/api/login` | POST | new | open | `{username, password, next?}` → LabCore `POST /api/login`; 200 `{ok, name, method: "password", next}` + the session cookie; 401 wrong, 429 throttled, 503 `{labcore_unavailable}`; through Cloudflare https only |

@@ -1195,7 +1195,7 @@ def _listify(v: Union[str, Sequence[Any]]) -> list:
 
 
 def _search_where(q, instrument, date_from, date_to, status, method_name, backfill,
-                  time_unverifiable=None, ids=None) -> tuple[str, list]:
+                  time_unverifiable=None, ids=None, qbench_sent=None) -> tuple[str, list]:
     where, args = [], []
     if ids is not None:
         idl = [int(i) for i in ids]
@@ -1240,6 +1240,10 @@ def _search_where(q, instrument, date_from, date_to, status, method_name, backfi
     if time_unverifiable is not None:
         where.append("time_unverifiable = ?")
         args.append(1 if time_unverifiable else 0)
+    if qbench_sent is not None:
+        # v5.0.0: "Not sent to QBench" = a final result never uploaded
+        where.append("qbench_uploaded_at IS NOT NULL" if qbench_sent
+                     else "(status = 'final' AND qbench_uploaded_at IS NULL)")
     return (" WHERE " + " AND ".join(where)) if where else "", args
 
 
@@ -1409,7 +1413,8 @@ class samples:  # noqa: N801
                status: Union[None, str, Sequence[str]] = None, limit: int = 100,
                offset: int = 0, *, method_name: Union[None, str, Sequence[str]] = None,
                backfill: Optional[bool] = None, time_unverifiable: Optional[bool] = None,
-               ids: Optional[Sequence[int]] = None, db: Db = None) -> list[dict]:
+               ids: Optional[Sequence[int]] = None, qbench_sent: Optional[bool] = None,
+               db: Db = None) -> list[dict]:
         """Filter samples, newest injection first (ties: newest id first).
 
         ``q``: case-insensitive substring of ``lab_id`` or ``source_name``
@@ -1418,13 +1423,32 @@ class samples:  # noqa: N801
         ``local_dt`` and compared with ``injection_dt``; a bare date
         ``date_to`` includes that whole day. ``backfill``: True/False/None.
         ``ids``: only these sample ids (an empty list matches nothing).
+        ``qbench_sent``: True = uploaded to QBench; False = a final result
+        not uploaded yet (the Samples page's "Not sent to QBench").
         """
         where, args = _search_where(q, instrument, date_from, date_to, status, method_name, backfill,
-                                    time_unverifiable, ids)
+                                    time_unverifiable, ids, qbench_sent)
         with connection(db) as conn:
             return _rows(conn.execute(
                 f"SELECT * FROM samples{where} ORDER BY injection_dt DESC, id DESC LIMIT ? OFFSET ?",
                 args + [int(limit), int(offset)]))
+
+    @staticmethod
+    def search_ids(q: Optional[str] = None, instrument: Union[None, str, Sequence[str]] = None,
+                   date_from: Union[None, str, datetime, date] = None,
+                   date_to: Union[None, str, datetime, date] = None,
+                   status: Union[None, str, Sequence[str]] = None, limit: int = 20000, *,
+                   method_name: Union[None, str, Sequence[str]] = None,
+                   backfill: Optional[bool] = None, qbench_sent: Optional[bool] = None,
+                   db: Db = None) -> list[int]:
+        """The ids ``search`` would match (same filters and order), at most
+        ``limit``: the Samples page's "Select all N matching this filter"."""
+        where, args = _search_where(q, instrument, date_from, date_to, status, method_name, backfill,
+                                    None, None, qbench_sent)
+        with connection(db) as conn:
+            return [int(r[0]) for r in conn.execute(
+                f"SELECT id FROM samples{where} ORDER BY injection_dt DESC, id DESC LIMIT ?",
+                args + [int(limit)])]
 
     @staticmethod
     def count(q: Optional[str] = None, instrument: Union[None, str, Sequence[str]] = None,
@@ -1433,10 +1457,11 @@ class samples:  # noqa: N801
               status: Union[None, str, Sequence[str]] = None, *,
               method_name: Union[None, str, Sequence[str]] = None,
               backfill: Optional[bool] = None, time_unverifiable: Optional[bool] = None,
-              ids: Optional[Sequence[int]] = None, db: Db = None) -> int:
+              ids: Optional[Sequence[int]] = None, qbench_sent: Optional[bool] = None,
+              db: Db = None) -> int:
         """How many samples ``search`` would match without paging."""
         where, args = _search_where(q, instrument, date_from, date_to, status, method_name, backfill,
-                                    time_unverifiable, ids)
+                                    time_unverifiable, ids, qbench_sent)
         with connection(db) as conn:
             return int(conn.execute(f"SELECT COUNT(*) FROM samples{where}", args).fetchone()[0])
 

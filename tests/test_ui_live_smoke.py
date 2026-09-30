@@ -122,7 +122,7 @@ def test_an_ingested_cdf_appears_without_a_reload(tmp_path):
         drv = _driver()
         browser_sign_in(drv, port)
         try:
-            drv.get(f"http://127.0.0.1:{port}/")
+            drv.get(f"http://127.0.0.1:{port}/classic")
             assert _wait(lambda: len(_rows(drv)) >= 8), _rows(drv)
             # the Refresh button (and its Ctrl+R) is gone
             assert drv.execute_script("return document.getElementById('btn-refresh');") is None

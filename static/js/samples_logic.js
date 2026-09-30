@@ -322,17 +322,21 @@
     // ── the chart ───────────────────────────────────────────────────────
     /** Carbon ticks along the top: short hairlines for every carbon of the
         sample's own ladder, labels thinned to at most maxLabels. */
-    function carbonTicks(times, carbons, colours, maxLabels) {
+    function carbonTicks(times, carbons, colours, maxLabels, xSpan) {
         const n = Math.min((times || []).length, (carbons || []).length);
         const shapes = [];
         const annotations = [];
         if (!n) return { shapes, annotations };
-        const every = Math.max(1, Math.ceil(n / Math.max(1, maxLabels || 14)));
+        const xs = times.slice(0, n).map(Number);
+        const span = xSpan > 0 ? xSpan : (Math.max(...xs) - Math.min(...xs));
+        const gap = span / Math.max(1, maxLabels || 14) - 1e-9;
+        let last = -Infinity;
         for (let i = 0; i < n; i++) {
-            const x = Number(times[i]);
+            const x = xs[i];
             shapes.push({ type: 'line', x0: x, x1: x, y0: 1.0, y1: 1.03, yref: 'paper',
                           line: { color: colours.axis, width: 1 } });
-            if (i % every === 0) {
+            if (x - last >= gap) {
+                last = x;
                 annotations.push({ x, y: 1.035, yref: 'paper', text: 'C' + carbons[i], showarrow: false,
                                    yanchor: 'bottom', font: { color: colours.axis, size: 10 } });
             }
