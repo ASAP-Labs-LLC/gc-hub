@@ -181,7 +181,7 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/api/login/card` | POST | new | open | `{code, next?}` (the card code as both LabCore fields) → as `/api/login`, method `card`; the code is never logged |
 | `/api/login/admin` | POST | new | open | `{password, next?}` → the break-glass session `Admin (break-glass)`, method `admin`; 403 through Cloudflare; `admin_auth.check` and its throttle |
 | `/api/logout` | POST | new | open | revokes the session, clears the cookies → `{ok: true}` |
-| `/api/session` | GET | new | session | → `{name, method, hub_url}` of the signed-in person (`hub_url` = `admin_auth.effective_hub_url()`, the base of a copied sample link) (the gate's 401 otherwise); the SSE stream's check |
+| `/api/session` | GET | new | session | → `{name, method, link_url}` of the signed-in person (`link_url` = `admin_auth.sendable_hub_url()`, the base of a copied sample link: the hub URL unless it is LAN-only, then https://gc.asaplabs.net) (the gate's 401 otherwise); the SSE stream's check |
 | `/api/admin/sessions` | POST | new | session | admin password; `{action: list\|revoke\|revoke-name, id?, name?}` → `{sessions: [{id, name, method, ip, created_at, last_seen, user_agent}]}` (never a token hash) |
 <!-- route-fates:end -->
 

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -28,6 +27,7 @@ webdriver = pytest.importorskip("selenium.webdriver")
 
 from bootapp import browser_sign_in, booted  # noqa: E402
 from hub_boot import build_hub  # noqa: E402
+from ui_wait import click_when_ready, wait_for  # noqa: E402
 
 PRELOAD = """
 if (!window.Plotly) {
@@ -59,19 +59,6 @@ def _driver():
     return drv
 
 
-def _wait(pred, timeout=30.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            v = pred()
-        except Exception:  # noqa: BLE001 - DOM not ready yet
-            v = None
-        if v:
-            return v
-        time.sleep(0.2)
-    return pred()
-
-
 def test_clicking_a_sample_selects_the_best_fit_standard_and_runs_the_analysis(tmp_path):
     hub = build_hub(tmp_path)
     settings = hub.data / "settings.json"
@@ -84,26 +71,31 @@ def test_clicking_a_sample_selects_the_best_fit_standard_and_runs_the_analysis(t
         try:
             browser_sign_in(drv, port)
             drv.get(f"http://127.0.0.1:{port}/")
-            assert _wait(lambda: drv.execute_script(
-                "return state.files.length > 0 && state.comparisonStandards.length > 0"))
-            drv.find_element("css selector", '.tab-btn[data-tab="tab-analysis"]').click()
-            li = _wait(lambda: drv.find_element(
-                "css selector", f'#analysis-sample-list li[data-sample-id="{sid}"]'))
-            li.click()
+            # the page has finished starting up (lists, standards, settings)
+            assert wait_for(drv, lambda: drv.execute_script(
+                "return !!(window.DeepLink && DeepLink.started) && state.files.length > 0"
+                " && state.comparisonStandards.length > 0"), 30)
+            assert click_when_ready(drv, '.tab-btn[data-tab="tab-analysis"]')
+            # find + click in one retried step: the lists are rebuilt when the
+            # flags/best-fit cache fills in, which can stale a found element
+            assert click_when_ready(drv, f'#analysis-sample-list li[data-sample-id="{sid}"]')
+            assert wait_for(drv, lambda: drv.execute_script(
+                "return state.selectedSample && state.selectedSample.sample_id") == sid)
 
             # the best-fit standard is picked and shown selected in the list
-            assert _wait(lambda: drv.execute_script(
-                "return state.selectedStandard && state.selectedStandard.name") == "Diesel"), \
+            assert wait_for(drv, lambda: drv.execute_script(
+                "return state.selectedStandard && state.selectedStandard.name") == "Diesel", 30), \
                 drv.execute_script("return [state.bestFit, state.selectedStandard]")
-            assert _wait(lambda: drv.execute_script("""
+            assert wait_for(drv, lambda: drv.execute_script("""
                 const li = document.querySelector('#analysis-standards-list li.selected');
                 return li ? li.textContent : null;""") == "Diesel")
             # ... and the analysis runs with it, and renders
-            assert _wait(lambda: any(a.get("sample_id") == sid and a.get("standard_name") == "Diesel"
-                                     for a in drv.execute_script("return window.__analysis"))), \
+            assert wait_for(drv, lambda: any(
+                a.get("sample_id") == sid and a.get("standard_name") == "Diesel"
+                for a in drv.execute_script("return window.__analysis")), 30), \
                 drv.execute_script("return window.__analysis")
-            assert _wait(lambda: drv.execute_script(
-                "return state.analysisResult && state._renderedAnalysisSampleId") == sid)
+            assert wait_for(drv, lambda: drv.execute_script(
+                "return state.analysisResult && state._renderedAnalysisSampleId") == sid, 30)
             assert drv.execute_script("return state.standardPinned") is False
         finally:
             drv.quit()

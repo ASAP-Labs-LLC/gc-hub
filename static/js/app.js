@@ -1576,8 +1576,14 @@ function renderDistillTable() {
         return;
     }
 
-    for (const row of displayRows) {
+    // Each row's sample id (sample_ids runs parallel to rows): a /data link
+    // marks its sample's row (static/js/deeplink.js).
+    const idOfRow = new Map(rows.map((r, i) => [r, (state.tableData.sample_ids || [])[i]]));
+    displayRows.forEach((row, ri) => {
         const tr = document.createElement('tr');
+        const sid = idOfRow.get(sortedRows[ri]);
+        if (sid != null) tr.dataset.sampleId = sid;
+        if (sid != null && sid === state.linkedTableSampleId) tr.classList.add('linked-row');
         row.forEach((cell, ci) => {
             const td = document.createElement('td');
             const cls = DistillView.columnClass(columns[ci]);   // the same group as its header
@@ -1586,7 +1592,7 @@ function renderDistillTable() {
             tr.appendChild(td);
         });
         tbody.appendChild(tr);
-    }
+    });
 
     // Attach sort handlers on header
     if (thead) {

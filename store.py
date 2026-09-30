@@ -544,6 +544,13 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
     ),
 )
 SCHEMA_VERSION = len(MIGRATIONS)
+# Indexes ``migrate`` ensures on every start, outside the numbered steps (no
+# ``user_version`` bump, no backup): additive, harmless to older code, and
+# nothing another branch's migration step has to be ordered against.
+ENSURED_INDEXES: tuple[str, ...] = (
+    # sendable links (v3.1): /lab/<lab_id>'s case-insensitive fallback
+    "CREATE INDEX IF NOT EXISTS samples_lab_nocase ON samples(lab_id COLLATE NOCASE)",
+)
 WEB_SESSION_METHODS: tuple[str, ...] = ("password", "card", "admin")
 WEB_SESSION_IDLE_SECONDS = 12 * 3600      # web_auth's idle limit
 WEB_SESSION_PRUNE_DAYS = 30               # Maintenance deletes sessions ended this long ago
@@ -879,6 +886,9 @@ def migrate(path: PathLike = None) -> int:
                 log.info("store: migrated to schema v%s", version + 1)
             version = conn.execute("PRAGMA user_version").fetchone()[0]
         _check_columns(conn)
+        with write_txn(conn):
+            for stmt in ENSURED_INDEXES:
+                conn.execute(stmt)
         return version
     finally:
         conn.close()
@@ -1268,6 +1278,18 @@ class samples:  # noqa: N801
             return _row(conn.execute(
                 "SELECT * FROM samples WHERE instrument_id=? AND lab_id=? AND injection_dt=?",
                 (instrument_id, lab_id, injection_dt)).fetchone())
+
+    @staticmethod
+    def with_lab_id(lab_id: str, *, nocase: bool = False, db: Db = None) -> list[dict]:
+        """Every sample whose lab ID is ``lab_id`` (``nocase``: ASCII
+        case-insensitively; SQLite's NOCASE folds A–Z only), newest injection
+        first (ties: newest id). Indexed (``samples_lab`` /
+        ``samples_lab_nocase``), never a substring, no row limit."""
+        where = "lab_id = ? COLLATE NOCASE" if nocase else "lab_id = ?"
+        with connection(db) as conn:
+            return _rows(conn.execute(
+                f"SELECT * FROM samples WHERE {where} ORDER BY injection_dt DESC, id DESC",
+                (lab_id,)))
 
     @staticmethod
     def find_by_legacy(instrument_id: str, lab_id: str, dt: str, *, db: Db = None) -> list[dict]:

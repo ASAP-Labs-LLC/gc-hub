@@ -19,8 +19,9 @@ API (session)::
     GET /api/lab/<lab_id> → {lab_id, sample_id, runs: [{sample_id, lab_id,
         instrument, instrument_name, injection_dt, status}]}   newest first; 404
 
-**Resolution.** The lab ID is matched exactly, else case-insensitively (never
-a substring; LIKE wildcards are literal). The run opened is the one with the
+**Resolution.** The lab ID is matched exactly, else ASCII case-insensitively
+(SQLite NOCASE: non-ASCII letters must match exactly; never a substring), both
+through an index (``store.samples.with_lab_id``). The run opened is the one with the
 latest ``injection_dt`` among the final runs, else among all runs (ties: the
 newest id), across instruments. The URL is decoded once, by the server; ``/``
 cannot be in a lab ID (the route does not match it).
@@ -37,10 +38,8 @@ import store
 
 bp = Blueprint("sample_links", __name__)
 
-# More rows than any lab ID has runs; the search is a substring match, so this
-# also bounds what near-miss IDs (403290 for 40329) can crowd in.
-_SEARCH_LIMIT = 5000
 MAX_LAB_ID = 200
+MAX_SAMPLE_ID = 2 ** 63 - 1           # SQLite's INTEGER range; larger ids cannot exist
 
 
 def _db() -> Path:
@@ -48,16 +47,14 @@ def _db() -> Path:
 
 
 def find_runs(lab_id: str, *, db) -> list[dict]:
-    """The samples whose lab ID is ``lab_id`` exactly, else case-insensitively;
-    newest injection first (ties: newest id)."""
+    """The samples whose lab ID is ``lab_id`` exactly, else ASCII
+    case-insensitively (SQLite NOCASE: é and É stay different); newest
+    injection first (ties: newest id). Both lookups are indexed, never a
+    substring, with no row limit."""
     if not lab_id or len(lab_id) > MAX_LAB_ID:
         return []
-    rows = store.samples.search(q=lab_id, limit=_SEARCH_LIMIT, db=db)
-    exact = [r for r in rows if r["lab_id"] == lab_id]
-    if exact:
-        return exact
-    folded = lab_id.casefold()
-    return [r for r in rows if str(r["lab_id"]).casefold() == folded]
+    return (store.samples.with_lab_id(lab_id, db=db)
+            or store.samples.with_lab_id(lab_id, nocase=True, db=db))
 
 
 def pick(runs: list[dict]) -> Optional[dict]:
@@ -120,7 +117,7 @@ def lab_page(lab_id: str):
 
 
 def _sample_page(sample_id: int):
-    if store.samples.get(sample_id, db=_db()) is None:
+    if not 0 < sample_id <= MAX_SAMPLE_ID or store.samples.get(sample_id, db=_db()) is None:
         return _not_found(sample_id=sample_id)
     return _classic_page()
 

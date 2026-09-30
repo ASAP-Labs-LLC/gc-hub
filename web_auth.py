@@ -66,7 +66,7 @@ cached in memory for 30 s (revoking clears the cache). ``last_seen`` is kept
 in memory and written by a background refresher at most once a minute per
 session, and only for activity (``note_seen``, called by the app's activity
 tracker, which skips its non-activity paths). Sign out is ``POST
-/api/logout``. ``GET /api/session`` → ``{name, method, hub_url}`` (or the gate's 401).
+/api/logout``. ``GET /api/session`` → ``{name, method, link_url}`` (or the gate's 401).
 
 **Logging**: a sign-in logs the name, method and client address; a failed
 one logs the address, the method and ``sha256(username)[:8]`` — never the
@@ -128,6 +128,7 @@ SETUP_PATHS = frozenset({admin_auth.SETUP_PATH, "/api/admin/setup"})
 NOT_LOCAL_MESSAGE = ("This control works only on the hub machine itself "
                      "(the hub tray, or http://localhost:5560 on ASAPSV1).")
 
+_NEXT_PATH_SAFE = "/:@!$&'()*+,;=-._~"    # RFC 3986 path characters kept as they are
 _NEXT_RE = re.compile(r"^/(?![/\\])[^\\\x00-\x1f]*$")
 
 
@@ -408,9 +409,11 @@ def _login_required():
         resp.status_code = 401
         resp.headers[LOGIN_REQUIRED_HEADER] = "1"
         return resp
-    nxt = request.path + (("?" + request.query_string.decode("latin-1"))
-                          if request.query_string else "")
     from urllib.parse import quote
+    # request.path is decoded: quote it again, so a link's %3F, %23, %25 or
+    # %5C comes back as the same request after sign-in (sendable links)
+    nxt = quote(request.path, safe=_NEXT_PATH_SAFE) + (
+        ("?" + request.query_string.decode("latin-1")) if request.query_string else "")
     return redirect(f"{LOGIN_PATH}?next={quote(safe_next(nxt), safe='/')}", 302)
 
 
@@ -763,10 +766,10 @@ def api_session():
     s = current_user()
     if s is None:           # the gate refuses first; kept for safety
         return _login_required()
-    # hub_url: the address a copied sample link uses (always the configured
-    # hub, never this request's origin; sendable links, v3.1)
+    # link_url: the base of a copied sample link (sendable links, v3.1): the
+    # hub URL unless it is LAN-only, never this request's origin
     return jsonify({"name": s["name"], "method": s["method"],
-                    "hub_url": admin_auth.effective_hub_url()})
+                    "link_url": admin_auth.sendable_hub_url()})
 
 
 @bp.route(LOGIN_PATH, methods=["GET"])

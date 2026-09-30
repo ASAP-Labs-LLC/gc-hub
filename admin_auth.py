@@ -497,6 +497,20 @@ def effective_hub_url(*, db=None) -> str:
         return DEFAULT_HUB_URL
 
 
+def sendable_hub_url(*, db=None) -> str:
+    """The base of a link meant to be sent (copied sample links): the
+    effective hub URL, unless it only works on the lab network (http, or a
+    LAN name/IP), then ``DEFAULT_HUB_URL``."""
+    url = effective_hub_url(db=db)
+    try:
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme == "https" and parts.hostname and not is_lan_host(parts.hostname):
+            return url.rstrip("/")
+    except ValueError:
+        pass
+    return DEFAULT_HUB_URL
+
+
 def configured_hub_host(*, db=None) -> Optional[str]:
     """The effective hub URL's host name."""
     url = effective_hub_url(db=db)

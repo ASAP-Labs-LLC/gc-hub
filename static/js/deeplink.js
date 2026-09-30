@@ -11,8 +11,8 @@
 
    app.js calls DeepLink.start() once, after the sample list first loads, and
    DeepLink.wireContextItem(file) from the sample context menu. A copied link is
-   <hub_url>/samples/<id>, hub_url from GET /api/session (the configured hub,
-   https://gc.asaplabs.net by default), never location.origin: a link copied
+   <link_url>/samples/<id>, link_url from GET /api/session (the configured hub,
+   or https://gc.asaplabs.net when that is LAN-only), never location.origin: a link copied
    over the LAN must still open from anywhere. The DOM is built with
    textContent only (lab IDs and instrument names are untrusted). */
 (function (root) {
@@ -65,10 +65,22 @@
         return `${base}/samples/${sampleId}`;
     }
 
-    /** The link from GET /api/session's answer. ``loc`` is deliberately
+    /** The link from GET /api/session's ``link_url`` (the hub URL, or the
+        public default when the hub URL is LAN-only). ``loc`` is deliberately
         ignored: the page's own origin (a LAN address) is never used. */
     function linkFromSession(session, sampleId, loc) {
-        return sampleLink(session && session.hub_url, sampleId);
+        return sampleLink(session && session.link_url, sampleId);
+    }
+
+    /** /api/files for the one row a link needs when the loaded list leaves it
+        out: its lab ID, on its instrument, on its day (never crowded out). */
+    function exactFileUrl(meta) {
+        if (!meta || meta.lab_id == null) return null;
+        const parts = ['limit=50', 'q=' + encodeURIComponent(meta.lab_id)];
+        if (meta.instrument) parts.push('instrument=' + encodeURIComponent(meta.instrument));
+        const day = /^(\d{4}-\d{2}-\d{2})/.exec(String(meta.injection_datetime || ''));
+        if (day) parts.push(`date_from=${day[1]}`, `date_to=${day[1]}`);
+        return '/api/files?' + parts.join('&');
     }
 
     function labApiUrl(labId) { return '/api/lab/' + encodeURIComponent(labId); }
@@ -109,7 +121,7 @@
 
     const pure = {
         DEFAULT_HUB_URL, parseLocation, tabId, isAdvancedTab, sampleLink, linkFromSession,
-        labApiUrl, runLabel, otherRuns, otherRunsTitle, findStandard, findFile,
+        exactFileUrl, labApiUrl, runLabel, otherRuns, otherRunsTitle, findStandard, findFile,
     };
 
     if (typeof module !== 'undefined' && module.exports) {
@@ -121,14 +133,14 @@
 
     let _session = null;
 
-    async function _hubUrl() {
+    async function _loadSession() {
         if (!_session) {
             try {
                 const r = await fetch('/api/session', { cache: 'no-store' });
                 if (r.ok) _session = await r.json();
-            } catch (_) { /* the default below */ }
+            } catch (_) { /* linkFromSession falls back to the default */ }
         }
-        return (_session && _session.hub_url) || DEFAULT_HUB_URL;
+        return _session;
     }
 
     function _notify(msg, type) {
@@ -161,7 +173,7 @@
             _notify('Select a sample first', 'error');
             return null;
         }
-        const url = linkFromSession({ hub_url: await _hubUrl() }, file.sample_id);
+        const url = linkFromSession(await _loadSession(), file.sample_id);
         api.lastCopied = url;
         if (await _copyText(url)) _notify('Link copied', 'success');
         else window.prompt('Copy this link:', url);
@@ -222,26 +234,50 @@
         if (label) label.textContent = file.name;
     }
 
-    /** The sample's row, loading it (by its lab ID, every instrument) when the
-        list's page or instrument filter leaves it out. */
-    async function _fileFor(sampleId, labId) {
+    /** The sample's row. When the list's instrument filter leaves it out, the
+        list is reloaded for every instrument (this view only; the remembered
+        filter is not changed), so "All" really shows all. When the loaded page
+        leaves it out, the list shows a search for its lab ID, with the row
+        itself fetched exactly if even that search is crowded. */
+    async function _fileFor(sampleId) {
         const file = findFile(state.files, sampleId);
         if (file && (!state.listInstrument || file.instrument === state.listInstrument)) return file;
-        if (!labId) {
-            const meta = await _json(`/api/samples/${sampleId}/metadata`);
-            labId = meta.ok ? meta.body.lab_id : null;
+        const meta = await _json(`/api/samples/${sampleId}/metadata`);
+        if (!meta.ok) return null;
+        if (state.listInstrument) {
+            state.listInstrument = null;
+            const sel = document.getElementById('instrument-filter');
+            if (sel) sel.value = '';
+            state.searchResult = null;
+            await loadFiles();
+            const reloaded = findFile(state.files, sampleId);
+            if (reloaded) return reloaded;
         }
-        if (!labId) return null;
-        const res = await _json(filesUrl({ q: labId }, 500));
-        const found = res.ok ? findFile(res.body.samples, sampleId) : null;
-        if (!found) return null;
-        state.listInstrument = null;              // this view only; not remembered
-        const sel = document.getElementById('instrument-filter');
-        if (sel) sel.value = '';
+        const labId = meta.body.lab_id;
+        const limit = typeof FILES_PAGE_LIMIT !== 'undefined' ? FILES_PAGE_LIMIT : 5000;
+        const res = await _json(filesUrl({ q: labId }, limit));
+        let samples = res.ok ? (res.body.samples || []) : [];
+        let found = findFile(samples, sampleId);
+        if (!found) {
+            const one = await _json(exactFileUrl(meta.body));
+            found = one.ok ? findFile(one.body.samples, sampleId) : null;
+            if (!found) return null;
+            samples = [found].concat(samples);
+        }
         const search = document.getElementById('universal-search');
         if (search) search.value = labId;
-        state.searchResult = { q: labId, samples: res.body.samples || [], total: res.body.total || 0 };
+        state.searchResult = { q: labId, samples,
+                               total: Math.max((res.ok && res.body.total) || 0, samples.length) };
         return found;
+    }
+
+    /** Distillation Data: mark the sample's row and scroll to it. */
+    function _showDataRow(sampleId) {
+        state.linkedTableSampleId = sampleId;
+        if (typeof renderDistillTable === 'function') renderDistillTable();
+        const tr = document.querySelector('#distill-table-body tr.linked-row');
+        if (tr && tr.scrollIntoView) tr.scrollIntoView({ block: 'center' });
+        else _notify(`Sample #${sampleId} has no row in Distillation Data (no result yet)`, 'info');
     }
 
     async function _open(target) {
@@ -262,7 +298,7 @@
             resolved = res.body;
             sampleId = resolved.sample_id;
         }
-        const file = await _fileFor(sampleId, resolved && resolved.lab_id);
+        const file = await _fileFor(sampleId);
         if (!file) {
             _notify(`Sample #${sampleId} could not be found`, 'error');
             return;
@@ -288,6 +324,10 @@
         const idx = Array.from(document.querySelectorAll('.tab-btn'))
             .findIndex(b => b.dataset.tab === tabId(tab));
         switchTab(idx < 0 ? 0 : idx);     // re-renders the lists and loads the tab
+        if (tab === 'data') {
+            _showDataRow(file.sample_id);
+            return;
+        }
         const row = document.querySelector('.tab-pane.active li.selected');
         if (row && row.scrollIntoView) row.scrollIntoView({ block: 'center' });
     }
@@ -296,7 +336,8 @@
     async function start() {
         const btn = document.getElementById('btn-copy-link');
         if (btn) btn.addEventListener('click', () => copyLink(state.selectedFile));
-        _hubUrl();                                  // warm: copying stays in the click
+        _loadSession();                             // warm: copying stays in the click
+        api.started = true;
         const target = parseLocation(location.pathname, location.search);
         if (!target) return;
         try {
@@ -309,6 +350,6 @@
     }
 
     const api = Object.assign({}, pure, { start, copyLink, wireContextItem,
-                                          lastCopied: null, applied: null });
+                                          lastCopied: null, started: false, applied: null });
     root.DeepLink = api;
 })(typeof window !== 'undefined' ? window : globalThis);

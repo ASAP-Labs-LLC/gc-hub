@@ -56,11 +56,25 @@ module.exports = (t) => {
     t.eq(D.sampleLink(null, 12), 'https://gc.asaplabs.net/samples/12');
     t.eq(D.DEFAULT_HUB_URL, 'https://gc.asaplabs.net');
     // opened over the LAN, the session still says gc.asaplabs.net
-    t.eq(D.linkFromSession({ name: 'x', hub_url: 'https://gc.asaplabs.net' }, 40,
+    // GET /api/session's link_url (the server already swaps a LAN-only hub
+    // URL for the public one); hub_url and the page origin are never used
+    t.eq(D.linkFromSession({ name: 'x', link_url: 'https://gc.asaplabs.net' }, 40,
                            { origin: 'http://asapsv1:5560' }),
+         'https://gc.asaplabs.net/samples/40');
+    t.eq(D.linkFromSession({ link_url: 'https://gc.example.org/' }, 40), 'https://gc.example.org/samples/40');
+    t.eq(D.linkFromSession({ hub_url: 'http://asapsv1:5560' }, 40, { origin: 'http://asapsv1:5560' }),
          'https://gc.asaplabs.net/samples/40');
     t.eq(D.linkFromSession(null, 40, { origin: 'http://192.168.1.20:5560' }),
          'https://gc.asaplabs.net/samples/40');
+
+    // the one row a link needs when the loaded list leaves it out: its lab
+    // ID on its instrument on its day (a handful of rows, never crowded out)
+    t.eq(D.exactFileUrl({ lab_id: '40304', instrument: 'gc2', injection_datetime: '2026-09-25 14:23:00' }),
+         '/api/files?limit=50&q=40304&instrument=gc2&date_from=2026-09-25&date_to=2026-09-25');
+    t.eq(D.exactFileUrl({ lab_id: 'A&B', instrument: 'gc 1', injection_datetime: '2026-09-25T01:02:03' }),
+         '/api/files?limit=50&q=A%26B&instrument=gc%201&date_from=2026-09-25&date_to=2026-09-25');
+    t.eq(D.exactFileUrl({ lab_id: '1' }), '/api/files?limit=50&q=1');
+    t.eq(D.exactFileUrl(null), null);
 
     t.eq(D.labApiUrl('40318-RERUN-2'), '/api/lab/40318-RERUN-2');
     t.eq(D.labApiUrl('A%41'), '/api/lab/A%2541');

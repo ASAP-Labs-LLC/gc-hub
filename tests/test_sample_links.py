@@ -286,25 +286,101 @@ def test_a_signed_out_link_lands_back_on_it_after_sign_in(env):
     assert r.status_code == 200 and r.get_data(as_text=True) == CLASSIC
 
 
-def test_a_signed_out_compare_link_keeps_its_query(env):
+@pytest.mark.parametrize("raw", ["40%3F1", "40%231", "40%2541", "40%25", "a%5Cb", "a%20b",
+                                 "%C3%A9t%C3%A9"])
+def test_a_signed_out_link_keeps_its_escapes_through_sign_in(env, raw):
+    """next is the path re-quoted: the browser, sent to next after sign-in,
+    requests exactly the same /lab/<raw> (?, #, % and backslash survive)."""
+    from urllib.parse import parse_qs, unquote, urlsplit
+    r = get(env, "/lab/" + raw)
+    assert r.status_code == 302
+    nxt = parse_qs(urlsplit(r.headers["Location"]).query)["next"][0]
+    assert web_auth.safe_next(nxt) == nxt
+    after = urlsplit(nxt)
+    assert not after.query and not after.fragment
+    assert unquote(after.path) == unquote("/lab/" + raw)
+
+
+def test_next_keeps_the_query_and_the_guards(env):
     r = get(env, "/samples/7/compare?standard=Diesel%20B")
     assert r.status_code == 302
     assert r.headers["Location"] == "/login?next=/samples/7/compare%3Fstandard%3DDiesel%2520B"
+    r = get(env, "/instruments?x=1")
+    assert r.headers["Location"] == "/login?next=/instruments%3Fx%3D1"
+    assert web_auth.safe_next("/%5Cevil.example") == "/%5Cevil.example"   # a relative path
+    for bad in ("//evil.example", "/\\evil.example", "/api/lab/1", "https://evil.example"):
+        assert web_auth.safe_next(bad) == "/"
 
 
 # ── the copied link's address ───────────────────────────────────────────────
 
-def test_the_session_carries_the_hub_url_even_over_the_lan(env):
-    token = signed_in(env)
-    r = env["app"].test_client(use_cookies=False).get("/api/session", environ_base=LAN,
-                                     headers={"Host": "192.168.1.20:5560", "Cookie": f"gc_session={token}"})
+def _session(env, host, token):
+    r = env["app"].test_client(use_cookies=False).get(
+        "/api/session", environ_base=LAN, headers={"Host": host, "Cookie": f"gc_session={token}"})
     assert r.status_code == 200
-    assert r.get_json()["hub_url"] == "https://gc.asaplabs.net"
+    return r.get_json()
 
 
-def test_the_session_carries_an_admin_set_hub_url(env):
+def test_the_session_carries_the_link_url_even_over_the_lan(env):
+    token = signed_in(env)
+    assert _session(env, "192.168.1.20:5560", token)["link_url"] == "https://gc.asaplabs.net"
+
+
+def test_an_admin_set_public_hub_url_is_the_link_url(env):
     token = signed_in(env)
     store.settings_kv.set("hub_url", "https://gc.example.org", db=env["db"])
-    r = env["app"].test_client(use_cookies=False).get("/api/session", environ_base=LAN,
-                                     headers={"Host": "asapsv1:5560", "Cookie": f"gc_session={token}"})
-    assert r.get_json()["hub_url"] == "https://gc.example.org"
+    assert _session(env, "asapsv1:5560", token)["link_url"] == "https://gc.example.org"
+
+
+@pytest.mark.parametrize("lan", ["http://asapsv1:5560", "http://192.168.1.20:5560",
+                                 "https://asapsv1.local", "http://[fd00::5]:5560",
+                                 "https://10.0.0.5"])
+def test_a_lan_hub_url_falls_back_to_the_public_address(env, lan):
+    """A link is meant to be sent: a LAN-only hub URL would not open elsewhere."""
+    token = signed_in(env)
+    store.settings_kv.set("hub_url", lan, db=env["db"])
+    assert _session(env, "asapsv1:5560", token)["link_url"] == "https://gc.asaplabs.net"
+
+
+# ── lookups the critic found ────────────────────────────────────────────────
+
+def test_an_old_exact_lab_id_is_not_crowded_out_by_newer_near_misses(env):
+    signed_in(env)
+    db = env["db"]
+    sid = add(db, "4032", "2020-01-01 00:00:00")
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            conn.executemany(
+                "INSERT INTO samples(instrument_id, lab_id, injection_dt, injection_dt_source, "
+                "status, received_at) VALUES ('gc1', ?, ?, 'cdf', 'final', '2026-01-01')",
+                [(f"4032{i % 10}",
+                  f"2026-01-01 {i // 3600 % 24:02d}:{i // 60 % 60:02d}:{i % 60:02d}")
+                 for i in range(5001)])
+    code, body = api(env, "/api/lab/4032")
+    assert code == 200 and body["sample_id"] == sid and len(body["runs"]) == 1
+
+
+def test_non_ascii_lab_ids_match_exactly_only(env):
+    """SQLite's NOCASE folds A-Z only: é and É are different (documented)."""
+    signed_in(env)
+    sid = add(env["db"], "ÉTÉ-1", "2026-09-28 10:00:00")
+    assert api(env, "/api/lab/%C3%89T%C3%89-1")[1]["sample_id"] == sid
+    assert api(env, "/api/lab/%C3%89t%C3%89-1")[1]["sample_id"] == sid    # t: ASCII
+    assert api(env, "/api/lab/%C3%A9t%C3%A9-1")[0] == 404                 # é: not
+
+
+@pytest.mark.parametrize("path", ["/samples/99999999999999999999",
+                                  "/samples/99999999999999999999/compare",
+                                  "/samples/99999999999999999999/data",
+                                  "/samples/9223372036854775808", "/samples/0"])
+def test_huge_or_zero_sample_ids_get_the_friendly_page(env, path):
+    signed_in(env)
+    r = get(env, path)
+    assert r.status_code == 404
+    assert 'data-testid="link-not-found"' in r.get_data(as_text=True)
+
+
+@pytest.mark.parametrize("path", ["/api/lab/%00", "/lab/%00", "/lab/" + "9" * 201])
+def test_odd_lab_ids_are_not_found(env, path):
+    signed_in(env)
+    assert get(env, path).status_code == 404
