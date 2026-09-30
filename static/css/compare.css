@@ -76,9 +76,10 @@
 .cmp-findings { list-style: none; margin: 0; padding: 0; }
 .cmp-find { padding: var(--s3) 0; border-top: 1px solid var(--border-light); }
 .cmp-find.muted { color: var(--text-muted); font-size: var(--fs-sm); }
-.cmp-find-top { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s2); min-height: 28px; }
-.cmp-find-top .spacer { flex: 1; }
-.cmp-find-head { font-weight: 620; font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.cmp-find-top { display: flex; align-items: center; gap: var(--s2); min-height: 28px; }
+.cmp-find-top .spacer { flex: 1 0 0; }
+.cmp-find-head { flex: 0 1 auto; min-width: 0; font-weight: 620; font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.cmp-find-top .cmp-sev, .cmp-find-top .cmp-find-go { flex: none; }
 .cmp-find-text { margin: var(--s1) 0 0; font-size: var(--fs-sm); color: var(--text); overflow-wrap: anywhere; line-height: 1.5; }
 .cmp-sev {
     display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: var(--radius-pill);
