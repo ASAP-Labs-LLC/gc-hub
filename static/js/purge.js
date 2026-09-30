@@ -3,7 +3,8 @@
    confirmation ("PURGE <instrument name>") -> Start (POST /api/admin/purge/start,
    an admin job) -> progress from POST /api/admin/jobs/status. Every call is JSON
    with the admin password from the page's #pw box. The pure helpers are
-   module.exports for the Node tests. DOM text is textContent only: lab IDs,
+   module.exports for the Node tests. Answers are parsed with
+   GCSession.readJson. DOM text is textContent only: lab IDs,
    paths and names come from the server. */
 (function () {
     'use strict';
@@ -116,7 +117,16 @@
         return s + (j.finished_at ? `, ${j.finished_at}` : '');
     }
 
-    const api = { formatBytes, canStart, previewLines, jobLine, finishedLines, journalLine };
+    // The instrument picker, from GET /api/instruments (the panel fills its
+    // own select: it depends on nothing else on the page).
+    function instrumentOptions(body) {
+        return ((body && body.instruments) || []).map((i) => ({
+            value: String(i.id), text: i.name && i.name !== i.id ? `${i.name} (${i.id})` : String(i.id),
+        }));
+    }
+
+    const api = { formatBytes, canStart, previewLines, jobLine, finishedLines, journalLine,
+        instrumentOptions };
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
     if (typeof document === 'undefined') return;
 
@@ -136,9 +146,8 @@
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(Object.assign({ password: $('pw').value }, body || {})),
         });
-        let j = null;
-        try { j = await r.json(); } catch (e) { j = {}; }
-        if (!r.ok) throw new Error((j && j.error) || `HTTP ${r.status}`);
+        const j = (await window.GCSession.readJson(r)).body || {};
+        if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
         return j;
     }
 
@@ -200,8 +209,11 @@
     async function poll() {
         clearTimeout(timer);
         try {
-            const r = await fetch('/api/purge/status', { cache: 'no-store' });
-            const j = r.ok ? await r.json() : {};
+            // a background poll: never counted as someone using the hub
+            const r = await fetch('/api/purge/status', {
+                cache: 'no-store', headers: { 'X-GC-Background': '1' } });
+            const j = (await window.GCSession.readJson(r)).body || {};
+            if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
             if (j.job || j.journal) renderJob(j.job, j.journal);
             if (j.job && j.job.state === 'running') timer = setTimeout(poll, 1500);
         } catch (e) { say(e.message, 'err'); }
@@ -227,8 +239,28 @@
         }
     }
 
+    async function loadInstruments() {
+        try {
+            const r = await fetch('/api/instruments', {
+                cache: 'no-store', headers: { 'X-GC-Background': '1' } });
+            const j = (await window.GCSession.readJson(r)).body || {};
+            if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+            const sel = $('purge-inst');
+            const chosen = sel.value;
+            sel.textContent = '';
+            for (const o of instrumentOptions(j)) {
+                const opt = document.createElement('option');
+                opt.value = o.value;
+                opt.textContent = o.text;
+                sel.appendChild(opt);
+            }
+            if (chosen) sel.value = chosen;
+        } catch (e) { say(e.message, 'err'); }
+    }
+
     function init() {
         if (!$('purge-panel')) return;
+        loadInstruments();
         $('btn-purge-preview').addEventListener('click', doPreview);
         $('btn-purge-start').addEventListener('click', doStart);
         $('purge-confirm').addEventListener('input', refreshStart);

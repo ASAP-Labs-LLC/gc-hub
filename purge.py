@@ -77,7 +77,8 @@ nothing):
 7. ``new_results_path`` is applied through ``HubExporter.new_path``; an
    ``instrument_events`` row is written when that table exists (schema v4,
    another v3.1 branch); a notification is raised; ``live`` events are
-   published when the ``live`` module exists; the journal becomes ``done``.
+   published (the instrument and the purged sample ids); the journal becomes
+   ``done``.
    A failure in any step after the commit never fails the purge: it is
    ``completed_with_warnings`` and the warnings are in the summary and the
    notification.
@@ -116,6 +117,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import exports
+import live
 import paths
 import pipeline
 import store
@@ -692,16 +694,11 @@ def _record_event(db, instrument_id: str, by: str, detail: dict) -> None:
                          (instrument_id, by, store.now_iso(), json.dumps(detail)))
 
 
-def _publish(kind: str, payload: dict) -> None:
-    """``live.publish`` when the live event bus (v3.1) is present."""
-    try:
-        import live  # type: ignore
-    except ImportError:
-        return
-    try:
-        live.publish(kind, payload)
-    except Exception:  # noqa: BLE001 - publish never raises into the caller by contract
-        log.exception("purge: live publish failed")
+def _publish(journal: dict) -> None:
+    """Live events (``live.py``): the instrument, and every purged sample, so
+    open pages drop the rows (more than the ring holds makes them reload)."""
+    live.publish("instrument", {"instrument_id": journal["instrument"]})
+    live.publish_samples(journal.get("sample_ids") or [])
 
 
 def _who(by: str) -> str:
@@ -838,7 +835,7 @@ def _finish(journal: dict, jpath: Path, *, db, data_dir: Path, exporter, notifie
         _notify(notifier, "warning", message)
         journal["notified"] = True
     _save_quietly(jpath, journal)
-    _publish("instrument", {"instrument_id": inst_id})
+    _publish(journal)
     return _summary(journal)
 
 

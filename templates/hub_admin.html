@@ -125,7 +125,7 @@
     <p><strong>Restore after a purge</strong> (DEPLOY.md): stop the hub, copy the pre-purge backup
       over <code>gc.db</code>, move the contents of the purged folder back into the data folder,
       start the hub.</p>
-    <label for="purge-inst">Instrument</label><select id="purge-inst" class="inst-select"></select>
+    <label for="purge-inst">Instrument</label><select id="purge-inst"></select>
     <label for="purge-scope">Scope</label>
     <select id="purge-scope">
       <option value="all">all samples</option>
@@ -206,7 +206,7 @@
 </main>
 <script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=5"></script>
 <script src="{{ url_for('static', filename='js/diagnostics.js') }}?v=4"></script>
-<script src="{{ url_for('static', filename='js/purge.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/purge.js') }}?v=4"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

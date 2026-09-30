@@ -74,4 +74,9 @@ module.exports = (t) => {
     t.eq(P.journalLine({ instrument: 'gc1', scope: 'backfill', state: 'abandoned',
         reason: 'power cut', finished_at: 'T' }),
         'Last purge: gc1 (backfill) abandoned — nothing was removed (power cut), T');
+
+    t.eq(P.instrumentOptions({ instruments: [{ id: 'gc1', name: 'GC-1' }, { id: 'gc2', name: 'gc2' },
+        { id: 'gc3' }] }), [{ value: 'gc1', text: 'GC-1 (gc1)' }, { value: 'gc2', text: 'gc2' },
+        { value: 'gc3', text: 'gc3' }]);
+    t.eq(P.instrumentOptions(null), []);
 };

@@ -529,3 +529,13 @@ def test_no_lock_is_held_while_waiting_for_a_job(h, monkeypatch):
     store.jobs.complete(job, db=h.db)
     t.join(30)
     assert out["s"]["samples"] > 0
+
+
+def test_a_purge_publishes_live_events(h):
+    import live
+    gc1 = ph.instrument_sample_ids(h.db, "gc1")
+    start = live.poll(None)["cursor"]
+    h.run()
+    out = live.poll(start)
+    assert "gc1" in out["instruments"]
+    assert set(out["samples"]) >= gc1
