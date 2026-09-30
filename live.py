@@ -1,7 +1,7 @@
-"""live.py: the in-memory event bus behind live updates (v3.1).
+"""live.py: the in-memory event bus behind live updates (v4.0).
 
 Spec: ``docs/superpowers/specs/2026-09-30-ui-redesign-live-setup-design.md``,
-"Live updates (v3.1)". Stdlib only, no import-time side effects beyond the
+"Live updates (v4.0)". Stdlib only, no import-time side effects beyond the
 process's one ``BUS``; importable by the pipeline, the exporter and tools.
 
 * A ring of ``RING_SIZE`` events, a ``boot_id`` (random per process) and a

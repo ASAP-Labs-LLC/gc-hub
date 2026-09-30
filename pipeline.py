@@ -61,7 +61,7 @@ Public API
     pause_instrument(instrument_id, reason='purge in progress')   resume_instrument(id)
     paused_instruments() -> frozenset      instrument_paused(id) -> bool
         # per process, in memory: the Worker claims none of a paused
-        # instrument's jobs and submit refuses its files (the v3.1 purge)
+        # instrument's jobs and submit refuses its files (the v4.0 purge)
     SubmitResult(outcome, sha256, sample_id, status, conflict_id, instrument_id, message)
         # outcome: 'created' | 'duplicate' | 'cross_instrument' | 'conflict'
     is_blank_name(name) -> bool
@@ -280,7 +280,7 @@ class InstrumentPaused(RuntimeError):
     503 "purge in progress; retry", and the agent backs off and sends it again."""
 
 
-# ── pausing one instrument (a purge, v3.1) ──────────────────────────────────
+# ── pausing one instrument (a purge, v4.0) ──────────────────────────────────
 # In memory, per process: a purge runs on an admin-job thread of this process
 # and ends (resume_instrument, in a finally) before its job does, and a hub that
 # dies mid-purge starts with nothing paused.

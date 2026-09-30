@@ -555,7 +555,7 @@ def _live_job_instruments(kinds: tuple) -> set:
 
 
 def recover_purges(db, data_dir, notifier: Optional[Notifier]) -> list:
-    """``purge.recover`` (interrupted purges; v3.1), skipping any purge live in
+    """``purge.recover`` (interrupted purges; v4.0), skipping any purge live in
     this process (its instrument is paused, or an admin purge job owns it). A
     failure is logged and notified, never a failed start: the hub still
     serves, and the next start tries again (every recovery step is idempotent)."""

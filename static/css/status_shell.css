@@ -1,6 +1,6 @@
 /* status_shell.css (v4.0 lane E): the shell's sidebar footer rows for
    "running now" and the GCs' liveness, and the processing-paused banner, on
-   the v3.1 token system. The markup and logic are running_now.js's, shared
+   the v4.0 token system. The markup and logic are running_now.js's, shared
    with the classic main page (status.css). Colour only repeats what a glyph
    and a word already say. */
 

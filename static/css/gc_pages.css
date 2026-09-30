@@ -1,4 +1,4 @@
-/* The v3.1 Instruments, instrument and setup-guide pages (on tokens.css + shell.css). */
+/* The v4.0 Instruments, instrument and setup-guide pages (on tokens.css + shell.css). */
 
 /* ── /instruments ─────────────────────────────────────────────────────── */
 .inst-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: var(--s5); }

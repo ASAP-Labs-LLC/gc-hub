@@ -1,4 +1,4 @@
-// /instruments/<id> (v3.1): the setup checklist, then Agent, Calibration,
+// /instruments/<id> (v4.0): the setup checklist, then Agent, Calibration,
 // Correction factors, Results file, Methods, Backfill and Conflicts. The same
 // operations as the classic page, over the same routes (GET /api/instruments
 // /<id>[/…], /api/conflicts, and the admin POSTs through GCShell.adminPost).

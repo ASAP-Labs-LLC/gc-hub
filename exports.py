@@ -616,7 +616,7 @@ _TRANSIENT = (OSError, sqlite3.OperationalError)
 
 
 def _publish_appended(instrument: str, rows) -> None:
-    """Live update (v3.1): these ledger rows are in the results CSV now."""
+    """Live update (v4.0): these ledger rows are in the results CSV now."""
     try:
         live.publish_samples([r["sample_id"] for r in rows])
     except Exception:  # noqa: BLE001 - never into the exporter
@@ -1188,7 +1188,7 @@ class HubExporter:
                  event_by: Optional[str] = None) -> Path:
         """Switch this instrument's export to *path* (an existing file there
         must then be adopted before the hub appends to it). Refuses ``in-use``.
-        With ``event_by`` (v3.1) the ``export_path`` instrument event is written
+        With ``event_by`` (v4.0) the ``export_path`` instrument event is written
         in the same transaction as the path."""
         with _instrument_lock(instrument):
             path = Path(path)

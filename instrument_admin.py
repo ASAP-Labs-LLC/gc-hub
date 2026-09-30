@@ -81,7 +81,7 @@ class AdminError(ValueError):
 
 
 def _changed(instrument_id: Any) -> None:
-    """Live update (v3.1): the instrument changed (after the commit)."""
+    """Live update (v4.0): the instrument changed (after the commit)."""
     live.publish("instrument", {"instrument_id": instrument_id})
 
 
@@ -117,7 +117,7 @@ def get(instrument_id: Any, *, db: store.Db = None) -> dict:
 
 def reserved_id_warnings(*, db: store.Db = None) -> list:
     """One message per existing instrument whose id is now reserved (made
-    before v3.1): its new page can't be opened at /instruments/<id>."""
+    before v4.0): its new page can't be opened at /instruments/<id>."""
     out = []
     for r in store.instruments.list(db=db):
         if r["id"] in RESERVED_IDS:

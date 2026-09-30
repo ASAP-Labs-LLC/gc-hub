@@ -1,4 +1,4 @@
-"""api_errors.py: every failure on an ``/api/`` path answers JSON (v3.1.0).
+"""api_errors.py: every failure on an ``/api/`` path answers JSON (v4.0.0).
 
 Before this, an ``HTTPException`` without its own handler (a 405, werkzeug's
 400 for malformed JSON) or an uncaught exception answered werkzeug's HTML

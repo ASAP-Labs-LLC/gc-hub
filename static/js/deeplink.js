@@ -1,4 +1,4 @@
-/* Sendable sample links (v3.1): what a link URL opens on the classic page,
+/* Sendable sample links (v4.0): what a link URL opens on the classic page,
    and "Copy link". Pure helpers first (window globals + module.exports, node
    tested in tests/js/deeplink.test.js), then a thin browser hook:
 

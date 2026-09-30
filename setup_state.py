@@ -1,4 +1,4 @@
-"""The GC setup guide's steps (v3.1; spec "GC setup guide").
+"""The GC setup guide's steps (v4.0; spec "GC setup guide").
 
 Derived, never stored: ``steps(instrument_row, facts)`` computes the eight
 steps from existing rows and is **pure** (no I/O, inputs untouched), so every

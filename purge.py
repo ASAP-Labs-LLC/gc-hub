@@ -1,4 +1,4 @@
-"""purge.py: purge one instrument's samples (v3.1; spec "Purge instrument data").
+"""purge.py: purge one instrument's samples (v4.0; spec "Purge instrument data").
 
 "Purge only GC-1's samples, and keep GC-2 and the settings." A sample spans
 ``samples`` and every table that references it; hand-editing ``gc.db`` is

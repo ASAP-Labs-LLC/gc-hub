@@ -838,7 +838,7 @@ scheduled task and `updater.log`).
 
 ## Restore after a purge
 
-**Hub admin > Purge instrument data** (v3.1) removes one instrument's samples
+**Hub admin > Purge instrument data** (v4.0) removes one instrument's samples
 (all, or only its backfill samples) and everything that belongs to them. It
 never deletes a file: before it touches anything it copies the whole database
 to `data\backups\pre-purge-<instrument>-<UTC time>.db` (the nightly pruning

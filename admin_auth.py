@@ -816,7 +816,7 @@ def _refuse_host():
                              "its own name or IP address."}), 403
 
 
-# ── the setup-path trail (v3.1.0) ───────────────────────────────────────────
+# ── the setup-path trail (v4.0.0) ───────────────────────────────────────────
 # One INFO line per POST to /api/admin/setup or /api/admin/password: the
 # outcome, which check refused, how the request arrived and the NEW password's
 # length bucket and character classes. Never the password, the setup code or

@@ -60,7 +60,7 @@
             });
     }
 
-    // ── readJson (v3.1.0) ──────────────────────────────────────────────
+    // ── readJson (v4.0.0) ──────────────────────────────────────────────
     // Every fetch that expects data parses it through readJson(resp) →
     // {status, body}. When the answer is not JSON (a hub error page, or a
     // Cloudflare block/challenge/5xx page in front of gc.asaplabs.net) body

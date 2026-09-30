@@ -766,7 +766,7 @@ def api_session():
     s = current_user()
     if s is None:           # the gate refuses first; kept for safety
         return _login_required()
-    # link_url: the base of a copied sample link (sendable links, v3.1): the
+    # link_url: the base of a copied sample link (sendable links, v4.0): the
     # hub URL unless it is LAN-only, never this request's origin
     return jsonify({"name": s["name"], "method": s["method"],
                     "link_url": admin_auth.sendable_hub_url()})

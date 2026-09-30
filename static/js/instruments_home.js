@@ -1,4 +1,4 @@
-// /instruments (v3.1): the instrument cards, "Add a GC" and the live Activity
+// /instruments (v4.0): the instrument cards, "Add a GC" and the live Activity
 // feed. Reads GET /api/instruments (through the shell, one request),
 // /api/lem/machines and /api/instruments/activity; live updates through
 // GCLiveAdapter (lane A's GCLive, or a 5 s poll). Agent status and "checked

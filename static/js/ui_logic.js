@@ -1,4 +1,4 @@
-// The v3.1 pages' pure logic (Instruments, one instrument, the setup guide,
+// The v4.0 pages' pure logic (Instruments, one instrument, the setup guide,
 // the shell): no DOM, node-tested (tests/js/ui_logic.test.js). Window global
 // GCUi, module.exports for node. Everything a page shows from here is set
 // with textContent by the caller.

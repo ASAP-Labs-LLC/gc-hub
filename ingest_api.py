@@ -437,7 +437,7 @@ def api_ingest():
                               data_dir=paths.data_dir(), db=_db(None), notifier=_notifier())
     except pipeline.UnknownInstrument as exc:
         return _err(str(exc), 401)
-    except pipeline.InstrumentPaused as exc:       # an admin purge of it is running (v3.1)
+    except pipeline.InstrumentPaused as exc:       # an admin purge of it is running (v4.0)
         resp, code = _err(str(exc), 503)
         resp.headers["Retry-After"] = "60"           # the agent backs off 5 s doubling to 300 s
         return resp, code

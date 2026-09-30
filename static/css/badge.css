@@ -20,7 +20,7 @@
   font-size: 10px;
   letter-spacing: 0.04em;
   font-variant-numeric: tabular-nums;
-  /* v3.1: full opacity, so the badge reaches 4.5:1 (it stays small and muted) */
+  /* v4.0: full opacity, so the badge reaches 4.5:1 (it stays small and muted) */
   color: var(--badge-fg, var(--text-muted, var(--muted, #7d8590)));
 }
 

@@ -1,4 +1,4 @@
-// Admin actions shared by the v3.1 instrument page and the setup guide
+// Admin actions shared by the v4.0 instrument page and the setup guide
 // (GCActions): the LEM machine dropdown, Edit details, Download installer
 // (with the confirm-revoke step), Revoke key, Go live now and method mapping.
 // They call the EXISTING /api/admin/... routes through GCShell.adminPost (the

@@ -1,4 +1,4 @@
-"""sample_links.py: sendable sample links (v3.1). A Blueprint registered by
+"""sample_links.py: sendable sample links (v4.0). A Blueprint registered by
 ``app.py``; spec ``docs/superpowers/specs/2026-09-30-ui-redesign-live-setup-design.md``
 ("Sendable sample links").
 

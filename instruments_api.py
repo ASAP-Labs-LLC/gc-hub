@@ -10,19 +10,19 @@ are ``{error, ...}`` with 400/404/409 (``instrument_admin.AdminError``).
 
 Routes::
 
-    GET  /instruments                                        the page (v3.1 design)
+    GET  /instruments                                        the page (v4.0 design)
     GET  /instruments/classic                                the 2A2 page (this release only)
-    GET  /instruments/<id>                                   one instrument (v3.1 design)
-    GET  /setup[?instrument=|new=1]                          the setup guide (v3.1)
-    GET  /api/instruments/activity[?limit=]                  the Activity feed (v3.1)
-    GET  /api/instruments/<id>/setup                         the eight setup steps (v3.1)
+    GET  /instruments/<id>                                   one instrument (v4.0 design)
+    GET  /setup[?instrument=|new=1]                          the setup guide (v4.0)
+    GET  /api/instruments/activity[?limit=]                  the Activity feed (v4.0)
+    GET  /api/instruments/<id>/setup                         the eight setup steps (v4.0)
     GET  /api/instruments                                    every instrument + summary
     GET  /api/instruments/<id>                               one, with corrections/methods/export
     POST /api/admin/instruments                              {id, name, ...} create (201)
     POST /api/admin/instruments/<id>                         {name|enabled|method|live_since|lem_machine_uid}
     POST /api/admin/instruments/<id>/export-path             {path}
     POST /api/admin/instruments/<id>/export-adopt            {}
-    POST /api/admin/instruments/<id>/export-hub-only         {} keep the hub-only file (v3.1)
+    POST /api/admin/instruments/<id>/export-hub-only         {} keep the hub-only file (v4.0)
     GET  /api/instruments/<id>/calibration[?sensitivity=]    the Calibration page payload
     GET  /api/instruments/<id>/calibration-candidates[?q=]   the instrument's own samples
     POST /api/admin/instruments/<id>/calibration-cdf         {sample_id | path}
@@ -200,7 +200,7 @@ def _summary(row: dict, conf: dict, db, counts: dict, agents: dict) -> dict:
     out["open_conflicts"] = counts["conflicts"].get(iid, 0)
     out["corrections_set"] = counts["corrections"].get(iid, 0) > 0
     out["agent"] = agents.get(iid)
-    # v3.1: the cards' numbers and "Step N of 8" / "Ready"
+    # v4.0: the cards' numbers and "Step N of 8" / "Ready"
     out["today"] = counts["today"].get(iid, 0)
     out["held"] = sum(out["counts"].get(s, 0) for s in HELD_STATUSES)
     out["export_pending"] = counts["export_pending"].get(iid, 0)
@@ -212,7 +212,7 @@ def _summary(row: dict, conf: dict, db, counts: dict, agents: dict) -> dict:
     return out
 
 
-# ── pages (v3.1: the new design; the 2A2 page stays at /instruments/classic) ──
+# ── pages (v4.0: the new design; the 2A2 page stays at /instruments/classic) ──
 
 def _page(template: str, **extra):
     return render_template(template, app_version=version.APP_VERSION, **extra)
@@ -344,7 +344,7 @@ def api_export_path(iid):
 
 @bp.route("/api/admin/instruments/<iid>/export-hub-only", methods=["POST"])
 def api_export_hub_only(iid):
-    """v3.1: keep the hub's own results file on purpose (LEM won't see it)."""
+    """v4.0: keep the hub's own results file on purpose (LEM won't see it)."""
     _body, err = _admin()
     if err:
         return err

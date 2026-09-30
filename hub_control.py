@@ -343,7 +343,7 @@ def refresh_cache() -> bool:
     return True
 
 
-# ── live updates (v3.1): what /api/live reads, from memory only ───────────
+# ── live updates (v4.0): what /api/live reads, from memory only ───────────
 
 def _by_name(by: Any) -> Optional[str]:
     """``"Ryan C (10.0.0.5)"`` -> ``"Ryan C"``: who, never the address."""

@@ -51,7 +51,7 @@ sample is backfill and is never exported automatically, D11)::
          carries a warning (rows are matched to stored revisions by CSV path and
          line number).
 
-Purge instrument data (v3.1, ``purge.py``; the page's *Purge instrument data*
+Purge instrument data (v4.0, ``purge.py``; the page's *Purge instrument data*
 panel)::
 
     POST /api/admin/purge/preview   {password, instrument, scope: all|backfill}
@@ -529,7 +529,7 @@ def api_admin_import_history_last_run():
     return jsonify({"last_run": last_run(inst, db=_db())})
 
 
-# ── purge instrument data (v3.1) ────────────────────────────────────────────
+# ── purge instrument data (v4.0) ────────────────────────────────────────────
 
 def _purge_params(body: dict):
     """``(instrument, scope)`` as sent (``purge`` validates them)."""

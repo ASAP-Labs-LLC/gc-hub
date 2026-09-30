@@ -1,4 +1,4 @@
-"""The Instruments page's Activity feed (v3.1; spec "instrument_events").
+"""The Instruments page's Activity feed (v4.0; spec "instrument_events").
 
 ``feed(limit, *, db)`` merges, newest first:
 

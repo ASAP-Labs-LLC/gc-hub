@@ -228,7 +228,7 @@ import comments_api  # noqa: E402  (phase 4: sample comments, presets)
 app.register_blueprint(comments_api.bp)
 import hub_control  # noqa: E402  (hub tray: status, pause/resume processing, stop)
 app.register_blueprint(hub_control.bp)
-import sample_links; app.register_blueprint(sample_links.bp)  # noqa: E402,E702 (v3.1 sendable links)
+import sample_links; app.register_blueprint(sample_links.bp)  # noqa: E402,E702 (v4.0 sendable links)
 import web_auth  # noqa: E402  (sign-in: LabLink sessions, the session gate)
 app.register_blueprint(web_auth.bp)
 # Order matters (before_request runs in registration order): the https
@@ -237,7 +237,7 @@ app.register_blueprint(web_auth.bp)
 app.before_request(web_auth.require_https)
 app.after_request(web_auth.add_security_headers)
 app.context_processor(web_auth.template_context)
-import api_errors  # noqa: E402  (v3.1.0: every /api/ failure answers JSON {error, status, ref})
+import api_errors  # noqa: E402  (v4.0.0: every /api/ failure answers JSON {error, status, ref})
 api_errors.install(app)
 
 # ---------------------------------------------------------------------------
@@ -831,7 +831,7 @@ def _admin_json_body():
 # them as activity would keep the idle timer from ever advancing: the updater
 # polls /healthz continuously, static assets load on every page view, and
 # these are the endpoints app.js hits on its own timers for the life of an
-# open tab (not from a click): /api/live every 3 s (30 s hidden; live.js, v3.1),
+# open tab (not from a click): /api/live every 3 s (30 s hidden; live.js, v4.0),
 # /api/notifications when the live count changes (every 30 s in tabs still
 # running an older app.js); /healthz every 2s while waiting
 # for a restart (_waitForServerAndReload; /api/server-status, which it used
@@ -850,7 +850,7 @@ _NON_ACTIVITY_PATHS = {
     "/api/server-status",
     "/api/reprocess/status",
     "/api/qbench-upload-status",
-    # v3.1 live updates: every open tab polls it every 3 s (30 s hidden)
+    # v4.0 live updates: every open tab polls it every 3 s (30 s hidden)
     "/api/live",
     # 2B1: GC-PC agents are machines, never users (ingest_api)
     "/api/ingest", "/api/agent/heartbeat", "/api/agent/results",
@@ -872,7 +872,7 @@ def _track_activity():
     if path in _NON_ACTIVITY_PATHS or path.startswith("/static/") or path.endswith("/stream"):
         return
     if web_auth.is_background_request():
-        # v3.1 live: a GET/HEAD an open tab made on its own (X-GC-Background: 1,
+        # v4.0 live: a GET/HEAD an open tab made on its own (X-GC-Background: 1,
         # GCLive.bgFetch). Never a POST or other write: those stay activity.
         return
     session = web_auth.current_user()
@@ -2350,7 +2350,7 @@ def api_reprocess_preview():
         return _error(str(exc))
 
 
-# ── Live updates (v3.1; live.py, static/js/live.js) ──────────────────
+# ── Live updates (v4.0; live.py, static/js/live.js) ──────────────────
 @app.route("/api/live", methods=["GET"])
 def api_live():
     """What changed since ``?since=<boot_id>:<seq>``: ``{cursor, reset,

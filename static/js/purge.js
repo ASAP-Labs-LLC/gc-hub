@@ -1,4 +1,4 @@
-/* Hub admin "Purge instrument data" (/admin/hub, v3.1).
+/* Hub admin "Purge instrument data" (/admin/hub, v4.0).
    Instrument + scope -> Preview (POST /api/admin/purge/preview) -> type the
    confirmation ("PURGE <instrument name>") -> Start (POST /api/admin/purge/start,
    an admin job) -> progress from POST /api/admin/jobs/status. Every call is JSON

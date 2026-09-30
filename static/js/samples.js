@@ -172,7 +172,7 @@
         return Number(b.sample_id) - Number(a.sample_id);
     }
 
-    /** v3.1 live updates: merge the rows fetched for *changedIds*
+    /** v4.0 live updates: merge the rows fetched for *changedIds*
         (/api/files?ids=, with the list's own filters) into *files* without
         reloading it. A returned row replaces its old copy or is inserted in
         the server's order; a changed id that was not returned no longer

@@ -1,4 +1,4 @@
-// The v3.1 shell (templates/_shell.html, _layout.html): theme, the sidebar
+// The v4.0 shell (templates/_shell.html, _layout.html): theme, the sidebar
 // rail, the user menu, Recent, the bell, the Live line, the "Setup guide ·
 // Step N" nav item, the admin-password prompt (a closure, 15 minutes, never
 // storage) and small DOM helpers the pages share (GCShell). Loaded in <head>

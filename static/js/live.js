@@ -1,4 +1,4 @@
-/* live.js: the live-update client (v3.1; spec "Live updates (v3.1)").
+/* live.js: the live-update client (v4.0; spec "Live updates (v4.0)").
 
    window.GCLive:
      start(opts?)          idempotent; returns a Promise that resolves after the

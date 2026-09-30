@@ -42,7 +42,7 @@ He delegated approval to the internal critic. This spec folds in that critique; 
   - Recent (labelled "on this computer", from localStorage);
   - a footer with a "Live" dot, the bell and the user chip. The chip's menu holds Theme, Settings, Help, "Update ready: restart to install vX" and Sign out; the chip shows only the name, since there are no roles.
 
-## Live updates (v3.1)
+## Live updates (v4.0)
 
 ### Event bus
 New module `live.py`, in memory:
@@ -74,7 +74,7 @@ Response: `{cursor, reset, samples:[ids], instruments:[ids], agents:[{instrument
 
 The live client is `static/js/live.js`: pure cursor/reducer logic, tested with node, plus a thin poller. It replaces the notification 30 s poll and the reprocess status poll, and the Refresh button goes. "Checked in 12 s ago" ticks on the client from `last_seen`. SSE stays only for the QBench upload stream.
 
-## GC setup guide (v3.1)
+## GC setup guide (v4.0)
 
 ### Derived, not stored
 `setup_state.py` computes each step from existing rows, as one pure function with tests: `steps(instrument_row, facts) -> [{key, status: done|current|waiting|blocked, detail, blocker, action}]`.
@@ -134,7 +134,7 @@ Older code must still start on this DB.
 - **`/setup` (Setup guide):** the same step cards for one instrument, with an instrument picker. It suits the first-time flow, with each step's explanation, primary button and blocker. "Add a new GC" starts at step 1.
 - **Admin actions** keep needing the admin password. Until the elevation work (v4.1), the page prompts for it and keeps it in a JS closure for 15 minutes, never in storage.
 
-## Sendable sample links (v3.1)
+## Sendable sample links (v4.0)
 
 Ryan: "have the samples create custom links so that the links are sendable, and could be opened from for example COA Reviewer".
 
@@ -153,7 +153,7 @@ Ryan: "have the samples create custom links so that the links are sendable, and 
 - **"Copy link".** A "Copy link" action on every sample (classic: in the sample's context menu and the Dashboard header; new UI: in the sample header). It copies `<effective hub_url>/samples/<id>`, always the gc.asaplabs.net form, even when opened over the LAN, with a toast "Link copied".
 - **Out of scope.** A "View in GC Hub" link inside COA Reviewer is a COA change and needs Ryan's go-ahead separately.
 
-## Purge instrument data (v3.1)
+## Purge instrument data (v4.0)
 
 Ryan wants to "purge only GC-1's samples, and keep GC-2 and the settings". A sample spans `samples`, `revisions`, `jobs`, `export_rows`, `sample_cache`, `conflicts`, `sample_comments` and `report_log`, plus stored CDFs. Hand-editing `gc.db` is unsafe.
 

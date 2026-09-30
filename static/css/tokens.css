@@ -1,4 +1,4 @@
-/* GC Hub design tokens (v3.1; spec "Visual system").
+/* GC Hub design tokens (v4.0; spec "Visual system").
    COA Reviewer's tokens, name for name (so the two apps can share one sheet
    later), plus the hub's additions (marked GC). Light is the default;
    <html data-theme="dark"> switches (shell.js sets it from the user menu).

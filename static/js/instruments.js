@@ -643,7 +643,7 @@
 
     $('btn-refresh').addEventListener('click', () => { lemMachines(true); buildAddLem(); loadList(true); });
 
-    // ── live agent status (v3.1, static/js/live.js) ────────────────────────
+    // ── live agent status (v4.0, static/js/live.js) ────────────────────────
     // A heartbeat updates the list's dot and the selected instrument's Agent
     // card without a reload (only that card is redrawn, so a form being
     // filled in elsewhere on the page is left alone); "Last seen" ticks on

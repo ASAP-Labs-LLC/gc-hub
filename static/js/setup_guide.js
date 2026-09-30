@@ -1,4 +1,4 @@
-// /setup (v3.1): the GC setup guide. One instrument's eight steps (GET
+// /setup (v4.0): the GC setup guide. One instrument's eight steps (GET
 // /api/instruments/<id>/setup, derived by setup_state on the server) as
 // plain-language cards with each step's explanation, primary button and
 // blocker; "Add a new GC" (?new=1) starts at step 1 with the create form. The

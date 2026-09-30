@@ -1,4 +1,4 @@
-// Live updates for the v3.1 pages (GCLiveAdapter), coded against lane A's
+// Live updates for the v4.0 pages (GCLiveAdapter), coded against lane A's
 // fixed GCLive contract:
 //   GCLive.start(); GCLive.subscribe(fn) -> unsubscribe
 //   fn(update): {reset, samples:[ids], instruments:[ids],

@@ -500,7 +500,7 @@ async function refreshAll() {
 }
 
 /* ===================================================================
-   5b. LIVE UPDATES (static/js/live.js; v3.1)
+   5b. LIVE UPDATES (static/js/live.js; v4.0)
    New, changed and finalised samples are fetched by id and merged into
    the list in place; the notification badge follows the live count; a
    reset (the hub restarted, or this tab fell too far behind) reloads.
@@ -790,7 +790,7 @@ function initSampleSort() {
     show();
 }
 
-/** v3.1 live updates: replace just these rows' <li> in every list. False
+/** v4.0 live updates: replace just these rows' <li> in every list. False
     when that isn't enough (a row must appear where it wasn't): the caller
     then re-renders the lists. */
 function patchFileRows(rows) {
@@ -4573,7 +4573,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     showNotification('GC Viewer ready', 'success');
 
-    // v3.1: the new pages' user menu links here with ?open=settings|help
+    // v4.0: the new pages' user menu links here with ?open=settings|help
     // (after the settings have loaded, so the Settings form is filled).
     openFromQuery();
 

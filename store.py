@@ -248,7 +248,7 @@ Conventions and decisions (where the spec left a choice)
   ``sample_comments.author_name``/``deleted_by_name`` and
   ``report_log.user_name``. v2.0.0 still starts on a v3 database — and then
   serves with no login at all (DEPLOY.md: pause the tunnel before a rollback).
-* **Schema v4** (v3.1, the setup guide) adds ``instrument_events``
+* **Schema v4** (v4.0, the setup guide) adds ``instrument_events``
   (``instrument_id, kind, by, at, detail``; ``kind`` one of ``EVENT_KINDS``,
   ``by`` = ``web_auth.actor()``, ``detail`` JSON). v3.0.0 (schema v3 code)
   starts on a v4 database and ignores it (``tests/store/v3_0_0``).
@@ -559,7 +559,7 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         "ALTER TABLE sample_comments ADD COLUMN deleted_by_name TEXT",
         "ALTER TABLE report_log ADD COLUMN user_name TEXT",
     ),
-    (  # v4 (v3.1, the setup guide): who did what to an instrument, and when
+    (  # v4 (v4.0, the setup guide): who did what to an instrument, and when
         # No foreign key: an event row must never stop a migration or a restore.
         """CREATE TABLE instrument_events(
             id INTEGER PRIMARY KEY,
@@ -577,7 +577,7 @@ SCHEMA_VERSION = len(MIGRATIONS)
 # ``user_version`` bump, no backup): additive, harmless to older code, and
 # nothing another branch's migration step has to be ordered against.
 ENSURED_INDEXES: tuple[str, ...] = (
-    # sendable links (v3.1): /lab/<lab_id>'s case-insensitive fallback
+    # sendable links (v4.0): /lab/<lab_id>'s case-insensitive fallback
     "CREATE INDEX IF NOT EXISTS samples_lab_nocase ON samples(lab_id COLLATE NOCASE)",
 )
 WEB_SESSION_METHODS: tuple[str, ...] = ("password", "card", "admin")
