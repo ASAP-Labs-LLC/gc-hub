@@ -1,0 +1,22 @@
+{#- Test-only (tests/ui_compare_harness.py): a shell page that mounts the
+    Compare view the way lane S's Samples page does. Never shipped. -#}
+{% extends "_layout.html" %}
+{% block title %}Compare harness{% endblock %}
+{% block topbar %}<h1>Samples</h1><span class="spacer"></span>{% endblock %}
+{% block content %}
+<main class="content" id="main" data-testid="compare-harness">
+  <header class="page-head">
+    <div class="row">
+      <h1 id="h-lab">…</h1>
+      <span class="spacer grow"></span>
+      <button type="button" class="btn" id="h-export" data-testid="h-export">Export report</button>
+      <button type="button" class="btn btn-primary" id="h-queue" data-testid="h-queue">Add to queue</button>
+    </div>
+  </header>
+  <div id="compare-root"></div>
+</main>
+{% endblock %}
+{% block scripts %}
+{% include "_compare_assets.html" %}
+<script src="/__harness/compare_harness.js"></script>
+{% endblock %}

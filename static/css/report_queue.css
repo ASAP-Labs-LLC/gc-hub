@@ -1,0 +1,63 @@
+/* v5.0.0 lane C: the top bar's "Report queue N" button and the report queue
+   sheet (report_queue.js), on every shell page. Checked tokens only
+   (tests/test_ui_contrast.py). */
+
+.rq-btn {
+    display: inline-flex; align-items: center; gap: var(--s2); height: 32px; padding: 0 var(--s3);
+    margin-left: auto; border-radius: var(--radius-pill); border: 1px solid var(--border);
+    background: var(--bg-card); color: var(--text); font: inherit; font-size: var(--fs-sm); font-weight: 550;
+    cursor: pointer; white-space: nowrap;
+}
+.rq-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.rq-btn .ico { width: 15px; height: 15px; }
+.rq-count {
+    min-width: 20px; height: 20px; padding: 0 6px; border-radius: var(--radius-pill);
+    background: var(--ink); color: var(--ink-fg); font-size: 11px; font-weight: 700;
+    display: inline-grid; place-items: center;
+}
+.rq-btn .rq-progress { font-size: var(--fs-xs); color: var(--text-muted); font-weight: 500; }
+
+.rq-sheet { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 64px); }
+.rq-sheet .rq-head { display: flex; align-items: center; gap: var(--s3); }
+.rq-sheet .rq-head h2 { margin: 0; }
+.rq-sheet .spacer { flex: 1; }
+.rq-sheet .rq-intro { margin: var(--s2) 0 0; font-size: var(--fs-sm); }
+.rq-sheet h3 { font-size: var(--fs-md); margin: 0; }
+.rq-list { list-style: none; margin: var(--s3) 0 0; padding: 0; max-height: 36vh; overflow: auto; }
+.rq-list li { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) 0; border-top: 1px solid var(--border-light); }
+.rq-main { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.rq-main b { font-weight: 620; overflow-wrap: anywhere; }
+.rq-sheet .empty-note { margin: var(--s3) 0 0; color: var(--text-muted-sunken); }
+.rq-signin, .rq-progress-block { display: grid; gap: var(--s2); margin-top: var(--s4); padding-top: var(--s4); border-top: 1px solid var(--border-light); }
+.rq-sheet .rq-signin p, .rq-sheet .rq-reauth p { margin: 0; }
+.rq-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s3); align-items: end; }
+.rq-fields input { width: 100%; }
+.rq-reauth {
+    display: grid; gap: var(--s2); margin-top: var(--s4); padding: var(--s3) var(--s4);
+    border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--bg-sunken);
+}
+.rq-sheet .rq-reauth p { color: var(--text); font-weight: 550; }
+.rq-reauth .field > span { color: var(--text-muted-sunken); }
+.rq-sheet .rq-overall { margin: 0; font-size: var(--fs-sm); color: var(--text); }
+.rq-sheet .rq-overall.tone-ok { color: var(--pill-final-fg); font-weight: 600; }
+.rq-sheet .rq-overall.tone-warn { color: var(--pill-held-fg); font-weight: 600; }
+.rq-sheet .rq-overall.tone-err { color: var(--pill-error-fg); font-weight: 600; }
+.rq-sheet .rq-overall.tone-info { color: var(--text-muted); }
+.rq-uplist { list-style: none; margin: 0; padding: 0; max-height: 28vh; overflow: auto; }
+.rq-uplist li { display: grid; grid-template-columns: minmax(80px, auto) auto minmax(0, 1fr) auto; align-items: center;
+    gap: var(--s3); padding: 6px 0; border-top: 1px solid var(--border-light); font-size: var(--fs-sm); }
+.rq-uplist .rq-st { color: var(--text); font-weight: 550; }
+.rq-uplist li[data-status="ok"] .rq-st { color: var(--pill-final-fg); }
+.rq-uplist li[data-status="failed"] .rq-st,
+.rq-uplist li[data-status="error"] .rq-st,
+.rq-uplist li[data-status="login_failed"] .rq-st { color: var(--pill-error-fg); }
+.rq-uplist li[data-status="skipped"] .rq-st { color: var(--text-muted); }
+.rq-uplist .rq-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rq-sheet .rq-msg { margin: var(--s3) 0 0; font-size: var(--fs-sm); color: var(--text); min-height: 1em; }
+.rq-sheet .rq-msg:empty { display: none; }
+.rq-sheet .actions { flex-wrap: wrap; align-items: center; }
+
+.rq-x { --m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M6 6l12 12M18 6 6 18'/%3E%3C/svg%3E"); }
+.rq-ico { --m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5'/%3E%3C/svg%3E"); }
+
+@media print { .rq-btn { display: none; } }

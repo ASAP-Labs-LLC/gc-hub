@@ -137,6 +137,16 @@ PAIRS = [
     ("--text-muted-sunken", ["--bg", "--bg-active"], TEXT, "the why line on a selected row"),
     ("--text-muted-sunken", ["--bg", "--bg-hover"], TEXT, "the why line on a hovered row"),
     ("--text-muted-sunken", ["--bg-card", "--bg-active"], TEXT, "the why line on a selected row (card)"),
+    # v5.0.0 lane C: Compare (compare.css) and the report queue sheet (report_queue.css)
+    ("--text-muted-sunken", ["--bg", "--bg-sunken"], TEXT, "a marginal finding's badge"),
+    ("--text-muted-sunken", ["--bg-card", "--chart-band"], TEXT, "a range band's label"),
+    ("--chart-axis", ["--bg"], TEXT, "chart labels full screen"),
+    ("--pill-final-fg", ["--bg-elevated"], TEXT, "an uploaded report in the queue sheet"),
+    ("--pill-held-fg", ["--bg-elevated"], TEXT, "a partial upload's line"),
+    ("--pill-error-fg", ["--bg-elevated"], TEXT, "a failed upload in the queue sheet"),
+    ("--text", ["--bg-elevated", "--bg-sunken"], TEXT, "the queue sheet's sign-in-again box"),
+    ("--text-muted-sunken", ["--bg-elevated", "--bg-sunken"], TEXT, "the empty queue, sign-in labels"),
+    ("--text", ["--bg-elevated", "--bg-hover"], TEXT, "a menu item on hover (Clear annotations)"),
     ("--accent", ["--bg"], UI, "focus ring"),
     ("--accent", ["--sidebar-bg"], UI, "focus ring in the sidebar"),
     ("--accent", ["--bg-sunken"], UI, "focus ring on sunken fields"),
@@ -183,7 +193,8 @@ def test_the_version_badge_is_readable():
 # v4.0 lane E2: the new pages' stylesheets use only the checked tokens for
 # colour (no literal colours), and only token pairs listed above for text.
 PAGE_CSS = [ROOT / "static" / "css" / "admin.css", ROOT / "static" / "css" / "calibration.css",
-            ROOT / "static" / "css" / "samples.css"]
+            ROOT / "static" / "css" / "samples.css",
+            ROOT / "static" / "css" / "compare.css", ROOT / "static" / "css" / "report_queue.css"]
 CHECKED_FG = {p[0] for p in PAIRS}
 
 
