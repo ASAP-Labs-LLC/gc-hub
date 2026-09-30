@@ -40,15 +40,15 @@
 
 /* the flag-rule editor: one row per rule */
 .rules { display: grid; gap: var(--s2); }
-.rule { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.rule { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .rule .rf { display: inline-flex; }
 .gc .rule .r-name { width: 140px; }
 .gc .rule .r-cond { width: 92px; }
 .gc .rule input[type="number"] {
     height: 36px; padding: 0 var(--s2); border: 1px solid var(--border); border-radius: var(--radius-md);
-    background: var(--bg-card); color: var(--text); font: inherit; width: 76px; text-align: right;
+    background: var(--bg-card); color: var(--text); font: inherit; width: 70px; text-align: right;
 }
-.gc .rule .r-t0, .gc .rule .r-t1 { width: 64px; }
+.gc .rule .r-t0, .gc .rule .r-t1 { width: 56px; }
 
 /* comparison standards */
 .std-tbl td { vertical-align: top; }

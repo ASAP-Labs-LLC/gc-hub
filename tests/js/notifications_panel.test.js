@@ -17,6 +17,9 @@ module.exports = (t) => {
     t.eq(N.link('GC-2 agent has not checked in for 10 minutes'), { href: '/instruments', text: 'Open Instruments' });
     t.eq(N.link('3 samples held: awaiting calibration'), { href: '/results?status=held', text: 'Show held runs' });
     t.eq(N.link('Processing paused by Ryan C'), { href: '/admin/hub#status', text: 'Open Hub status' });
+    // hub_control.PAUSED_NOTICE mentions the results CSV too: it is about the pause
+    t.eq(N.link('Processing is paused by Ryan C (since 09:12). Samples are still received and queued, but nothing is processed, exported to the results CSV or backed up until processing is resumed (hub tray: Resume processing).').href, '/admin/hub#status');
+    t.eq(N.link('Processing resumed: queued samples are being processed again.').href, '/admin/hub#status');
     t.eq(N.link('Nightly backup failed: disk full'), { href: '/admin/hub#diagnostics', text: 'Open Diagnostics' });
     t.eq(N.link('Something else'), null);
     t.eq(N.link(''), null);

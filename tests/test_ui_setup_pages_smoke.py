@@ -170,12 +170,12 @@ def test_the_three_pages_in_both_themes_at_both_sizes(tmp_path):
                     assert "Written to results CSV" in feed and "LEM" not in feed
                     assert _wait(lambda: not _js(drv, "return document.getElementById('nav-setup').hidden;"))
                     assert _js(drv, "return document.getElementById('nav-setup-step').textContent;") == "GC-2 · 5/8"
-                    # the mark goes home; there is no separate Results item (same page as Samples)
+                    # the mark goes home; v5.0 lane R: Results is its own page
                     assert _js(drv, "return document.querySelector('.sb-mark').getAttribute('href');") == "/"
-                    assert _js(drv, "return document.querySelectorAll('.sb-nav [data-nav=results]').length;") == 0
-                    # Settings and Help open the classic page's modals
+                    assert _js(drv, "return document.querySelector('.sb-nav [data-nav=results]').getAttribute('href');") == "/results"
+                    # v5.0 lane R: Settings and Help are pages
                     hrefs = _js(drv, "return Array.from(document.querySelectorAll('#user-menu a')).map(a => a.getAttribute('href'));")
-                    assert "/?open=settings" in hrefs and "/?open=help" in hrefs, hrefs
+                    assert "/settings" in hrefs and "/help" in hrefs, hrefs
                     assert _tid(drv, "add-gc") == 1
                     live = _js(drv, "return document.querySelector('[data-instrument=gc1] [data-role=agent-pill]').textContent;")
                     assert live == "Live"

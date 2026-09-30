@@ -26,11 +26,12 @@
     const LINKS = [
         [/\bpurg/i, '/admin/hub#purge-panel', 'Open Purge'],
         [/\bimport/i, '/admin/hub#import-history', 'Open Import history'],
+        [/\bpaused\b|processing resumed/i, '/admin/hub#status', 'Open Hub status'],
         [/results file|\bexport|\.csv\b|ledger/i, '/admin/hub#exports', 'Open Results files'],
         [/\bagent\b|checked in|check in|offline|installer|\bkey\b/i, '/instruments', 'Open Instruments'],
         [/\bheld\b|awaiting calibration|pending corrections|waiting for/i, '/results?status=held', 'Show held runs'],
         [/correction factor|calibration|method|conflict|reserved/i, '/instruments', 'Open Instruments'],
-        [/\bpaused\b|\bresumed\b|processing|hub (did not|could not) start/i, '/admin/hub#status', 'Open Hub status'],
+        [/\bresumed\b|hub (did not|could not) start/i, '/admin/hub#status', 'Open Hub status'],
         [/backup|diagnostic|disk/i, '/admin/hub#diagnostics', 'Open Diagnostics'],
     ];
     function link(message) {

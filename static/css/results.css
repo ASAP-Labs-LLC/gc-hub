@@ -58,7 +58,7 @@ th.num .th-sort { width: 100%; text-align: right; }
 .tag.flag { max-width: 110px; overflow: hidden; text-overflow: ellipsis; vertical-align: -4px; }
 .gc-tag, .tbl.results .gc { display: inline-block; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: var(--fs-xs); line-height: 20px; color: var(--text-muted); font-weight: 550; }
 .tbl.results td.c-inj { color: var(--text-muted); }
-.tbl.results td.tailc { color: var(--text); max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+.tbl.results td.tailc { color: var(--text); max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
 .tbl.results td.why { color: var(--text-muted); }
 .tbl.results tr.is-picked td:first-child { box-shadow: inset 3px 0 0 var(--ink); }
 .tbl.results tr.no-result td.c-lab .lab, .tbl.results tr.backfill td.c-lab .lab { font-weight: 550; }
