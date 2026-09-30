@@ -550,6 +550,7 @@
         const e = backfillEls;
         if (!e) return;
         if (background === true && bfHold()) { bf.pending = true; return; }
+        bf.pending = false;
         const seq = ++bf.seq;
         const params = new URLSearchParams({ q: bf.q, released: bf.released, limit: '1000' });
         const r = await S.getJSON('/api/instruments/' + enc(e.inst.id) + '/backfill?' + params, background === true);
