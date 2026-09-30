@@ -83,13 +83,15 @@ def _rows(drv):
                     ".map(r => Number(r.dataset.sampleId));")
 
 
-def _errors(drv):
+def _errors(drv, expected=()):
+    """SEVERE console lines, less the favicon and the given expected answers
+    (a result-only run's trace and curve are 404s: it has no CDF)."""
     try:
         logs = drv.get_log("browser")
     except Exception:  # noqa: BLE001
         return []
-    return [e["message"] for e in logs if e["level"] == "SEVERE"
-            and "favicon.ico" not in e["message"] and "compare_view.js" not in e["message"]]
+    return [e["message"] for e in logs if e["level"] == "SEVERE" and "favicon.ico" not in e["message"]
+            and not any(x in e["message"] for x in expected)]
 
 
 @pytest.fixture(scope="module")
@@ -258,26 +260,61 @@ def test_multi_select_bulk_bar_and_select_all_matching(page):
     assert wait_for(drv, lambda: _js(drv, "return GCSamples.state.sel.ids.size") == 0)
 
 
+def test_a_result_only_run_shows_its_imported_numbers(page):
+    """A v1-imported run has no CDF, so no curve: Overview and Data show its /api/table numbers."""
+    drv, base, hub = page
+    sid = hub.ids["resultonly"]
+    _open(drv, base, f"/samples/{sid}")
+    assert wait_for(drv, lambda: _tid(drv, "results-table") == 1 and _tid(drv, "results-from-table") == 1)
+    cells = _js(drv, "return [...document.querySelectorAll('[data-testid=results-table] tbody tr')]"
+                     ".map(tr => [...tr.children].map(td => td.textContent));")
+    assert cells[0][0] == "IBP" and cells[0][1] != "—" and cells[0][2] != "—", cells
+    _js(drv, "document.querySelector('[data-testid=view-data]').click();")
+    assert wait_for(drv, lambda: _js(drv, "return document.querySelectorAll('[data-testid=data-table] tbody tr').length") == 13)
+    rep = _js(drv, "return document.querySelector('[data-testid=data-table] tbody tr td.rep').textContent")
+    assert rep != "—", rep
+    assert _errors(drv, expected=(f"/api/samples/{sid}/trace", f"/api/samples/{sid}/distillation-curve")) == []
+
+
 def test_copy_link_compare_and_adjust(page):
     drv, base, hub = page
     sid = hub.ids["final"]
     _open(drv, base, f"/samples/{sid}")
+    assert wait_for(drv, lambda: _js(drv, "return document.querySelector('[data-testid=act-cdf]').getAttribute('href')")
+                    == f"/api/samples/{sid}/cdf")
     _js(drv, "document.querySelector('[data-testid=more-menu-button]').click();")
     assert _js(drv, "return document.querySelector('[data-testid=more-menu]').hidden") is False
     assert _js(drv, "return document.querySelector('[data-testid=act-cdf]').getAttribute('href')") == f"/api/samples/{sid}/cdf"
     _js(drv, "document.querySelector('[data-testid=act-copy-link]').click();")
     assert wait_for(drv, lambda: _js(drv, "return window.__clip") == f"https://gc.asaplabs.net/samples/{sid}")
-    # Compare mounts GCCompare; its standard goes in the address
+    # Compare mounts lane C's GCCompare; the standard it settles on goes in the address
     _js(drv, "document.querySelector('[data-testid=view-compare]').click();")
-    assert wait_for(drv, lambda: _path(drv) == f"/samples/{sid}/compare")
+    assert wait_for(drv, lambda: _path(drv).startswith(f"/samples/{sid}/compare"))
     assert wait_for(drv, lambda: _js(drv, "return !!(GCSamples.state.compare)"))
-    _js(drv, "GCSamples.state.compare.setStandard('Diesel');")
-    if _js(drv, "return !!window.GCCompare.__stub"):
-        _js(drv, "const s = document.querySelector('[data-testid=compare-stub] select');"
-                 "s.value = s.options[1] ? s.options[1].value : ''; s.dispatchEvent(new Event('change'));")
-        want = _js(drv, "return document.querySelector('[data-testid=compare-stub] select').value")
-        if want:
-            assert wait_for(drv, lambda: "standard=" in _path(drv))
+    assert _js(drv, "return !window.GCCompare.__stub && typeof GCCompare.openExportSheet") == "function"
+    assert wait_for(drv, lambda: "standard=" in _path(drv)), _path(drv)
+    assert wait_for(drv, lambda: _tid(drv, "compare-standard") == 1)
+    # a reload with ?standard= opens Compare on that standard
+    drv.get(f"{base}/samples/{sid}/compare?standard=Diesel")
+    assert wait_for(drv, lambda: _js(drv, "return !!(window.GCSamples && GCSamples.ready && GCSamples.state.compare)"))
+    assert wait_for(drv, lambda: _js(drv, "return GCSamples.state.compare.standard()") == "Diesel")
+    assert _path(drv) == f"/samples/{sid}/compare?standard=Diesel"
+    # the header's Add to queue carries what Compare shows: a threshold set in Adjust
+    _js(drv, "try { GCReportQueue.clear(); } catch (e) {}")
+    _js(drv, "document.querySelector('[data-testid=compare-adjust-toggle]').click();")
+    box = wait_for(drv, lambda: drv.find_element("css selector", "[data-testid=adjust-significant]"))
+    box.clear()
+    box.send_keys("2345")
+    assert wait_for(drv, lambda: _js(drv, "return GCSamples.state.compare.params().thresh_significant") in (2345, "2345"))
+    _js(drv, "document.querySelector('[data-testid=add-to-queue]').click();")
+    item = wait_for(drv, lambda: _js(drv, "const i = GCReportQueue.items(); return i.length && i[i.length - 1];"))
+    assert item and item["sample_id"] == sid and item["standard_name"] == "Diesel", item
+    assert float(item["params"]["thresh_significant"]) == 2345, item
+    assert item.get("sample_name") != "40304"
+    # Export report opens lane C's sheet
+    _js(drv, "document.querySelector('[data-testid=export-report]').click();")
+    assert wait_for(drv, lambda: _js(drv, "const d = document.querySelector('[data-testid=export-sheet]'); return !!(d && d.open)"))
+    _js(drv, "document.querySelector('[data-testid=export-sheet]').close();")
     # the Adjust drawer hides the list
     _js(drv, "document.dispatchEvent(new CustomEvent('gc:adjust', {detail: {open: true}}));")
     assert wait_for(drv, lambda: _js(drv, "return getComputedStyle(document.querySelector('[data-testid=list-pane]')).display") == "none")

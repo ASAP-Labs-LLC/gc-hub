@@ -9,12 +9,14 @@
    every answer, GCLive.bgFetch for what the page fetches on its own) and
    builds the DOM with textContent.
 
-   Lane C contracts, guarded: window.GCCompare.mount(el, {sample, standards,
-   settings, onUrlChange}) -> {unmount(), setStandard(name)} for Compare
-   (compare_view.js, loaded on demand; compare_view_stub.js stands in while
-   it is missing), the gc:adjust event (the Adjust drawer hides the list),
-   window.GCReportQueue.add(item) for "Add to queue" and the bulk action, and
-   window.GCReportExport.open(sample) for "Export report" when it exists.
+   Lane C (compare_view.js, from _compare_assets.html): Compare mounts
+   GCCompare.mount(el, {sample, standards, settings, onUrlChange}) ->
+   {unmount(), setStandard(name), ...}; the header's Export report and Add to
+   queue are GCCompare.openExportSheet / GCCompare.addToQueue (the mounted
+   view's parameters when Compare is open, the saved defaults otherwise); the
+   bulk "Add to report queue" is GCReportQueue.addMany with each run's
+   GCCompare.defaultStandard; the gc:adjust event (the Adjust drawer) hides
+   the list.
    Themes: GCTheme's gc:theme event (and any data-theme change) re-themes
    Plotly from the CSS tokens. */
 (function () {
@@ -27,16 +29,17 @@
     const h = SH.h;
     const $ = (id) => document.getElementById(id);
     const PAGE = 500;
+    const D86_KEY = 'gc.correctedD86';      // shared with Results, Settings and classic
 
     const S = {
         route: R.parse(location.pathname, location.search),
         files: [], total: 0, loading: false, listSeq: 0,
         instruments: [], names: {},
-        standards: [], settings: null,
+        standards: [], settings: null, standardsReady: null, table: null,
         sel: L.selection(),
         row: null, meta: null, cache: new Map(),       // sample id -> {meta, trace, curve, lab}
         detailSeq: 0, compare: null, compareFor: null,
-        corrected: loadBool('gc.samples.corrected', true),
+        corrected: loadBool(D86_KEY, false),
         counts: { held: 0, error: 0, today: 0 },
         bulkRunning: false, bulkStop: false,
     };
@@ -124,7 +127,7 @@
         $('rows').replaceChildren(h('p', { className: 'list-empty', role: 'alert', text: msg }));
     }
 
-    function renderFilters() {
+    function renderFilters(fromUrl) {
         const f = S.route.filters;
         const inst = $('inst-chips');
         const chips = [h('button', { type: 'button', className: 'chip', 'aria-pressed': f.instrument.length ? 'false' : 'true',
@@ -158,7 +161,7 @@
                               onclick: () => setFilters({ notsent: !S.route.filters.notsent }) }));
         st.replaceChildren(...sc);
         const q = $('filter-q');
-        if (document.activeElement !== q && q.value !== f.q) q.value = f.q;
+        if ((fromUrl || document.activeElement !== q) && q.value !== f.q) q.value = f.q;
         document.querySelectorAll('#sort-switch [data-sort]').forEach(b =>
             b.setAttribute('aria-checked', b.dataset.sort === f.sort ? 'true' : 'false'));
     }
@@ -423,27 +426,39 @@
         refreshRowStates();
     }
 
-    function standardNames() { return S.standards.map(s => s.name); }
+    function convert() {
+        return window.GCResults && window.GCResults.convertToD86 ? window.GCResults.convertToD86 : null;
+    }
+
+    function defaultStandard(row) {
+        const C = window.GCCompare;
+        return C && C.defaultStandard ? C.defaultStandard(row, S.standards) : null;
+    }
 
     async function queueRows(rows, progress) {
         const q = window.GCReportQueue;
-        if (!q || typeof q.add !== 'function') throw new Error('The report queue is not available on this page yet.');
-        let done = 0;
-        const refused = [];
-        for (const f of rows) {
-            const item = L.queueItem(f, standardNames(), null);
-            try { q.add(item); done++; } catch (e) { refused.push({ sample_id: f.sample_id, error: e.message }); }
-            progress({ sent: done + refused.length, total: rows.length });
-        }
-        return { done, refused, failed: 0, stopped: false, total: rows.length };
-    }
-
-    async function downloadReports(rows, progress) {
+        if (!q || typeof q.addMany !== 'function') throw new Error('The report queue is not available on this page.');
+        await settingsAndStandards();
         const items = [];
         const refused = [];
         for (const f of rows) {
-            const it = L.queueItem(f, standardNames(), null);
-            if (!it.standard_name) { refused.push({ sample_id: f.sample_id, error: 'no best-fit standard' }); continue; }
+            const std = defaultStandard(f);
+            if (std) items.push(L.queueItem(f, std));
+            else refused.push({ sample_id: f.sample_id, error: 'no comparison standard' });
+        }
+        const n = items.length ? (q.addMany(items, { quiet: true }) || 0) : 0;
+        progress({ sent: rows.length, total: rows.length });
+        if (n && typeof q.openSheet === 'function') q.openSheet();
+        return { done: n, refused, failed: items.length - n, stopped: false, total: rows.length };
+    }
+
+    async function downloadReports(rows, progress) {
+        await settingsAndStandards();
+        const items = [];
+        const refused = [];
+        for (const f of rows) {
+            const it = L.queueItem(f, defaultStandard(f));
+            if (!it.standard_name) { refused.push({ sample_id: f.sample_id, error: 'no comparison standard' }); continue; }
             items.push({ sample_id: it.sample_id, standard_name: it.standard_name, lab_id: it.lab_id,
                          doc_name: 'GC Analysis', sample_name: it.sample_name });
         }
@@ -475,6 +490,20 @@
     }
 
     // ── one sample ──────────────────────────────────────────────────────
+    async function loadCurve(id, row, background) {
+        const r = await getJSON('/api/samples/' + id + '/distillation-curve', background);
+        if (r.ok) return r.body;
+        if (r.status === 404 && row && row.current_revision) {
+            if (!S.table || Date.now() - S.table.at > 60000) {
+                const t = await getJSON('/api/table', background);
+                if (t.ok) S.table = { at: Date.now(), body: t.body };
+            }
+            const c = S.table ? L.curveFromTable(S.table.body, id) : null;
+            if (c) return c;
+        }
+        return { error: errText(r, 'The results') };
+    }
+
     function entry(id) {
         if (!S.cache.has(id)) S.cache.set(id, {});
         return S.cache.get(id);
@@ -630,7 +659,7 @@
         const row = S.row;
         const wants = [
             e.trace ? null : getJSON('/api/samples/' + id + '/trace', background).then(r => { e.trace = r.ok ? r.body : { error: errText(r, 'The chromatogram') }; }),
-            e.curve || !row.current_revision ? null : getJSON('/api/samples/' + id + '/distillation-curve', background).then(r => { e.curve = r.ok ? r.body : { error: errText(r, 'The results') }; }),
+            e.curve || !row.current_revision ? null : loadCurve(id, row, background).then(c => { e.curve = c; }),
             e.lab || !row.lab_id || String(row.lab_id).includes('/') ? null : getJSON('/api/lab/' + encodeURIComponent(row.lab_id), true).then(r => { e.lab = r.ok ? r.body : { runs: [] }; }),
         ].filter(Boolean);
         if (!e.trace) $('chrom').replaceChildren(h('div', { className: 'chart-empty', text: 'Loading the chromatogram…' }));
@@ -651,7 +680,7 @@
         }
         if (!curve) { body.replaceChildren(h('p', { className: 'side-note', text: 'Loading…' })); return; }
         if (curve.error) { body.replaceChildren(h('p', { className: 'side-note', role: 'alert', text: curve.error })); return; }
-        const rows = L.resultRows(curve, S.corrected);
+        const rows = L.resultRows(curve, S.corrected, convert());
         const tbl = h('table', { className: 'res-tbl', 'data-testid': 'results-table' },
             h('thead', {}, h('tr', {}, h('th', { scope: 'col', text: 'Recovery' }), h('th', { scope: 'col', text: 'D86' }), h('th', { scope: 'col', text: 'D2887' }))),
             h('tbody', {}, ...rows.map(r => h('tr', { className: r.key ? 'key' : '' },
@@ -660,12 +689,13 @@
                 h('td', { className: r.d2887 === null ? 'none' : '', text: L.fmt(r.d2887, 1) })))));
         const sw = h('button', { type: 'button', className: 'switch', role: 'switch', 'aria-checked': S.corrected ? 'true' : 'false',
                                  'aria-label': 'D86 corrected', 'data-testid': 'corrected-toggle',
-                                 onclick: () => { S.corrected = !S.corrected; saveBool('gc.samples.corrected', S.corrected); renderResults(S.row, entry(S.row.sample_id).curve); } });
+                                 onclick: () => { S.corrected = !S.corrected; saveBool(D86_KEY, S.corrected); renderResults(S.row, entry(S.row.sample_id).curve); } });
         const inst = S.names[row.instrument] || row.instrument;
         const best = row.best_fit;
         const flags = L.flagText(row);
         body.replaceChildren(tbl,
             h('div', { className: 'switch-row' }, h('span', { text: S.corrected ? 'D86 corrected (' + inst + ' factors)' : 'D86 uncorrected' }), sw),
+            curve.fromTable ? h('p', { className: 'side-note', 'data-testid': 'results-from-table', text: 'Imported result: the numbers as stored (no curve for this run).' }) : null,
             h('div', { className: 'res-foot' },
                 h('div', { className: 'line' }, h('span', { className: 'k', text: 'Best fit' }),
                     h('span', { className: 'v' }, best && best.label ? best.label : '—',
@@ -694,8 +724,7 @@
         const e = entry(id);
         const row = S.row;
         if (!e.curve && row.current_revision) {
-            const r = await getJSON('/api/samples/' + id + '/distillation-curve', background);
-            e.curve = r.ok ? r.body : { error: errText(r, 'The results') };
+            e.curve = await loadCurve(id, row, background);
         }
         if (seq !== S.detailSeq) return;
         const curve = e.curve;
@@ -704,7 +733,7 @@
             const st = L.rowStatus(row);
             tbl.replaceChildren(h('tbody', {}, h('tr', {}, h('td', { text: curve && curve.error ? curve.error : 'No result yet: ' + (st.reason || st.text) + '.' }))));
         } else {
-            const rows = L.dataRows(curve);
+            const rows = L.dataRows(curve, convert());
             const inst = S.names[row.instrument] || row.instrument;
             tbl.replaceChildren(
                 h('thead', {}, h('tr', {}, ...['Recovery', 'D2887 °C', 'D86 raw', inst + ' correction', 'D86 reported'].map(t => h('th', { scope: 'col', text: t })))),
@@ -743,28 +772,19 @@
     async function copyTable() {
         const e = entry(S.route.sampleId);
         if (!e.curve || e.curve.error) return;
-        const ok = await copyText(L.dataTableText(L.dataRows(e.curve)));
+        const ok = await copyText(L.dataTableText(L.dataRows(e.curve, convert())));
         SH.toast(ok ? 'Table copied' : 'Could not copy the table', ok ? undefined : 'err');
     }
 
     // ── Compare (lane C) ────────────────────────────────────────────────
-    let compareLoading = null;
-    function loadCompareModule() {
-        if (window.GCCompare && !window.GCCompare.__stub) return Promise.resolve();
-        if (compareLoading) return compareLoading;
-        const ver = encodeURIComponent((($('app-version') || {}).textContent || '').trim());
-        const load = (src) => new Promise((resolve) => {
-            const s = document.createElement('script');
-            s.src = src;
-            s.onload = () => resolve(true);
-            s.onerror = () => resolve(false);
-            document.body.appendChild(s);
-        });
-        compareLoading = (async () => {
-            if (!window.GCCompare) await load('/static/js/compare_view.js?v=' + ver);
-            if (!window.GCCompare) await load('/static/js/compare_view_stub.js?v=' + ver);
-        })();
-        return compareLoading;
+    function settingsAndStandards() {
+        if (!S.standardsReady) {
+            S.standardsReady = Promise.all([
+                getJSON('/api/comparison-standards', true).then(r => { S.standards = r.ok && Array.isArray(r.body) ? r.body : []; }),
+                S.settings ? null : getJSON('/api/settings', true).then(r => { S.settings = r.ok ? r.body : {}; }),
+            ]);
+        }
+        return S.standardsReady;
     }
 
     async function mountCompare() {
@@ -775,25 +795,31 @@
         }
         unmountCompare();
         const el = $('view-compare');
-        el.replaceChildren(h('p', { className: 'side-note', text: 'Loading Compare…' }));
-        await loadCompareModule();
-        if (S.route.sampleId !== id || S.route.view !== 'compare') return;
-        if (!S.settings) {
-            const r = await getJSON('/api/settings');
-            S.settings = r.ok ? r.body : {};
+        if (!window.GCCompare || typeof window.GCCompare.mount !== 'function') {
+            el.replaceChildren(h('p', { className: 'errline', role: 'alert', text: 'Compare did not load (compare_view.js). Reload the page.' }));
+            return;
         }
+        el.replaceChildren(h('p', { className: 'side-note', text: 'Loading Compare…' }));
+        await settingsAndStandards();
+        if (S.route.sampleId !== id || S.route.view !== 'compare') return;
         el.replaceChildren();
-        const sample = Object.assign({}, S.row, { metadata: entry(id).meta, standard: S.route.standard });
         try {
             S.compare = window.GCCompare.mount(el, {
-                sample, standards: S.standards, settings: S.settings,
+                sample: S.row, standards: S.standards, settings: S.settings,
                 onUrlChange: (change) => {
                     if (!change || S.route.sampleId !== id || S.route.view !== 'compare') return;
-                    if ('standard' in change) { go({ standard: change.standard || null }, 'replace'); renderViewSwitch(); }
+                    if ('standard' in change) {
+                        // a pick is a step Back can undo; the default resolving is not
+                        go({ standard: change.standard || null }, change.source === 'pick' ? 'push' : 'replace');
+                        renderViewSwitch();
+                    }
                 },
             });
             S.compareFor = id;
-            if (S.route.standard && S.compare && S.compare.setStandard) S.compare.setStandard(S.route.standard);
+            if (S.route.standard && S.compare && S.compare.setStandard
+                    && S.compare.setStandard(S.route.standard) === false) {
+                SH.toast('No comparison standard named ' + S.route.standard + '.', 'err');
+            }
         } catch (e) {
             el.replaceChildren(h('p', { className: 'errline', role: 'alert', text: 'Compare could not open: ' + e.message }));
         }
@@ -849,39 +875,21 @@
         else SH.toast(r.body.refused && r.body.refused.length ? 'Not exported: ' + r.body.refused[0].error : errText(r, 'Export to LIMS'), 'err');
     }
 
-    function currentStandard() {
-        return S.route.view === 'compare' ? S.route.standard : null;
-    }
-
-    function addToQueue() {
-        const q = window.GCReportQueue;
-        if (!q || typeof q.add !== 'function') { SH.toast('The report queue is not available on this page yet.', 'err'); return; }
-        const item = L.queueItem(S.row, standardNames(), currentStandard());
-        try {
-            q.add(item);
-            SH.toast('Added ' + (S.row.display_name || S.row.lab_id) + ' to the report queue' + (item.standard_name ? ' · standard ' + item.standard_name : ' · pick a standard before sending'));
-        } catch (e) {
-            SH.toast(e.message, 'err');
+    async function addToQueue() {
+        const C = window.GCCompare;
+        if (!C || typeof C.addToQueue !== 'function' || !window.GCReportQueue) {
+            SH.toast('The report queue is not available on this page.', 'err');
+            return;
         }
+        await settingsAndStandards();
+        C.addToQueue({ sample: S.row, standards: S.standards, settings: S.settings });   // it says what it did
     }
 
     async function exportReport() {
-        const ex = window.GCReportExport;
-        const sample = Object.assign({}, S.row, { standard: currentStandard() });
-        if (ex && typeof ex.open === 'function') { ex.open(sample); return; }
-        // without lane C's Export report sheet: this run's PDF against its best fit
-        const item = L.queueItem(S.row, standardNames(), currentStandard());
-        if (!item.standard_name) { SH.toast('Pick a standard in Compare first: this run has no best-fit standard.', 'err'); setView('compare', 'push'); return; }
-        SH.toast('Building the report for ' + item.lab_id + '…');
-        const r = await fetch('/api/export-analysis-report', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sample_id: item.sample_id, standard_name: item.standard_name, lab_id: item.lab_id, doc_name: 'GC Analysis' }) });
-        if (!r.ok) { const res = await window.GCSession.readJson(r); SH.toast((res.body && res.body.error) || 'The report failed (HTTP ' + r.status + ').', 'err'); return; }
-        const blob = await r.blob();
-        const a = h('a', { href: URL.createObjectURL(blob), download: item.lab_id + '_GC_Analysis.pdf' });
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-        SH.toast('Report downloaded · standard ' + item.standard_name);
+        const C = window.GCCompare;
+        if (!C || typeof C.openExportSheet !== 'function') { SH.toast('Export report did not load. Reload the page.', 'err'); return; }
+        await settingsAndStandards();
+        C.openExportSheet({ sample: S.row, standards: S.standards, settings: S.settings });
     }
 
     function wireHeader() {
@@ -1036,11 +1044,11 @@
             renderList();
             if (S.row) renderHeader(S.row, entry(S.row.sample_id).meta || {});
         });
-        getJSON('/api/comparison-standards', true).then(r => { S.standards = r.ok && Array.isArray(r.body) ? r.body : []; });
+        settingsAndStandards();
         window.addEventListener('popstate', () => {
             const before = S.route;
             S.route = R.parse(location.pathname, location.search);
-            renderFilters();
+            renderFilters(true);
             if (R.filesQuery(before.filters) !== R.filesQuery(S.route.filters)) { S.sel = L.clear(); loadList(); }
             else if (before.filters.sort !== S.route.filters.sort) renderList();
             if (before.sampleId !== S.route.sampleId || before.view !== S.route.view) showDetail();

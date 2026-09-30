@@ -6,7 +6,7 @@
 {% block title %}Samples{% endblock %}
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/gc_pages.css') }}?v=2">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/samples.css') }}?v=1">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/samples.css') }}?v=2">
 {% endblock %}
 {% block topbar %}
   <h1 class="tb-title">Samples</h1>
@@ -164,13 +164,13 @@
 {% endblock %}
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/distill_view.js') }}?v=2"></script>
-<script src="{{ url_for('static', filename='js/ladder.js') }}?v=2"></script>
 <script src="{{ url_for('static', filename='js/sample_order.js') }}?v=2"></script>
-<script src="{{ url_for('static', filename='js/samples.js') }}?v=4"></script>
-<script src="{{ url_for('static', filename='js/deeplink.js') }}?v=3"></script>
-<script src="{{ url_for('static', filename='js/report_payload.js') }}?v=3"></script>
-<script src="{{ url_for('static', filename='js/samples_router.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/samples_logic.js') }}?v=1"></script>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
-<script src="{{ url_for('static', filename='js/samples_page.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/samples.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/deeplink.js') }}?v=4"></script>
+<script src="{{ url_for('static', filename='js/results_logic.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/samples_router.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/samples_logic.js') }}?v=2"></script>
+{#- lane C: Plotly, ladder.js, comments.js, compare_logic.js, compare_view.js and compare.css -#}
+{% include "_compare_assets.html" %}
+<script src="{{ url_for('static', filename='js/samples_page.js') }}?v=2"></script>
 {% endblock %}

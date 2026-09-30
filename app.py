@@ -3828,11 +3828,11 @@ def samples_page():
 
 @app.route("/")
 def index():
-    """The Samples page (v5.0.0). The classic page's old ``/?open=settings|help``
-    links still open its modals, at ``/classic``."""
+    """The Samples page (v5.0.0). The old user-menu links ``/?open=settings|help``
+    go to the Settings and Help pages."""
     what = request.args.get("open")
     if what in ("settings", "help"):
-        return redirect(f"/classic?open={what}")
+        return redirect(f"/{what}")
     return samples_page()
 
 

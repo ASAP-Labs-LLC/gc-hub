@@ -3,7 +3,7 @@ additions, booted against a hub with real samples (``tests/hub_boot.py``).
 
 * ``/``, ``/samples`` and ``/samples/<id>[/compare|/data]`` render the new
   Samples page; ``/classic`` the old page; ``/?open=settings|help`` (the old
-  user-menu links) go to ``/classic?open=…``; ``/lab/<id>`` lands on
+  user-menu links) go to ``/settings`` and ``/help``; ``/lab/<id>`` lands on
   ``/samples/<its newest run>``;
 * ``GET /api/files/ids`` answers the ids ``/api/files`` would list for the
   same filters (the "Select all N matching this filter" source), capped;
@@ -81,10 +81,10 @@ def test_the_classic_page_moved_to_classic(hub_app):
 
 
 @pytest.mark.parametrize("what", ["settings", "help"])
-def test_the_old_open_links_go_to_the_classic_modals(hub_app, what):
+def test_the_old_open_links_go_to_the_settings_and_help_pages(hub_app, what):
     port, _hub, _ = hub_app
     code, headers, _ = _raw(port, f"/?open={what}")
-    assert code == 302 and headers["Location"].endswith(f"/classic?open={what}")
+    assert code == 302 and headers["Location"].endswith(f"/{what}")
 
 
 def test_a_lab_link_lands_on_its_newest_run(hub_app):

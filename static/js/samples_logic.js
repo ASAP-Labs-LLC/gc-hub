@@ -256,10 +256,10 @@
     }
 
     /** The Results card: [{label, d86, d2887, note, key}] (D86 per the toggle). */
-    function resultRows(curve, corrected) {
+    function resultRows(curve, corrected, convert) {
         const c = curve || {};
         const view = DV.dashboardD86({ d86: c.d86 || {}, d86_uncorrected: c.d86_uncorrected, d2887: c.d2887 || {} },
-            !!corrected, null);
+            !!corrected, convert || null);
         return LABELS.map(l => ({
             label: l,
             d86: view.values[l],
@@ -270,10 +270,16 @@
     }
 
     /** The Data table: D2887, D86 before and after the correction, the correction. */
-    function dataRows(curve) {
+    function dataRows(curve, convert) {
         const c = curve || {};
+        let converted = null;
+        if (!c.d86_uncorrected && typeof convert === 'function') {
+            const byLabel = {};
+            LABELS.forEach((l) => { byLabel[l] = round2((c.d2887 || {})[_col('2887', l)]); });
+            converted = DV.x4Midpoints(convert(byLabel) || {});
+        }
         return LABELS.map(l => {
-            const raw = round2((c.d86_uncorrected || {})[_col('D86', l)]);
+            const raw = converted ? round2(converted[l]) : round2((c.d86_uncorrected || {})[_col('D86', l)]);
             const reported = round2((c.d86 || {})[_col('D86', l)]);
             return {
                 label: l,
@@ -367,19 +373,34 @@
     }
 
     // ── the report queue item (lane C's GCReportQueue.add) ──────────────
-    function queueItem(r, standardNames, picked) {
-        const names = standardNames || [];
-        const best = r && r.best_fit && r.best_fit.label ? String(r.best_fit.label) : '';
-        const std = picked || (names.includes(best) ? best : '');
-        return { sample_id: r.sample_id, lab_id: r.lab_id, sample_name: r.display_name || r.lab_id,
-                 instrument: r.instrument, standard_name: std };
+    function queueItem(r, standard) {
+        return { sample_id: r.sample_id, lab_id: r.lab_id, sample_name: 'GC Analysis',
+                 instrument: r.instrument, standard_name: standard || '' };
+    }
+
+    /** A result-only (v1-imported) run has no CDF, so no distillation curve:
+        its numbers come from its /api/table row, shaped like the curve's
+        (d2887/d86 by CSV column; no stored uncorrected D86). null: no row. */
+    function curveFromTable(table, sampleId) {
+        if (!table || !Array.isArray(table.rows)) return null;
+        const i = (table.sample_ids || []).indexOf(sampleId);
+        if (i < 0) return null;
+        const row = table.rows[i] || [];
+        const out = { d2887: {}, d86: {}, d86_uncorrected: null, fromTable: true };
+        (table.columns || []).forEach((col, j) => {
+            const v = row[j];
+            if (v === null || v === undefined || String(v).trim() === '' || !Number.isFinite(Number(v))) return;
+            if (/^2887 /.test(col)) out.d2887[col] = Number(v);
+            else if (/^D86 /.test(col)) out.d86[col] = Number(v);
+        });
+        return out;
     }
 
     const api = {
         number, plural, fmt, rowStatus, rowDetail, flagText, injectedText,
         selection, selectedIds, toggle, extend, paint, selectShown, selectAllMatching, clear, keepOnly, bulkBar,
         CHUNK, BULK_LIMIT, chunks, runChunks, outcomeText, filterText, confirmText, countsText,
-        resultRows, dataRows, dataTableText, historyItems, carbonTicks, CHART_CONFIG, chartLayout, step, queueItem,
+        resultRows, dataRows, dataTableText, curveFromTable, historyItems, carbonTicks, CHART_CONFIG, chartLayout, step, queueItem,
     };
     root.SamplesLogic = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;

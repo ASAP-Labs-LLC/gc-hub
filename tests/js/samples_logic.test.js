@@ -196,8 +196,33 @@ module.exports = async (t) => {
     t.eq(L.step([5, 4, 3], 99, -1), 5);
 
     // ── a report item for the queue (lane C's GCReportQueue.add) ─────────
-    t.eq(L.queueItem(row(1, { display_name: '40301 (2)', best_fit: { label: 'Diesel', score: 0.9 } }), ['Diesel', 'Jet A'], null),
-         { sample_id: 1, lab_id: '40301', sample_name: '40301 (2)', instrument: 'gc1', standard_name: 'Diesel' });
-    t.eq(L.queueItem(row(1, { best_fit: { label: 'Mix: A + B', score: 0.9 } }), ['Diesel'], null).standard_name, '');
-    t.eq(L.queueItem(row(1), ['Diesel'], 'Jet A').standard_name, 'Jet A');
+    // the report's name is 'GC Analysis' as on classic (it names the PDF and the QBench attachment)
+    t.eq(L.queueItem(row(1, { display_name: '40301 (2)' }), 'Diesel'),
+         { sample_id: 1, lab_id: '40301', sample_name: 'GC Analysis', instrument: 'gc1', standard_name: 'Diesel' });
+    t.eq(L.queueItem(row(1), null).standard_name, '');
+
+    // ── a result-only (v1-imported) run: its numbers from /api/table ─────
+    const table = { columns: ['Lab ID', 'InjectionDateTime', '2887 IBP', '2887 T30', '2887 T50', '2887 T70', 'D86 IBP', 'D86 T50', 'D86 T40', 'Best Fit'],
+                    rows: [['X', '2026-09-01 10:00', '100.5', '200', '250', '300', '150.25', '255', '', 'Diesel'],
+                           ['Y', '2026-09-02 10:00', '1', '2', '3', '4', '5', '6', '7', '']],
+                    sample_ids: [7, 8] };
+    const tc = L.curveFromTable(table, 7);
+    t.eq(tc.fromTable, true);
+    t.eq(tc.d2887['2887 IBP'], 100.5);
+    t.eq(tc.d86['D86 IBP'], 150.25);
+    t.eq(tc.d86['D86 T40'], undefined);                 // an empty cell is no value
+    t.eq(tc.d86_uncorrected, null);
+    t.eq(L.curveFromTable(table, 99), null);
+    t.eq(L.curveFromTable(null, 7), null);
+    // corrected: the stored cells; uncorrected: the D2887 converted (X4), 40/60 the midpoints
+    const conv = (d) => ({ '30%': d['30%'] + 1, '50%': d['50%'] + 1, '70%': d['70%'] + 1 });
+    t.eq(L.resultRows(tc, true, conv)[0].d86, 150.25);
+    const un = L.resultRows(tc, false, conv);
+    t.eq(un[6].d86, 251);
+    t.eq(un[5].d86, 226);                               // 40%: midpoint of 201 and 251
+    t.eq(un[7].d86, 276);                               // 60%: midpoint of 251 and 301
+    // the Data view: raw = the conversion when the result stores none
+    const dr = L.dataRows(tc, conv);
+    t.eq(dr[6], { label: '50%', d2887: 250, raw: 251, correction: 4, reported: 255 });
+    t.eq(L.dataRows(tc)[6].raw, null);
 };

@@ -181,7 +181,7 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/api/admin/hub/resume-processing` | POST | new | local | hub tray `hub_control` (loopback only + admin password): start them again |
 | `/api/admin/hub/stop` | POST | new | local | hub tray `hub_control` (loopback only + admin password): write the updater's `paused` marker, stop the hub, exit without a respawn → 202 |
 | `/healthz` | GET | unchanged | open | |
-| `/` | GET | migrated | session | v5.0.0: the Samples page (`templates/samples.html`, lane S); `?open=settings\|help` (the classic modals' old links) → 302 `/classic?open=…` |
+| `/` | GET | migrated | session | v5.0.0: the Samples page (`templates/samples.html`, lane S); `?open=settings\|help` (the old user-menu links) → 302 `/settings` / `/help` |
 | `/samples` | GET | new | session | v5.0.0: the Samples page; filters, search and sort in the query (`instrument, status, q, sort, notsent`) |
 | `/classic` | GET | new | session | v5.0.0: the classic main page (`templates/index.html`), kept for this release only |
 | `/classic/lab/<lab_id>` | GET | new | session | v5.0.0 `sample_links`: the classic page with the lab ID's newest run selected (as `/lab/<lab_id>` was in v4.0); 404 friendly page |
