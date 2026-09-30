@@ -118,6 +118,20 @@ PAIRS = [
     ("--text", ["--bg", "--bg-active"], TEXT, "the admin sub-nav's current item"),
     ("--pill-error-fg", ["--bg-sunken"], TEXT, "an error in the path editor"),
     ("--ink-fg", ["--ink-hover"], TEXT, "primary buttons on hover"),
+    # v5.0.0 lane S: the Samples page (samples.css): rows on hover/active, reasons, tags, chips
+    ("--text-muted-sunken", ["--bg", "--bg-hover"], TEXT, "a hovered row's caption"),
+    ("--text-muted-sunken", ["--bg", "--bg-active"], TEXT, "the open or a checked row's caption"),
+    ("--text", ["--bg", "--bg-active"], TEXT, "the open or a checked row's lab ID"),
+    ("--warn-text", ["--bg", "--bg-hover"], TEXT, "a held row's reason on hover"),
+    ("--pill-held-fg", ["--bg", "--bg-active"], TEXT, "a held row's reason, open or checked"),
+    ("--st-error", ["--bg", "--bg-hover"], TEXT, "an error row's reason on hover"),
+    ("--st-error", ["--bg", "--bg-active"], TEXT, "an error row's reason, open or checked"),
+    ("--text-muted-sunken", ["--bg", "--bg-sunken"], TEXT, "the Ctrl K hint and the view switch"),
+    ("--text", ["--bg-elevated"], TEXT, "the bulk bar"),
+    ("--text-muted", ["--bg-elevated"], TEXT, "the bulk bar's progress line"),
+    ("--text", ["--bg-card", "--bg-hover"], TEXT, "a hovered chip"),
+    ("--warn-text", ["--bg-card"], TEXT, "a held sample's reason in the header"),
+    ("--st-error", ["--bg-card"], TEXT, "an error sample's reason in the header"),
     # v5.0: the Backfill rows (gc_pages.css): selected and hovered rows, their why line
     ("--text", ["--bg", "--bg-active"], TEXT, "a selected backfill row"),
     ("--text-muted-sunken", ["--bg", "--bg-active"], TEXT, "the why line on a selected row"),
@@ -191,6 +205,7 @@ def test_the_version_badge_is_readable():
 # v4.0 lane E2: the new pages' stylesheets use only the checked tokens for
 # colour (no literal colours), and only token pairs listed above for text.
 PAGE_CSS = [ROOT / "static" / "css" / "admin.css", ROOT / "static" / "css" / "calibration.css",
+            ROOT / "static" / "css" / "samples.css",
             ROOT / "static" / "css" / "compare.css", ROOT / "static" / "css" / "report_queue.css",
             # v5.0 lane R
             ROOT / "static" / "css" / "results.css", ROOT / "static" / "css" / "settings.css",

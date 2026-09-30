@@ -1,5 +1,6 @@
-"""v3.1 sendable links: a headless-Chrome smoke of ``/lab/<lab_id>`` and
-``/samples/<id>[/compare|/data]`` on the classic page, signed in, against a
+"""v3.1 sendable links: a headless-Chrome smoke of ``/classic/lab/<lab_id>`` and
+``/classic/samples/<id>[/compare|/data]`` on the classic page (v5.0.0 moved it
+to /classic; the plain links open the new Samples page), signed in, against a
 hub with real samples (``tests/hub_boot.py``): the linked sample is selected
 on the right tab, a lab ID's other runs are listed, and "Copy link" copies
 the hub address (https://gc.asaplabs.net/samples/<id>) although the page was
@@ -85,8 +86,8 @@ def _open(drv, url):
 
 def test_a_lab_link_selects_its_newest_run_and_lists_the_other(page):
     drv, base, hub = page
-    _open(drv, f"{base}/lab/40304")
-    assert drv.current_url == f"{base}/lab/40304"
+    _open(drv, f"{base}/classic/lab/40304")
+    assert drv.current_url == f"{base}/classic/lab/40304"
     newest, older = hub.ids["rerun"], hub.ids["final"]
     assert wait_for(drv, lambda: drv.execute_script(SELECTED) == [newest, "tab-dashboard", newest]), \
         drv.execute_script(SELECTED)
@@ -98,7 +99,7 @@ def test_a_lab_link_selects_its_newest_run_and_lists_the_other(page):
 
 def test_a_lowercase_encoded_lab_link_works_too(page):
     drv, base, hub = page
-    _open(drv, f"{base}/lab/%34%30%32%39%38")          # 40298, percent-encoded
+    _open(drv, f"{base}/classic/lab/%34%30%32%39%38")          # 40298, percent-encoded
     sid = hub.ids["released"]
     assert wait_for(drv, lambda: drv.execute_script(SELECTED)[2] == sid)
 
@@ -106,7 +107,7 @@ def test_a_lowercase_encoded_lab_link_works_too(page):
 def test_copy_link_uses_the_hub_address_not_the_page_origin(page):
     drv, base, hub = page
     sid = hub.ids["final"]
-    _open(drv, f"{base}/samples/{sid}")
+    _open(drv, f"{base}/classic/samples/{sid}")
     assert wait_for(drv, lambda: drv.execute_script(SELECTED) == [sid, "tab-dashboard", sid])
     assert click_when_ready(drv, "#btn-copy-link")
     want = f"https://gc.asaplabs.net/samples/{sid}"
@@ -127,7 +128,7 @@ def test_copy_link_uses_the_hub_address_not_the_page_origin(page):
 def test_a_compare_link_opens_analysis_with_the_standard(page):
     drv, base, hub = page
     sid = hub.ids["final"]
-    _open(drv, f"{base}/samples/{sid}/compare?standard=diesel")
+    _open(drv, f"{base}/classic/samples/{sid}/compare?standard=diesel")
     assert wait_for(drv, lambda: drv.execute_script(SELECTED) == [sid, "tab-analysis", sid]), \
         drv.execute_script(SELECTED)
     assert drv.execute_script("return state.selectedStandard && state.selectedStandard.name") \
@@ -139,7 +140,7 @@ def test_a_data_link_on_a_filtered_out_instrument(page):
     # this browser remembers the gc1 filter; the linked run is on gc2
     drv.execute_script("localStorage.setItem('gc-hub.listInstrument', 'gc1')")
     sid = hub.ids["held"]
-    _open(drv, f"{base}/samples/{sid}/data")
+    _open(drv, f"{base}/classic/samples/{sid}/data")
     assert wait_for(drv, lambda: drv.execute_script(SELECTED) == [sid, "tab-distilldata", sid]), \
         drv.execute_script(SELECTED)
     assert drv.execute_script("return localStorage.getItem('gc-hub.listInstrument')") == "gc1"
@@ -168,24 +169,25 @@ return [Number(tr.dataset.sampleId), r.top >= wrap.top - 1 && r.bottom <= wrap.b
 def test_a_data_link_highlights_and_scrolls_to_its_row(page):
     drv, base, hub = page
     sid = hub.ids["released"]
-    _open(drv, f"{base}/samples/{sid}/data")
+    _open(drv, f"{base}/classic/samples/{sid}/data")
     assert wait_for(drv, lambda: drv.execute_script(LINKED_ROW) == [sid, True, 1]), \
         drv.execute_script(LINKED_ROW)
     # a later /data link moves the highlight
     other = hub.ids["rerun"]
-    _open(drv, f"{base}/samples/{other}/data")
+    _open(drv, f"{base}/classic/samples/{other}/data")
     assert wait_for(drv, lambda: drv.execute_script(LINKED_ROW) == [other, True, 1]), \
         drv.execute_script(LINKED_ROW)
 
 
 def test_an_unknown_lab_id_shows_the_friendly_page(page):
     drv, base, _hub = page
-    drv.get(f"{base}/lab/99999")
+    drv.get(f"{base}/classic/lab/99999")
     box = drv.find_element("css selector", '[data-testid="link-not-found"]')
     assert "No GC result for lab ID 99999 yet" in box.text
     box.find_element("link text", "Search the samples").click()
+    # v5.0.0: the search link opens the new Samples page with its lab-ID filter set
     assert wait_for(drv, lambda: drv.execute_script(
-        "return document.getElementById('universal-search').value") == "99999")
+        "const q = document.getElementById('filter-q'); return q && q.value") == "99999")
 
 
 # -- a hub with more samples than the list loads -------------------------------
@@ -216,14 +218,14 @@ def crowded(tmp_path_factory):
 def test_a_sample_link_beyond_the_loaded_page(crowded):
     drv, base, hub = crowded
     sid = hub.ids["final"]
-    _open(drv, f"{base}/samples/{sid}")
+    _open(drv, f"{base}/classic/samples/{sid}")
     assert wait_for(drv, lambda: drv.execute_script(SELECTED) == [sid, "tab-dashboard", sid],
                     30), drv.execute_script(SELECTED)
 
 
 def test_a_lab_link_beyond_the_loaded_page(crowded):
     drv, base, hub = crowded
-    _open(drv, f"{base}/lab/40304")
+    _open(drv, f"{base}/classic/lab/40304")
     sid = hub.ids["rerun"]
     assert wait_for(drv, lambda: drv.execute_script(SELECTED) == [sid, "tab-dashboard", sid],
                     30), drv.execute_script(SELECTED)

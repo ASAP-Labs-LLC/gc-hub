@@ -92,7 +92,7 @@ def test_running_now_follows_a_dry_run_then_shows_its_outcome(tmp_path):
         drv = _driver()
         browser_sign_in(drv, port)
         try:
-            drv.get(f"http://127.0.0.1:{port}/")
+            drv.get(f"http://127.0.0.1:{port}/classic")
             assert _wait(lambda: _js(drv, "return document.querySelectorAll("
                                           "'#dash-file-list li[data-uid]').length") > 0)
             assert _indicator(drv) == ""                  # nothing running: no pill
@@ -163,7 +163,7 @@ def test_the_gc_strip_follows_heartbeats_and_the_list_order(tmp_path):
         drv = _driver()
         browser_sign_in(drv, port)
         try:
-            drv.get(f"http://127.0.0.1:{port}/")
+            drv.get(f"http://127.0.0.1:{port}/classic")
             strip = lambda: _js(drv, "const b = document.getElementById('gc-strip');"  # noqa: E731
                                      "return b.hidden ? '' : b.textContent;")
             assert _wait(lambda: strip() == "\u25cb0 of 2 GCs live"), strip()

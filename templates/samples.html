@@ -1,0 +1,176 @@
+{% extends "_layout.html" %}
+{#- v5.0.0 lane S: the Samples page, at /, /samples and /samples/<id>[/compare|/data].
+    The address bar is the link (samples_router.js); the list (filters, day
+    headings, multi-select with the bulk bar) and the detail (header, Overview ·
+    Compare · Data) are built by samples_page.js with textContent only. -#}
+{% block title %}Samples{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/gc_pages.css') }}?v=2">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/samples.css') }}?v=2">
+{% endblock %}
+{% block topbar %}
+  <h1 class="tb-title">Samples</h1>
+  <span class="spacer"></span>
+  {#- lane C's "Report queue N" button mounts here when report_queue.js is present -#}
+  <span class="tb-actions" id="topbar-actions" data-testid="topbar-actions"></span>
+{% endblock %}
+{% block content %}
+<main class="samples" id="main" data-testid="samples-page">
+  <section class="s-list" id="list-pane" aria-label="Samples" data-testid="list-pane">
+    <div class="s-filters">
+      <div class="chips" role="group" aria-label="Instrument" id="inst-chips" data-testid="instrument-chips"></div>
+      <div class="chips chips-sm" role="group" aria-label="Status" id="status-chips" data-testid="status-chips"></div>
+      <label class="s-search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+        <input type="search" id="filter-q" placeholder="Filter lab ID" autocomplete="off" spellcheck="false"
+               aria-label="Filter by lab ID" data-testid="filter-q">
+        <kbd aria-hidden="true">Ctrl K</kbd>
+      </label>
+      <div class="s-meta">
+        <label class="check sel-all" title="Select every sample shown">
+          <input type="checkbox" id="select-shown" data-testid="select-shown" aria-label="Select every sample shown">
+        </label>
+        <span id="list-count" data-testid="list-count"></span>
+        <span class="spacer"></span>
+        <div class="seg" role="radiogroup" aria-label="Order" id="sort-switch" data-testid="sort-switch">
+          <button type="button" role="radio" data-sort="newest" aria-checked="true" title="Newest run first, under day headings">Newest</button>
+          <button type="button" role="radio" data-sort="lab" aria-checked="false" title="Lab ID, in number order">Lab ID</button>
+        </div>
+      </div>
+    </div>
+    <div class="s-rows" id="rows" role="listbox" aria-label="Samples" aria-multiselectable="true" tabindex="0" data-testid="sample-rows"></div>
+  </section>
+
+  <section class="s-detail" id="detail" aria-label="Sample" data-testid="sample-detail">
+    <div class="s-empty" id="detail-empty" data-testid="detail-empty">
+      <p><b>Pick a sample</b></p>
+      <p class="caption">Click a row, or use ↑ ↓ (or j k). Ctrl K filters by lab ID.</p>
+    </div>
+    <div id="detail-body" hidden>
+      <header class="d-head" data-testid="detail-header">
+        <div class="d-title">
+          <h1 id="d-lab" data-testid="detail-lab"></h1>
+          <span id="d-status" class="pill" data-testid="detail-status"></span>
+        </div>
+        <div class="d-actions">
+          <button type="button" class="btn" id="btn-export-report" data-testid="export-report">
+            <span class="ico ico-download" aria-hidden="true"></span>Export report</button>
+          <button type="button" class="btn btn-primary" id="btn-add-queue" data-testid="add-to-queue">
+            <span class="ico ico-plus" aria-hidden="true"></span>Add to queue</button>
+          <div class="more-wrap">
+            <button type="button" class="icon-btn more-btn" id="btn-more" data-testid="more-menu-button"
+                    aria-haspopup="menu" aria-expanded="false" aria-controls="more-menu" aria-label="More actions" title="More actions">
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+            </button>
+            <div class="menu d-menu" id="more-menu" role="menu" hidden data-testid="more-menu">
+              <button type="button" role="menuitem" class="menu-item" data-act="reprocess" data-testid="act-reprocess">Re-process</button>
+              <button type="button" role="menuitem" class="menu-item" data-act="lims" data-testid="act-lims">Export to LIMS</button>
+              <a role="menuitem" id="act-cdf" data-testid="act-cdf" href="#" download>Download CDF</a>
+              <button type="button" role="menuitem" class="menu-item" data-act="copy" data-testid="act-copy-link">Copy link</button>
+            </div>
+          </div>
+        </div>
+        <div class="d-meta" id="d-meta" data-testid="detail-meta"></div>
+        <p class="d-reason" id="d-reason" data-testid="detail-reason" hidden></p>
+      </header>
+
+      <div class="d-views">
+        <nav class="seg views" role="tablist" aria-label="View" data-testid="view-switch">
+          <a role="tab" href="#" data-view="overview" id="tab-overview" data-testid="view-overview">Overview</a>
+          <a role="tab" href="#" data-view="compare" id="tab-compare" data-testid="view-compare">Compare</a>
+          <a role="tab" href="#" data-view="data" id="tab-data" data-testid="view-data">Data</a>
+        </nav>
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-sm" id="btn-copy-table" data-testid="copy-table" hidden>
+          <span class="ico ico-doc" aria-hidden="true"></span>Copy table</button>
+      </div>
+
+      <div class="view" id="view-overview" role="tabpanel" aria-labelledby="tab-overview" data-testid="panel-overview">
+        <div class="ov-grid">
+          <div class="ov-main">
+            <section class="card chart-card" aria-labelledby="chrom-title">
+              <div class="card-bar"><h2 id="chrom-title">Chromatogram</h2><span class="spacer"></span>
+                <span class="caption" id="chrom-note"></span></div>
+              <div class="chart" id="chrom" data-testid="chromatogram"></div>
+            </section>
+            <section class="runs" id="other-runs" data-testid="other-runs" hidden>
+              <h2 class="sub">Other runs of <span id="runs-lab"></span></h2>
+              <ul id="runs-list"></ul>
+            </section>
+          </div>
+          <section class="card results-card" id="results-card" aria-labelledby="results-title" data-testid="results-card">
+            <div class="card-bar"><h2 id="results-title">Results</h2><span class="spacer"></span><span class="caption">°C</span></div>
+            <div id="results-body"></div>
+          </section>
+        </div>
+      </div>
+
+      <div class="view" id="view-compare" role="tabpanel" aria-labelledby="tab-compare" data-testid="panel-compare" hidden></div>
+
+      <div class="view" id="view-data" role="tabpanel" aria-labelledby="tab-data" data-testid="panel-data" hidden>
+        <div class="data-grid">
+          <div class="data-main">
+            <section class="card" aria-label="Numbers">
+              <div class="tablewrap"><table class="tbl num-tbl" id="data-table" data-testid="data-table"></table></div>
+            </section>
+            <div class="facts card" id="data-facts" data-testid="data-facts"></div>
+          </div>
+          <div class="data-side">
+            <section class="card side-card" aria-labelledby="cal-title" data-testid="calibration-used">
+              <div class="card-bar"><h2 id="cal-title">Calibration used</h2></div>
+              <div id="cal-body"></div>
+            </section>
+            <section class="card side-card" aria-labelledby="hist-title" data-testid="history">
+              <div class="card-bar"><h2 id="hist-title">History</h2></div>
+              <ol class="history" id="hist-list"></ol>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="bulk card" id="bulk" role="region" aria-label="Selected samples" data-testid="bulk-bar" hidden>
+    <div class="bulk-top">
+      <span id="bulk-text" data-testid="bulk-text"></span>
+      <button type="button" class="link-btn" id="bulk-all" data-testid="bulk-select-all-matching" hidden></button>
+      <span class="spacer"></span>
+      <button type="button" class="btn btn-ghost btn-sm" id="bulk-clear" data-testid="bulk-clear">Clear selection</button>
+    </div>
+    <div class="bulk-actions" id="bulk-actions">
+      <button type="button" class="btn btn-sm" data-bulk="reprocess" data-testid="bulk-reprocess">Re-process</button>
+      <button type="button" class="btn btn-sm" data-bulk="lims" data-testid="bulk-lims">Export to LIMS</button>
+      <button type="button" class="btn btn-sm" data-bulk="queue" data-testid="bulk-queue">Add to report queue</button>
+      <button type="button" class="btn btn-sm" data-bulk="reports" data-testid="bulk-reports">Download reports</button>
+    </div>
+    <div class="bulk-run" id="bulk-run" data-testid="bulk-progress" hidden>
+      <div class="progress"><span id="bulk-bar-fill"></span></div>
+      <span id="bulk-run-text" class="caption"></span>
+      <button type="button" class="btn btn-ghost btn-sm" id="bulk-stop" data-testid="bulk-stop">Stop</button>
+    </div>
+  </div>
+</main>
+
+<dialog class="sheet" id="bulk-confirm" data-testid="bulk-confirm">
+  <form method="dialog" class="form">
+    <h2 id="bc-title"></h2>
+    <p id="bc-body"></p>
+    <div class="actions">
+      <button type="button" class="btn" id="bc-cancel">Cancel</button>
+      <button type="submit" class="btn btn-primary" id="bc-ok" data-testid="bulk-confirm-ok"></button>
+    </div>
+  </form>
+</dialog>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/distill_view.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/sample_order.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/samples.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/deeplink.js') }}?v=4"></script>
+<script src="{{ url_for('static', filename='js/results_logic.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/samples_router.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/samples_logic.js') }}?v=2"></script>
+{#- lane C: Plotly, ladder.js, comments.js, compare_logic.js, compare_view.js and compare.css -#}
+{% include "_compare_assets.html" %}
+<script src="{{ url_for('static', filename='js/samples_page.js') }}?v=2"></script>
+{% endblock %}

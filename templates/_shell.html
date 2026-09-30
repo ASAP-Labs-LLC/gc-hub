@@ -15,7 +15,7 @@
   </div>
 
   <nav class="sb-nav" aria-label="Pages">
-    <a class="nav-item" href="/" data-nav="samples" title="Samples">
+    <a class="nav-item{% if nav == 'samples' %} active{% endif %}" href="/" data-nav="samples" title="Samples"{% if nav == 'samples' %} aria-current="page"{% endif %}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 19h18M5 19l3-9 2 5 3-11 3 12 2-4 1 7"/></svg>
       <span class="sb-label">Samples</span></a>
     <a class="nav-item{% if nav == 'results' %} active{% endif %}" href="/results" data-nav="results" data-testid="nav-results" title="Results"{% if nav == 'results' %} aria-current="page"{% endif %}>

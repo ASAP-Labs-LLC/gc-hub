@@ -2,13 +2,17 @@
 ``app.py``; spec ``docs/superpowers/specs/2026-09-30-ui-redesign-live-setup-design.md``
 ("Sendable sample links").
 
-Pages (session; they render the classic main page, and ``static/js/deeplink.js``
-selects the sample and the tab from the URL)::
+Pages (session). v5.0.0: the Samples page (``templates/samples.html``;
+``static/js/samples_router.js`` reads the view from the URL)::
 
-    GET /lab/<lab_id>                         the lab ID's newest run
-    GET /samples/<id>                         one run, Dashboard
-    GET /samples/<id>/compare[?standard=<n>]  one run, Analysis (standard picked)
-    GET /samples/<id>/data                    one run, Distillation Data
+    GET /lab/<lab_id>                         302 to /samples/<its newest run>
+    GET /samples/<id>                         one run, Overview
+    GET /samples/<id>/compare[?standard=<n>]  one run, Compare (standard picked)
+    GET /samples/<id>/data                    one run, Data
+
+The classic page keeps its links for this release under ``/classic``:
+``/classic/lab/<lab_id>`` and ``/classic/samples/<id>[/compare|/data]``
+(``static/js/deeplink.js`` selects the sample and the tab).
 
 An unknown lab ID or sample id gets a friendly 404 page ("No GC result for
 lab ID … yet", with a link to search). COA Reviewer and other apps link to
@@ -31,7 +35,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from flask import Blueprint, current_app, jsonify, render_template
+from flask import Blueprint, current_app, jsonify, redirect, render_template
 
 import paths
 import store
@@ -86,8 +90,13 @@ def resolve(lab_id: str, *, db) -> Optional[dict]:
 
 
 def _classic_page():
-    """The classic main page (app.py's ``index`` view), at this URL."""
-    return current_app.view_functions["index"]()
+    """The classic main page (app.py's ``classic_page`` view), at this URL."""
+    return current_app.view_functions["classic_page"]()
+
+
+def _samples_page():
+    """v5.0.0: the Samples page (app.py's ``samples_page``), at this URL."""
+    return current_app.view_functions["samples_list_page"]()
 
 
 def _not_found(*, lab_id: Optional[str] = None, sample_id: Optional[int] = None):
@@ -111,15 +120,22 @@ def api_lab(lab_id: str):
 
 @bp.route("/lab/<lab_id>", methods=["GET"])
 def lab_page(lab_id: str):
-    if resolve(lab_id, db=_db()) is None:
+    """v5.0.0: lands on the Samples page's ``/samples/<id>`` (whose Overview
+    lists the lab ID's other runs)."""
+    found = resolve(lab_id, db=_db())
+    if found is None:
         return _not_found(lab_id=lab_id)
-    return _classic_page()
+    return redirect(f"/samples/{found['sample_id']}", code=302)
+
+
+def _known(sample_id: int) -> bool:
+    return 0 < sample_id <= MAX_SAMPLE_ID and store.samples.get(sample_id, db=_db()) is not None
 
 
 def _sample_page(sample_id: int):
-    if not 0 < sample_id <= MAX_SAMPLE_ID or store.samples.get(sample_id, db=_db()) is None:
+    if not _known(sample_id):
         return _not_found(sample_id=sample_id)
-    return _classic_page()
+    return _samples_page()
 
 
 @bp.route("/samples/<int:sample_id>", methods=["GET"])
@@ -135,3 +151,33 @@ def sample_compare_page(sample_id: int):
 @bp.route("/samples/<int:sample_id>/data", methods=["GET"])
 def sample_data_page(sample_id: int):
     return _sample_page(sample_id)
+
+
+# ── the classic page's links, kept for v5.0.0 (deeplink.js reads them) ────
+
+@bp.route("/classic/lab/<lab_id>", methods=["GET"])
+def classic_lab_page(lab_id: str):
+    if resolve(lab_id, db=_db()) is None:
+        return _not_found(lab_id=lab_id)
+    return _classic_page()
+
+
+def _classic_sample(sample_id: int):
+    if not _known(sample_id):
+        return _not_found(sample_id=sample_id)
+    return _classic_page()
+
+
+@bp.route("/classic/samples/<int:sample_id>", methods=["GET"])
+def classic_sample_page(sample_id: int):
+    return _classic_sample(sample_id)
+
+
+@bp.route("/classic/samples/<int:sample_id>/compare", methods=["GET"])
+def classic_sample_compare_page(sample_id: int):
+    return _classic_sample(sample_id)
+
+
+@bp.route("/classic/samples/<int:sample_id>/data", methods=["GET"])
+def classic_sample_data_page(sample_id: int):
+    return _classic_sample(sample_id)
