@@ -39,9 +39,10 @@ LOCAL_ROUTES = {"/api/hub/status", "/api/admin/hub/pause-processing",
 # Routes whose work can outlast Cloudflare's 100 s: 202 {job}, then polled (v3.0.1).
 LONG_WORK = {"/api/admin/load-folder", "/api/admin/import-history/start",
              "/api/admin/import-history/dry-run", "/api/admin/diagnostics/bundle",
-             "/api/export-analysis-reports-zip"}
+             "/api/export-analysis-reports-zip", "/api/admin/purge/start"}
 # ... and the routes that poll them or fetch what they built.
 POLLED_BY = {"/api/admin/jobs/status": {"POST"}, "/api/admin/diagnostics/status": {"POST"},
+             "/api/purge/status": {"GET"},
              "/api/admin/diagnostics/download/<token>": {"GET"},
              "/api/export-analysis-reports-zip/<job_id>": {"GET"},
              "/api/export-analysis-reports-zip/<job_id>/download": {"GET"}}

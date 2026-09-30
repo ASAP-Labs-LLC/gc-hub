@@ -30,7 +30,8 @@ JSON (415), 64 KiB (413) and the admin password (403). An optional ``by``
     POST /api/admin/hub/resume-processing  {password, by?} → 202 {processing_paused: false}
     POST /api/admin/hub/stop               {password, by?, force?}
          → 202 {stopping: true, marker}; 409 {error, busy: [...]} while work is in
-           progress (``busy_reasons``) unless ``force: true``
+           progress (``busy_reasons``) unless ``force: true``; a purge
+           (``blocking_reasons``) is refused even with ``force`` (``blocked``)
 
 Pause persists the flag (``hub.set_processing_paused``, so a restart comes
 back paused) and raises a warning notification at once, then stops the
@@ -498,10 +499,44 @@ def status_snapshot() -> dict:
     }
 
 
-# ── busy: what a Stop would cut short ─────────────────────────────────────
+# ── busy: what a Stop or a restart would cut short ────────────────────────
+# One list for the tray's Stop, POST /api/restart (the Settings button, the
+# tray's Restart, "Restart & install") and /healthz's idle signal to the
+# updater, so they cannot drift. ``force`` overrides busy_reasons() but
+# never blocking_reasons(): a running purge (purge.py) is never interrupted.
 
-def busy_reasons() -> List[str]:
-    """Work in progress that a Stop would interrupt (empty = safe)."""
+def _admin_job() -> Optional[dict]:
+    try:
+        import hub_admin
+        job = hub_admin.JOBS.current()
+    except Exception:  # noqa: BLE001
+        return None
+    return job if job is not None and job.get("state") == "running" else None
+
+
+def blocking_reasons() -> List[str]:
+    """Work that neither a Stop nor a restart may interrupt, even with
+    ``force``: a purge. (Once its transaction commits, its journal finishes it
+    at the next start; before that nothing would be lost, but a purge is never
+    worth cutting short.)"""
+    job = _admin_job()
+    if job is not None and job.get("kind") == "purge":
+        inst = (job.get("params") or {}).get("instrument") or "an instrument"
+        return [f"a purge of {inst} is running (it cannot be interrupted; wait for it to "
+                "finish)"]
+    return []
+
+
+def busy_reasons(*, cached: bool = False, export_pass: bool = True) -> List[str]:
+    """Work in progress that a Stop or a restart would interrupt (empty =
+    safe): the app's own (a QBench upload, a report ZIP: ``busy_extra``), an
+    export append, any admin job (folder load, history import or its dry
+    run, purge), running Worker jobs and a diagnostics bundle. ``cached``
+    reads the Worker's running jobs from the status cache instead of the
+    store (``/healthz``: never SQLite on that path). ``export_pass=False``
+    leaves out the exporter's pass (a restart lets it finish: ``_stop_hub``
+    waits for it; and it runs every few seconds, which would make the idle
+    signal flap)."""
     out: List[str] = []
     try:
         out.extend(_hooks.busy_extra() or [])
@@ -511,21 +546,25 @@ def busy_reasons() -> List[str]:
         rt = _hooks.runtime()
     except Exception:  # noqa: BLE001
         rt = None
-    if rt is not None and getattr(getattr(rt, "exporter", None), "ticking", False):
+    if (export_pass and rt is not None
+            and getattr(getattr(rt, "exporter", None), "ticking", False)):
         out.append("an export to the results CSV is being written")
-    try:
-        import hub_admin
-        job = hub_admin.JOBS.current()
-        if job is not None and job.get("state") == "running":
+    job = _admin_job()
+    if job is not None:
+        if job.get("kind") == "purge":
+            out.extend(blocking_reasons())
+        else:
             out.append(f"an admin job ({job.get('kind') or 'job'}) is running")
-    except Exception:  # noqa: BLE001
-        pass
     db = _db_path()
     worker_alive = rt is not None and _alive(lambda: rt.worker.is_alive())
     if worker_alive and db is not None and db.is_file():
         # a `running` row without a live Worker is a leftover, not work
         try:
-            running = _read_store(db)[1]["jobs_running"]
+            if cached:
+                with _cache_lock:
+                    running = (_cache.get("queue") or {}).get("jobs_running")
+            else:
+                running = _read_store(db)[1]["jobs_running"]
             if running:
                 out.append(f"{running} processing job(s) running")
         except Exception:  # noqa: BLE001
@@ -739,11 +778,15 @@ def api_stop():
     data = paths.data_dir()
     if shutdown is None or data is None:
         return _err("This process cannot stop itself (no shutdown hook or data folder).", 503)
+    blocked = blocking_reasons()
+    if blocked:
+        return jsonify({"error": "The hub cannot be stopped now: " + "; ".join(blocked) + ".",
+                        "busy": blocked, "blocked": blocked}), 409
     if body.get("force") is not True:
         busy = busy_reasons()
         if busy:
             return jsonify({"error": "The hub is busy: " + "; ".join(busy) + ". Stop anyway "
-                                     "with force, or wait.", "busy": busy}), 409
+                                     "with force, or wait.", "busy": busy, "blocked": []}), 409
     try:
         _write_marker(Path(data), by)
     except Exception as exc:  # noqa: BLE001 - never exit without the marker

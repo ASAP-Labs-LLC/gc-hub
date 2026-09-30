@@ -56,7 +56,12 @@ Public API
         # (the folder loader's "load as history" option).
         # The 2B1 ingest route maps InstrumentDisabled to 403 (the agent holds
         # and retries later) and every other SubmitRejected to 400 (the agent
-        # marks the file rejected).
+        # marks the file rejected). InstrumentPaused (an admin purge of that
+        # instrument is running) is a 503: the agent backs off and retries.
+    pause_instrument(instrument_id, reason='purge in progress')   resume_instrument(id)
+    paused_instruments() -> frozenset      instrument_paused(id) -> bool
+        # per process, in memory: the Worker claims none of a paused
+        # instrument's jobs and submit refuses its files (the v3.1 purge)
     SubmitResult(outcome, sha256, sample_id, status, conflict_id, instrument_id, message)
         # outcome: 'created' | 'duplicate' | 'cross_instrument' | 'conflict'
     is_blank_name(name) -> bool
@@ -267,6 +272,50 @@ class InstrumentDisabled(SubmitRejected):
 
 class NotExportable(ValueError):
     """The sample doesn't pass the export gate (or isn't in a state the action needs)."""
+
+
+class InstrumentPaused(RuntimeError):
+    """The instrument's processing is paused while an admin purge runs
+    (``pause_instrument``). Not a verdict on the file: the ingest route answers
+    503 "purge in progress; retry", and the agent backs off and sends it again."""
+
+
+# ── pausing one instrument (a purge, v3.1) ──────────────────────────────────
+# In memory, per process: a purge runs on an admin-job thread of this process
+# and ends (resume_instrument, in a finally) before its job does, and a hub that
+# dies mid-purge starts with nothing paused.
+
+_paused_lock = threading.Lock()
+_paused: dict = {}        # instrument id -> reason
+
+
+def pause_instrument(instrument_id: str, reason: str = "purge in progress") -> None:
+    """Stop the Worker claiming this instrument's jobs and make ``submit``
+    refuse its files (``InstrumentPaused``) until ``resume_instrument``."""
+    with _paused_lock:
+        _paused[str(instrument_id)] = reason
+
+
+def resume_instrument(instrument_id: str) -> None:
+    with _paused_lock:
+        _paused.pop(str(instrument_id), None)
+
+
+def paused_instruments() -> frozenset:
+    with _paused_lock:
+        return frozenset(_paused)
+
+
+def instrument_paused(instrument_id: str) -> bool:
+    with _paused_lock:
+        return str(instrument_id) in _paused
+
+
+def _refuse_if_paused(inst: dict) -> None:
+    with _paused_lock:
+        reason = _paused.get(str(inst["id"]))
+    if reason is not None:
+        raise InstrumentPaused(f"{inst.get('name') or inst['id']}: {reason}; retry in a minute")
 
 
 @dataclass(frozen=True)
@@ -776,6 +825,7 @@ def _submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os
         raise UnknownInstrument(f"unknown instrument {instrument_id!r}")
     if not inst.get("enabled", 1):
         raise InstrumentDisabled(f"instrument {instrument_id} is disabled")
+    _refuse_if_paused(inst)
     if isinstance(cdf, (bytes, bytearray, memoryview)):
         body = bytes(cdf)
     else:
@@ -829,6 +879,9 @@ def _submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os
 
         with store.connection(db) as conn:
             with store.write_txn(conn):
+                # again under the write lock: a purge pauses before its own
+                # transaction, so a sample is either in its snapshot or refused
+                _refuse_if_paused(inst)
                 known = existing_result(sha, instrument_id, conn)
                 if known is not None:
                     return known
@@ -1107,7 +1160,8 @@ class Worker:
 
     def run_once(self) -> bool:
         """Claim and handle one due ``process`` job; False if none was due."""
-        job = store.jobs.claim_next(self.now_fn(), kind=PROCESS, db=self.db)
+        job = store.jobs.claim_next(self.now_fn(), kind=PROCESS, db=self.db,
+                                    exclude_instruments=tuple(paused_instruments()))
         if job is None:
             return False
         try:

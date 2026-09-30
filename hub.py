@@ -421,7 +421,11 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
         if paused is None:
             paused = processing_paused(db) is not None
         instruments.bootstrap_gc1(app_conf, db=db)
-        exporter = exports.HubExporter(db, data_dir=data, notifier=notifier)
+        # A purge the process died in is finished (or abandoned) before the
+        # exporter can flush: its sidecar must be unlinked first (purge.py).
+        recover_purges(db, data, notifier)
+        mark_interrupted_imports(db, data, notifier)
+        exporter =exports.HubExporter(db, data_dir=data, notifier=notifier)
 
         def final_hook(sample_id: int) -> None:
             exporter.wake()
@@ -471,6 +475,32 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
              " with processing PAUSED (resume it from the hub tray or the admin API)"
              if rt.paused else "")
     return rt
+
+
+def recover_purges(db, data_dir, notifier: Optional[Notifier]) -> list:
+    """``purge.recover`` (interrupted purges; v3.1). A failure is logged and
+    notified, never a failed start: the hub still serves, and the next start
+    tries again (every recovery step is idempotent)."""
+    try:
+        import purge
+        return purge.recover(db=db, data_dir=data_dir, notifier=notifier)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("hub: recovering an interrupted purge failed")
+        _notify(notifier, "error", f"An interrupted purge could not be finished at start-up "
+                                   f"({exc}); it is retried at the next start. See app.log and "
+                                   f"the purged folder's manifest.json.")
+        return []
+
+
+def mark_interrupted_imports(db, data_dir, notifier: Optional[Notifier]) -> list:
+    """``jobs.import_history.mark_interrupted``: a history import the process
+    died in is marked interrupted and announced (never a failed start)."""
+    try:
+        from jobs import import_history
+        return import_history.mark_interrupted(db=db, data_dir=data_dir, notifier=notifier)
+    except Exception:  # noqa: BLE001
+        log.exception("hub: marking interrupted history imports failed")
+        return []
 
 
 # ── Processing paused (persisted) ─────────────────────────────────────────

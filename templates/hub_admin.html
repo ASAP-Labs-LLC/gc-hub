@@ -109,6 +109,40 @@
     <div id="ih-result"></div>
   </div>
 
+  <div class="panel" id="purge-panel">
+    <h2>Purge instrument data</h2>
+    <p>Removes one instrument's samples from the hub (all of them, or only its backfill samples,
+      i.e. imported history, to redo an import) with everything that belongs to them: results,
+      export rows, comments, report records, conflicts and queued jobs. The instrument itself and
+      its settings stay (calibration, corrections, methods, LEM machine, live since, results
+      file, agent and token), and so do the other instruments' data and the global settings.
+      Processing and uploads for that instrument pause while it runs (its agent retries).</p>
+    <p>First the whole database is copied to <code>backups\pre-purge-&lt;instrument&gt;-&lt;time&gt;.db</code>
+      (never pruned). The purged samples' CDF files are <strong>moved, never deleted</strong>, to
+      <code>purged\&lt;instrument&gt;-&lt;time&gt;\</code> in the data folder; a CDF that something
+      kept still uses (a calibration, a comparison standard, a blank a kept result subtracted)
+      stays where it is. The results CSV LEM reads is not edited: rows already in it stay.</p>
+    <p><strong>Restore after a purge</strong> (DEPLOY.md): stop the hub, copy the pre-purge backup
+      over <code>gc.db</code>, move the contents of the purged folder back into the data folder,
+      start the hub.</p>
+    <label for="purge-inst">Instrument</label><select id="purge-inst" class="inst-select"></select>
+    <label for="purge-scope">Scope</label>
+    <select id="purge-scope">
+      <option value="all">all samples</option>
+      <option value="backfill">backfill (imported history) only</option>
+    </select>
+    <button id="btn-purge-preview">Preview</button>
+    <button id="btn-purge-status">Show progress</button>
+    <div id="purge-preview"></div>
+    <input id="purge-new-path" class="wide" type="text"
+      placeholder="Optional: a new results CSV for this instrument after the purge, absolute path">
+    <input id="purge-confirm" class="wide" type="text" autocomplete="off" spellcheck="false"
+      placeholder="Preview first, then type the confirmation shown">
+    <button id="btn-purge-start" class="warn" disabled>Start purge</button>
+    <span id="purge-msg" role="status"></span>
+    <div id="purge-job"></div>
+  </div>
+
   <div class="panel">
     <h2>Comment presets</h2>
     <p>The one-click comments on the Analysis tab. Their text is copied into a sample's comment
@@ -172,6 +206,7 @@
 </main>
 <script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=5"></script>
 <script src="{{ url_for('static', filename='js/diagnostics.js') }}?v=4"></script>
+<script src="{{ url_for('static', filename='js/purge.js') }}?v=2"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

@@ -1,6 +1,6 @@
 /* Pure, DOM-free helpers for the Restart button — shared by the browser
    (window globals) and Node tests (module.exports). The decision object is
-   POST /api/restart's answer: {mode: "switch"|"restart", tag, pid}. */
+   POST /api/restart's answer: {mode: "switch"|"restart", tag, pid, busy, blocked}. */
 (function (root) {
     function _switching(decision) {
         return !!(decision && decision.mode === 'switch' && decision.tag);
@@ -42,11 +42,31 @@
         return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
     }
 
+    /** What to ask before a restart while background work runs (the dry
+        run's ``busy``/``blocked`` lists), or null when nothing does.
+        ``canForce`` is false for work that is never interrupted (a purge). */
+    function restartBusyPrompt(decision) {
+        const items = (list) => list.map((b) => `- ${b}`).join('\n');
+        const blocked = (decision && decision.blocked) || [];
+        const busy = (decision && decision.busy) || [];
+        if (blocked.length) {
+            return { canForce: false, text: `Restart is not possible now:\n\n${items(blocked)}` +
+                '\n\nThis cannot be overridden; try again when it has finished.' };
+        }
+        if (busy.length) {
+            return { canForce: true, text: `The hub is busy:\n\n${items(busy)}\n\n` +
+                'Restarting now cuts that short. Restart anyway?' };
+        }
+        return null;
+    }
+
     root.restartLabel = restartLabel;
     root.restartConfirmText = restartConfirmText;
     root.serverReplaced = serverReplaced;
     root.switchOutcomeNotice = switchOutcomeNotice;
+    root.restartBusyPrompt = restartBusyPrompt;
     if (typeof module !== 'undefined' && module.exports) {
-        module.exports = { restartLabel, restartConfirmText, serverReplaced, switchOutcomeNotice };
+        module.exports = { restartLabel, restartConfirmText, serverReplaced, switchOutcomeNotice,
+            restartBusyPrompt };
     }
 })(typeof window !== 'undefined' ? window : globalThis);

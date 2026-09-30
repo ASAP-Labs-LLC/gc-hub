@@ -28,6 +28,7 @@ Public API
         .adopt(instrument, *, by=None) -> dict       # admin: accept the file as it is now
         .new_path(instrument, path) -> Path          # admin: switch the export to another file
         .write_fresh(instrument, path, *, by=None) -> int   # admin: new file of gated current revisions
+        .after_purge(instrument) -> {path, relinked}   # purge.py: unlink a purged ledger row
         .tick() -> {instrument: {...}}       # one background pass over every instrument
         .start(interval=FLUSH_INTERVAL_SECONDS) / .stop() / .is_alive()
         .wake()                              # flush now (a row just became pending)
@@ -1195,6 +1196,35 @@ class HubExporter:
                 self._adopt_next[instrument] = path      # "New path, then Adopt"
             LOGGER.info("exports: %s now exports to %s", instrument, path)
             return path
+
+    def after_purge(self, instrument: str) -> dict:
+        """After ``purge.py`` deleted this instrument's ledger rows: when the
+        sidecar's ``seq`` names a row that is gone, drop the line link
+        (``last_line_sha256``/``last_line_end``) and keep everything else.
+
+        Without this the next flush would refuse ``ledger-mismatch`` (the
+        restore-from-backup check). ``seq``, size and hash stay, so the file is
+        still verified as the hub left it, and new rows (``export_rows.seq`` is
+        AUTOINCREMENT: never reused) append after it; the next append links
+        the sidecar to a ledger row again. The file itself is never touched.
+        Returns ``{path, relinked}``; refuses ``busy`` like the other admin
+        calls. The caller holds the instrument across its delete and this call
+        (``_instrument_lock``) so no flush sees the gap in between.
+        """
+        with _instrument_lock(instrument):
+            path = self.export_path(instrument)
+            with _admin_lock(path):
+                side = _read_sidecar(path)
+                if (side is None or side.get("instrument") != instrument
+                        or not side.get("last_line_sha256")
+                        or self._ledger_line(instrument, side["seq"]) is not None):
+                    return {"path": str(path), "relinked": False}
+                side = dict(side, last_line_sha256=None, last_line_end=None,
+                            updated_at=store.now_iso(), purged_at=store.now_iso())
+                _write_sidecar(path, side)
+            LOGGER.warning("exports: %s sidecar of %s unlinked from purged ledger row %d",
+                           instrument, path, side["seq"])
+            return {"path": str(path), "relinked": True}
 
     def _fresh_lines(self, instrument: str) -> tuple:
         """(lines, max ledger seq) for every gated sample's current revision,

@@ -4066,7 +4066,18 @@ async function _fetchHealthz(timeoutMs) {
 
 async function restartServer() {
     await refreshRestartLabel();
-    if (!confirm(restartConfirmText(_restartDecision))) {
+    // Background work (an import, a purge, a diagnostics build, a report ZIP,
+    // a QBench upload, running jobs): name it; a purge cannot be overridden.
+    const busyPrompt = restartBusyPrompt(_restartDecision);
+    let force = false;
+    if (busyPrompt && !busyPrompt.canForce) {
+        alert(busyPrompt.text);
+        return;
+    }
+    if (busyPrompt) {
+        if (!confirm(busyPrompt.text)) return;
+        force = true;
+    } else if (!confirm(restartConfirmText(_restartDecision))) {
         return;
     }
     let oldVersion = null;
@@ -4075,7 +4086,7 @@ async function restartServer() {
         oldVersion = h ? h.version : null;
     } catch (_) { /* not needed to restart */ }
     try {
-        const res = await apiPost('/api/restart', {});
+        const res = await apiPost('/api/restart', force ? { force: true } : {});
         const installing = res && res.mode === 'switch' && res.tag;
         showNotification(installing
             ? `Restarting and installing ${res.tag}… this page will reconnect`

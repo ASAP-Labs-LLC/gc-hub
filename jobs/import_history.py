@@ -895,6 +895,12 @@ def _write_batch(batch, rec, ctx: _Ctx, *, db, progress, done, total) -> int:
         done += 1
         events.append({"phase": "import", "done": done, "total": total, "outcome": outcome,
                        "lab_id": item.lab_id})
+    if ctx.run_id is not None:        # how far a run got, should the process die
+        try:
+            store.import_runs.progress(ctx.run_id, dict(rec.summary["counts"], progress={
+                "done": done, "total": total}), db=db)
+        except Exception:  # noqa: BLE001 - a record, never a reason to stop
+            log.exception("import_history: could not record the run's progress")
     for e in events:
         _emit(progress, e)
     _emit(progress, {"phase": "commit", "done": done, "total": total})
@@ -1165,6 +1171,49 @@ def format_summary(summary: dict, *, examples: int = 5) -> str:
             for e in entries[:n]:
                 add("  " + _example_text(e))
     return "\n".join(out) + "\n"
+
+
+INTERRUPTED = "interrupted by a restart"
+
+
+def mark_interrupted(*, db: store.Db, data_dir, notifier=None) -> list:
+    """Start-up (``hub.start``): a run the process died in (no ``finished_at``;
+    admin jobs die with the process) is marked ``stopped: interrupted by a
+    restart``, the importer's staged copies in ``cdf/.incoming`` are removed
+    (no import can be running yet), and one notification says how far it got.
+
+    Nothing is lost: every batch is one transaction, so the batch in flight
+    rolled back; its staged copies are removed here, and a file it had already
+    moved into place is written again, byte for byte, when Start resumes (the
+    same sample id and name). Returns the runs marked."""
+    runs = store.import_runs.unfinished(db=db)
+    incoming = Path(data_dir) / "cdf" / pipeline.INCOMING_DIR
+    if incoming.is_dir():
+        for p in incoming.glob("import-*.CDF"):
+            try:
+                p.unlink()
+            except OSError:
+                log.warning("import_history: could not remove %s", p)
+    for r in runs:
+        try:
+            counts = json.loads(r["counts"] or "{}") or {}
+        except ValueError:
+            counts = {}
+        prog = counts.get("progress") if isinstance(counts, dict) else None
+        store.import_runs.finish(r["id"], counts, stopped=INTERRUPTED, db=db)
+        inst = store.instruments.get(r["instrument_id"], db=db) or {}
+        name = inst.get("name") or r["instrument_id"]
+        how_far = (f"after {prog['done']} of {prog['total']}" if isinstance(prog, dict)
+                   and prog.get("total") else "before its first batch was saved")
+        message = (f"History import for {name} was interrupted by a restart {how_far}; "
+                   f"press Start to resume, nothing was lost.")
+        log.warning("import_history: run %s: %s", r["id"], message)
+        if notifier is not None:
+            try:
+                notifier("warning", message)
+            except Exception:  # noqa: BLE001
+                log.exception("import_history: notification failed")
+    return runs
 
 
 def last_run(instrument_id: str, *, db: store.Db = None) -> Optional[dict]:

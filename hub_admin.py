@@ -51,6 +51,23 @@ sample is backfill and is never exported automatically, D11)::
          carries a warning (rows are matched to stored revisions by CSV path and
          line number).
 
+Purge instrument data (v3.1, ``purge.py``; the page's *Purge instrument data*
+panel)::
+
+    POST /api/admin/purge/preview   {password, instrument, scope: all|backfill}
+         → 200 {preview} (read-only); 400 bad scope; 404 unknown instrument
+    POST /api/admin/purge/start     {password, instrument, scope,
+                                     confirm_text: purge.confirmation_text(...),
+                                     new_results_path?}
+         → 202 {job} (kind ``purge``, the same ``AdminJobs`` runner: one job at a
+           time); 400 wrong confirmation, scope or path; 404 unknown instrument;
+           409 another admin job is running, or the path is another
+           instrument's results file. Progress and the summary come through
+           ``/api/admin/jobs/status``.
+    GET  /api/purge/status          (session, no password) → {job, journal}: the
+         running or last purge job and the newest purge journal, so the
+         admin page shows a purge in progress as soon as it opens
+
 Exports (need the running ``exports.HubExporter``: ``set_exporter`` is
 called by ``hub.start``; 503 until then)::
 
@@ -402,6 +419,96 @@ def api_admin_import_history_last_run():
         return _err(f"Unknown instrument {inst!r}", 404)
     from jobs.import_history import last_run
     return jsonify({"last_run": last_run(inst, db=_db())})
+
+
+# ── purge instrument data (v3.1) ────────────────────────────────────────────
+
+def _purge_params(body: dict):
+    """``(instrument, scope)`` as sent (``purge`` validates them)."""
+    return str(body.get("instrument") or "").strip(), body.get("scope")
+
+
+@bp.route("/api/admin/purge/preview", methods=["POST"])
+def api_admin_purge_preview():
+    """What a purge of one instrument would remove and keep (``purge.preview``;
+    read-only)."""
+    body, err = _admin()
+    if err:
+        return err
+    import purge
+    inst, scope = _purge_params(body)
+    with _exporter_lock:
+        exp = _exporter
+    try:
+        pv = purge.preview(inst, scope, db=_db(), data_dir=paths.require_data_dir(),
+                           exporter=exp)
+    except purge.PurgeRefused as exc:
+        return _err(str(exc), exc.status)
+    return jsonify({"preview": pv})
+
+
+@bp.route("/api/purge/status", methods=["GET"])
+def api_purge_status():
+    """The running or last purge, for the admin page to show without the
+    password (signed-in session only; read-only): ``{job}`` when the current
+    or last admin job is a purge, and ``journal``, the newest purge journal
+    (also one a restart finished or abandoned)."""
+    import purge
+    job = JOBS.current()
+    if job is not None and job.get("kind") != "purge":
+        job = None
+    if job is not None:
+        job.pop("stop_requested", None)
+    try:
+        journal = purge.latest_journal(paths.require_data_dir())
+    except Exception:  # noqa: BLE001 - informational
+        log.exception("purge status: could not read the journals")
+        journal = None
+    return jsonify({"job": job, "journal": journal})
+
+
+@bp.route("/api/admin/purge/start", methods=["POST"])
+def api_admin_purge_start():
+    """Start the purge as an admin job (kind ``purge``; one admin job at a time).
+    The confirmation, scope, instrument and ``new_results_path`` are checked
+    here first (400/404/409) and again by ``purge.run``."""
+    body, err = _admin()
+    if err:
+        return err
+    import purge
+    inst, scope = _purge_params(body)
+    confirm = body.get("confirm_text")
+    raw_path = body.get("new_results_path")
+    data_dir = paths.require_data_dir()
+    with _exporter_lock:
+        exp = _exporter
+    try:
+        row = purge._instrument(inst, _db())
+        purge._check_scope(scope)
+        if confirm != purge.confirmation_text(row, db=_db()):
+            return _err(f'Type "{purge.confirmation_text(row, db=_db())}" exactly to confirm the purge', 400)
+        if raw_path not in (None, ""):
+            purge.check_new_results_path(raw_path, row["id"], db=_db(), data_dir=data_dir,
+                                         exporter=exp)
+    except purge.PurgeRefused as exc:
+        return _err(str(exc), exc.status)
+    by = _who()
+    import hub
+    runtime = hub.running()
+    notifier = runtime.notifier if runtime is not None else hub.default_notifier()
+
+    def run(progress):
+        return purge.run(row["id"], scope, confirm_text=confirm, by=by, db=_db(),
+                         data_dir=data_dir, exporter=exp, notifier=notifier,
+                         new_results_path=raw_path, progress=progress)
+
+    try:
+        job = JOBS.start("purge", run, {"instrument": row["id"], "scope": scope,
+                                        "new_results_path": raw_path or None, "by": by})
+    except RuntimeError as exc:
+        return _err(str(exc), 409, job=JOBS.current())
+    log.warning("admin: purge of %s (%s) started by %s", row["id"], scope, by)
+    return jsonify({"job": job}), 202
 
 
 # ── exports ─────────────────────────────────────────────────────────────────

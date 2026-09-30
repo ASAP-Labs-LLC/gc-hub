@@ -881,6 +881,12 @@ def _is_server_idle() -> bool:
     # Block while a report ZIP is built, waits to be fetched or streams
     if REPORT_ZIPS.busy():
         return False
+    # Block while background work runs: the one list the restart button, the
+    # tray's Stop and /healthz's idle signal use too (hub_control.busy_reasons:
+    # a QBench upload, a report ZIP, an admin job, a diagnostics bundle,
+    # running Worker jobs)
+    if hub_control.busy_reasons(export_pass=False):
+        return False
     # Block while the Worker has due jobs (a retry scheduled later doesn't count)
     data = paths.data_dir()
     if data is not None and hub.background_busy(data / store.DB_FILENAME):
@@ -2346,9 +2352,24 @@ def api_restart():
     has a newer healthy one. ``{"dry_run": true}`` only reports what a
     restart would do (the UI labels its button with it).
 
-    Returns ``{"mode": "switch"|"restart", "tag": <tag or null>, "pid"}``;
-    the browser polls /healthz until ``pid`` changes."""
+    Returns ``{"mode": "switch"|"restart", "tag": <tag or null>, "pid",
+    "busy": [...], "blocked": [...]}``; the browser polls /healthz until
+    ``pid`` changes. While background work runs (``hub_control.busy_reasons``:
+    an admin job, a diagnostics build, a report ZIP, a QBench upload, running
+    Worker jobs, an export append) it answers 409 ``{error, busy, blocked}``
+    unless ``force: true``; a purge (``blocked``) is refused even with it."""
     body = request.get_json(silent=True) or {}
+    blocked = hub_control.blocking_reasons()
+    busy = hub_control.busy_reasons(export_pass=False)
+    if not body.get("dry_run"):
+        if blocked:
+            return jsonify({"error": "Restart is not possible now: " + "; ".join(blocked) + ".",
+                            "busy": busy, "blocked": blocked}), 409
+        if busy and body.get("force") is not True:
+            return jsonify({"error": "The hub is busy: " + "; ".join(busy) + ". Restart anyway "
+                                     "(force), or wait.", "busy": busy, "blocked": []}), 409
+        if busy:
+            LOGGER.warning("Restart forced by %s while: %s", _who(), "; ".join(busy))
     if body.get("dry_run"):
         with _restart_lock:
             if _restart_claimed:
@@ -2363,7 +2384,8 @@ def api_restart():
             # 15 minutes; a process that just came up doesn't need another.
             return jsonify({"error": f"The server just restarted, try again in {wait} s"}), 409
         mode, tag = request_restart(_who())
-    return jsonify({"mode": mode, "tag": tag, "pid": os.getpid()})
+    return jsonify({"mode": mode, "tag": tag, "pid": os.getpid(), "busy": busy,
+                    "blocked": blocked})
 
 
 @app.route("/api/server-status", methods=["GET"])
@@ -3671,6 +3693,14 @@ def healthz():
         # Through Cloudflare (gc.asaplabs.net): no session count, idle time or
         # hub internals for the internet. The updater polls localhost.
         return jsonify({"status": "ok", "version": version.APP_VERSION, "pid": os.getpid()})
+    try:
+        # The updater's auto-switch waits for idle_seconds >= its minimum: any
+        # background work (an import, a purge, a diagnostics build, a report
+        # ZIP, a QBench upload, running jobs) is "not idle" (the cache: no SQLite).
+        if hub_control.busy_reasons(cached=True, export_pass=False):
+            idle = 0.0
+    except Exception:
+        LOGGER.exception("healthz: busy check failed (non-fatal)")
     body = {"status": "ok", "version": version.APP_VERSION, "pid": os.getpid(),
             "active_sessions": active, "idle_seconds": round(idle, 1)}
     try:   # extra, never part of the contract: the hub tray's numbers
@@ -3792,6 +3822,8 @@ def _stop_busy() -> list:
         return [f"a QBench upload is running ({pending} item(s) queued)"]
     if REPORT_ZIPS.running():
         return ["a report ZIP is being built"]
+    if REPORT_ZIPS.busy():
+        return ["a report ZIP is waiting to be downloaded"]
     return []
 
 
