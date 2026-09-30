@@ -2,7 +2,8 @@
    Instrument + scope -> Preview (POST /api/admin/purge/preview) -> type the
    confirmation ("PURGE <instrument name>") -> Start (POST /api/admin/purge/start,
    an admin job) -> progress from POST /api/admin/jobs/status. Every call is JSON
-   with the admin password from the page's #pw box. The pure helpers are
+   with the password unlocked once on the page (v4.0 lane E: admin_unlock.js,
+   through hub_admin.js's call queue). The pure helpers are
    module.exports for the Node tests. Answers are parsed with
    GCSession.readJson. DOM text is textContent only: lab IDs,
    paths and names come from the server. */
@@ -151,10 +152,17 @@
     function say(text, cls) {
         const m = $('purge-msg');
         m.textContent = text || '';
-        m.className = cls || '';
+        m.className = 'msg ' + (cls || '');
+    }
+
+    // v4.0 lane E: the page is unlocked once (admin_unlock.js); admin calls go
+    // through hub_admin.js's queue (one password check at a time, 30 s timeout).
+    function unlocked() {
+        return !!(window.GCAdminUnlock && window.GCAdminUnlock.page.isUnlocked());
     }
 
     async function call(path, body) {
+        if (window.GCAdminCall) return window.GCAdminCall(path, body);
         const r = await fetch(path, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(Object.assign({ password: $('pw').value }, body || {})),
@@ -219,6 +227,8 @@
 
     // The page shows a running (or the last) purge as soon as it loads, and
     // follows it until it ends.
+    let lastState = null;
+
     async function poll() {
         clearTimeout(timer);
         try {
@@ -226,7 +236,7 @@
             // warnings, files not moved). Without: the reduced one, a
             // background poll never counted as someone using the hub.
             let j;
-            if ($('pw').value) {
+            if (unlocked()) {
                 j = await call('/api/admin/purge/status');
             } else {
                 const r = await fetch('/api/purge/status', {
@@ -236,6 +246,8 @@
             }
             if (j.job || j.journal) renderJob(j.job, j.journal);
             if (j.job && j.job.state === 'running') timer = setTimeout(poll, 1500);
+            else if (j.job && lastState === 'running') say('');   // "Purge started" is stale now
+            lastState = j.job ? j.job.state : null;
         } catch (e) { say(e.message, 'err'); }
     }
 
@@ -286,7 +298,9 @@
         $('purge-confirm').addEventListener('input', refreshStart);
         $('purge-inst').addEventListener('change', () => { shown = null; renderPreview(null); });
         $('purge-scope').addEventListener('change', () => { shown = null; renderPreview(null); });
-        $('btn-purge-status').addEventListener('click', poll);
+        if ($('btn-purge-status')) $('btn-purge-status').addEventListener('click', poll);
+        // unlocking shows the full status (paths, warnings) of the last purge
+        if (window.GCAdminUnlock) window.GCAdminUnlock.page.onChange((on) => { if (on) poll(); });
         refreshStart();
         poll();
     }
