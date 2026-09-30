@@ -29,6 +29,49 @@ def test_create_records_created(hub):
     assert _events(hub) == [("created", BY, {"name": "GC-2"})]
 
 
+def test_create_with_live_since_records_it_too(hub):
+    ia.create({"id": "gc2", "name": "GC-2", "live_since": "2026-10-01 08:00"}, db=hub.db, by=BY)
+    assert _events(hub) == [("created", BY, {"name": "GC-2"}),
+                            ("live_since", BY, {"live_since": "2026-10-01 08:00:00", "old": None})]
+
+
+def test_keeping_the_hub_only_results_file_is_an_explicit_recorded_choice(hub):
+    hub.gc2()
+    exp = exports.HubExporter(hub.db, data_dir=hub.data)
+    out = ia.keep_hub_only_export("gc2", exp, by=BY)
+    assert out["configured"] is False
+    ev = _events(hub)
+    assert [k for k, _b, _d in ev] == ["export_hub_only"] and ev[0][1] == BY
+    assert ev[0][2]["path"].endswith("gc2_results.csv")
+
+
+def test_the_hub_only_choice_is_refused_when_a_results_file_is_set(hub, tmp_path):
+    hub.gc2()
+    exp = exports.HubExporter(hub.db, data_dir=hub.data)
+    ia.set_export_path("gc2", str(tmp_path / "gc2.csv"), exp, by=BY)
+    with pytest.raises(ia.AdminError) as e:
+        ia.keep_hub_only_export("gc2", exp, by=BY)
+    assert e.value.status == 409
+    assert [k for k, _b, _d in _events(hub)] == ["export_path"]
+
+
+def test_the_export_path_event_is_in_the_same_transaction(hub, tmp_path, monkeypatch):
+    """If recording the event fails, the path is not changed either."""
+    hub.gc2()
+    exp = exports.HubExporter(hub.db, data_dir=hub.data)
+    real = store.instrument_events.add
+
+    def boom(db, iid, kind, **kw):
+        if kind == "export_path":
+            raise RuntimeError("event write failed")
+        return real(db, iid, kind, **kw)
+
+    monkeypatch.setattr(store.instrument_events, "add", staticmethod(boom))
+    with pytest.raises(RuntimeError):
+        ia.set_export_path("gc2", str(tmp_path / "gc2.csv"), exp, by=BY)
+    assert not store.instruments.get("gc2", db=hub.db)["export_path"]
+
+
 def test_a_refused_create_records_nothing(hub):
     ia.create({"id": "gc2", "name": "GC-2"}, db=hub.db, by=BY)
     with pytest.raises(ia.AdminError):

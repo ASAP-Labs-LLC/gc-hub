@@ -72,6 +72,21 @@ def test_start_migrates_bootstraps_and_runs_everything(tmp_path):
     _stop_all(rt2)
 
 
+def test_start_warns_about_an_instrument_with_a_reserved_id(tmp_path):
+    """v3.1: an instrument created before ids like "classic" were reserved
+    can't be opened at /instruments/<id>; the hub says so at start."""
+    h = _hub_folder(tmp_path)
+    store.migrate(h.db)
+    store.instruments.upsert({"id": "classic", "name": "Old GC"}, db=h.db)
+    notes = []
+    rt = hub.start(h.conf, data_dir=h.data, notifier=lambda lvl, msg: notes.append((lvl, msg)),
+                   conf_fn=lambda: h.conf, maintenance=False)
+    _stop_all(rt)
+    warn = [m for lvl, m in notes if lvl == "warning" and "reserved" in m]
+    assert len(warn) == 1 and "Old GC" in warn[0] and "classic" in warn[0]
+    assert "/instruments/classic?instrument=classic" in warn[0]
+
+
 def test_final_sample_is_flushed_without_waiting_for_the_export_interval(tmp_path):
     h = _hub_folder(tmp_path)
     rt = hub.start(h.conf, data_dir=h.data, notifier=None, conf_fn=lambda: h.conf,

@@ -1183,13 +1183,20 @@ class HubExporter:
             raise ExportRefused("header-mismatch", path, "the first line is not the 31-column "
                                 f"results header (got {first[:120]!r})")
 
-    def new_path(self, instrument: str, path: PathLike) -> Path:
+    def new_path(self, instrument: str, path: PathLike, *,
+                 event_by: Optional[str] = None) -> Path:
         """Switch this instrument's export to *path* (an existing file there
-        must then be adopted before the hub appends to it). Refuses ``in-use``."""
+        must then be adopted before the hub appends to it). Refuses ``in-use``.
+        With ``event_by`` (v3.1) the ``export_path`` instrument event is written
+        in the same transaction as the path."""
         with _instrument_lock(instrument):
             path = Path(path)
             self._check_free(instrument, path)
-            store.instruments.upsert({"id": instrument, "export_path": str(path)}, db=self.db)
+            with store.connection(self.db) as conn, store.write_txn(conn):
+                store.instruments.upsert({"id": instrument, "export_path": str(path)}, db=conn)
+                if event_by is not None:
+                    store.instrument_events.add(conn, instrument, "export_path", by=event_by,
+                                                detail={"path": str(path)})
             self._clear_refusal(instrument)
             if _stat(path) is not None and not sidecar_path(path).exists():
                 self._adopt_next[instrument] = path      # "New path, then Adopt"

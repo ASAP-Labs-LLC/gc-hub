@@ -56,7 +56,7 @@
                 why: "The hub only processes runs whose ChemStation method it knows; it never guesses. Runs with a method it doesn't know wait until you map it." };
             case 'go_live': return {
                 title: 'Choose the results file and go live',
-                why: 'Going live means results from now on are written to the results file LEM reads. Before that, runs count as backfill: they are kept and processed, but never sent on unless you release them.' };
+                why: 'First choose the results file LEM reads (LabStation takes the results from it), then go live. From then on every result is written to that file. Before that, runs count as backfill: they are kept and processed, but never written to a results file unless you release them.' };
             case 'first_result': return {
                 title: 'The first result',
                 why: 'Run any sample on ' + name + '. It shows up in Samples within a minute and is processed like the others.' };
@@ -69,16 +69,24 @@
     }
 
     // ── actions per step ────────────────────────────────────────────────────
+    // For "Go live now": the hub's clock when the list was read, and the GC's skew.
+    let LIST_AT = Date.now();
+    function clock() {
+        return { hub_local_now: LIST && LIST.hub_local_now, loaded_at: LIST_AT,
+                 skew_seconds: inst.agent ? inst.agent.clock_skew_seconds : null,
+                 results_file_configured: !!(inst.export_path || '').trim() };
+    }
+
     function actions(step) {
         const id = enc(inst.id);
         const primary = step.status === 'current' ? 'btn btn-primary' : 'btn';
         const out = [];
         switch (step.key) {
             case 'create':
-                out.push(h('a', { className: 'btn', href: '/instruments/' + id + '?edit=1', text: 'Change details' }));
+                out.push(h('a', { className: 'btn', href: U.instrumentHref(inst.id) + (U.instrumentHref(inst.id).includes('?') ? '' : '?edit=1'), text: 'Change details' }));
                 break;
             case 'corrections':
-                out.push(h('a', { className: primary, href: '/instruments/' + id + '#corrections', text: 'Enter correction factors' }));
+                out.push(h('a', { className: primary, href: U.instrumentHref(inst.id) + '#corrections', text: 'Enter correction factors' }));
                 break;
             case 'installer':
                 out.push(h('button', { type: 'button', className: primary, 'data-testid': 'guide-installer',
@@ -86,7 +94,7 @@
                     S.icon('download'), 'Download installer for ' + inst.name));
                 break;
             case 'calibration':
-                out.push(h('a', { className: primary, href: '/instruments/' + id + '#calibration', text: 'Choose the calibration run' }));
+                out.push(h('a', { className: primary, href: U.instrumentHref(inst.id) + '#calibration', text: 'Choose the calibration run' }));
                 if (inst.calibration && inst.calibration.calibration_cdf) {
                     out.push(h('a', { className: 'btn btn-ghost', href: '/calibration?instrument=' + id, text: 'Assign peaks' }));
                 }
@@ -97,15 +105,27 @@
                                            onclick: async () => { if (await A.mapMethod(inst, name, inst.method)) refresh(); } },
                         'Process ' + name + ' as ' + inst.method));
                 }
-                out.push(h('a', { className: 'btn btn-ghost', href: '/instruments/' + id + '#methods', text: 'See methods' }));
+                out.push(h('a', { className: 'btn btn-ghost', href: U.instrumentHref(inst.id) + '#methods', text: 'See methods' }));
                 break;
-            case 'go_live':
-                if (step.status !== 'done') {
+            case 'go_live': {
+                // 1. the results file first, 2. then go live
+                if (step.needs_results_file) {
+                    const path = h('input', { type: 'text', className: 'grow mono', 'data-testid': 'guide-results-path',
+                                              placeholder: 'The file LEM reads, e.g. \\\\asapserver\\Labsharedrive\\…\\results.csv',
+                                              'aria-label': 'Results file LEM reads' });
+                    out.push(h('div', { className: 'row', style: 'width:100%' }, path,
+                        h('button', { type: 'button', className: primary, 'data-testid': 'guide-set-results-file', text: 'Set results file',
+                                      onclick: async () => { if (await A.setResultsFile(inst, path.value)) refresh(); } })));
+                    out.push(h('button', { type: 'button', className: 'btn btn-ghost', 'data-testid': 'guide-keep-hub-only',
+                                           text: "Keep the hub-only file (LEM won't see these results)",
+                                           onclick: async () => { if (await A.keepHubOnly(inst)) refresh(); } }));
+                } else if (!inst.live_since) {
                     out.push(h('button', { type: 'button', className: primary, 'data-testid': 'guide-go-live',
-                                           onclick: async () => { if (await A.goLiveNow(inst)) refresh(); } }, 'Go live now'));
+                                           onclick: async () => { if (await A.goLiveNow(inst, clock())) refresh(); } }, 'Go live now'));
                 }
-                out.push(h('a', { className: 'btn btn-ghost', href: '/instruments/' + id + '#export', text: 'Change the results file' }));
+                out.push(h('a', { className: 'btn btn-ghost', href: U.instrumentHref(inst.id) + '#export', text: 'Results file settings' }));
                 break;
+            }
             case 'first_result':
                 out.push(h('a', { className: step.status === 'current' ? 'btn btn-primary' : 'btn', href: '/', text: 'Open Samples' }));
                 break;
@@ -255,6 +275,7 @@
     let started = false;
     S.onInstruments(async (body) => {
         LIST = body;
+        LIST_AT = Date.now();
         const cur = chosen();
         renderPicker(cur);
         if (started) {

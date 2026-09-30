@@ -14,7 +14,7 @@
 * ``agents.last_seen`` -> ``agent_seen`` (one per agent: its last check-in).
 
 Every entry is ``{key, kind, at, instrument_id, instrument_name, by,
-sample_id, lab_id, detail}``. ``key`` is stable for the same fact, so the page
+sample_id, lab_id, injection_dt, detail}``. ``key`` is stable for the same fact, so the page
 prepends only keys it has not shown (an agent's key stays ``agent:<id>``: its
 entry moves up on each check-in). Each source is read newest-first with the
 limit, then merged, so the work is bounded by ``limit`` per source. Strings
@@ -52,10 +52,11 @@ def _sort_key(at: Optional[str]) -> float:
     return dt.timestamp()
 
 
-def _entry(key, kind, at, iid, names, by=None, sample_id=None, lab_id=None, detail=None) -> dict:
+def _entry(key, kind, at, iid, names, by=None, sample_id=None, lab_id=None, detail=None,
+           injection_dt=None) -> dict:
     return {"key": key, "kind": kind, "at": at, "instrument_id": iid,
             "instrument_name": names.get(iid, iid), "by": by, "sample_id": sample_id,
-            "lab_id": lab_id, "detail": detail}
+            "lab_id": lab_id, "injection_dt": injection_dt, "detail": detail}
 
 
 def feed(limit: int = DEFAULT_LIMIT, *, db: store.Db = None) -> list:
@@ -73,10 +74,11 @@ def feed(limit: int = DEFAULT_LIMIT, *, db: store.Db = None) -> list:
             out.append(_entry(f"event:{r['id']}", r["kind"], r["at"], r["instrument_id"], names,
                               by=r["by"], detail=detail))
         for r in conn.execute(
-                "SELECT id, instrument_id, lab_id, received_at, status, source_name FROM samples "
+                "SELECT id, instrument_id, lab_id, injection_dt, received_at, status, source_name FROM samples "
                 "ORDER BY received_at DESC, id DESC LIMIT ?", (limit,)):
             out.append(_entry(f"received:{r['id']}", "sample_received", r["received_at"],
                               r["instrument_id"], names, sample_id=r["id"], lab_id=r["lab_id"],
+                              injection_dt=r["injection_dt"],
                               detail={"status": r["status"], "source_name": r["source_name"]}))
         for r in conn.execute(
                 "SELECT instrument_id, changed_at, changed_by, reason, COUNT(*) AS n, "
@@ -88,20 +90,21 @@ def feed(limit: int = DEFAULT_LIMIT, *, db: store.Db = None) -> list:
                               by=r["changed_by"],
                               detail={"changed": int(r["changed"] or 0), "reason": r["reason"]}))
         for r in conn.execute(
-                "SELECT l.id, l.kind, l.created_at, l.user_name, s.id AS sample_id, s.lab_id, "
+                "SELECT l.id, l.kind, l.created_at, l.user_name, s.id AS sample_id, s.lab_id, s.injection_dt, "
                 "s.instrument_id FROM report_log l JOIN samples s ON s.id=l.sample_id "
                 "ORDER BY l.created_at DESC, l.id DESC LIMIT ?", (limit,)):
             out.append(_entry(f"report:{r['id']}", "report", r["created_at"], r["instrument_id"],
                               names, by=r["user_name"], sample_id=r["sample_id"],
-                              lab_id=r["lab_id"], detail={"report_kind": r["kind"]}))
+                              lab_id=r["lab_id"], injection_dt=r["injection_dt"],
+                              detail={"report_kind": r["kind"]}))
         for r in conn.execute(
-                "SELECT e.seq, e.instrument_id, e.hub_appended_at, s.id AS sample_id, s.lab_id "
+                "SELECT e.seq, e.instrument_id, e.hub_appended_at, s.id AS sample_id, s.lab_id, s.injection_dt "
                 "FROM export_rows e JOIN samples s ON s.id=e.sample_id "
                 "WHERE e.hub_appended_at IS NOT NULL "
                 "ORDER BY e.hub_appended_at DESC, e.seq DESC LIMIT ?", (limit,)):
             out.append(_entry(f"export:{r['seq']}", "export_written", r["hub_appended_at"],
                               r["instrument_id"], names, sample_id=r["sample_id"],
-                              lab_id=r["lab_id"]))
+                              lab_id=r["lab_id"], injection_dt=r["injection_dt"]))
         for r in conn.execute(
                 "SELECT instrument_id, last_seen, host, version FROM agents "
                 "WHERE last_seen IS NOT NULL ORDER BY last_seen DESC LIMIT ?", (limit,)):

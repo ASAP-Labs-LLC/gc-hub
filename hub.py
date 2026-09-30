@@ -456,6 +456,12 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
     # The seed reads the corrections file (often on the share, which can
     # stall), so it runs outside the lock; the Worker is already up and gc1's
     # samples simply wait until it succeeds (the seed queues them).
+    try:
+        import instrument_admin
+        for msg in instrument_admin.reserved_id_warnings(db=db):
+            _notify(notifier, "warning", msg)
+    except Exception:  # noqa: BLE001 - a warning must never stop the hub
+        log.exception("hub: reserved-id check failed")
     seeded_at = datetime.now()
     try:
         seed_gc1_corrections(app_conf, db, notifier)

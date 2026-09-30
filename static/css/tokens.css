@@ -60,6 +60,13 @@
     --st-held:       #b45309;
     --st-error:      #b91c1c;
     --st-working:    var(--ink);
+    /* status pill text on its soft tint (AA: 4.5:1 over the tint) */
+    --pill-final-fg: #166534;
+    --pill-held-fg:  #92400e;
+    --pill-error-fg: #991b1b;
+    /* the nav's step count on a hovered or active item; the version badge */
+    --nav-meta:      #475569;
+    --badge-fg:      var(--text-muted);
 
     /* Deviation fill (GC): above = sample higher than the standard */
     --dev-above:       #dc2626;
@@ -161,6 +168,10 @@
     --st-final:      #4ade80;
     --st-held:       #facc15;
     --st-error:      #f87171;
+    --pill-final-fg: #4ade80;
+    --pill-held-fg:  #facc15;
+    --pill-error-fg: #fca5a5;
+    --nav-meta:      #b5b5b5;
 
     --dev-above:       #f87171;
     --dev-above-fill:  rgba(248, 113, 113, 0.30);

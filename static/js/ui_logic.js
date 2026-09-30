@@ -231,6 +231,55 @@
         }));
     }
 
+    // ── "Go live now": the hub's clock, never the browser's ────────────────
+    const LOCAL_TS = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/;
+    function parseLocal(text) {
+        const m = LOCAL_TS.exec(String(text || ''));
+        return m ? Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
+    }
+    function formatLocal(ms) {
+        const d = new Date(ms);
+        return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()) + ' ' +
+            pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds());
+    }
+    // hubLocalNow: the hub's local time when the page loaded (loadedAtMs, the
+    // browser's clock then); skewSeconds: the GC PC's clock minus the hub's, when
+    // an agent has reported it. live_since is the GC's clock, so that is used
+    // when known. -> {value, basis: gc|hub, text} or null.
+    function goLiveTime(hubLocalNow, loadedAtMs, nowMs, skewSeconds) {
+        const base = parseLocal(hubLocalNow);
+        if (base === null) return null;
+        const hubNow = base + Math.max(0, nowMs - loadedAtMs);
+        const known = typeof skewSeconds === 'number' && isFinite(skewSeconds);
+        const value = formatLocal(hubNow + (known ? skewSeconds * 1000 : 0));
+        return {
+            value, basis: known ? 'gc' : 'hub',
+            text: known ? value.slice(0, 16) + " by the GC's clock"
+                : value.slice(0, 16) + " by the hub's clock (the GC's clock is unknown until its agent checks in)",
+        };
+    }
+
+    function liveSinceState(liveSince, hubLocalNow) {
+        if (!liveSince) return { live: false, text: 'Not live' };
+        const at = String(liveSince).slice(0, 16);
+        if (hubLocalNow && String(liveSince) > String(hubLocalNow)) return { live: false, text: 'Waiting until ' + at };
+        return { live: true, text: 'Live since ' + at };
+    }
+
+    // Ids the hub's page addresses use: such an instrument opens on the classic page.
+    const RESERVED_IDS = ['activity', 'classic', 'new', 'setup'];
+    const UNREACHABLE_IDS = ['activity', 'classic'];
+    function instrumentHref(id) {
+        if (UNREACHABLE_IDS.includes(id)) return '/instruments/classic?instrument=' + encodeURIComponent(id);
+        return '/instruments/' + encodeURIComponent(id);
+    }
+
+    function activitySample(e) {
+        if (!e || e.sample_id === null || e.sample_id === undefined) return null;
+        return { href: '/samples/' + encodeURIComponent(e.sample_id),
+                 injected: e.injection_dt ? 'injected ' + String(e.injection_dt).slice(0, 16) : null };
+    }
+
     function lemTitle(answer, uid) {
         if (!uid) return null;
         const list = answer && Array.isArray(answer.machines) ? answer.machines : [];
@@ -242,6 +291,7 @@
         LIVE_SECONDS, ACTIVITY_KINDS, STEP_SHORT, nextStepText, relTime, clockTime, actorName, initials, agentStatus, sampleStatus,
         setupLabel, stepBadge, setupNav, activityText, activityIcon, mergeActivity, makeAdminGate,
         recentAdd, recentClean, resolveTheme, diffSummaries, agentsFromStatus, lemTitle,
+        goLiveTime, liveSinceState, RESERVED_IDS, instrumentHref, activitySample,
     };
     root.GCUi = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;

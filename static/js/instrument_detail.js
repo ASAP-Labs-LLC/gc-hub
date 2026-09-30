@@ -30,18 +30,20 @@
     // ── load ────────────────────────────────────────────────────────────────
     // `background`: a reload caused by a live update (X-GC-Background: 1), not a click.
     let bgRender = false;
+    let LOADED_AT = Date.now();
     async function load(background) {
         const bg = background === true;
         const [d, st] = await Promise.all([S.getJSON('/api/instruments/' + enc(IID), bg),
                                            S.getJSON('/api/instruments/' + enc(IID) + '/setup', bg)]);
         bgRender = bg;
+        LOADED_AT = Date.now();
         if (d.status !== 200) { S.toast((d.body && d.body.error) || 'Could not load ' + IID, 'err'); return; }
         D = d.body;
         if (st.status === 200) SETUP = st.body;
         const server = D.instrument.agent || {};
         const liveNewer = agent && agent.last_seen && (!server.last_seen || agent.last_seen > server.last_seen);
         agent = Object.assign({}, server, liveNewer ? { last_seen: agent.last_seen } : {});
-        render();
+        render(bg);
     }
 
     async function loadSetup() {
@@ -128,11 +130,19 @@
                 ['Computer', seen ? txt(a.host) : '— reported on first check-in'],
                 ['Agent version', seen ? txt(a.version) : '—'],
                 ['Clock', seen ? L.formatSkew(a.clock_skew_seconds) : '— checked on first check-in'],
+                seen ? ['State', txt(a.state || a.status)] : null,
                 seen ? ['Queue', (a.queue_size || 0) + ' waiting · ' + (a.rejected_count || 0) + ' rejected'] : null,
+                seen ? ['Results seq', txt(a.results_seq)] : null,
+                ['Pending command', a.pending_command ? a.pending_command + ' (taken at the next check-in)' : 'none'],
+                ['Hub address', h('span', { className: 'row' },
+                    h('span', { className: 'mono', text: LIST.hub_url_effective || '—' }),
+                    h('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: 'Change…', 'data-testid': 'hub-url',
+                                  onclick: async () => { if (await A.setHubUrl(LIST.hub_url, LIST.hub_url_effective)) S.loadInstruments(false); } }))],
                 seen && a.last_file ? ['Last file', a.last_file, 'mono'] : null,
                 seen && a.last_error ? ['Last error', a.last_error, 'errline'] : null,
             ]),
             skew ? h('p', { className: 'warnline', text: skew + ' Fix it before relying on live since.' }) : null,
+            inst.enabled ? null : h('p', { className: 'warnline', text: 'This GC is disabled: its runs are refused. Enable it in Edit details.' }),
             h('div', { className: 'row' },
                 h('button', { type: 'button', className: 'btn' + (inst.has_token ? '' : ' btn-primary'), 'data-testid': 'download-installer',
                               onclick: async () => { if (await A.downloadInstaller(inst)) load(); } },
@@ -164,6 +174,9 @@
                               onclick: () => { finderOpen = !finderOpen; renderSection('calibration'); } })),
         ];
         if (finderOpen) out.push(calibrationFinder(inst));
+        // not ported yet: comparison standards are tagged by instrument on the classic page
+        out.push(h('p', { className: 'caption' }, 'Comparison standards are tagged by instrument on the ',
+            h('a', { className: 'link', href: '/instruments/classic?instrument=' + enc(inst.id), text: 'classic Instruments page' }), '.'));
         return out;
     }
 
@@ -246,39 +259,66 @@
         ];
     }
 
+    function clock() {
+        return { hub_local_now: D.hub_local_now, loaded_at: LOADED_AT,
+                 skew_seconds: (agent || {}).clock_skew_seconds,
+                 results_file_configured: !!(D.export || {}).configured };
+    }
+
     function exportSection() {
         const inst = D.instrument;
         const ex = D.export || {};
-        const path = h('input', { type: 'text', className: 'grow mono', value: ex.configured ? ex.path : '', placeholder: ex.path || 'An absolute path to a .csv file', 'aria-label': 'Results file path' });
+        const step = stepOf('go_live') || {};
+        const hubOnly = !ex.configured && !step.needs_results_file;
+        const path = h('input', { type: 'text', className: 'grow mono', value: ex.configured ? ex.path : '',
+                                  placeholder: 'The file LEM reads, e.g. \\\\asapserver\\Labsharedrive\\…\\results.csv',
+                                  'aria-label': 'Results file path', 'data-testid': 'results-path' });
         const state = ex.refused ? 'Refused (' + ex.refused + '): ' + txt(ex.refused_detail) : ex.last_error || ex.error ? txt(ex.last_error || ex.error) : 'OK';
-        const liveText = inst.live_since ? inst.live_since.slice(0, 16) + " (the GC's clock)"
-            : 'Not live: every run is backfill and is never written to this file unless released';
-        async function setPath() {
-            const r = await S.adminPost('/api/admin/instruments/' + enc(inst.id) + '/export-path', { path: path.value });
-            if (r && r.status === 200) { S.toast('Results file set. If a file is already there, adopt it before the hub appends.'); load(); }
-        }
+        const ls = U.liveSinceState(inst.live_since, D.hub_local_now);
+        const liveText = inst.live_since ? ls.text + " (the GC's clock)"
+            : 'Not live: every run is backfill and is never written to a results file unless released';
         async function adopt() {
             if (!window.confirm('Adopt ' + txt(ex.path) + ' as it is now? The hub appends after its current content.')) return;
             const r = await S.adminPost('/api/admin/instruments/' + enc(inst.id) + '/export-adopt', {});
             if (r && r.status === 200) { S.toast('Adopted.'); load(); }
         }
-        return [
+        const fileText = ex.configured ? ex.path + ' (LEM reads it)'
+            : ex.path + (hubOnly ? " (the hub's own file, kept on purpose: LEM won't see these results)"
+                                 : " (the hub's own file: LEM does not read it)");
+        const out = [
             kv([
-                ['File', ex.path + (ex.configured ? '' : ' (the default)'), 'mono'],
+                ['File', fileText, 'mono'],
                 ['Waiting to write', (ex.pending || 0) + ' row(s)'],
                 ['State', state, ex.refused ? 'errline' : ''],
                 ['Live since', liveText],
                 ['Backfill', (inst.backfill_unreleased || 0) + ' run(s) held back'],
             ]),
+            // 1. the results file
+            h('h3', { className: 'caption', text: '1 · The results file' }),
+            ex.configured ? null : h('p', { className: 'warnline', text:
+                "Rows written to the hub's own file never reach LEM, even if you choose LEM's file later: choose it before going live." }),
+            h('div', { className: 'row' }, path,
+                h('button', { type: 'button', className: 'btn' + (step.needs_results_file ? ' btn-primary' : ''), text: 'Set results file',
+                              'data-testid': 'set-results-file',
+                              onclick: async () => { if (await A.setResultsFile(inst, path.value)) { clean('export'); load(); } } }),
+                ex.configured || hubOnly ? null : h('button', { type: 'button', className: 'btn btn-ghost', 'data-testid': 'keep-hub-only',
+                    text: "Keep the hub-only file (LEM won't see these results)",
+                    onclick: async () => { if (await A.keepHubOnly(inst, ex.path)) load(); } }),
+                ex.configured ? h('button', { type: 'button', className: 'btn btn-ghost', text: 'Adopt the file as it is', onclick: adopt }) : null),
+            // 2. go live
+            h('h3', { className: 'caption', text: '2 · Go live' }),
             ...(inst.live_since ? (D.live_since_warnings || []) : []).map(w => h('p', { className: 'warnline', text: w })),
-            h('div', { className: 'row' },
-                inst.live_since ? null : h('button', { type: 'button', className: 'btn btn-primary', 'data-testid': 'go-live', text: 'Go live now',
-                                                       onclick: async () => { if (await A.goLiveNow(inst)) load(); } }),
-                h('button', { type: 'button', className: 'btn btn-ghost', text: inst.live_since ? 'Change live since…' : 'Choose a time…',
-                              onclick: () => A.editDetails(inst, LIST.hub_methods || [], load) })),
-            h('div', { className: 'row' }, path, h('button', { type: 'button', className: 'btn', text: 'Set results file', onclick: setPath }),
-                h('button', { type: 'button', className: 'btn btn-ghost', text: 'Adopt the file as it is', onclick: adopt })),
         ];
+        if (!inst.live_since && step.needs_results_file) {
+            out.push(h('p', { className: 'caption', text: 'Choose the results file first (step 1 above).' }));
+        } else {
+            out.push(h('div', { className: 'row' },
+                inst.live_since ? null : h('button', { type: 'button', className: 'btn btn-primary', 'data-testid': 'go-live', text: 'Go live now',
+                                                       onclick: async () => { if (await A.goLiveNow(inst, clock())) load(); } }),
+                h('button', { type: 'button', className: 'btn btn-ghost', text: inst.live_since ? 'Change live since…' : 'Choose a time…',
+                              onclick: () => A.editDetails(inst, LIST.hub_methods || [], load) })));
+        }
+        return out;
     }
 
     function methodsSection() {
@@ -392,20 +432,36 @@
 
     const SECTIONS = { agent: agentSection, calibration: calibrationSection, corrections: correctionsSection,
                        export: exportSection, methods: methodsSection, backfill: backfillSection, conflicts: conflictsSection };
-    function renderSection(key) {
+
+    // A section someone is editing (typed, ticked, picked, or focused) is left
+    // alone by live updates; it is redrawn after its own save, or the next
+    // time it is neither dirty nor focused.
+    const DIRTY = new Set();
+    function clean(key) { DIRTY.delete(key); }
+    for (const key of Object.keys(SECTIONS)) {
         const body = $(key + '-body');
-        const focused = document.activeElement && body.contains(document.activeElement) && document.activeElement.tagName === 'INPUT';
-        if (focused && key === 'corrections') return;          // never wipe a half-typed value
-        body.replaceChildren(...SECTIONS[key]().filter(Boolean));
+        const mark = (ev) => { if (ev.isTrusted) DIRTY.add(key); };
+        body.addEventListener('input', mark);
+        body.addEventListener('change', mark);
+    }
+    function busy(key) {
+        const body = $(key + '-body');
+        return DIRTY.has(key) || (document.activeElement && document.activeElement !== document.body &&
+                                  body.contains(document.activeElement));
+    }
+    function renderSection(key, background) {
+        if (background && busy(key)) return;
+        DIRTY.delete(key);
+        $(key + '-body').replaceChildren(...SECTIONS[key]().filter(Boolean));
     }
 
-    function render() {
+    function render(background) {
         renderHead();
         renderChecklist();
-        for (const key of Object.keys(SECTIONS)) renderSection(key);
-        loadBackfill(bgRender);
-        loadConflicts(bgRender);
-        S.addRecent({ href: '/instruments/' + IID, label: D.instrument.name });
+        for (const key of Object.keys(SECTIONS)) renderSection(key, background);
+        if (!(background && busy('backfill'))) loadBackfill(background);
+        if (!(background && busy('conflicts'))) loadConflicts(background);
+        S.addRecent({ href: U.instrumentHref(IID), label: D.instrument.name });
     }
 
     // ── live ────────────────────────────────────────────────────────────────
@@ -442,7 +498,7 @@
 
     $('edit-details').addEventListener('click', () => { if (D) A.editDetails(D.instrument, LIST.hub_methods || [], load); });
     $('checklist-toggle').addEventListener('click', () => { checklistOpen = !checklistOpen; renderChecklist(); });
-    S.onInstruments((body) => { LIST = body; if (D) renderSection('agent'); });
+    S.onInstruments((body) => { LIST = body; if (D) renderSection('agent', true); });
     A.lemMachines().then(ans => { LEM = ans; if (D) renderHead(); });
     load().then(() => {
         if (new URLSearchParams(location.search).get('edit') === '1' && D) A.editDetails(D.instrument, LIST.hub_methods || [], load);

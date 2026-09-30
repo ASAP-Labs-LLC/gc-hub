@@ -1,0 +1,151 @@
+"""v3.1 (WCAG AA): every text/background pair the new pages use, computed
+from ``static/css/tokens.css`` for the light and the dark theme, reaches
+4.5:1 (3:1 for the focus ring and the status glyphs, which are not text).
+Translucent fills (hover, active, the pills' soft tints) are composited over
+the surface they sit on, as the browser does. The rendered pages are checked
+the same way in the Selenium smoke (``test_ui_setup_pages_smoke``); this one
+needs no browser and catches a token change at once."""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+TOKENS = ROOT / "static" / "css" / "tokens.css"
+SHELL = ROOT / "static" / "css" / "shell.css"
+BADGE = ROOT / "static" / "css" / "badge.css"
+
+
+def _blocks(css: str) -> dict:
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    out = {}
+    for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        out[sel.strip()] = dict(re.findall(r"(--[\w-]+)\s*:\s*([^;]+);", body))
+    return out
+
+
+def _themes() -> dict:
+    blocks = _blocks(TOKENS.read_text(encoding="utf-8"))
+    light = blocks[":root"]
+    dark = dict(light, **blocks[':root[data-theme="dark"]'])
+    return {"light": light, "dark": dark}
+
+
+def _resolve(tokens: dict, value: str, depth: int = 0) -> str:
+    value = value.strip()
+    m = re.fullmatch(r"var\((--[\w-]+)\)", value)
+    if m and depth < 10:
+        return _resolve(tokens, tokens[m.group(1)], depth + 1)
+    return value
+
+
+def _rgba(text: str) -> tuple:
+    text = text.strip()
+    if text.startswith("#"):
+        h = text[1:]
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 1.0)
+    m = re.fullmatch(r"rgba?\(([^)]*)\)", text)
+    assert m, text
+    parts = [float(p) for p in re.split(r"[ ,/]+", m.group(1).strip()) if p]
+    return (parts[0], parts[1], parts[2], parts[3] if len(parts) > 3 else 1.0)
+
+
+def _over(top, bottom):
+    a = top[3]
+    return tuple(top[i] * a + bottom[i] * (1 - a) for i in range(3)) + (1.0,)
+
+
+def _lum(c):
+    def f(v):
+        v /= 255
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+    return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2])
+
+
+def ratio(fg, bg) -> float:
+    a, b = _lum(fg), _lum(bg)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+def colour(tokens, *layers):
+    """The colour of stacked layers, bottom first (tokens or literals)."""
+    base = (255, 255, 255, 1.0)
+    for layer in layers:
+        base = _over(_rgba(_resolve(tokens, tokens.get(layer, layer))), base)
+    return base
+
+
+# (foreground, [background layers bottom first], minimum, what)
+TEXT = 4.5
+UI = 3.0
+PAIRS = [
+    ("--text", ["--bg"], TEXT, "body text"),
+    ("--text", ["--bg-card"], TEXT, "card text"),
+    ("--text", ["--sidebar-bg"], TEXT, "sidebar text"),
+    ("--text", ["--sidebar-bg", "--bg-active"], TEXT, "active nav item"),
+    ("--text", ["--bg-sunken"], TEXT, "text on sunken tracks"),
+    ("--text", ["--bg-elevated"], TEXT, "menus and dialogs"),
+    ("--text-muted", ["--bg"], TEXT, "captions"),
+    ("--text-muted", ["--bg-card"], TEXT, "captions on cards"),
+    ("--text-muted", ["--sidebar-bg"], TEXT, "sidebar captions"),
+    ("--nav-meta", ["--sidebar-bg", "--bg-hover"], TEXT, "nav meta on hover"),
+    ("--nav-meta", ["--sidebar-bg", "--bg-active"], TEXT, "nav meta on the active item"),
+    ("--text-muted", ["--bg-elevated"], TEXT, "menu captions"),
+    ("--text-muted-sunken", ["--bg-sunken"], TEXT, "muted text on sunken tracks"),
+    ("--text-muted-sunken", ["--bg-card", "--bg-sunken"], TEXT, "tiles, pills, notes"),
+    ("--pill-final-fg", ["--bg-card", "--good-soft"], TEXT, "Live / final pill"),
+    ("--pill-held-fg", ["--bg-card", "--warn-soft"], TEXT, "held pill"),
+    ("--pill-error-fg", ["--bg-card", "--bad-soft"], TEXT, "error pill"),
+    ("--warn-text", ["--bg"], TEXT, "warning lines"),
+    ("--st-error", ["--bg"], TEXT, "error lines"),
+    ("--bad", ["--bg"], TEXT, "danger buttons"),
+    ("--ink-fg", ["--ink"], TEXT, "primary buttons and the toast"),
+    ("--text-inverse", ["--st-error"], TEXT, "the bell's count"),
+    ("--text-inverse", ["--bad"], TEXT, "an error toast"),
+    ("--badge-fg", ["--bg"], TEXT, "the version badge"),
+    ("--chart-axis", ["--bg-card"], TEXT, "chart labels"),
+    ("--accent", ["--bg"], UI, "focus ring"),
+    ("--accent", ["--sidebar-bg"], UI, "focus ring in the sidebar"),
+    ("--accent", ["--bg-sunken"], UI, "focus ring on sunken fields"),
+    ("--st-final", ["--bg"], UI, "final glyph"),
+    ("--st-held", ["--bg"], UI, "held glyph"),
+    ("--st-error", ["--bg"], UI, "error glyph"),
+    ("--text-muted", ["--bg"], UI, "never glyph"),
+]
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("fg,bg,need,what", PAIRS, ids=[p[3] for p in PAIRS])
+def test_token_pair_contrast(theme, fg, bg, need, what):
+    t = _themes()[theme]
+    back = colour(t, *bg)
+    front = _over(_rgba(_resolve(t, t[fg])), back)
+    r = ratio(front, back)
+    assert r >= need, f"{theme}: {what} ({fg} on {' + '.join(bg)}) is {r:.2f}:1, needs {need}:1"
+
+
+def test_the_shell_uses_the_checked_tokens():
+    css = SHELL.read_text(encoding="utf-8")
+    assert re.search(r"\.pill\.final\s*\{[^}]*color:\s*var\(--pill-final-fg\)", css)
+    assert re.search(r"\.pill\.held\s*\{[^}]*color:\s*var\(--pill-held-fg\)", css)
+    assert re.search(r"\.pill\.error\s*\{[^}]*color:\s*var\(--pill-error-fg\)", css)
+    assert re.search(r"\.nav-item \.nav-meta\s*\{[^}]*color:\s*var\(--nav-meta\)", css)
+
+
+def test_the_focus_ring_is_a_solid_offset_outline():
+    css = SHELL.read_text(encoding="utf-8")
+    rule = re.search(r"\.gc :focus-visible\s*\{([^}]*)\}", css).group(1)
+    assert re.search(r"outline:\s*2px solid var\(--accent\)", rule)
+    assert "outline-offset" in rule and "border-radius" not in rule
+
+
+def test_the_version_badge_is_readable():
+    css = BADGE.read_text(encoding="utf-8")
+    rule = re.search(r"#app-version\s*\{([^}]*)\}", css).group(1)
+    op = re.search(r"opacity:\s*([\d.]+)", rule)
+    assert op is None or float(op.group(1)) == 1.0
+    assert "var(--badge-fg" in rule

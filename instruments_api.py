@@ -22,6 +22,7 @@ Routes::
     POST /api/admin/instruments/<id>                         {name|enabled|method|live_since|lem_machine_uid}
     POST /api/admin/instruments/<id>/export-path             {path}
     POST /api/admin/instruments/<id>/export-adopt            {}
+    POST /api/admin/instruments/<id>/export-hub-only         {} keep the hub-only file (v3.1)
     GET  /api/instruments/<id>/calibration[?sensitivity=]    the Calibration page payload
     GET  /api/instruments/<id>/calibration-candidates[?q=]   the instrument's own samples
     POST /api/admin/instruments/<id>/calibration-cdf         {sample_id | path}
@@ -160,7 +161,7 @@ def _counts(db) -> dict:
             "SELECT instrument_id, COUNT(*) AS n FROM instrument_corrections GROUP BY instrument_id")}
         today = {r["instrument_id"]: r["n"] for r in conn.execute(
             "SELECT instrument_id, COUNT(*) AS n FROM samples WHERE received_at >= ? "
-            "GROUP BY instrument_id", (_local_midnight_utc(),))}
+            "AND backfill=0 GROUP BY instrument_id", (_local_midnight_utc(),))}
         pending = {r["instrument_id"]: r["n"] for r in conn.execute(
             "SELECT instrument_id, COUNT(*) AS n FROM export_rows WHERE hub_appended_at IS NULL "
             "GROUP BY instrument_id")}
@@ -170,6 +171,12 @@ def _counts(db) -> dict:
 
 # "Held" on the Instruments cards: samples waiting for something an admin fixes.
 HELD_STATUSES = ("awaiting_calibration", "pending_corrections", "other_method", "review_method")
+
+
+def _hub_local_now() -> str:
+    """The hub's local clock in live_since's form, for "Go live now"."""
+    from datetime import datetime
+    return store.local_dt(datetime.now().replace(microsecond=0))
 
 
 def _local_midnight_utc() -> str:
@@ -198,8 +205,7 @@ def _summary(row: dict, conf: dict, db, counts: dict, agents: dict) -> dict:
     out["held"] = sum(out["counts"].get(s, 0) for s in HELD_STATUSES)
     out["export_pending"] = counts["export_pending"].get(iid, 0)
     try:
-        st = setup_state.steps(row, setup_state.gather(iid, conf, db=db, data_dir=_data()))
-        out["setup"] = setup_state.summary(st)
+        out["setup"] = setup_state.SUMMARIES.summary(row, conf, db=db, data_dir=_data())
     except Exception:  # noqa: BLE001 - one bad row must not blank the page
         log.exception("setup state for %s", iid)
         out["setup"] = None
@@ -226,6 +232,11 @@ def instruments_classic_page():
 def instrument_detail_page(iid):
     if store.instruments.get(iid, db=_db()) is None:
         return _page("instrument_missing.html", nav="instruments", instrument_id=iid), 404
+    if iid in ia.UNREACHABLE_IDS:
+        # /api/instruments/<iid> is shadowed by a hub route for this id (made
+        # before the id was reserved): the classic page can still manage it
+        from flask import redirect
+        return redirect(f"/instruments/classic?instrument={iid}")
     return _page("instrument_detail.html", nav="instruments", instrument_id=iid)
 
 
@@ -248,6 +259,7 @@ def api_instruments():
         "hub_url_effective": ingest_api.effective_hub_url(db=db),
         "agent_commands": list(ingest_api.AGENT_COMMANDS),
         "skew_warn_seconds": ia.SKEW_WARN_SECONDS,
+        "hub_local_now": _hub_local_now(),
     })
 
 
@@ -284,6 +296,7 @@ def api_instrument(iid):
         "methods": ia.methods_view(iid, db=db),
         "export": _export_status(iid),
         "live_since_warnings": ia.live_since_warnings(iid, db=db)[1:],
+        "hub_local_now": _hub_local_now(),
     })
 
 
@@ -327,6 +340,15 @@ def api_export_path(iid):
     if err:
         return err
     return jsonify({"export": ia.set_export_path(iid, body.get("path"), _get_exporter(), by=_by())})
+
+
+@bp.route("/api/admin/instruments/<iid>/export-hub-only", methods=["POST"])
+def api_export_hub_only(iid):
+    """v3.1: keep the hub's own results file on purpose (LEM won't see it)."""
+    _body, err = _admin()
+    if err:
+        return err
+    return jsonify({"export": ia.keep_hub_only_export(iid, _get_exporter(), by=_by())})
 
 
 @bp.route("/api/admin/instruments/<iid>/export-adopt", methods=["POST"])

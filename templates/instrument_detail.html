@@ -1,6 +1,6 @@
 {% extends "_layout.html" %}
 {% block title %}Instrument{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/gc_pages.css') }}?v=1">{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/gc_pages.css') }}?v=2">{% endblock %}
 {% block topbar %}
   <nav class="crumbs" aria-label="Breadcrumb">
     <a href="/instruments">Instruments</a><span class="sep ico ico-chev" aria-hidden="true"></span>
@@ -66,6 +66,6 @@
 {% endblock %}
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/instruments_logic.js') }}?v=4"></script>
-<script src="{{ url_for('static', filename='js/instrument_actions.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/instrument_detail.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/instrument_actions.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/instrument_detail.js') }}?v=2"></script>
 {% endblock %}

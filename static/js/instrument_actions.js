@@ -143,17 +143,52 @@
         return false;
     }
 
-    // ── go live ─────────────────────────────────────────────────────────────
-    async function goLiveNow(inst) {
-        const now = L.localNow();
-        const text = 'Go live now? Runs ' + inst.name + ' injects from ' + now.slice(0, 16) +
-            " (by the GC's clock) are written to the results file LEM reads. Runs before that stay backfill.";
+    // ── results file, go live ───────────────────────────────────────────────
+    // clock: {hub_local_now, loaded_at (browser ms when it was read), skew_seconds}.
+    // The time comes from the hub's clock (plus the GC's skew when an agent has
+    // reported it), never the browser's; the confirmation says which, and warns
+    // about a skewed GC clock before anything is saved.
+    async function goLiveNow(inst, clock) {
+        const c = clock || {};
+        const at = window.GCUi.goLiveTime(c.hub_local_now, c.loaded_at || Date.now(), Date.now(), c.skew_seconds);
+        if (!at) { S.toast("The hub's clock is not known yet; reload the page and try again.", 'err'); return false; }
+        const skew = L.skewWarning(c.skew_seconds);
+        const file = c.results_file_configured ? 'the results file LEM reads'
+            : "the hub's own results file (LEM won't see these results)";
+        const text = 'Go live now? Runs ' + inst.name + ' injects from ' + at.text + ' are written to ' + file +
+            '. Runs before that stay backfill.' + (skew ? '\n\n' + skew + ' Fix the clock first if it matters.' : '');
         if (!window.confirm(text)) return false;
-        const r = await S.adminPost('/api/admin/instruments/' + enc(inst.id), { live_since: now });
+        const r = await S.adminPost('/api/admin/instruments/' + enc(inst.id), { live_since: at.value });
         if (!r || r.status !== 200) return false;
         const warn = (r.body.warnings || []).filter(w => !/applies to samples received from now on/.test(w));
         S.toast(warn.length ? 'Live. ' + warn.join(' ') : inst.name + ' is live.');
         return true;
+    }
+
+    async function setResultsFile(inst, path) {
+        const r = await S.adminPost('/api/admin/instruments/' + enc(inst.id) + '/export-path', { path: path });
+        if (r && r.status === 200) {
+            S.toast('Results file set. If a file is already there, adopt it before the hub appends.');
+            return true;
+        }
+        return false;
+    }
+
+    async function keepHubOnly(inst, path) {
+        if (!window.confirm("Keep " + inst.name + "'s results in the hub's own file (" + (path || 'results/' + inst.id + '_results.csv') +
+            ")? LEM won't see them. Rows written there never reach LEM, even if you choose LEM's file later.")) return false;
+        const r = await S.adminPost('/api/admin/instruments/' + enc(inst.id) + '/export-hub-only', {});
+        if (r && r.status === 200) { S.toast('Results stay in the hub-only file.'); return true; }
+        return false;
+    }
+
+    async function setHubUrl(current, effective) {
+        const v = window.prompt('The address the GC computers use to reach this hub (written into new installers). ' +
+            'Leave empty for https://gc.asaplabs.net. Now: ' + (effective || ''), current || '');
+        if (v === null) return false;
+        const r = await S.adminPost('/api/admin/hub-url', { hub_url: v.trim() });
+        if (r && r.status === 200) { S.toast('Installers now point at ' + (r.body.effective || r.body.hub_url) + '.'); return true; }
+        return false;
     }
 
     async function mapMethod(inst, name, hubMethod) {
@@ -166,5 +201,6 @@
         return false;
     }
 
-    window.GCActions = { lemMachines, lemPicker, editDetails, downloadInstaller, revokeKey, agentCommand, goLiveNow, mapMethod };
+    window.GCActions = { lemMachines, lemPicker, editDetails, downloadInstaller, revokeKey, agentCommand, goLiveNow,
+                         setResultsFile, keepHubOnly, setHubUrl, mapMethod };
 })();

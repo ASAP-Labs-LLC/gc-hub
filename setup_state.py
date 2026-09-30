@@ -31,7 +31,10 @@ done_at}`` (plus ``unmapped`` on the method step):
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+import threading
+import time
+from datetime import datetime
+from typing import Any, Callable, Optional
 
 TOTAL = 8
 CUTS = 11
@@ -82,6 +85,9 @@ def steps(instrument_row: dict, facts: dict) -> list:
     export = f.get("export") or {}
     ncorr = int(f.get("corrections_count") or 0)
     live = r.get("live_since")
+    events = f.get("events") or {}
+    disabled = not r.get("enabled", 1)
+    refused_note = "This GC is disabled: its runs are refused. Enable it in Edit details."
 
     out: dict = {}
 
@@ -92,8 +98,9 @@ def steps(instrument_row: dict, facts: dict) -> list:
 
     # 1 create
     uid = r.get("lem_machine_uid")
+    lem = f.get("lem_title") or uid
     put("create", True,
-        f"{name} is created. LEM machine: {uid}." if uid else
+        f"{name} is created. LEM machine: {lem}." if uid else
         f"{name} is created. No LEM machine is chosen yet (optional, but LabStation "
         f"routes results by it).", action="edit")
 
@@ -124,6 +131,9 @@ def steps(instrument_row: dict, facts: dict) -> list:
         put("checkin", True, "The agent has checked in" +
             (" " + ", ".join(b for b in bits if b) if any(bits) else "") + ".",
             done_at=agent.get("last_seen"))
+    elif disabled:
+        put("checkin", False, f"As soon as the agent says hello, {name} shows as Live.",
+            blocker=refused_note)
     elif not r.get("token_issued_at"):
         put("checkin", False, f"As soon as the agent says hello, {name} shows as Live.",
             blocker="Install the agent first (step 3).")
@@ -173,26 +183,55 @@ def steps(instrument_row: dict, facts: dict) -> list:
             action="methods", unmapped=names)
 
     # 7 results file and go live
+    # Only a configured export path is a file LEM reads. The hub's default
+    # results/<id>_results.csv is its own: choosing it must be explicit (an
+    # ``export_hub_only`` event), or "Ready" would hide that LEM gets nothing.
     path = export.get("path") or f"results/{r.get('id')}_results.csv"
-    if live:
-        put("go_live", True, f"Live since {live} (the GC's clock). Results are written to "
-                             f"{path}.", action="go_live")
+    configured = bool(export.get("configured"))
+    hub_only = not configured and "export_hub_only" in events
+    decided = configured or hub_only
+    if configured:
+        file_text = f"Results are written to {path}, the file LEM reads."
+    elif hub_only:
+        file_text = (f"Results are written to the hub's own file {path}, as chosen: LEM won't "
+                     f"see them.")
+    else:
+        file_text = (f"No results file for LEM is chosen yet: results would go to the hub's own "
+                     f"file {path}, which LEM does not read. Choose the file LEM reads (or keep "
+                     f"the hub-only file on purpose) before going live; rows written to the "
+                     f"hub-only file never reach LEM, even after you change the path later.")
+    now_local = f.get("now_local")
+    future = bool(live and now_local and str(live) > str(now_local))
+    if live and decided and not future:
+        put("go_live", True, f"Live since {str(live)[:16]} (the GC's clock). {file_text}",
+            action="go_live", needs_results_file=False)
+    elif live and future:
+        put("go_live", False, f"Goes live at {str(live)[:16]} (the GC's clock). {file_text}",
+            action="go_live", needs_results_file=not decided,
+            blocker=f"Waiting until {str(live)[:16]} (the GC's clock): runs before then are "
+                    f"backfill.")
+    elif live:
+        put("go_live", False, f"Live since {str(live)[:16]} (the GC's clock), but {file_text[0].lower()}"
+                              f"{file_text[1:]}", action="go_live", needs_results_file=True)
     else:
         so_far = (f"The {_plural(backfill, 'run')} received so far "
                   f"{'is' if backfill == 1 else 'are'} backfill. " if backfill else "")
         put("go_live", False,
             f"Not live yet: until you go live, every run counts as backfill and is never written "
-            f"to the results file LEM reads ({path}) unless you release it. {so_far}".strip(),
-            action="go_live")
+            f"to a results file unless you release it. {so_far}{file_text}",
+            action="go_live", needs_results_file=not decided)
 
     # 8 first result
     if f.get("first_result"):
-        put("first_result", True, f"{name} has a final result, written to the results CSV.")
+        put("first_result", True, f"{name} has a final result, written to the results CSV"
+                                  f"{'' if configured else ' (the hub-only file)'}.")
     else:
         prereqs = ["corrections"] + ([] if received else ["checkin"]) + \
             ["calibration", "method", "go_live"]
         missing = next((k for k in prereqs if not out[k]["done"]), None)
-        if missing == "go_live":
+        if disabled:
+            blocker = refused_note
+        elif missing == "go_live":
             blocker = (_waits_for("go_live") + " Until then runs are backfill and never written "
                                                "to the results file.")
         elif missing:
@@ -213,7 +252,7 @@ def steps(instrument_row: dict, facts: dict) -> list:
         s = out[key]
         if s["done"]:
             s["status"] = "done"
-            ev = (f.get("events") or {}).get(EVENT_FOR.get(key, ""))
+            ev = events.get(EVENT_FOR.get(key, ""))
             if ev:
                 s["done_by"] = ev.get("by")
                 s["done_at"] = ev.get("at")
@@ -297,7 +336,21 @@ def gather(instrument_id: str, conf: dict, *, db: Any = None, data_dir: Any = No
                    "refused": export.get("refused")},
         "first_result": first is not None,
         "events": store.instrument_events.latest_by_kind(instrument_id, db=db),
+        # the hub's local clock, to tell a live_since still in the future
+        "now_local": store.local_dt(datetime.now().replace(microsecond=0)),
+        "lem_title": _lem_title(conf, row.get("lem_machine_uid")),
     }
+
+
+def _lem_title(conf: dict, uid: Optional[str]) -> Optional[str]:
+    """The LEM machine's title from the cached list (never a fetch), or None."""
+    if not uid:
+        return None
+    try:
+        import lem_machines
+        return lem_machines.CACHE.title(lem_machines.resolve_url(conf), uid)
+    except Exception:  # noqa: BLE001 - a title is a nicety; the uid is shown instead
+        return None
 
 
 def _data_dir():
@@ -313,3 +366,38 @@ def for_instrument(instrument_id: str, conf: dict, *, db: Any = None, data_dir: 
     row = ia.get(instrument_id, db=db)
     st = steps(row, gather(instrument_id, conf, db=db, data_dir=data_dir, export=export))
     return {"instrument_id": instrument_id, "steps": st, "summary": summary(st)}
+
+
+class SummaryCache:
+    """``summary(steps(row, gather(...)))`` per instrument, reused for ``ttl``
+    seconds (the Instruments list and the 5 s fallback poll ask for every
+    instrument each time). An answer is recomputed at once when the row's
+    ``updated_at`` or the instrument's newest event changes, so an admin
+    change shows immediately; a heartbeat or a new sample shows within ``ttl``."""
+
+    def __init__(self, ttl: float = 5.0, clock: Callable[[], float] = time.monotonic):
+        self.ttl = ttl
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._items: dict = {}
+
+    def summary(self, row: dict, conf: dict, *, db: Any = None, data_dir: Any = None) -> dict:
+        import store
+        iid = row["id"]
+        with store.connection(db) as conn:
+            last_event = conn.execute("SELECT MAX(id) FROM instrument_events WHERE instrument_id=?",
+                                      (iid,)).fetchone()[0]
+        key = (str(db), iid)
+        mark = (row.get("updated_at"), last_event)
+        now = self._clock()
+        with self._lock:
+            hit = self._items.get(key)
+            if hit and hit[0] == mark and now - hit[1] <= self.ttl:
+                return dict(hit[2])
+        out = summary(steps(row, gather(iid, conf, db=db, data_dir=data_dir)))
+        with self._lock:
+            self._items[key] = (mark, now, out)
+        return dict(out)
+
+
+SUMMARIES = SummaryCache()

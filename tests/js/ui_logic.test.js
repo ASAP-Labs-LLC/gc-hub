@@ -165,6 +165,42 @@ module.exports = (t) => {
         [{ instrument_id: 'gc1', last_seen: 't', version: '2', host: 'h', status: 'running' }]);
     t.eq(U.agentsFromStatus(null), []);
 
+    // ── "Go live now" uses the hub's clock (and the GC's, when its skew is known),
+    //    never the browser's
+    const loaded = Date.parse('2026-09-30T12:00:00Z');
+    // the browser runs 5 min fast; the hub said 14:00:00 when the page loaded
+    let g = U.goLiveTime('2026-09-30 14:00:00', loaded, loaded + 90 * 1000, null);
+    t.eq(g.value, '2026-09-30 14:01:30');
+    t.eq(g.basis, 'hub');
+    t.eq(g.text.includes("hub's clock"), true);
+    g = U.goLiveTime('2026-09-30 14:00:00', loaded, loaded + 90 * 1000, -600);    // GC 10 min behind
+    t.eq(g.value, '2026-09-30 13:51:30');
+    t.eq(g.basis, 'gc');
+    t.eq(g.text.includes("GC's clock"), true);
+    t.eq(U.goLiveTime('2026-12-31 23:59:59', loaded, loaded + 2000, 0).value, '2027-01-01 00:00:01');
+    t.eq(U.goLiveTime(null, loaded, loaded, null), null);
+    t.eq(U.goLiveTime('garbage', loaded, loaded, null), null);
+
+    // ── live_since in the future, by the hub's clock
+    t.eq(U.liveSinceState('2026-10-01 08:00:00', '2026-09-30 12:00:00'),
+        { live: false, text: 'Waiting until 2026-10-01 08:00' });
+    t.eq(U.liveSinceState('2026-09-01 08:00:00', '2026-09-30 12:00:00'),
+        { live: true, text: 'Live since 2026-09-01 08:00' });
+    t.eq(U.liveSinceState(null, '2026-09-30 12:00:00'), { live: false, text: 'Not live' });
+
+    // ── where an instrument's page is (a reserved id can't use /instruments/<id>)
+    t.eq(U.instrumentHref('gc2'), '/instruments/gc2');
+    t.eq(U.instrumentHref('classic'), '/instruments/classic?instrument=classic');
+    t.eq(U.instrumentHref('activity'), '/instruments/classic?instrument=activity');
+    t.eq(U.instrumentHref('a b'), '/instruments/a%20b');
+    t.eq(U.RESERVED_IDS.includes('setup'), true);
+
+    // ── the Activity feed: the sample's link and injection time
+    t.eq(U.activitySample({ sample_id: 7, lab_id: '40330', injection_dt: '2026-09-30 07:00:00' }),
+        { href: '/samples/7', injected: 'injected 2026-09-30 07:00' });
+    t.eq(U.activitySample({ sample_id: null }), null);
+    t.eq(U.activitySample({ sample_id: 3, injection_dt: null }), { href: '/samples/3', injected: null });
+
     // ── the LEM machine's title for a card (untrusted: shown as text)
     const lem = { source: 'live', machines: [{ uid: 'm1', title: 'GC-1 (Agilent 7890B)' }] };
     t.eq(U.lemTitle(lem, 'm1'), 'GC-1 (Agilent 7890B)');

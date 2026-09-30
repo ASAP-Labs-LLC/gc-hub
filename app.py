@@ -809,7 +809,6 @@ def _admin_json_body():
 # before_request fires once per connection attempt, not per keep-alive byte
 # sent over an already-open one, so a stream that free-runs for hours without
 # reconnecting doesn't need (and can't get) re-exclusion after the first hit.
-BACKGROUND_HEADER = "X-GC-Background"
 _NON_ACTIVITY_PATHS = {
     "/healthz",
     "/api/notifications",

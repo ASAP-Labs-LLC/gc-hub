@@ -35,7 +35,9 @@ def _status(port, path, **kw):
 
 
 def test_the_new_pages_and_the_classic_page(tmp_path):
-    _prepare(tmp_path)
+    import store
+    hub = _prepare(tmp_path)
+    store.instruments.upsert({"id": "activity", "name": "Old GC"}, db=hub.db)
     with booted(tmp_path) as (port, _proc, _data, _home):
         home = get_text(port, "/instruments", timeout=15)
         assert 'data-testid="instruments-page"' in home
@@ -50,6 +52,9 @@ def test_the_new_pages_and_the_classic_page(tmp_path):
         detail = get_text(port, "/instruments/gc1", timeout=15)
         assert 'data-testid="instrument-detail-page"' in detail and 'data-instrument="gc1"' in detail
         assert _status(port, "/instruments/nope") == 404
+        # an instrument made before "activity" was reserved opens on the classic page
+        html = get_text(port, "/instruments/activity", timeout=15)
+        assert 'id="inst-list"' in html
 
         guide = get_text(port, "/setup?instrument=gc1", timeout=15)
         assert 'data-testid="setup-page"' in guide
@@ -90,9 +95,19 @@ def test_setup_and_activity_endpoints(tmp_path):
                           {"id": "gc2", "name": "GC-2", "password": pw})
         assert code == 201
         code, body = post(port, "/api/admin/instruments/gc2",
-                          {"live_since": "2026-10-01T08:00", "password": pw})
+                          {"live_since": "2026-09-01T08:00", "password": pw})
         assert code == 200
         code, body = post(port, "/api/admin/instruments/gc2/revoke-token", {"password": pw})
+        assert code == 200
+        # live, but no results file decision: step 7 is not done (LEM would get nothing)
+        code, body = get(port, "/api/instruments/gc2/setup", timeout=30)
+        go_live = {s["key"]: s for s in body["steps"]}["go_live"]
+        assert go_live["status"] != "done" and go_live["needs_results_file"] is True
+        # the explicit "keep the hub-only file" choice (admin)
+        assert post(port, "/api/admin/instruments/gc2/export-hub-only", {})[0] == 403
+        code, body = post(port, "/api/admin/instruments/gc2/export-hub-only", {"password": pw})
+        assert code == 200 and body["export"]["configured"] is False
+        assert post(port, "/api/admin/instruments/nope/export-hub-only", {"password": pw})[0] == 404
         assert code == 200
 
         code, body = get(port, "/api/instruments/activity?limit=10", timeout=30)
@@ -101,6 +116,7 @@ def test_setup_and_activity_endpoints(tmp_path):
         assert ("created", "gc2", ACTOR) in kinds
         assert ("live_since", "gc2", ACTOR) in kinds
         assert ("token_revoked", "gc2", ACTOR) in kinds
+        assert ("export_hub_only", "gc2", ACTOR) in kinds
         assert get(port, "/api/instruments/activity?limit=abc", timeout=30)[0] == 400
         assert get(port, "/api/instruments/activity", auth=False)[0] == 401
 
@@ -108,6 +124,10 @@ def test_setup_and_activity_endpoints(tmp_path):
         steps = {s["key"]: s for s in body["steps"]}
         assert steps["create"]["done_by"] == ACTOR
         assert steps["go_live"]["status"] == "done" and steps["go_live"]["done_by"] == ACTOR
+        assert "LEM won't see" in steps["go_live"]["detail"]
+        # the hub's clock and the agent's skew for "Go live now"
+        code, body = get(port, "/api/instruments/gc2", timeout=30)
+        assert len(body["hub_local_now"]) == 19
 
         # a reserved id can't be created (it would shadow a page)
         code, body = post(port, "/api/admin/instruments",

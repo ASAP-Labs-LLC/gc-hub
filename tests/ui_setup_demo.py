@@ -30,7 +30,10 @@ RYAN = "Ryan C (10.0.0.5)"
 def build(root: Path):
     hub = build_hub(root)
     db = hub.db
-    store.instruments.upsert({"id": "gc1", "name": "GC-1", "lem_machine_uid": "gc1-agilent-7890b"}, db=db)
+    share = Path(root) / "share"                     # stands in for the file LEM tails
+    share.mkdir(exist_ok=True)
+    store.instruments.upsert({"id": "gc1", "name": "GC-1", "lem_machine_uid": "gc1-agilent-7890b",
+                              "export_path": str(share / "gc1_results.csv")}, db=db)
     store.instruments.upsert({"id": "gc2", "name": "GC-2", "live_since": None,
                               "lem_machine_uid": "gc2-agilent-8890"}, db=db)
     store.instrument_events.add(db, "gc2", "created", by=RYAN, detail={"name": "GC-2"})

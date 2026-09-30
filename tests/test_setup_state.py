@@ -44,6 +44,8 @@ def facts(**kw) -> dict:
         "export": {"path": "results/gc2_results.csv", "configured": False, "refused": None},
         "first_result": False,
         "events": {},
+        "now_local": "2026-10-02 00:00:00",
+        "lem_title": None,
     }
     base.update(kw)
     return base
@@ -51,12 +53,15 @@ def facts(**kw) -> dict:
 
 AGENT = {"last_seen": "2026-09-30T12:00:00+00:00", "version": "2.4.1", "host": "GC2-PC"}
 USABLE = {"usable": True, "problem": None, "calibration_cdf": "cdf/gc2/cal.CDF", "assigned": 13}
+LEM_FILE = {"path": r"\\asapserver\share\gc2.csv", "configured": True, "refused": None}
+HUB_ONLY = {"export_hub_only": {"by": "Ryan C (x)", "at": "2026-09-30T13:00:00+00:00",
+                                "detail": {"path": "results/gc2_results.csv"}}}
 
 
 def complete_facts(**kw) -> dict:
     base = facts(corrections_count=11, agent=AGENT, calibration=USABLE, samples_received=5,
                  methods={"mapped_seen": ["SIMDISB.M"], "unmapped_seen": [], "held": 0},
-                 first_result=True)
+                 first_result=True, export=LEM_FILE)
     base.update(kw)
     return base
 
@@ -287,7 +292,7 @@ def test_method_waiting_behind_an_earlier_step():
     assert by_key(ss.steps(row(), facts(samples_received=1, methods=m)))["method"]["status"] == "waiting"
 
 
-# ── 7 results file and go live (live_since unset) ───────────────────────────
+# ── 7 results file and go live (live_since unset, no results file) ────────
 
 def test_live_since_unset_explains_backfill_in_plain_words():
     s = by_key(ss.steps(row(), facts(samples_received=4, backfill_unreleased=4)))["go_live"]
@@ -301,19 +306,80 @@ def test_live_since_unset_is_current_when_everything_before_is_done():
     assert s["status"] == "current"
 
 
-def test_go_live_names_the_results_file_default_or_configured():
+def test_no_results_file_chosen_never_mentions_the_file_lem_reads_as_if_it_were_this_one():
+    # the default file is the hub's own: LEM does not read it
+    s = by_key(ss.steps(row(), facts()))["go_live"]
+    assert "LEM" in s["detail"]
+    assert "results/gc2_results.csv" in s["detail"]
+    assert "hub's own" in s["detail"] or "hub-only" in s["detail"]
+    assert "the results file LEM reads (results/gc2_results.csv)" not in s["detail"]
+    assert s["needs_results_file"] is True
+
+
+def test_live_but_no_results_file_decision_is_not_done():
     s = by_key(ss.steps(row(live_since="2026-10-01 08:00:00"), facts()))["go_live"]
-    assert s["status"] == "done"
-    assert "results/gc2_results.csv" in s["detail"] and "2026-10-01 08:00" in s["detail"]
-    ex = {"path": r"\\asapserver\share\gc2.csv", "configured": True, "refused": None}
-    s = by_key(ss.steps(row(live_since="2026-10-01 08:00:00"), facts(export=ex)))["go_live"]
+    assert s["status"] != "done"
+    assert "LEM" in s["detail"] and "results/gc2_results.csv" in s["detail"]
+    assert s["needs_results_file"] is True
+
+
+def test_live_with_a_configured_results_file_is_done_and_names_it():
+    s = by_key(ss.steps(row(live_since="2026-10-01 08:00:00"), facts(export=LEM_FILE)))["go_live"]
+    assert s["status"] == "done" and s["needs_results_file"] is False
+    assert r"\\asapserver\share\gc2.csv" in s["detail"] and "2026-10-01 08:00" in s["detail"]
+    assert "LEM reads" in s["detail"]
+
+
+def test_live_with_the_hub_only_file_chosen_explicitly_is_done_and_says_lem_wont_see_it():
+    s = by_key(ss.steps(row(live_since="2026-10-01 08:00:00"), facts(events=HUB_ONLY)))["go_live"]
+    assert s["status"] == "done" and s["needs_results_file"] is False
+    assert "LEM won't see" in s["detail"] and "results/gc2_results.csv" in s["detail"]
+
+
+def test_a_results_file_chosen_but_not_live_yet_is_not_done():
+    s = by_key(ss.steps(row(), facts(export=LEM_FILE)))["go_live"]
+    assert s["status"] == "waiting" and s["needs_results_file"] is False
     assert r"\\asapserver\share\gc2.csv" in s["detail"]
+
+
+def test_live_since_in_the_future_is_waiting_until_then():
+    f = facts(export=LEM_FILE, now_local="2026-09-30 12:00:00")
+    s = by_key(ss.steps(row(live_since="2026-10-01 08:00:00"), f))["go_live"]
+    assert s["status"] == "blocked"
+    assert "Waiting until 2026-10-01 08:00" in s["blocker"]
+
+
+def test_live_since_in_the_future_is_not_checked_without_a_clock():
+    s = by_key(ss.steps(row(live_since="2099-10-01 08:00:00"), facts(export=LEM_FILE, now_local=None)))
+    assert s["go_live"]["status"] == "done"
 
 
 def test_go_live_done_by_comes_from_the_live_since_event():
     ev = {"live_since": {"by": "Ryan C (x)", "at": "2026-09-30T14:00:00+00:00"}}
-    s = by_key(ss.steps(row(live_since="2026-10-01 08:00:00"), facts(events=ev)))["go_live"]
+    s = by_key(ss.steps(row(live_since="2026-10-01 08:00:00"), facts(export=LEM_FILE, events=ev)))["go_live"]
     assert s["done_by"] == "Ryan C (x)"
+
+
+def test_summary_is_not_ready_while_results_only_reach_the_hub_only_file():
+    out = ss.steps(row(token_issued_at="t", live_since="2026-10-01 08:00:00"),
+                   complete_facts(export={"path": "results/gc2_results.csv", "configured": False,
+                                          "refused": None}))
+    assert ss.summary(out)["ready"] is False
+    assert by_key(out)["go_live"]["status"] != "done"
+
+
+# ── disabled / LEM title ────────────────────────────────────────────────────
+
+def test_a_disabled_instrument_says_its_runs_are_refused():
+    out = by_key(ss.steps(row(enabled=0, token_issued_at="t"), facts(corrections_count=11)))
+    assert out["checkin"]["status"] == "blocked"
+    assert "disabled" in out["checkin"]["blocker"] and "refused" in out["checkin"]["blocker"]
+    assert "disabled" in out["first_result"]["blocker"]
+
+
+def test_the_lem_title_is_used_when_known():
+    s = by_key(ss.steps(row(lem_machine_uid="m-17"), facts(lem_title="GC-2 (Agilent 8890)")))["create"]
+    assert "GC-2 (Agilent 8890)" in s["detail"]
 
 
 # ── 8 first result ──────────────────────────────────────────────────────────
@@ -438,3 +504,48 @@ def test_gather_reads_the_agent_corrections_and_latest_events(db):
     assert f["corrections_count"] == 11
     assert f["events"]["calibration_saved"]["by"] == "B (2)"
     assert f["events"]["calibration_saved"]["detail"] == {"n": 2}
+
+
+def test_gather_gives_the_hub_clock_and_the_hub_only_choice(db):
+    f = ss.gather("gc2", {}, db=db, data_dir=db.parent)
+    assert f["now_local"] and len(f["now_local"]) == 19 and f["now_local"][10] == " "
+    assert f["lem_title"] is None
+    store.instrument_events.add(db, "gc2", "export_hub_only", by="Ryan C (x)")
+    f = ss.gather("gc2", {}, db=db, data_dir=db.parent)
+    assert "export_hub_only" in f["events"]
+
+
+def test_gather_names_the_lem_machine_from_the_cache(db, monkeypatch):
+    import lem_machines
+    store.instruments.upsert({"id": "gc2", "lem_machine_uid": "m-17"}, db=db)
+    monkeypatch.setattr(lem_machines.CACHE, "title",
+                        lambda url, uid: "GC-2 (Agilent 8890)" if uid == "m-17" else None)
+    assert ss.gather("gc2", {}, db=db, data_dir=db.parent)["lem_title"] == "GC-2 (Agilent 8890)"
+
+
+# ── the summary cache (the list endpoint and the 5 s fallback poll) ─────────
+
+def test_cached_summary_reuses_a_recent_answer_and_notices_changes(db, monkeypatch):
+    calls = []
+    real = ss.gather
+
+    def counting(*a, **kw):
+        calls.append(a[0])
+        return real(*a, **kw)
+
+    monkeypatch.setattr(ss, "gather", counting)
+    clock = [100.0]
+    cache = ss.SummaryCache(ttl=5.0, clock=lambda: clock[0])
+    row_ = store.instruments.get("gc2", db=db)
+    a = cache.summary(row_, {}, db=db, data_dir=db.parent)
+    b = cache.summary(row_, {}, db=db, data_dir=db.parent)
+    assert a == b and len(calls) == 1
+    clock[0] += 5.1                                     # expired
+    cache.summary(row_, {}, db=db, data_dir=db.parent)
+    assert len(calls) == 2
+    changed = dict(row_, updated_at="later")            # an admin change
+    cache.summary(changed, {}, db=db, data_dir=db.parent)
+    assert len(calls) == 3
+    store.instrument_events.add(db, "gc2", "installer", by="x")   # a new event
+    cache.summary(changed, {}, db=db, data_dir=db.parent)
+    assert len(calls) == 4

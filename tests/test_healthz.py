@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bootapp import ROOT, booted, get  # noqa: E402
+from bootapp import ROOT, booted, get, send  # noqa: E402
 
 sys.path.insert(0, str(ROOT))
 import version  # noqa: E402
@@ -162,6 +162,19 @@ class ActivitySemanticsTests(unittest.TestCase):
                 _, body = get(port, "/healthz")
         self.assertGreaterEqual(body["idle_seconds"], 1.1)
         self.assertEqual(body["active_sessions"], 0)
+
+    def test_the_background_header_on_a_post_still_counts_as_activity(self):
+        """Only a GET/HEAD may say it is a background refresh: a change is
+        always someone doing something."""
+        with tempfile.TemporaryDirectory() as t:
+            with booted(Path(t)) as (port, proc, data, home):
+                time.sleep(1.2)
+                code, _ = send(port, "/api/notifications/dismiss-all", b"{}",
+                               {"Content-Type": "application/json", "X-GC-Background": "1"})
+                self.assertEqual(code, 200)
+                _, body = get(port, "/healthz")
+        self.assertLess(body["idle_seconds"], 1)
+        self.assertEqual(body["active_sessions"], 1)
 
     def test_a_real_user_route_counts_as_activity(self):
         with tempfile.TemporaryDirectory() as t:

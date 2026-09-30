@@ -62,6 +62,10 @@ def test_feed_merges_every_source_newest_first(hub):
         assert {"key", "kind", "at", "instrument_id", "instrument_name", "by", "sample_id",
                 "lab_id", "detail"} <= set(e)
     assert len({e["key"] for e in feed}) == len(feed)
+    # entries about a sample carry its injection time (the page links /samples/<id>)
+    for kind in ("report", "export_written", "sample_received"):
+        assert by_kind[kind]["injection_dt"] == "2026-09-30 07:00:00", kind
+    assert by_kind["installer"]["injection_dt"] is None
 
 
 def test_keys_are_stable_between_calls(hub):
@@ -89,6 +93,18 @@ def test_an_agent_that_never_checked_in_is_not_listed(hub):
     with store.connection(hub.db) as conn:
         conn.execute("INSERT INTO agents(instrument_id, pending_command) VALUES ('gc2', 'pause')")
     assert [e for e in act.feed(50, db=hub.db) if e["kind"] == "agent_seen"] == []
+
+
+def test_samples_today_excludes_backfill(hub):
+    """The cards' "samples today" counts live runs, not imported history."""
+    import instruments_api
+    hub.gc2(live_since=None)
+    now = store.now_iso()
+    for n, backfill in (("1", 0), ("2", 1), ("3", 1)):
+        store.samples.insert_received("gc2", "L" + n, f"2026-09-30 0{n}:00:00", "cdf",
+                                      cdf_sha256="t" + n, cdf_path=None, backfill=backfill,
+                                      received_at=now, db=hub.db)
+    assert instruments_api._counts(hub.db)["today"]["gc2"] == 1
 
 
 def test_bad_limits_are_clamped():

@@ -56,6 +56,8 @@ ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 # Ids a page URL uses (/instruments/classic, /api/instruments/activity): an
 # instrument with one of these ids could never be opened.
 RESERVED_IDS = frozenset({"activity", "classic", "new", "setup"})
+# ...of which these can't be opened at /instruments/<id> (the page or its API is shadowed)
+UNREACHABLE_IDS = frozenset({"activity", "classic"})
 NAME_MAX = 64
 UID_MAX = 128
 SKEW_WARN_SECONDS = 120
@@ -112,6 +114,18 @@ def get(instrument_id: Any, *, db: store.Db = None) -> dict:
 
 
 # ── field validation ────────────────────────────────────────────────────────
+
+def reserved_id_warnings(*, db: store.Db = None) -> list:
+    """One message per existing instrument whose id is now reserved (made
+    before v3.1): its new page can't be opened at /instruments/<id>."""
+    out = []
+    for r in store.instruments.list(db=db):
+        if r["id"] in RESERVED_IDS:
+            out.append(f"Instrument {r['name']} has the id \"{r['id']}\", which is now reserved by the hub's "
+                       f"pages, so /instruments/{r['id']} does not open it. Manage it on the "
+                       f"classic page: /instruments/classic?instrument={r['id']}.")
+    return out
+
 
 def _name(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -195,6 +209,9 @@ def create(fields: Any, *, db: store.Db = None, by: Optional[str] = None) -> dic
             row = store.instruments.upsert(dict(
                 clean, id=iid, method_map=json.dumps(instruments.DEFAULT_METHOD_MAP)), db=conn)
             store.instrument_events.add(conn, iid, "created", by=by, detail={"name": row["name"]})
+            if clean.get("live_since"):
+                store.instrument_events.add(conn, iid, "live_since", by=by, detail={
+                    "live_since": clean["live_since"], "old": None})
     log.warning("instrument %s created (%s)", iid, row["name"])
     _changed(iid)
     return public_row(row)
@@ -318,11 +335,10 @@ def set_export_path(instrument_id: str, path: Any, exporter, *, by: Optional[str
         raise AdminError("The export path must be an absolute path to a .csv file, e.g. "
                          r"\\asapserver\Labsharedrive\...\distill_results.csv.")
     try:
-        exporter.new_path(instrument_id, path.strip())
+        # the export_path event is written in the same transaction as the path
+        exporter.new_path(instrument_id, path.strip(), event_by=by)
     except exports.ExportRefused as err:
         raise _refused(err) from None
-    store.instrument_events.add(exporter.db, instrument_id, "export_path", by=by,
-                                detail={"path": path.strip()})
     log.warning("instrument %s export path set to %s", instrument_id, path.strip())
     _changed(instrument_id)
     return export_status(instrument_id, exporter)
@@ -340,6 +356,22 @@ def adopt_export(instrument_id: str, exporter, *, by: Optional[str]) -> dict:
                                 detail={"size": (side or {}).get("size")})
     _changed(instrument_id)
     return {"adopted": side, "status": export_status(instrument_id, exporter)}
+
+
+def keep_hub_only_export(instrument_id: str, exporter, *, by: Optional[str]) -> dict:
+    """Record the explicit choice to keep the hub's own results file
+    (``results/<id>_results.csv``, which LEM does not read): the setup guide's
+    step 7 needs a configured path or this choice. 409 when a path is set."""
+    row = get(instrument_id, db=exporter.db)
+    if (row.get("export_path") or "").strip():
+        raise AdminError(f"{row['name']} already writes to {row['export_path']}; the hub-only file "
+                         f"is not in use.", 409)
+    st = export_status(instrument_id, exporter)
+    store.instrument_events.add(exporter.db, instrument_id, "export_hub_only", by=by,
+                                detail={"path": st.get("path")})
+    log.warning("instrument %s: results kept in the hub-only file %s (by %s)", instrument_id,
+                st.get("path"), by)
+    return st
 
 
 # ── calibration (Processing per instrument) ─────────────────────────────────

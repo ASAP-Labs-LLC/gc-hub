@@ -33,7 +33,7 @@
         return h('article', { className: 'card inst-card' + (inst.enabled ? '' : ' disabled'), 'data-testid': 'instrument-card',
                               'data-instrument': inst.id },
             h('div', { className: 'head' },
-                h('h2', {}, h('a', { href: '/instruments/' + enc(inst.id), text: inst.name })), pill),
+                h('h2', {}, h('a', { href: U.instrumentHref(inst.id), text: inst.name })), pill),
             h('div', { className: 'meta' },
                 h('div', {}, h('span', { text: 'LEM machine · ' }), h('b', { text: lemText || 'not chosen' })),
                 agentLine,
@@ -80,8 +80,16 @@
 
     // ── the Activity feed ───────────────────────────────────────────────────
     function feedItem(e, isNew) {
+        // the sample's lab ID links to its page (/samples/<id>), with its injection time
+        const sample = U.activitySample(e);
         const txt = h('span', { className: 'txt' },
-            ...U.activityText(e).map(s => (s.strong ? h('b', { text: s.text }) : document.createTextNode(s.text))));
+            ...U.activityText(e).map(s => {
+                if (s.strong && sample && s.text === e.lab_id) {
+                    return h('a', { className: 'link', href: sample.href, 'data-testid': 'activity-sample' }, h('b', { text: s.text }));
+                }
+                return s.strong ? h('b', { text: s.text }) : document.createTextNode(s.text);
+            }),
+            sample && sample.injected ? h('span', { className: 'caption', text: ' · ' + sample.injected }) : null);
         const at = h('time', { className: 'at', datetime: e.at || '', 'data-at': e.at || '',
                                title: e.at ? new Date(e.at).toLocaleString() : '',
                                text: U.relTime(e.at, Date.now()) || '' });

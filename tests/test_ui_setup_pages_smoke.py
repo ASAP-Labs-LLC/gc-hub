@@ -71,6 +71,32 @@ def _wait(pred, timeout=20.0):
     return pred()
 
 
+# WCAG AA on the rendered page: every visible text node's colour (with the
+# opacity of its ancestors) against the composited background behind it
+# (4.5:1, 3:1 for large text). Disabled controls are exempt, as in WCAG.
+CONTRAST_JS = r"""
+function parse(c){const m=c.match(/rgba?\(([^)]+)\)/);if(!m)return null;const p=m[1].split(/[ ,\/]+/).filter(Boolean).map(Number);return [p[0],p[1],p[2],p.length>3?p[3]:1];}
+function over(t,b){const a=t[3];return [t[0]*a+b[0]*(1-a),t[1]*a+b[1]*(1-a),t[2]*a+b[2]*(1-a),1];}
+function lum(c){const f=v=>{v/=255;return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4)};return 0.2126*f(c[0])+0.7152*f(c[1])+0.0722*f(c[2]);}
+function ratio(a,b){const x=lum(a),y=lum(b);return (Math.max(x,y)+0.05)/(Math.min(x,y)+0.05);}
+function bgOf(el){const st=[];let e=el;while(e&&e.nodeType===1){const b=parse(getComputedStyle(e).backgroundColor);if(b&&b[3]>0)st.push(b);if(b&&b[3]>=1)break;e=e.parentElement;}
+ let base=parse(getComputedStyle(document.body).backgroundColor)||[255,255,255,1];if(base[3]<1)base=[255,255,255,1];
+ for(let i=st.length-1;i>=0;i--)base=over(st[i],base);return base;}
+const out=[];const seen=new Set();const w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+while(w.nextNode()){const t=w.currentNode;if(!t.textContent.trim())continue;const el=t.parentElement;if(!el||seen.has(el))continue;seen.add(el);
+ const r=el.getBoundingClientRect();if(!r.width||!r.height)continue;const cs=getComputedStyle(el);if(cs.visibility==='hidden'||cs.display==='none'||el.closest('[hidden]'))continue;
+ let op=1;let e=el;while(e&&e.nodeType===1){op*=parseFloat(getComputedStyle(e).opacity);e=e.parentElement;}
+ const fg=parse(cs.color);const bg=bgOf(el);const cr=ratio(over([fg[0],fg[1],fg[2],fg[3]*op],bg),bg);
+ const size=parseFloat(cs.fontSize);const large=size>=24||(size>=18.66&&parseInt(cs.fontWeight)>=700);
+ if(cr<(large?3:4.5)&&!el.closest('[disabled]'))out.push([t.textContent.trim().slice(0,40),cs.color,op.toFixed(2),cr.toFixed(2)]);}
+return out;
+"""
+
+
+def _contrast(drv):
+    return _js(drv, CONTRAST_JS)
+
+
 def _js(drv, script, *args):
     return drv.execute_script(script, *args)
 
@@ -110,6 +136,15 @@ def _common(drv, theme, width):
     # the dark theme really changes the page's background
     bg = _js(drv, "return getComputedStyle(document.body).backgroundColor;")
     assert (bg == "rgb(255, 255, 255)") == (theme == "light"), bg
+    # WCAG AA, including the open user menu
+    assert _contrast(drv) == [], (theme, width, drv.current_url)
+    _js(drv, "document.getElementById('user-chip').click();")
+    assert _contrast(drv) == [], ("menu", theme, width)
+    _js(drv, "document.body.click();")
+    # the focus ring: a solid 2px outline
+    ring = _js(drv, "const b=document.getElementById('user-chip'); b.focus({focusVisible:true});"
+                    "const cs=getComputedStyle(b); return [cs.outlineStyle, cs.outlineWidth];")
+    assert ring == ["solid", "2px"], ring
 
 
 def test_the_three_pages_in_both_themes_at_both_sizes(tmp_path):
@@ -154,6 +189,11 @@ def test_the_three_pages_in_both_themes_at_both_sizes(tmp_path):
                     _common(drv, theme, size[0])
 
                     # ── /setup
+                    _open(drv, port, "/calibration?instrument=gc2", theme, size)
+                    assert _wait(lambda: _js(drv, "return document.querySelectorAll('#peak-body tr, tbody tr').length;") > 3)
+                    time.sleep(0.5)
+                    assert _contrast(drv) == [], ("calibration", theme, size)
+
                     _open(drv, port, "/setup?instrument=gc2", theme, size)
                     assert _wait(lambda: _js(drv, "return document.querySelectorAll('#steps > li').length;") == 8)
                     assert _js(drv, "return document.querySelector('[data-testid=step-checkin]').dataset.status;") == "current"
@@ -206,6 +246,48 @@ def test_the_guide_moves_on_when_the_agent_checks_in_and_add_a_gc(tmp_path):
             # the password is never stored by the page
             stored = _js(drv, "return JSON.stringify(localStorage) + JSON.stringify(sessionStorage);")
             assert pw not in stored
+            assert _errors(drv) == []
+        finally:
+            drv.quit()
+
+
+def test_step_7_asks_for_the_results_file_first_and_live_updates_keep_what_is_typed(tmp_path):
+    hub = ui_setup_demo.build(tmp_path)
+    with booted(tmp_path) as (port, _proc, data, _home):
+        pw = setup_admin(port, data)
+        drv = _driver()
+        browser_sign_in(drv, port)
+        try:
+            # the guide: gc2 has no results file for LEM, so "Go live now" is not offered yet
+            _open(drv, port, "/setup?instrument=gc2", "light", (1440, 900))
+            assert _wait(lambda: _tid(drv, "step-go_live") == 1)
+            assert _tid(drv, "guide-results-path") == 1 and _tid(drv, "guide-keep-hub-only") == 1
+            assert _tid(drv, "guide-go-live") == 0
+            detail = _js(drv, "return document.querySelector('[data-testid=step-go_live]').textContent;")
+            assert "LEM does not read" in detail
+
+            # keep the hub-only file on purpose: then "Go live now" appears
+            _js(drv, "window.confirm = () => true;")
+            _js(drv, "document.querySelector('[data-testid=guide-keep-hub-only]').click();")
+            assert _wait(lambda: _js(drv, "return document.getElementById('admin-dialog').open;"))
+            drv.find_element("id", "admin-password").send_keys(pw)
+            _js(drv, "document.getElementById('admin-ok').click();")
+            assert _wait(lambda: _tid(drv, "guide-go-live") == 1)
+            assert [e["kind"] for e in store.instrument_events.list(instrument_id="gc2", db=hub.db)
+                    ][0] == "export_hub_only"
+
+            # the instrument page: a half-typed correction survives a live reload
+            _open(drv, port, "/instruments/gc2", "light", (1440, 900))
+            assert _wait(lambda: _js(drv, "return document.querySelectorAll('#corrections-body input').length;") == 12)
+            box = drv.find_element("css selector", "#corrections-body input")
+            box.clear()
+            box.send_keys("-7.25")
+            _js(drv, "document.activeElement.blur();")
+            ui_setup_demo.touch_agent(hub.db, "gc2")         # first check-in: the page reloads
+            assert _wait(lambda: "Live" in _js(drv, "return document.getElementById('agent-body').textContent;"),
+                         timeout=20)
+            time.sleep(1.0)
+            assert _js(drv, "return document.querySelector('#corrections-body input').value;") == "-7.25"
             assert _errors(drv) == []
         finally:
             drv.quit()
