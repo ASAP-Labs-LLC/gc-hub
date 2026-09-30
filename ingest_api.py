@@ -21,6 +21,7 @@ import re
 import secrets
 import tempfile
 import threading
+import time
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -279,9 +280,12 @@ def clock_skew_seconds(agent_time: Optional[str], last_seen: Optional[str]) -> O
     return (agent - hub_local).total_seconds()
 
 
-def agents_status(*, db=None) -> list:
+def agents_status(*, db=None, now: Optional[float] = None) -> list:
     """Every instrument with its agent row (``None`` fields if it never
-    reported), ``clock_skew_seconds`` and the token's issue date."""
+    reported), ``clock_skew_seconds``, the token's issue date, and ``live`` /
+    ``last_seen_age_s`` by the one liveness rule (``live.agent_liveness``, on
+    the hub's clock; v4.0 lane E)."""
+    t = time.time() if now is None else now
     with store.connection(_db(db)) as conn:
         rows = conn.execute(
             "SELECT i.id AS instrument_id, i.name AS instrument_name, i.enabled, "
@@ -293,6 +297,7 @@ def agents_status(*, db=None) -> list:
     for r in rows:
         d = dict(r)
         d["clock_skew_seconds"] = clock_skew_seconds(d["agent_time"], d["last_seen"])
+        d["live"], d["last_seen_age_s"] = live.agent_liveness(d["last_seen"], t)
         out.append(d)
     return out
 

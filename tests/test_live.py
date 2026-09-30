@@ -149,7 +149,7 @@ def test_poll_shape():
     b = _bus()
     out = _poll(b, None)
     assert set(out) == {"cursor", "reset", "samples", "instruments", "kinds", "agents",
-                        "notifications_unread", "hub", "version"}
+                        "notifications_unread", "hub", "version", "tasks"}
     import version
     assert out["version"] == version.APP_VERSION
     assert out["kinds"] == []

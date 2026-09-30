@@ -125,6 +125,7 @@ import exports
 import web_auth
 import paths
 import store
+import tasks
 
 log = logging.getLogger("hub_admin")
 
@@ -193,18 +194,58 @@ def job_refusal(kind: str, *, startup: bool = True) -> Optional[JobRefused]:
     if claimed:
         return JobRefused("A restart is under way; start this again once the hub is back.", 409)
     return None
+#: v4.0 lane E: where each admin job's panel is on /admin/hub (the task
+#: feed's "Open").
+OPEN_URLS = {"load-folder": "/admin/hub#load-folder",
+             "import-history": "/admin/hub#import-history",
+             "import-history-dry-run": "/admin/hub#import-history",
+             "purge": "/admin/hub#purge",
+             "diagnostics-bundle": "/admin/hub#diagnostics"}
 
 
 class AdminJobs:
     """One admin job at a time, run on a daemon thread, its progress kept in
-    memory for polling."""
+    memory for polling. Each job is also a task in ``tasks`` (default
+    ``tasks.REGISTRY``; v4.0 lane E): its kind, instrument, who started it and
+    its progress in words, never its parameters, summary or error."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, tasks=None) -> None:
         self._lock = threading.Lock()
         self._ids = itertools.count(1)
         self._job: Optional[dict] = None
         # kind -> JobRefused | None, checked before a job starts (job_refusal)
         self.refuse: Optional[Callable[[str], Optional[JobRefused]]] = None
+        self._tasks = tasks
+        self._task_ids: dict = {}          # job id -> task id
+
+    # ── the task feed (v4.0 lane E; the registry never raises into the job) ──
+    def _registry(self):
+        return self._tasks if self._tasks is not None else tasks.REGISTRY
+
+    @staticmethod
+    def _open_url(kind: str) -> str:
+        return OPEN_URLS.get(kind, "/admin/hub")
+
+    def _task_begin(self, job: dict) -> None:
+        try:
+            by = web_auth.current_name()
+        except Exception:  # noqa: BLE001 - outside a request
+            by = None
+        params = job.get("params") or {}
+        self._task_ids[job["id"]] = self._registry().begin(
+            job["kind"], by=by, instrument=params.get("instrument"),
+            open_url=self._open_url(job["kind"]))
+
+    def _task_progress(self, job: dict, event: dict) -> None:
+        tid = self._task_ids.get(job["id"])
+        if tid is not None:
+            self._registry().update(tid, done=event.get("done"), total=event.get("total"),
+                                    text=tasks.phase_text(event))
+
+    def _task_finish(self, job: dict) -> None:
+        tid = self._task_ids.pop(job["id"], None)
+        if tid is not None:
+            self._registry().finish(tid, job["state"])
 
     def current(self) -> Optional[dict]:
         with self._lock:
@@ -226,6 +267,7 @@ class AdminJobs:
                    "recent": [], "summary": None, "result": None, "error": None,
                    "stop_requested": False}
             self._job = job
+            self._task_begin(job)
         threading.Thread(target=self._run, args=(job, fn), daemon=True,
                          name=f"admin-{kind}").start()
         return _copy(job)
@@ -252,6 +294,7 @@ class AdminJobs:
                 job["recent"] = (job["recent"] + [{k: event.get(k) for k in
                                                    ("file", "outcome", "sample_id", "message")}
                                                   ])[-RECENT_FILES:]
+            self._task_progress(job, event)
 
     def _run(self, job: dict, fn: Callable[..., dict]) -> None:
         try:
@@ -269,6 +312,7 @@ class AdminJobs:
         with self._lock:
             job.update(state=state, error=error, summary=summary, finished_at=_now(),
                        result=None if summary is None else {"summary": summary})
+            self._task_finish(job)
 
 
 def _copy(job: Optional[dict]) -> Optional[dict]:
