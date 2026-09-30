@@ -50,7 +50,7 @@
 
   {#- live.js (lane A, GCLive) loads here, before live_adapter.js; without it
       the adapter polls every 5 s. -#}
-  <script src="{{ url_for('static', filename='js/live.js') }}?v=3"></script>
+  <script src="{{ url_for('static', filename='js/live.js') }}?v=5"></script>
   <script src="{{ url_for('static', filename='js/live_adapter.js') }}?v=2"></script>
   {% block scripts %}{% endblock %}
 

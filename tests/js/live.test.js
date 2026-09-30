@@ -28,7 +28,8 @@ module.exports = (t) => {
     t.eq(r.state.cursor, 'b:1');
     t.eq(r.update, { reset: true, samples: [], instruments: [], kinds: [], agents: [AG()],
                      notifications_unread: 0, hub: { state: 'running', staged_update: null },
-                     version: 'v3.1.0', version_changed: false, tasks: [], boot: 'b' });
+                     version: 'v3.1.0', version_changed: false, tasks: [], boot: 'b',
+                     server_today: null, day_changed: false });
     // the first answer is a reset even if the server did not say so
     t.eq(L.applyResponse(s0, RESP()).update.reset, true);
 

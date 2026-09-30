@@ -280,6 +280,9 @@ async function api(method, url, body, extra) {
         err.status = resp.status;        // v4.0 lane E: a 403 forgets the admin unlock
         throw err;
     }
+    // v4.0 lane E: the hub accepted an admin password: keep it 15 minutes
+    if (body && typeof body.password === 'string' && body.password
+        && typeof GCAdminUnlock !== 'undefined') GCAdminUnlock.accepted(body.password);
     const ct = resp.headers.get('content-type') || '';
     if (!ct.includes('application/json')) return resp;
     const j = (await GCSession.readJson(resp)).body;
@@ -613,6 +616,8 @@ async function onLiveUpdate(u) {
         loadNotifications({ bg: true });
     }
     if (u.version_changed) showVersionBanner(u.version);
+    // v4.0 lane E: the hub's date moved on (midnight): Today/Yesterday shift
+    if (u.day_changed) _renderListsKeepingScroll();
 }
 
 /** The hub was updated while this page was open: offer a reload (never
@@ -735,6 +740,13 @@ const _LIST_MODES = { 'dash-file-list': 'dashboard', 'chrom-file-list': 'chrom',
 // headings, or Lab ID in number order; remembered per browser.
 let sampleSortMode = (typeof SampleOrder !== 'undefined') ? SampleOrder.loadSortMode() : 'newest';
 
+/** The hub's date for the day headings (its clock: injection times are
+    hub-local); the browser's until the first /api/live answer. */
+function _hubToday() {
+    const t = (typeof GCLive !== 'undefined' && GCLive.serverToday) ? GCLive.serverToday() : null;
+    return t || new Date();
+}
+
 function renderFileList(containerId, files, mode) {
     const container = document.getElementById(containerId);
     if (!container) return;
@@ -744,7 +756,7 @@ function renderFileList(containerId, files, mode) {
         for (const file of filtered) container.appendChild(_fileItem(file, mode));
         return;
     }
-    for (const group of SampleOrder.groupSamples(filtered, sampleSortMode, new Date())) {
+    for (const group of SampleOrder.groupSamples(filtered, sampleSortMode, _hubToday())) {
         if (group.label) {
             const h = document.createElement('li');
             h.className = 'list-day';
@@ -869,7 +881,9 @@ function _fileItem(file, mode) {
 
         // v4.0 lane E: the run's injection date and time, on its own line
         if (typeof SampleOrder !== 'undefined') {
-            const rt = SampleOrder.rowTime(file);
+            // under a day heading (Newest run) the time alone; the date is the heading's
+            const rt = SampleOrder.rowTime(file, {
+                underDay: sampleSortMode !== 'lab' && SampleOrder.hasInjectionTime(file) });
             const time = document.createElement('span');
             time.className = 'file-item-time';
             time.textContent = rt.text;

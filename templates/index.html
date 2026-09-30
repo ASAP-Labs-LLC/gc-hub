@@ -260,7 +260,7 @@
     #comment-list .comment-delete { background:none; border:none; color:#f85149; cursor:pointer; font-size:13px; line-height:1; padding:0 2px; }
   </style>
   <!-- v4.0 lane E: running now, GC strip, paused banner, sample list order (after the inline styles) -->
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/status.css') }}?v=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/status.css') }}?v=2">
 </head>
 <body>
 
@@ -278,25 +278,30 @@
     <button class="tb-btn" id="btn-instruments" title="Instruments: calibration, corrections, agents, backfill, conflicts" onclick="window.location.href='/instruments'">Instruments</button>
     <a class="tb-btn" id="btn-hub-admin" title="Admin: imports, results files, diagnostics" href="/admin/hub">Hub admin</a>
     <button class="tb-btn" id="btn-export" title="Export current chromatogram to PDF">Export</button>
-    <button class="tb-btn" id="btn-comparison-export" title="Export comparison charts">Comparison Export</button>
 
     <span class="tb-sep"></span>
 
-    <!-- v4.0 lane E: the GC strip (running_now.js), one chip per GC, where Refresh was -->
-    <nav id="gc-strip" data-testid="gc-strip" aria-label="GC agents" hidden></nav>
+    <!-- v4.0 lane E: the GC strip (running_now.js): one compact chip, "2/2 GCs live", where Refresh was -->
+    <button type="button" id="gc-strip" class="gc-strip" data-testid="gc-strip" aria-haspopup="true"
+            aria-expanded="false" aria-controls="gc-strip-popover" hidden></button>
+    <div id="gc-strip-popover" data-testid="gc-strip-popover" role="region" aria-label="GC agents" hidden></div>
 
     <span class="tb-sep"></span>
 
     <button class="tb-btn" id="btn-reprocess" title="Re-process specific Lab IDs">Re-process</button>
+    <!-- v4.0 lane E: the rarely used actions sit behind "More" so the toolbar fits
+         at 1366 px (toolbar.js); their ids and handlers are unchanged -->
+    <button type="button" class="tb-btn" id="btn-more" aria-haspopup="true" aria-expanded="false"
+            aria-controls="more-menu" data-testid="btn-more">More &#9662;</button>
+    <div id="more-menu" class="more-menu" role="menu" hidden>
+      <button class="tb-btn" id="btn-advanced-views" role="menuitem" title="Toggle advanced tabs (Chromatograms, Distillation Data, Distillation Curve)">Advanced Views</button>
+      <button class="tb-btn" id="btn-comparison-export" role="menuitem" title="Export comparison charts">Comparison Export</button>
+      <button class="tb-btn" id="btn-help" role="menuitem" title="Help">Help</button>
+      <button class="tb-btn" id="btn-restart-server" role="menuitem" title="Restart the server process (auto-restarts daily at 3 AM if idle)">Restart Server</button>
+    </div>
 
     <span class="tb-sep"></span>
 
-    <button class="tb-btn" id="btn-help" title="Help">Help</button>
-    <button class="tb-btn" id="btn-restart-server" title="Restart the server process (auto-restarts daily at 3 AM if idle)">Restart Server</button>
-
-    <span class="tb-sep"></span>
-
-    <button class="tb-btn" id="btn-advanced-views" title="Toggle advanced tabs (Chromatograms, Distillation Data, Distillation Curve)">Advanced Views</button>
     <label class="tb-checkbox" title="Apply EQM correction factors to D86 values">
       <input type="checkbox" id="chk-corrected-d86"> Corrected D86
     </label>
@@ -1131,10 +1136,11 @@
 <script src="{{ url_for('static', filename='js/selection.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/report_payload.js') }}?v=4"></script>
 <script src="{{ url_for('static', filename='js/samples.js') }}?v=5"></script>
-<script src="{{ url_for('static', filename='js/live.js') }}?v=4"></script>
-<script src="{{ url_for('static', filename='js/sample_order.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/running_now.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/admin_unlock.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/live.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/sample_order.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/running_now.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/admin_unlock.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/toolbar.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=4"></script>
 <script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
@@ -1142,7 +1148,7 @@
 <script src="{{ url_for('static', filename='js/ladder.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/distill_view.js') }}?v=2"></script>
 <script src="{{ url_for('static', filename='js/deeplink.js') }}?v=3"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=57"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=58"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

@@ -3,26 +3,36 @@
 
    From GCLive's /api/live answers (tasks, agents, hub) it keeps three things
    current, without a reload:
-     #running-now          the "running now" indicator at bottom-left (it
-                           replaced "Ready"): one line, most urgent first;
-                           click for the list of tasks with Open / Download /
-                           Dismiss. Finished and failed tasks stay for 30
-                           minutes (the server drops them), or until dismissed
-                           in this browser (localStorage, keyed
+     #running-now          the indicator at bottom-left (it replaced "Ready"):
+                           one line, most urgent first; click for the list,
+                           titled "Running now" while something runs, else
+                           "Recent work". A running task shows its title and
+                           progress; an ended one ONE outcome line from the hub
+                           ("Re-processed 1 sample", "Dry run finished · 40
+                           classified"), who, and when it finished. Open /
+                           Download / Dismiss; Dismiss keeps the list open.
+                           Ended tasks stay 30 minutes (the hub drops them) or
+                           until dismissed in this browser (localStorage, keyed
                            "<boot id>:<task id>": task ids restart with the hub).
-     #gc-strip             one chip per GC: glyph + text ("GC-1 ● Live"),
-                           never colour alone; `live` is the server's (last
-                           check-in at most 90 s ago on the hub's clock).
+     #gc-strip             ONE compact chip, "2/2 GCs live" (glyph + text, never
+                           colour alone); click for each GC's status and a link
+                           to its page. `live` is the hub's rule (seen within
+                           90 s on the hub's clock); the age ticks from when the
+                           answer was read (GCLive.agentAge), re-rendered every
+                           15 s, so "Not seen for …" never freezes.
      #paused-banner        one line while processing is paused.
    The pure helpers are module.exports for tests/js/running_now.test.js; the
    DOM part mounts itself when the page has those elements and GCLive. Every
    string is set with textContent. The shell's sidebar footer (lane E2) can use
-   summary(), gcChip() and gcSummary() as they are. */
+   summary(), headline(), gcStrip() and gcSummary() as they are. */
 (function (root) {
     'use strict';
 
+    const LV = (typeof module !== 'undefined' && module.exports && typeof require === 'function')
+        ? require('./live.js') : root.GCLive;
     const DISMISS_KEY = 'gc-running-dismissed';
     const DISMISS_MAX = 200;
+    const STRIP_TICK_MS = 15000;
     const GLYPHS = { running: 'spinner', done: 'dot', failed: 'triangle', stopped: 'ring',
                      interrupted: 'ring' };
     const VERBS = { done: 'finished', failed: 'failed', stopped: 'stopped',
@@ -48,26 +58,40 @@
         return 'Starting…';
     }
 
-    /** An ended task's outcome in words. */
-    function outcomeText(task) {
-        const p = (task && task.progress) || {};
-        if (task.state === 'done') return 'Finished' + (p.text ? ' · ' + p.text : '');
-        if (task.state === 'stopped') {
-            const done = _num(p.done);
-            const total = _num(p.total);
-            if (done === null) return 'Stopped';
-            return 'Stopped after ' + fmtNum(done) + (total !== null ? ' of ' + fmtNum(total) : '');
-        }
-        if (task.state === 'interrupted') return 'Interrupted: it stopped without finishing';
-        return task.open_url ? 'Failed · see its page for why' : 'Failed';
+    /** The task's one headline: its title while running, the hub's outcome
+        line once it ended (an older hub without one: title + state). */
+    function headline(task) {
+        if (task.state === 'running') return task.title;
+        if (task.outcome) return task.outcome;
+        return task.title + ' ' + (VERBS[task.state] || 'ended');
     }
 
-    function taskLine(task) {
-        return task.state === 'running' ? progressText(task) : outcomeText(task);
+    /** The second line: progress while running; nothing once ended (the
+        outcome already says it). */
+    function detailLine(task) {
+        return task.state === 'running' ? progressText(task) : null;
     }
 
-    /** The collapsed indicator ({text, glyph, state, count}), or null when
-        there is nothing to show. */
+    function _hm(iso) {
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return null;
+        return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    }
+
+    /** "Ryan C · started 14:02" / "Ryan C · finished 14:05" (local time). */
+    function metaLine(task) {
+        const running = task.state === 'running';
+        const at = _hm(running ? task.started_at : task.ended_at);
+        const when = at ? (running ? 'started ' : task.state === 'done' ? 'finished ' : 'ended ') + at
+            : null;
+        return [task.by, when].filter(Boolean).join(' · ');
+    }
+
+    function popoverTitle(tasks) {
+        return (tasks || []).some(t => t.state === 'running') ? 'Running now' : 'Recent work';
+    }
+
+    /** The collapsed indicator ({text, glyph, state, count}), or null. */
     function summary(tasks) {
         const list = tasks || [];
         if (!list.length) return null;
@@ -85,9 +109,9 @@
             else if (p.text) tail = ' · ' + p.text;
             return { text: t.title + tail, glyph: 'spinner', state: 'running', count: list.length };
         }
-        const t = list[0];                     // the server sends the most recent first
-        return { text: t.title + ' ' + (VERBS[t.state] || 'ended') + ' · View',
-                 glyph: GLYPHS[t.state] || 'ring', state: t.state, count: list.length };
+        const t = list[0];                     // the hub sends the most recent first
+        return { text: headline(t), glyph: GLYPHS[t.state] || 'ring', state: t.state,
+                 count: list.length };
     }
 
     function dismissKey(boot, task) {
@@ -129,14 +153,14 @@
         return Math.floor(s / 86400) + ' d';
     }
 
-    /** One GC's chip: {id, name, glyph, text, cls, href, title}. ``href``
-        follows ``pattern`` ("{id}" is replaced; default the Instruments page
-        with that GC selected). */
-    function gcChip(agent, pattern) {
+    /** One GC at ``nowMs``: {id, name, glyph, text, cls, href, title}. Its age
+        is the hub's plus the time since the answer was read; ``pattern``'s
+        "{id}" is replaced (default the GC's own page). */
+    function gcChip(agent, nowMs, pattern) {
         const id = String(agent.instrument_id);
         const name = agent.name || id;
-        const href = (pattern || '/instruments?instrument={id}').replace('{id}', encodeURIComponent(id));
-        const age = _num(agent.last_seen_age_s);
+        const href = (pattern || '/instruments/{id}').replace('{id}', encodeURIComponent(id));
+        const age = LV.agentAge(agent, nowMs);
         const bits = [name];
         if (agent.host) bits.push(agent.host);
         if (agent.version) bits.push('agent ' + agent.version);
@@ -145,7 +169,7 @@
         let cls;
         if (agent.enabled === false) {
             glyph = '–'; text = 'Disabled'; cls = 'off';
-        } else if (agent.live === true) {
+        } else if (LV.agentLive(agent, nowMs)) {
             glyph = '●'; text = 'Live'; cls = 'live';
         } else if (age === null) {
             text = 'Never checked in'; cls = 'never';
@@ -157,24 +181,28 @@
         return { id, name, glyph, text, cls, href, title: bits.join(' · ') };
     }
 
+    /** The toolbar's one chip: {text: "2/2 GCs live", glyph, cls, title}, or
+        null without any GC. Disabled GCs are not counted. */
+    function gcStrip(agents, nowMs) {
+        const all = agents || [];
+        if (!all.length) return null;
+        const chips = all.map(a => gcChip(a, nowMs));
+        const on = chips.filter(c => c.cls !== 'off');
+        const live = on.filter(c => c.cls === 'live').length;
+        const allLive = on.length > 0 && live === on.length;
+        const noneSeen = on.length > 0 && on.every(c => c.cls === 'never');
+        return { text: live + '/' + on.length + (on.length === 1 ? ' GC live' : ' GCs live'),
+                 glyph: allLive ? '●' : '○',
+                 cls: allLive ? 'live' : (noneSeen ? 'never' : 'quiet'),
+                 title: chips.map(c => c.name + ': ' + c.text).join(' · ') };
+    }
+
     /** "2 of 2 GCs connected" (enabled GCs only); '' without any. */
-    function gcSummary(agents) {
+    function gcSummary(agents, nowMs) {
         const on = (agents || []).filter(a => a.enabled !== false);
         if (!on.length) return '';
-        const live = on.filter(a => a.live === true).length;
+        const live = on.filter(a => LV.agentLive(a, nowMs)).length;
         return live + ' of ' + on.length + (on.length === 1 ? ' GC' : ' GCs') + ' connected';
-    }
-
-    function _hm(iso) {
-        const d = new Date(iso);
-        if (isNaN(d.getTime())) return null;
-        return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-    }
-
-    /** "Ryan C · 14:02" (who started it, local time). */
-    function whenText(iso, by) {
-        const hm = iso ? _hm(iso) : null;
-        return [by, hm].filter(Boolean).join(' · ');
     }
 
     /** The processing-paused banner's line, or null. */
@@ -187,18 +215,18 @@
             '. Resume it from the hub tray on the server.';
     }
 
-    const pure = { DISMISS_KEY, DISMISS_MAX, fmtNum, progressText, outcomeText, taskLine, summary,
-                   dismissKey, visibleTasks, loadDismissed, saveDismissed, gcChip, gcSummary,
-                   whenText, pausedBanner };
+    const pure = { DISMISS_KEY, DISMISS_MAX, fmtNum, progressText, headline, detailLine, metaLine,
+                   popoverTitle, summary, dismissKey, visibleTasks, loadDismissed, saveDismissed,
+                   gcChip, gcStrip, gcSummary, pausedBanner };
     root.GCRunningNow = pure;
     if (typeof module !== 'undefined' && module.exports) module.exports = pure;
     if (typeof document === 'undefined') return;
 
     // ── the page ──────────────────────────────────────────────────────────
     const $ = (id) => document.getElementById(id);
-    let last = { tasks: [], agents: [], hub: null, boot: null };
+    let last = { tasks: [], hub: null, boot: null };
     let dismissed = loadDismissed();
-    let open = false;
+    let openPop = null;                 // 'tasks' | 'gcs' | null
 
     function el(tag, cls, text) {
         const e = document.createElement(tag);
@@ -225,7 +253,7 @@
         const s = summary(tasks);
         btn.hidden = !s;
         btn.replaceChildren();
-        if (!s) { setOpen(false); return; }
+        if (!s) { if (openPop === 'tasks') setOpen(null); return; }
         btn.dataset.state = s.state;
         btn.append(glyph(s.glyph), el('span', 'rn-text', s.text));
         const one = tasks.filter(t => t.state === 'running');
@@ -237,8 +265,8 @@
             bar.appendChild(fill);
             btn.appendChild(bar);
         }
-        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-        if (open) renderPopover();
+        btn.setAttribute('aria-expanded', openPop === 'tasks' ? 'true' : 'false');
+        if (openPop === 'tasks') renderTasksPopover();
     }
 
     function action(label, cls, attrs) {
@@ -250,17 +278,20 @@
         return a;
     }
 
-    function renderPopover() {
+    function renderTasksPopover() {
         const pop = $('running-now-popover');
         if (!pop) return;
+        const tasks = shown();
         const list = el('ul', 'rn-list');
-        for (const t of shown()) {
+        for (const t of tasks) {
             const li = el('li', 'rn-task rn-' + t.state);
             li.dataset.taskId = t.id;
             const head = el('div', 'rn-task-title');
-            head.append(glyph(GLYPHS[t.state] || 'ring'), el('span', null, t.title));
-            li.append(head, el('div', 'rn-task-meta', whenText(t.started_at, t.by)),
-                      el('div', 'rn-task-line', taskLine(t)));
+            head.append(glyph(GLYPHS[t.state] || 'ring'), el('span', null, headline(t)));
+            li.appendChild(head);
+            const detail = detailLine(t);
+            if (detail) li.appendChild(el('div', 'rn-task-line', detail));
+            li.appendChild(el('div', 'rn-task-meta', metaLine(t)));
             const acts = el('div', 'rn-actions');
             if (t.open_url) acts.appendChild(action('Open', 'rn-open', { href: t.open_url }));
             if (t.download_url) {
@@ -270,45 +301,75 @@
                 acts.appendChild(action('Dismiss', 'rn-dismiss', { type: 'button', onclick: () => {
                     dismissed.add(dismissKey(last.boot, t));
                     saveDismissed(dismissed);
-                    renderIndicator();
+                    renderIndicator();         // the list stays open while tasks remain
                 } }));
             }
             if (acts.childNodes.length) li.appendChild(acts);
             list.appendChild(li);
         }
-        pop.replaceChildren(el('div', 'rn-pop-title', 'Running now'), list);
+        pop.replaceChildren(el('div', 'rn-pop-title', popoverTitle(tasks)), list);
     }
 
-    function setOpen(v) {
-        open = !!v;
-        const pop = $('running-now-popover');
-        const btn = $('running-now');
-        if (pop) pop.hidden = !open;
-        if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-        if (open) renderPopover();
+    // ── the GC strip ──
+    function agentsNow() {
+        return root.GCLive ? root.GCLive.agents() : [];
     }
 
     function renderStrip() {
-        const strip = $('gc-strip');
-        if (!strip) return;
-        const chips = (last.agents || []).map(a => {
-            const c = gcChip(a);
-            const link = el('a', 'gc-chip gc-chip-' + c.cls);
-            link.href = c.href;
-            link.title = c.title;
-            link.dataset.instrument = c.id;
-            link.append(el('span', 'gc-chip-name', c.name), glyph0(c.glyph),
-                        el('span', 'gc-chip-text', c.text));
-            return link;
-        });
-        strip.replaceChildren(...chips);
-        strip.hidden = chips.length === 0;
+        const btn = $('gc-strip');
+        if (!btn) return;
+        const now = Date.now();
+        const s = gcStrip(agentsNow(), now);
+        btn.hidden = !s;
+        btn.replaceChildren();
+        if (!s) { if (openPop === 'gcs') setOpen(null); return; }
+        btn.className = 'gc-strip gc-strip-' + s.cls;
+        btn.title = s.title;
+        const g = el('span', 'gc-chip-glyph', s.glyph);
+        g.setAttribute('aria-hidden', 'true');
+        btn.append(g, el('span', 'gc-strip-text', s.text));
+        btn.setAttribute('aria-expanded', openPop === 'gcs' ? 'true' : 'false');
+        if (openPop === 'gcs') renderGcPopover();
     }
 
-    function glyph0(ch) {
-        const g = el('span', 'gc-chip-glyph', ch);
-        g.setAttribute('aria-hidden', 'true');
-        return g;
+    function renderGcPopover() {
+        const pop = $('gc-strip-popover');
+        if (!pop) return;
+        const now = Date.now();
+        const list = el('ul', 'rn-list');
+        for (const a of agentsNow()) {
+            const c = gcChip(a, now);
+            const li = el('li', 'gc-row gc-chip-' + c.cls);
+            li.dataset.instrument = c.id;
+            const link = el('a', 'gc-row-name', c.name);
+            link.href = c.href;
+            link.title = c.title;
+            const g = el('span', 'gc-chip-glyph', c.glyph);
+            g.setAttribute('aria-hidden', 'true');
+            li.append(g, link, el('span', 'gc-row-text', c.text));
+            list.appendChild(li);
+        }
+        pop.replaceChildren(el('div', 'rn-pop-title', 'GC agents'), list);
+    }
+
+    function setOpen(which) {
+        openPop = which;
+        const tp = $('running-now-popover');
+        const gp = $('gc-strip-popover');
+        if (tp) tp.hidden = which !== 'tasks';
+        if (gp) gp.hidden = which !== 'gcs';
+        const rb = $('running-now');
+        const gb = $('gc-strip');
+        if (rb) rb.setAttribute('aria-expanded', which === 'tasks' ? 'true' : 'false');
+        if (gb) gb.setAttribute('aria-expanded', which === 'gcs' ? 'true' : 'false');
+        if (which === 'tasks') renderTasksPopover();
+        if (which === 'gcs' && gp && gb) {
+            // fixed, under its chip: the toolbar scrolls sideways and would clip it
+            const r = gb.getBoundingClientRect();
+            gp.style.top = Math.round(r.bottom + 6) + 'px';
+            gp.style.left = Math.round(Math.max(8, Math.min(r.left, window.innerWidth - 328))) + 'px';
+            renderGcPopover();
+        }
     }
 
     function renderBanner() {
@@ -320,8 +381,7 @@
     }
 
     function onUpdate(u) {
-        last = { tasks: u.tasks || [], agents: u.agents || [], hub: u.hub || null,
-                 boot: u.boot || last.boot };
+        last = { tasks: u.tasks || [], hub: u.hub || null, boot: u.boot || last.boot };
         renderIndicator();
         renderStrip();
         renderBanner();
@@ -329,17 +389,21 @@
 
     function mount() {
         if (!root.GCLive || !($('running-now') || $('gc-strip') || $('paused-banner'))) return;
-        const btn = $('running-now');
-        if (btn) {
-            btn.addEventListener('click', (e) => { e.stopPropagation(); setOpen(!open); });
-            document.addEventListener('click', (e) => {
-                const pop = $('running-now-popover');
-                if (open && pop && !pop.contains(e.target)) setOpen(false);
-            });
-            document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && open) setOpen(false); });
+        const toggle = (which) => (e) => { e.stopPropagation(); setOpen(openPop === which ? null : which); };
+        if ($('running-now')) $('running-now').addEventListener('click', toggle('tasks'));
+        if ($('gc-strip')) $('gc-strip').addEventListener('click', toggle('gcs'));
+        // a click inside a popover (Dismiss re-renders it, so its target is gone
+        // by the time the document sees the click) never closes it
+        for (const id of ['running-now-popover', 'gc-strip-popover']) {
+            const pop = $(id);
+            if (pop) pop.addEventListener('click', (e) => e.stopPropagation());
         }
+        document.addEventListener('click', () => { if (openPop) setOpen(null); });
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && openPop) setOpen(null); });
         root.GCLive.subscribe(onUpdate);
-        setInterval(() => { if (open) renderPopover(); }, 15000);
+        // the ages tick between answers (and an agent's age alone is no update)
+        setInterval(() => { renderStrip(); if (openPop === 'tasks') renderTasksPopover(); },
+                    STRIP_TICK_MS);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount);

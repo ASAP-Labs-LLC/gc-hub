@@ -3,19 +3,38 @@
    index.html's inline styles. Colour only ever repeats what a glyph and a
    word already say. */
 
-/* ── the GC strip (toolbar) ─────────────────────────────────────────── */
-#gc-strip { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
-#gc-strip[hidden] { display: none; }
-.gc-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; font-size: 11px;
-  color: #c9d1d9; background: #0d1117; border: 1px solid #30363d; border-radius: 12px;
-  text-decoration: none; white-space: nowrap; }
-.gc-chip:hover { border-color: #58a6ff; color: #fff; }
-.gc-chip-name { font-weight: 600; }
+/* ── the GC strip (toolbar): one compact chip, a popover per GC ───────── */
+.gc-strip { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; padding: 3px 9px;
+  font: inherit; font-size: 11px; color: #c9d1d9; background: #0d1117; border: 1px solid #30363d;
+  border-radius: 12px; white-space: nowrap; cursor: pointer; }
+.gc-strip[hidden] { display: none; }
+.gc-strip:hover { border-color: #58a6ff; color: #fff; }
 .gc-chip-glyph { font-size: 10px; line-height: 1; }
-.gc-chip-live .gc-chip-glyph { color: #3fb950; }
-.gc-chip-quiet .gc-chip-glyph { color: #d29922; }
-.gc-chip-never .gc-chip-glyph, .gc-chip-off .gc-chip-glyph { color: #7d8590; }
-.gc-chip-text { color: #9ea7b3; }
+.gc-strip-live .gc-chip-glyph, .gc-chip-live .gc-chip-glyph { color: #3fb950; }
+.gc-strip-quiet .gc-chip-glyph, .gc-chip-quiet .gc-chip-glyph { color: #d29922; }
+.gc-strip-never .gc-chip-glyph, .gc-chip-never .gc-chip-glyph,
+.gc-chip-off .gc-chip-glyph { color: #7d8590; }
+#gc-strip-popover { position: fixed; z-index: 10004; width: 320px; max-height: 60vh; overflow-y: auto;
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .5); font-size: 12px; color: #c9d1d9; }
+#gc-strip-popover[hidden] { display: none; }
+.gc-row { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid #21262d; }
+.gc-row:last-child { border-bottom: 0; }
+.gc-row-name { font-weight: 600; color: #e6edf3; text-decoration: none; }
+.gc-row-name:hover { text-decoration: underline; color: #58a6ff; }
+.gc-row-text { margin-left: auto; color: #9ea7b3; }
+
+/* "More": the toolbar's rarely used actions (fixed: the toolbar scrolls and would clip it) */
+.more-menu { position: fixed; z-index: 10004; display: flex; flex-direction: column; gap: 2px;
+  min-width: 180px; padding: 4px; background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .5); }
+.more-menu[hidden] { display: none; }
+.more-menu .tb-btn { justify-content: flex-start; background: transparent; border-color: transparent; }
+.more-menu .tb-btn:hover { background: #21262d; }
+#universal-search { width: 180px !important; min-width: 0 !important; }
+
+/* the toolbar's one link looks and sits like its buttons */
+a.tb-btn { text-decoration: none; line-height: normal; font-family: inherit; }
 
 /* ── the processing-paused banner ───────────────────────────────────── */
 #paused-banner { flex-shrink: 0; padding: 6px 14px; font-size: 12px; color: #e3b341;

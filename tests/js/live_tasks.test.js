@@ -54,4 +54,55 @@ module.exports = (t) => {
         clearTimeout: () => {}, now: () => 0, isVisible: () => true, on: () => {}, off: () => {} });
     t.eq(p.tasks(), []);
     t.eq(p.hub(), null);
+
+    // ── v4.0 lane E review: an agent's age keeps ticking between updates ──
+    // agentAge = the hub's age when read + the time since (never the browser's
+    // clock against last_seen); agentLive applies the hub's 90 s rule to it.
+    const A = { last_seen: '2026-09-30T10:00:00+00:00', live: true, last_seen_age_s: 30, read_at: 1000 };
+    t.eq(L.agentAge(A, 1000), 30);
+    t.eq(L.agentAge(A, 31000), 60);
+    t.eq(L.agentAge(A, 500), 30);                           // never younger than read
+    t.eq(L.agentAge({ last_seen_age_s: 12 }, 99999), 12);   // no read_at: as read
+    t.eq(L.agentAge({ last_seen_age_s: null }, 1000), null);
+    t.eq(L.agentAge(null, 1000), null);
+    t.eq(L.agentLive(A, 31000), true);
+    t.eq(L.agentLive(A, 62000), false);                     // 91 s: the hub's rule
+    t.eq(L.agentLive(Object.assign({}, A, { live: false }), 1000), false);
+    t.eq(L.agentLive({ last_seen: null, live: undefined }, 1000), false);
+    t.eq(L.LIVE_SECONDS, 90);
+
+    // the poller stamps read_at on every answer, and agents() carries it, so a
+    // page's timer sees the latest ages even when no update was emitted
+    let clock = 5000;
+    const answers = [RESP({ reset: true, agents: [AG({ last_seen_age_s: 3 })] }),
+                     RESP({ agents: [AG({ last_seen_age_s: 6 })] })];
+    const timers = [];
+    const seen = [];
+    const q = L.createPoller({
+        fetch: () => Promise.resolve({ ok: true, status: 200,
+            text: () => Promise.resolve(JSON.stringify(answers.shift())) }),
+        setTimeout: (fn) => { timers.push(fn); return timers.length; }, clearTimeout: () => {},
+        now: () => clock, isVisible: () => true, on: () => {}, off: () => {} });
+    q.subscribe(u => seen.push(u));
+    return q.start().then(() => {
+        t.eq(q.agents()[0].read_at, 5000);
+        t.eq(seen.length, 1);
+        t.eq(seen[0].agents[0].read_at, 5000);
+        clock = 8000;
+        q.pollNow();
+        return new Promise(r => setTimeout(r, 20));
+    }).then(() => {
+        t.eq(seen.length, 1);                               // age alone: no update …
+        t.eq(q.agents()[0].last_seen_age_s, 6);             // … but the latest is there
+        t.eq(q.agents()[0].read_at, 8000);
+        t.eq(L.agentAge(q.agents()[0], 10000), 8);
+
+        // the hub's date rides along; a new day is an update
+        let s = L.applyResponse(L.initialState(), RESP({ server_today: '2026-09-30' })).state;
+        t.eq(s.server_today, '2026-09-30');
+        t.eq(L.applyResponse(s, RESP({ server_today: '2026-09-30' })).update, null);
+        const u = L.applyResponse(s, RESP({ server_today: '2026-10-01' })).update;
+        t.eq(u.server_today, '2026-10-01');
+        t.eq(u.day_changed, true);
+    });
 };

@@ -75,6 +75,7 @@
 
     // ── the page ──────────────────────────────────────────────────────────
     const page = createUnlock();
+    let pending = null;              // typed in the dialog, not yet accepted by the hub
 
     function el(tag, text, css) {
         const e = document.createElement(tag);
@@ -129,7 +130,8 @@
                 const pw = input.value;
                 input.value = '';
                 if (!pw) { done(null); return; }
-                page.set(pw);
+                // not kept yet: only once the hub accepts it (accepted(); v4.0 lane E review)
+                pending = pw;
                 done(pw);
             });
             document.body.appendChild(overlay);
@@ -147,5 +149,13 @@
         if (err && (err.status === 403)) page.forget();
     }
 
-    root.GCAdminUnlock = Object.assign({}, pure, { page, ask, refused });
+    /** A call carrying ``pw`` succeeded: if it is the one just typed in the
+        dialog, keep it for 15 minutes (never any other password, e.g. a
+        QBench login sent the same way). */
+    function accepted(pw) {
+        if (pending !== null && pw === pending) page.set(pw);
+        pending = null;
+    }
+
+    root.GCAdminUnlock = Object.assign({}, pure, { page, ask, refused, accepted });
 })(typeof window !== 'undefined' ? window : globalThis);

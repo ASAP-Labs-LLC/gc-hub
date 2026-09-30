@@ -30,10 +30,25 @@
         return String(s == null ? '' : s).match(TOKEN_RE) || [];
     }
 
+    const COLLATOR = (typeof Intl !== 'undefined' && Intl.Collator)
+        ? new Intl.Collator(undefined, { sensitivity: 'base' }) : null;
+
+    function _textCompare(x, y) {
+        if (COLLATOR) return COLLATOR.compare(x, y);
+        const lx = x.toLowerCase();
+        const ly = y.toLowerCase();
+        return lx === ly ? 0 : (lx < ly ? -1 : 1);
+    }
+
     /** Natural order: digit runs compare as numbers (leading zeros ignored,
-        then the shorter run first), other runs case-insensitively; numbers
-        before text; a prefix before what extends it. Ties: plain text order. */
+        then the shorter run first), other runs by their base letters (case
+        and accents aside, localeCompare's sensitivity 'base'); numbers before
+        text; a prefix before what extends it; an empty lab ID last. Ties:
+        plain text order. */
     function naturalCompare(a, b) {
+        const ea = a == null || String(a) === '';
+        const eb = b == null || String(b) === '';
+        if (ea || eb) return ea === eb ? (a == null) - (b == null) : (ea ? 1 : -1);
         const ta = _tokens(a);
         const tb = _tokens(b);
         const n = Math.min(ta.length, tb.length);
@@ -51,9 +66,8 @@
             } else if (dx !== dy) {
                 return dx ? -1 : 1;
             } else {
-                const lx = x.toLowerCase();
-                const ly = y.toLowerCase();
-                if (lx !== ly) return lx < ly ? -1 : 1;
+                const c = _textCompare(x, y);
+                if (c !== 0) return c < 0 ? -1 : 1;
             }
         }
         if (ta.length !== tb.length) return ta.length - tb.length;
@@ -75,8 +89,10 @@
         return !!file && file.injection_dt_source !== 'mtime' && parseInjection(file.injection_dt) !== null;
     }
 
-    /** The row's date and time: {text, title}. */
-    function rowTime(file) {
+    /** The row's time: {text, title}. Under a day heading ({underDay}) the
+        date is already said, so the row shows the time only and the tooltip
+        the full date; otherwise the date and time. */
+    function rowTime(file, opts) {
         const p = parseInjection(file && file.injection_dt);
         if (!p) return { text: '', title: 'No injection time' };
         const full = String(file.injection_dt).replace('T', ' ');
@@ -84,7 +100,7 @@
             return { text: 'file ' + p.day + ' ' + p.hm,
                      title: 'No injection time in the CDF; this is the file’s time, ' + full };
         }
-        return { text: p.day + ' ' + p.hm, title: 'Injected ' + full };
+        return { text: opts && opts.underDay ? p.hm : p.day + ' ' + p.hm, title: 'Injected ' + full };
     }
 
     function _dayKey(d) {
@@ -92,16 +108,22 @@
         return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
     }
 
-    /** "Today", "Yesterday", "Thu 24 Sep", or "Wed 31 Dec 2025" in another year. */
-    function dayLabel(day, now) {
-        const today = now instanceof Date ? now : new Date();
-        if (day === _dayKey(today)) return 'Today';
-        const y = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
-        if (day === _dayKey(y)) return 'Yesterday';
+    /** "Today", "Yesterday", "Thu 24 Sep", or "Wed 31 Dec 2025" in another
+        year. ``today`` is the hub's date ("YYYY-MM-DD", /api/live's
+        server_today: injection times are the hub's local clock), or a Date
+        (the browser's calendar, for an older hub). Date arithmetic in UTC, so
+        a DST change never skips a day. */
+    function dayLabel(day, today) {
+        const t = typeof today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(today) ? today
+            : _dayKey(today instanceof Date ? today : new Date());
+        if (day === t) return 'Today';
+        const [ty, tm, td] = t.split('-').map(Number);
+        const y = new Date(Date.UTC(ty, tm - 1, td - 1));
+        if (day === y.toISOString().slice(0, 10)) return 'Yesterday';
         const [yy, mm, dd] = day.split('-').map(Number);
-        const d = new Date(yy, mm - 1, dd);
-        const base = DAYS[d.getDay()] + ' ' + dd + ' ' + MONTHS[mm - 1];
-        return yy === today.getFullYear() ? base : base + ' ' + yy;
+        const d = new Date(Date.UTC(yy, mm - 1, dd));
+        const base = DAYS[d.getUTCDay()] + ' ' + dd + ' ' + MONTHS[mm - 1];
+        return yy === ty ? base : base + ' ' + yy;
     }
 
     function _labId(f) {

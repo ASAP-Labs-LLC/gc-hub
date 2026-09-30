@@ -13,8 +13,13 @@ module.exports = (t) => {
     t.eq(sorted, ['9', '0040317', '40318', '40318-RERUN-2', '40318-RERUN-3', '40318-rerun-10',
                   '40319', 'ab2', 'AB12', 'blank']);
     t.eq(O.naturalCompare('40318', '40318'), 0);
-    t.eq(O.naturalCompare('', '1') < 0, true);
-    t.eq(O.naturalCompare(null, '1') < 0, true);
+    t.eq(O.naturalCompare('', '1') > 0, true);
+    t.eq(O.naturalCompare(null, '1') > 0, true);
+    // v4.0 lane E review: an empty lab ID sorts last; accents compare as their base letter
+    t.eq(['', 'B2', '10', null, 'a1'].sort(O.naturalCompare), ['10', 'a1', 'B2', '', null]);
+    t.eq(['Éa', 'Eb', 'Ea'].sort(O.naturalCompare), ['Ea', 'Éa', 'Eb']);
+    t.eq(O.naturalCompare('résumé', 'resume') !== 0, true);        // still a stable order
+    t.eq(['Z1', 'é1', 'e2'].sort(O.naturalCompare), ['é1', 'e2', 'Z1']);
 
     // ── the injection time ──
     t.eq(O.parseInjection('2026-09-29 14:02:11'), { day: '2026-09-29', hm: '14:02', key: '2026-09-29 14:02:11' });
@@ -31,14 +36,24 @@ module.exports = (t) => {
          { text: 'file 2026-09-29 14:02',
            title: 'No injection time in the CDF; this is the file’s time, 2026-09-29 14:02:11' });
     t.eq(O.rowTime(S(1, 'a', null)), { text: '', title: 'No injection time' });
+    // under a day heading the date is already said: the time only, the date in the tooltip
+    t.eq(O.rowTime(S(1, 'a', '2026-09-29 00:20:11'), { underDay: true }),
+         { text: '00:20', title: 'Injected 2026-09-29 00:20:11' });
+    t.eq(O.rowTime(S(1, 'a', '2026-09-29 14:02:11', 'mtime'), { underDay: true }).text,
+         'file 2026-09-29 14:02');                       // "No injection time": keep the date
 
-    // ── day labels, on the browser's calendar ──
-    const now = new Date(2026, 8, 29, 9, 30);        // Tue 29 Sep 2026, local
+    // ── day labels, on the hub's calendar (its date, "YYYY-MM-DD") ──
+    const now = '2026-09-29';
     t.eq(O.dayLabel('2026-09-29', now), 'Today');
     t.eq(O.dayLabel('2026-09-28', now), 'Yesterday');
     t.eq(O.dayLabel('2026-09-24', now), 'Thu 24 Sep');
     t.eq(O.dayLabel('2025-12-31', now), 'Wed 31 Dec 2025');
     t.eq(O.dayLabel('2026-09-30', now), 'Wed 30 Sep');   // a GC clock ahead: just the date
+    t.eq(O.dayLabel('2026-03-01', '2026-03-02'), 'Yesterday');   // month ends
+    t.eq(O.dayLabel('2025-12-31', '2026-01-01'), 'Yesterday');
+    t.eq(O.dayLabel('2026-03-29', '2026-03-30'), 'Yesterday');   // across a DST change
+    // without the hub's date (an older hub): the browser's calendar
+    t.eq(O.dayLabel('2026-09-29', new Date(2026, 8, 29, 9, 30)), 'Today');
 
     // ── Newest run: injection time, newest first; no injection time last ──
     const files = [

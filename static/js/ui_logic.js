@@ -5,7 +5,7 @@
 (function (root) {
     'use strict';
 
-    const LIVE_SECONDS = 150;          // five 30 s heartbeats
+    const LIVE_SECONDS = 90;           // live.LIVE_SECONDS: the hub's one rule (v4.0 lane E)
     const AGENT_ERROR_STATES = ['hub-unreachable', 'auth-error', 'config-error'];
 
     function parseMs(iso) {
@@ -54,14 +54,30 @@
         return words.slice(0, 2).map(w => w[0].toUpperCase()).join('');
     }
 
+    // Seconds since the agent checked in: the hub's age (`last_seen_age_s`)
+    // plus the time since it was read (`read_at`, stamped by live.js); null
+    // when the hub gave none.
+    function agentAge(agent, nowMs) {
+        const age = agent && agent.last_seen_age_s;
+        if (typeof age !== 'number' || !isFinite(age)) return null;
+        const at = agent.read_at;
+        const extra = typeof at === 'number' && isFinite(at) ? Math.max(0, (nowMs - at) / 1000) : 0;
+        return Math.round(age + extra);
+    }
+
     // Agent status with its glyph (never by colour alone): Live / Last seen N
     // min ago / Never checked in; Paused and Reporting an error when live.
+    // Live is the hub's rule (v4.0 lane E): its `live` flag, and still within
+    // 90 s by its age; the browser's clock is never compared with last_seen.
     function agentStatus(agent, nowMs) {
         const at = parseMs(agent && agent.last_seen);
         if (at === null) return { glyph: 'never', label: 'Never checked in', since: null };
-        const ago = relTime(agent.last_seen, nowMs);
+        const age = agentAge(agent, nowMs);
+        const ago = age === null ? relTime(agent.last_seen, nowMs)
+            : relTime(new Date(nowMs - age * 1000).toISOString(), nowMs);
         const since = 'checked in ' + ago;
-        if ((nowMs - at) / 1000 > LIVE_SECONDS) return { glyph: 'held', label: 'Last seen ' + ago, since };
+        const live = agent.live === true && (age === null || age <= LIVE_SECONDS);
+        if (!live) return { glyph: 'held', label: 'Last seen ' + ago, since };
         // `status` is GCLive's (the agent's own state), `state` is /api/agents'
         const state = agent.status || agent.state;
         if (state === 'paused') return { glyph: 'held', label: 'Paused', since };
@@ -285,7 +301,8 @@
     }
 
     const api = {
-        LIVE_SECONDS, ACTIVITY_KINDS, relTime, clockTime, actorName, initials, agentStatus, sampleStatus,
+        LIVE_SECONDS, ACTIVITY_KINDS, relTime, clockTime, actorName, initials, agentStatus, agentAge,
+        sampleStatus,
         setupLabel, stepBadge, setupNav, activityText, activityIcon, mergeActivity, makeAdminGate,
         recentAdd, recentClean, resolveTheme, diffSummaries, agentsFromStatus, lemTitle,
         goLiveTime, liveSinceState, RESERVED_IDS, instrumentHref, activitySample,
