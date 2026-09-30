@@ -815,8 +815,12 @@ def backfill_list(instrument_id: str, q: Optional[str] = None, status: Optional[
                   released: Any = None, limit: Any = 100, offset: Any = 0, *,
                   db: store.Db = None) -> dict:
     """The instrument's backfill samples, newest injection first:
-    ``{samples, total}``. ``released`` True/False filters on ``released_at``."""
-    get(instrument_id, db=db)
+    ``{samples, total, live_since, live_since_set_at}``. ``released``
+    True/False filters on ``released_at``. ``live_since`` (the GC's clock) and
+    ``live_since_set_at`` (the hub's UTC time of the newest ``live_since``
+    event, None without one) let the page say why each row is backfill: the
+    flag is decided when a run arrives (``store.is_backfill``)."""
+    inst = get(instrument_id, db=db)
     limit = _bounded(limit, "limit", 1, 1000)
     offset = _bounded(offset, "offset", 0, 10 ** 9)
     if status is not None and status not in store.STATUSES:
@@ -840,7 +844,11 @@ def backfill_list(instrument_id: str, q: Optional[str] = None, status: Optional[
         rows = [dict(r) for r in conn.execute(
             f"SELECT * FROM samples{sql_where} ORDER BY injection_dt DESC, id DESC LIMIT ? OFFSET ?",
             args + [limit, offset])]
-    return {"samples": [_sample_public(r) for r in rows], "total": int(total)}
+        set_at = conn.execute(
+            "SELECT at FROM instrument_events WHERE instrument_id=? AND kind='live_since' "
+            "ORDER BY at DESC, id DESC LIMIT 1", (instrument_id,)).fetchone()
+    return {"samples": [_sample_public(r) for r in rows], "total": int(total),
+            "live_since": inst.get("live_since"), "live_since_set_at": set_at[0] if set_at else None}
 
 
 def _id_list(sample_ids: Any, what: str = "sample_ids", most: int = RELEASE_MAX) -> list:

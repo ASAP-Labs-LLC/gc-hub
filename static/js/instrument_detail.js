@@ -353,47 +353,237 @@
             h('tbody', {}, ...body)))];
     }
 
+    // ── backfill (v5.0: select many) ──────────────────────────────────────
+    // The selection is kept by sample id, outside the DOM, so the list can be
+    // redrawn by live updates without losing it; rows that are released or
+    // change drop out (GCBackfill.prune). A live reload is held back while a
+    // drag or a release is under way and runs when it ends. Select all, a
+    // shift-click range, a drag down the checkboxes or the rows (pointer
+    // events: mouse and touch; on touch, the checkbox column), Space and
+    // Shift+Space. Releases go GCBackfill.RELEASE_MAX ids per call.
+    const BF = window.GCBackfill;
+    const bf = { selected: new Set(), order: [], selectable: new Set(), rows: new Map(), anchor: null,
+                 gesture: null, keyed: null, releasing: false, pending: false, seq: 0,
+                 q: '', released: 'false', info: null };
     let backfillEls = null;
+    const bfHold = () => !!(bf.gesture || bf.releasing);
+
+    function bfSync() {
+        const e = backfillEls;
+        if (!e) return;
+        for (const [id, r] of bf.rows) {
+            const on = bf.selected.has(id);
+            r.box.checked = on;
+            r.tr.classList.toggle('is-sel', on);
+        }
+        const state = BF.headerState(bf.selected, bf.selectable);
+        e.all.checked = state === 'all';
+        e.all.indeterminate = state === 'some';
+        e.all.disabled = !bf.selectable.size || bf.releasing;
+        const n = bf.selected.size;
+        const t = BF.barText(n);
+        e.count.textContent = t.count;
+        e.bar.dataset.some = n ? 'true' : 'false';
+        e.release.textContent = t.action;
+        e.release.disabled = !n || bf.releasing;
+    }
+
+    function bfProgress(done, total) {
+        const e = backfillEls;
+        if (!e) return;
+        e.progress.hidden = done === null;
+        if (done === null) return;
+        e.progressText.textContent = BF.progressText(done, total);
+        e.progressFill.style.width = (total ? Math.round(100 * done / total) : 0) + '%';
+    }
+
+    const rowOf = (el) => (el && el.closest ? el.closest('#backfill-body tr[data-id]') : null);
+
+    function bfPointerDown(ev) {
+        if (bf.releasing || bf.gesture || (ev.pointerType === 'mouse' && ev.button !== 0)) return;
+        const tr = rowOf(ev.target);
+        if (!tr) return;
+        const id = Number(tr.dataset.id);
+        if (!bf.selectable.has(id)) return;
+        const r = bf.rows.get(id);
+        if (ev.pointerType === 'mouse') {
+            ev.preventDefault();                 // no text selection while dragging
+            r.box.focus({ preventScroll: true });
+        }
+        const state = !bf.selected.has(id);      // the first row's new state
+        if (ev.shiftKey && bf.anchor !== null) {
+            bf.selected = BF.setRange(bf.selected, bf.order, bf.anchor, id, state, bf.selectable);
+            bf.anchor = id;
+            bfSync();
+            return;
+        }
+        bf.gesture = { pointerId: ev.pointerId, start: id, over: id, state, base: new Set(bf.selected) };
+        bf.selected = BF.setRange(bf.gesture.base, bf.order, id, id, state, bf.selectable);
+        backfillEls.table.classList.add('dragging');
+        document.addEventListener('pointermove', bfPointerMove);
+        document.addEventListener('pointerup', bfPointerEnd);
+        document.addEventListener('pointercancel', bfPointerEnd);
+        bfSync();
+    }
+    function bfPointerMove(ev) {
+        const g = bf.gesture;
+        if (!g || ev.pointerId !== g.pointerId) return;
+        const tr = rowOf(document.elementFromPoint(ev.clientX, ev.clientY));
+        if (!tr) return;
+        const id = Number(tr.dataset.id);
+        if (id === g.over || !bf.rows.has(id)) return;
+        g.over = id;
+        bf.selected = BF.setRange(g.base, bf.order, g.start, id, g.state, bf.selectable);
+        bfSync();
+    }
+    function bfPointerEnd(ev) {
+        const g = bf.gesture;
+        if (!g || ev.pointerId !== g.pointerId) return;
+        // a touch that turned into a scroll is not a selection
+        if (ev.type === 'pointercancel') bf.selected = g.base;
+        else bf.anchor = g.over;
+        bf.gesture = null;
+        document.removeEventListener('pointermove', bfPointerMove);
+        document.removeEventListener('pointerup', bfPointerEnd);
+        document.removeEventListener('pointercancel', bfPointerEnd);
+        if (backfillEls) backfillEls.table.classList.remove('dragging');
+        bfSync();
+        bfRelease();
+    }
+    // A click from the mouse or a finger (detail > 0) was handled on
+    // pointerdown: keep the box as the selection says. A click with no pointer
+    // (a script, or Space where the key handler didn't run) toggles.
+    function bfClick(ev) {
+        const box = ev.target;
+        if (!box.dataset || !box.dataset.sel) return;
+        const id = Number(box.dataset.id);
+        if (ev.detail === 0 && bf.keyed !== id && bf.selectable.has(id) && !bf.releasing) {
+            bf.selected = BF.setRange(bf.selected, bf.order, ev.shiftKey && bf.anchor !== null ? bf.anchor : id, id,
+                                      !bf.selected.has(id), bf.selectable);
+            bf.anchor = id;
+        }
+        bfSync();
+    }
+    function bfKey(ev) {
+        const box = ev.target;
+        if (ev.key !== ' ' || !box.dataset || !box.dataset.sel) return;
+        ev.preventDefault();
+        if (ev.type === 'keyup') { setTimeout(() => { bf.keyed = null; }, 0); return; }
+        const id = Number(box.dataset.id);
+        if (ev.repeat || bf.releasing || !bf.selectable.has(id)) return;
+        bf.keyed = id;
+        bf.selected = BF.setRange(bf.selected, bf.order, ev.shiftKey && bf.anchor !== null ? bf.anchor : id, id,
+                                  !bf.selected.has(id), bf.selectable);
+        bf.anchor = id;
+        bfSync();
+    }
+
     function backfillSection() {
         const inst = D.instrument;
-        const q = h('input', { type: 'text', placeholder: 'Lab ID contains…', 'aria-label': 'Lab ID contains' });
+        const q = h('input', { type: 'text', placeholder: 'Lab ID contains…', 'aria-label': 'Lab ID contains', value: bf.q });
         const released = h('select', { 'aria-label': 'Released' }, h('option', { value: 'false', text: 'Not released' }),
             h('option', { value: 'true', text: 'Released' }), h('option', { value: '', text: 'All' }));
+        released.value = bf.released;
+        const filter = () => { bf.q = q.value; bf.released = released.value; loadBackfill(); };
+        q.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') filter(); });
         const tbody = h('tbody');
         const total = h('span', { className: 'caption' });
-        backfillEls = { inst, q, released, tbody, total };
+        const all = h('input', { type: 'checkbox', 'aria-label': 'Select all shown', 'data-testid': 'bf-all',
+                                 onclick: () => { bf.selected = BF.toggleAll(bf.selected, bf.selectable); bfSync(); } });
+        const count = h('span', { className: 'count', 'data-testid': 'bf-count', 'aria-live': 'polite' });
+        const release = h('button', { type: 'button', className: 'btn btn-primary btn-sm', 'data-testid': 'bf-release',
+                                      onclick: releaseSelected });
+        const progressText = h('span', { className: 'caption' });
+        const progressFill = h('span');
+        const progress = h('span', { className: 'bf-progress', 'data-testid': 'bf-progress', role: 'status', hidden: true },
+            h('span', { className: 'progress', 'aria-hidden': 'true' }, progressFill), progressText);
+        const bar = h('div', { className: 'bf-bar', 'data-testid': 'bf-bar' }, count, progress, h('span', { className: 'spacer' }), release);
+        const table = h('table', { className: 'tbl bf' },
+            h('thead', {}, h('tr', {}, h('th', { className: 'sel' }, all),
+                ...['Lab ID', 'Status', 'Released'].map(t => h('th', { text: t })))), tbody);
+        tbody.addEventListener('pointerdown', bfPointerDown);
+        tbody.addEventListener('click', bfClick);
+        tbody.addEventListener('keydown', bfKey);
+        tbody.addEventListener('keyup', bfKey);
+        backfillEls = { inst, q, released, tbody, total, all, count, release, bar, table, progress, progressText, progressFill };
+
         async function releaseSelected() {
-            const ids = Array.from(tbody.querySelectorAll('input[type=checkbox]:checked')).map(x => Number(x.dataset.id));
-            if (!ids.length) { S.toast('Select runs to release.', 'err'); return; }
-            if (!window.confirm('Release ' + ids.length + ' run(s)? Each is written to ' + inst.name + "'s results file (which LEM reads). This can't be undone.")) return;
-            const r = await S.adminPost('/api/admin/instruments/' + enc(inst.id) + '/backfill/release', { sample_ids: ids });
-            if (r && r.status === 200) { S.toast(L.releaseSummary(r.body.results), r.body.results.every(x => x.ok) ? null : 'err'); load(); }
+            const ids = bf.order.filter(id => bf.selected.has(id));
+            if (!ids.length || bf.releasing) return;
+            if (!window.confirm('Release ' + ids.length.toLocaleString('en-US') + ' run(s)? Each is written to ' +
+                                inst.name + "'s results file (which LEM reads). This can't be undone.")) return;
+            bf.releasing = true;
+            bfSync();
+            const results = [];
+            let done = 0;
+            bfProgress(0, ids.length);
+            try {
+                for (const part of BF.chunk(ids, BF.RELEASE_MAX)) {
+                    const r = await S.adminPost('/api/admin/instruments/' + enc(inst.id) + '/backfill/release', { sample_ids: part });
+                    if (!r || r.status !== 200) break;
+                    for (const x of r.body.results) {
+                        results.push(x);
+                        if (x.ok) bf.selected.delete(x.sample_id);
+                    }
+                    done += part.length;
+                    bfProgress(done, ids.length);
+                }
+            } finally {
+                bf.releasing = false;
+                bfProgress(null);
+                bfSync();
+            }
+            if (results.length) S.toast(L.releaseSummary(results), results.every(x => x.ok) ? null : 'err');
+            load();
         }
         return [
-            h('div', { className: 'row' }, q, released, h('button', { type: 'button', className: 'btn btn-sm', text: 'Filter', onclick: loadBackfill }), total),
-            h('div', { className: 'tablewrap' }, h('table', { className: 'tbl' },
-                h('thead', {}, h('tr', {}, ...['', 'Lab ID', 'Injected', 'Status', 'Released'].map(t => h('th', { text: t })))), tbody)),
-            h('div', { className: 'row' }, h('button', { type: 'button', className: 'btn', text: 'Release selected…', onclick: releaseSelected })),
+            h('div', { className: 'row' }, q, released, h('button', { type: 'button', className: 'btn btn-sm', text: 'Filter', onclick: filter }), total),
+            bar,
+            h('div', { className: 'tablewrap' }, table),
         ];
+    }
+    // A reload held back by a drag or a release runs when it ends.
+    function bfRelease() {
+        if (bf.pending && !bfHold()) { bf.pending = false; loadBackfill(true); }
     }
     async function loadBackfill(background) {
         const e = backfillEls;
         if (!e) return;
-        const params = new URLSearchParams({ q: e.q.value, released: e.released.value, limit: '200' });
+        if (background === true && bfHold()) { bf.pending = true; return; }
+        bf.pending = false;
+        const seq = ++bf.seq;
+        const params = new URLSearchParams({ q: bf.q, released: bf.released, limit: '1000' });
         const r = await S.getJSON('/api/instruments/' + enc(e.inst.id) + '/backfill?' + params, background === true);
-        if (e !== backfillEls) return;
-        e.tbody.replaceChildren();
+        if (e !== backfillEls || seq !== bf.seq) return;
+        if (background === true && bfHold()) { bf.pending = true; return; }
         if (r.status !== 200) { S.toast((r.body && r.body.error) || 'Could not load backfill', 'err'); return; }
+        const act = document.activeElement;
+        const focusId = act && act.dataset && act.dataset.sel ? Number(act.dataset.id) : null;
+        const info = { name: e.inst.name, live_since: r.body.live_since, live_since_set_at: r.body.live_since_set_at };
+        bf.order = r.body.samples.map(s => s.sample_id);
+        bf.selectable = new Set(r.body.samples.filter(s => s.status === 'final' && !s.released_at).map(s => s.sample_id));
+        bf.selected = BF.prune(bf.selected, bf.selectable);
+        if (bf.anchor !== null && !bf.selectable.has(bf.anchor)) bf.anchor = null;
+        bf.rows = new Map();
         e.total.textContent = r.body.total + ' run(s)' + (r.body.total > r.body.samples.length ? ', first ' + r.body.samples.length + ' shown' : '');
-        for (const s of r.body.samples) {
-            const box = h('input', { type: 'checkbox', disabled: s.status !== 'final' || !!s.released_at, 'aria-label': 'Release ' + s.lab_id });
-            box.dataset.id = String(s.sample_id);
+        const rows = r.body.samples.map(s => {
+            const can = bf.selectable.has(s.sample_id);
+            const box = h('input', { type: 'checkbox', disabled: !can, 'aria-label': 'Select ' + s.lab_id,
+                                     'data-sel': '1', 'data-id': String(s.sample_id) });
             const st = U.sampleStatus(s.status);
-            e.tbody.appendChild(h('tr', {}, h('td', {}, box), h('td', { text: s.lab_id }), h('td', { text: s.injection_dt }),
+            const tr = h('tr', { 'data-id': String(s.sample_id), className: can ? 'can' : null },
+                h('td', { className: 'sel' }, box),
+                h('td', {}, h('span', { className: 'lab', text: s.lab_id }),
+                    h('span', { className: 'why', 'data-testid': 'bf-why', text: BF.whyText(s, info) })),
                 h('td', {}, h('span', { className: 'row' }, S.glyph(st.glyph), h('span', { text: st.text }))),
-                h('td', { text: s.released_at ? U.clockTime(s.released_at, Date.now()) + ' by ' + (U.actorName(s.released_by) || '—') : 'No' })));
-        }
-        if (!r.body.samples.length) e.tbody.appendChild(h('tr', {}, h('td', { colspan: 5, className: 'muted', text: 'No backfill runs.' })));
+                h('td', { text: s.released_at ? U.clockTime(s.released_at, Date.now()) + ' by ' + (U.actorName(s.released_by) || '—') : 'No' }));
+            bf.rows.set(s.sample_id, { tr, box });
+            return tr;
+        });
+        e.tbody.replaceChildren(...rows);
+        if (!rows.length) e.tbody.appendChild(h('tr', {}, h('td', { colspan: 4, className: 'muted', text: 'No backfill runs.' })));
+        if (focusId !== null && bf.rows.has(focusId)) bf.rows.get(focusId).box.focus({ preventScroll: true });
+        bfSync();
     }
 
     let conflictsBox = null;
@@ -460,8 +650,14 @@
     function render(background) {
         renderHead();
         renderChecklist();
-        for (const key of Object.keys(SECTIONS)) renderSection(key, background);
-        if (!(background && busy('backfill'))) loadBackfill(background);
+        for (const key of Object.keys(SECTIONS)) {
+            // v5.0: live updates redraw only the Backfill rows, never its
+            // controls, so the filter and the selection stay as they are
+            if (key === 'backfill' && background && backfillEls) continue;
+            renderSection(key, background);
+        }
+        const typing = backfillEls && [backfillEls.q, backfillEls.released].includes(document.activeElement);
+        if (!(background && typing)) loadBackfill(background);
         if (!(background && busy('conflicts'))) loadConflicts(background);
         S.addRecent({ href: U.instrumentHref(IID), label: D.instrument.name });
     }

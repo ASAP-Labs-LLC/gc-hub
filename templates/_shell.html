@@ -65,9 +65,9 @@
       <div class="menu-head" id="menu-name">{{ web_user.name if web_user else 'Not signed in' }}</div>
       <div class="menu-row"><span>Theme</span>
         <div class="seg" role="radiogroup" aria-label="Theme" data-testid="theme-switch">
+          <button type="button" role="radio" data-theme-choice="system" aria-checked="false" title="Follow this computer's light or dark setting">System</button>
           <button type="button" role="radio" data-theme-choice="light" aria-checked="false">Light</button>
           <button type="button" role="radio" data-theme-choice="dark" aria-checked="false">Dark</button>
-          <button type="button" role="radio" data-theme-choice="system" aria-checked="false">Auto</button>
         </div>
       </div>
       <a role="menuitem" href="/?open=settings" title="Opens Settings on the Samples page">Settings</a>

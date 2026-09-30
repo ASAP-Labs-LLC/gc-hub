@@ -132,6 +132,11 @@ PAIRS = [
     ("--text", ["--bg-card", "--bg-hover"], TEXT, "a hovered chip"),
     ("--warn-text", ["--bg-card"], TEXT, "a held sample's reason in the header"),
     ("--st-error", ["--bg-card"], TEXT, "an error sample's reason in the header"),
+    # v5.0: the Backfill rows (gc_pages.css): selected and hovered rows, their why line
+    ("--text", ["--bg", "--bg-active"], TEXT, "a selected backfill row"),
+    ("--text-muted-sunken", ["--bg", "--bg-active"], TEXT, "the why line on a selected row"),
+    ("--text-muted-sunken", ["--bg", "--bg-hover"], TEXT, "the why line on a hovered row"),
+    ("--text-muted-sunken", ["--bg-card", "--bg-active"], TEXT, "the why line on a selected row (card)"),
     ("--accent", ["--bg"], UI, "focus ring"),
     ("--accent", ["--sidebar-bg"], UI, "focus ring in the sidebar"),
     ("--accent", ["--bg-sunken"], UI, "focus ring on sunken fields"),
