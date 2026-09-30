@@ -96,7 +96,7 @@ def test_failed_and_stopped_jobs_end_their_task_without_the_error_text():
 
 def test_the_diagnostics_runner_opens_the_diagnostics_panel():
     assert hub_admin.DIAG_JOBS._open_url("diagnostics-bundle") == "/admin/hub#diagnostics"
-    assert hub_admin.JOBS._open_url("purge") == "/admin/hub#purge"
+    assert hub_admin.JOBS._open_url("purge") == "/admin/hub#purge-panel"
     assert hub_admin.JOBS._open_url("load-folder") == "/admin/hub#load-folder"
     assert hub_admin.JOBS._open_url("import-history") == "/admin/hub#import-history"
 

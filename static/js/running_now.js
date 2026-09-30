@@ -372,6 +372,23 @@
         }
     }
 
+    // The shell's sidebar footer: "2 of 2 GCs connected" (glyph + text).
+    function renderGcSummary() {
+        const a = $('gc-summary');
+        if (!a) return;
+        const agents = agentsNow();
+        const text = gcSummary(agents, Date.now());
+        a.hidden = !text;
+        a.replaceChildren();
+        if (!text) return;
+        const s = gcStrip(agents, Date.now());
+        a.className = 'sb-gcs gc-strip-' + s.cls;
+        a.title = s.title;
+        const g = el('span', 'gc-chip-glyph', s.glyph);
+        g.setAttribute('aria-hidden', 'true');
+        a.append(g, el('span', 'sb-label', text));
+    }
+
     function renderBanner() {
         const b = $('paused-banner');
         if (!b) return;
@@ -384,11 +401,13 @@
         last = { tasks: u.tasks || [], hub: u.hub || null, boot: u.boot || last.boot };
         renderIndicator();
         renderStrip();
+        renderGcSummary();
         renderBanner();
     }
 
     function mount() {
-        if (!root.GCLive || !($('running-now') || $('gc-strip') || $('paused-banner'))) return;
+        if (!root.GCLive || !($('running-now') || $('gc-strip') || $('paused-banner')
+                               || $('gc-summary'))) return;
         const toggle = (which) => (e) => { e.stopPropagation(); setOpen(openPop === which ? null : which); };
         if ($('running-now')) $('running-now').addEventListener('click', toggle('tasks'));
         if ($('gc-strip')) $('gc-strip').addEventListener('click', toggle('gcs'));
@@ -401,8 +420,10 @@
         document.addEventListener('click', () => { if (openPop) setOpen(null); });
         document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && openPop) setOpen(null); });
         root.GCLive.subscribe(onUpdate);
+        // a shell page (live_adapter.js) may not start the poller itself
+        if (root.GCLive.start) root.GCLive.start();
         // the ages tick between answers (and an agent's age alone is no update)
-        setInterval(() => { renderStrip(); if (openPop === 'tasks') renderTasksPopover(); },
+        setInterval(() => { renderStrip(); renderGcSummary(); if (openPop === 'tasks') renderTasksPopover(); },
                     STRIP_TICK_MS);
     }
 

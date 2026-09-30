@@ -199,7 +199,7 @@ def job_refusal(kind: str, *, startup: bool = True) -> Optional[JobRefused]:
 OPEN_URLS = {"load-folder": "/admin/hub#load-folder",
              "import-history": "/admin/hub#import-history",
              "import-history-dry-run": "/admin/hub#import-history",
-             "purge": "/admin/hub#purge",
+             "purge": "/admin/hub#purge-panel",
              "diagnostics-bundle": "/admin/hub#diagnostics"}
 
 

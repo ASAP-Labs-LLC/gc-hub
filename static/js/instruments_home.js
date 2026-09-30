@@ -128,7 +128,11 @@
 
     S.onInstruments((body) => {
         instruments = body.instruments || [];
-        for (const i of instruments) if (i.agent) agents[i.id] = Object.assign({}, agents[i.id] || {}, i.agent);
+        // v4.0 lane E: the hub's age was read now (read_at), so it ticks from here
+        const readAt = Date.now();
+        for (const i of instruments) {
+            if (i.agent) agents[i.id] = Object.assign({}, agents[i.id] || {}, i.agent, { read_at: readAt });
+        }
         renderCards();
     });
     S.getJSON('/api/lem/machines').then(r => {

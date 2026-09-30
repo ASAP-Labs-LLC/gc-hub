@@ -3820,10 +3820,6 @@ def _start_hub() -> None:
     app serves: /healthz answers, and ingest keeps accepting (samples queue).
     Then primes ``sample_cache``."""
     global _hub_runtime
-    try:   # v4.0 lane E: imports a restart cut short show as interrupted tasks
-        tasks.note_unfinished_imports(paths.require_data_dir() / store.DB_FILENAME)
-    except Exception:  # noqa: BLE001 - never stop the hub starting
-        LOGGER.exception("Could not note interrupted imports")
     rt = hub.start_with_retry(
         lambda: hub.start(settings_mod.load_settings(), on_final=_on_sample_final),
         notifier=hub.default_notifier())

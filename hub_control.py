@@ -605,6 +605,33 @@ def busy_reasons(*, cached: bool = False, export_pass: bool = True) -> List[str]
             out.append("a diagnostics bundle is being built")
     except Exception:  # noqa: BLE001 - not there yet, or broken: not busy
         pass
+    out.extend(_task_reasons(out, job))
+    return out
+
+
+def _task_reasons(reasons: List[str], job: Optional[dict]) -> List[str]:
+    """v4.0 lane E: a running task the running-now indicator shows (and a
+    restart would cut short) that none of the checks above named: so the
+    indicator and this guard never disagree. Named once per kind."""
+    try:
+        import tasks
+        running = tasks.REGISTRY.running_blocking()
+    except Exception:  # noqa: BLE001
+        return []
+    text = " ".join(reasons).lower()
+    covered = set()
+    if job is not None:
+        covered.add(job.get("kind"))
+    for kind, words in (("qbench-upload", "qbench upload"), ("reports-zip", "report zip"),
+                        ("diagnostics-bundle", "diagnostics bundle")):
+        if words in text:
+            covered.add(kind)
+    out, seen = [], set()
+    for t in running:
+        if t["kind"] in covered or t["kind"] in seen:
+            continue
+        seen.add(t["kind"])
+        out.append(f"{t['title']} is running")
     return out
 
 

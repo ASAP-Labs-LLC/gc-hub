@@ -332,3 +332,32 @@ def test_hub_admin_unlocks_once_and_starts_a_folder_load(tmp_path):
             assert _wait(lambda: _js(drv, "return !document.getElementById('unlock-form').hidden;"))
         finally:
             drv.quit()
+
+
+def test_the_shell_sidebar_shows_running_work_and_live_gcs(tmp_path):
+    """The v3.1 shell pages (here /instruments) carry the same running-now row
+    and "N of M GCs connected" in the sidebar footer, and the paused banner."""
+    hub = build_hub(tmp_path)
+    token = ingest_api.mint_token("gc1", db=hub.db)
+    with booted(tmp_path) as (port, _proc, _data, _home):
+        drv = _driver()
+        browser_sign_in(drv, port)
+        try:
+            drv.get(f"http://127.0.0.1:{port}/instruments")
+            gcs = lambda: _js(drv, "const a = document.getElementById('gc-summary');"  # noqa: E731
+                                   "return a.hidden ? '' : a.textContent;")
+            assert _wait(lambda: gcs().endswith("0 of 2 GCs connected")), gcs()
+            code, _ = _heartbeat(port, token)
+            assert code == 200
+            assert _wait(lambda: gcs().endswith("1 of 2 GCs connected")), gcs()
+
+            code, body = post(port, "/api/reprocess", {"sample_ids": [hub.ids["final"]]})
+            assert code == 200, body
+            assert _wait(lambda: "Re-process" in _indicator(drv), timeout=60), _indicator(drv)
+            drv.find_element("id", "running-now").click()
+            assert _wait(lambda: "Re-processed 1 sample" in _js(
+                drv, "return document.getElementById('running-now-popover').textContent;"),
+                timeout=60)
+            assert _js(drv, "return document.getElementById('paused-banner').hidden;") is True
+        finally:
+            drv.quit()

@@ -101,39 +101,28 @@ def test_an_interrupted_task_can_be_noted_at_start_up(reg, clock):
     assert reg.snapshot(None) == []
 
 
-def test_imports_a_restart_cut_short_show_as_interrupted(tmp_path, clock):
-    """At start-up, before the hub runs anything: every real import run the
-    store says started but never finished was cut short by the restart."""
-    import sqlite3
-    db = tmp_path / "gc.db"
-    conn = sqlite3.connect(db)
-    conn.execute('CREATE TABLE import_runs(id INTEGER PRIMARY KEY, instrument_id TEXT, '
-                 'started_at TEXT, finished_at TEXT, "by" TEXT, sources TEXT, counts TEXT, '
-                 'stopped TEXT)')
-    conn.executemany('INSERT INTO import_runs(instrument_id, started_at, finished_at, "by") '
-                     'VALUES (?, ?, ?, ?)',
-                     [("gc2", "2026-09-30T10:00:00+00:00", None, "Ryan C (10.0.0.5)"),
-                      ("gc1", "2026-09-29T10:00:00+00:00", "2026-09-29T11:00:00+00:00", "x")])
-    conn.commit()
-    conn.close()
-    reg = tasks.Registry(clock=clock)
-    assert tasks.note_unfinished_imports(db, registry=reg) == 1
-    [t] = reg.snapshot("Ryan C", names={"gc2": "GC-2"})
-    assert t["state"] == "interrupted" and t["kind"] == "import-history"
-    assert t["outcome"] == "GC-2 history import interrupted by a restart"
-    assert t["by"] == "Ryan C" and t["mine"] is True             # the name, never the address
-    assert t["open_url"] == "/admin/hub#import-history"
-    # no store yet (a first start): nothing, no error
-    assert tasks.note_unfinished_imports(tmp_path / "missing.db", registry=reg) == 0
-
-
-def test_the_hub_start_notes_them_before_it_starts():
-    import ast
-    src = (ROOT / "app.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_start_hub")
-    body = ast.get_source_segment(src, fn)
-    assert body.index("tasks.note_unfinished_imports(") < body.index("hub.start_with_retry(")
+def test_start_up_recovery_shows_interrupted_work_as_tasks(monkeypatch, tmp_path):
+    """``hub.run_startup_recovery`` (v3.1 purge): a purge it finished and an
+    import it marked interrupted show as interrupted tasks for 30 minutes."""
+    pytest.importorskip("flask")
+    import hub
+    reg = tasks.Registry()
+    monkeypatch.setattr(tasks, "REGISTRY", reg)
+    monkeypatch.setattr(hub, "recover_purges", lambda db, d, n: [
+        {"instrument": "gc2", "samples": 5}, {"instrument": "gc3", "nothing_to_do": True}])
+    monkeypatch.setattr(hub, "mark_interrupted_imports", lambda db, d, n: [
+        {"id": 1, "instrument_id": "gc1", "by": "Ryan C (10.0.0.5)"}])
+    hub.forget_startup_recovery(tmp_path)
+    try:
+        assert hub.run_startup_recovery(tmp_path / "gc.db", tmp_path, None) is not None
+    finally:
+        hub.forget_startup_recovery(tmp_path)
+    out = {t["kind"]: t for t in reg.snapshot("Ryan C", names={"gc1": "GC-1", "gc2": "GC-2"})}
+    assert set(out) == {"purge", "import-history"}
+    assert out["purge"]["outcome"] == "GC-2 purge interrupted by a restart"
+    assert out["purge"]["open_url"] == "/admin/hub#purge-panel"
+    assert out["import-history"]["outcome"] == "GC-1 history import interrupted by a restart"
+    assert out["import-history"]["by"] == "Ryan C" and out["import-history"]["mine"] is True
 
 
 def test_the_reprocess_probe_reports_its_counts(tmp_path):

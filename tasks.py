@@ -41,6 +41,11 @@ RETAIN_SECONDS = 30 * 60        # a finished task stays visible this long
 MAX_KEPT = 200                  # tasks remembered at most (oldest ended dropped first)
 TEXT_MAX = 120
 STATES = ("running", "done", "failed", "stopped", "interrupted")
+#: Work a Stop or a restart would cut short (it lives in this process): these
+#: tasks hold off the restart like ``hub_control.busy_reasons``' own checks.
+#: A reprocess batch is not one: its jobs are durable and survive a restart.
+BLOCKING_KINDS = frozenset({"load-folder", "import-history", "import-history-dry-run", "purge",
+                            "diagnostics-bundle", "reports-zip", "qbench-upload"})
 WATCH_SECONDS = 2.0
 WATCH_MAX_ERRORS = 5
 
@@ -437,6 +442,13 @@ class Registry:
             })
         return out
 
+    def running_blocking(self) -> list:
+        """``[{kind, title}]`` of the running tasks a restart would cut short
+        (``BLOCKING_KINDS``): ``hub_control.busy_reasons`` names any its own
+        checks missed, so the indicator and the restart guard agree."""
+        return [{"kind": t["kind"], "title": t["title"]} for t in self.snapshot(None)
+                if t["state"] == "running" and t["kind"] in BLOCKING_KINDS]
+
     def reset(self) -> None:
         """Forget everything (tests)."""
         with self._lock:
@@ -480,33 +492,6 @@ def jobs_probe(job_ids: Iterable[Any], db: Path, *, timeout: float = 0.25) -> Ca
         return out
 
     return probe
-
-
-def note_unfinished_imports(db: Path, *, registry: Optional[Registry] = None) -> int:
-    """At start-up, before the hub runs anything (v4.0 lane E review): every
-    real history import the store says started but never finished was cut
-    short by the restart (admin jobs die with the process). Each shows as an
-    interrupted task for ``RETAIN_SECONDS``. Read-only; a missing or locked
-    store notes nothing. Returns how many were noted."""
-    reg = registry or REGISTRY
-    p = Path(db)
-    if not p.is_file():
-        return 0
-    try:
-        conn = sqlite3.connect(f"{p.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
-        try:
-            rows = conn.execute('SELECT instrument_id, "by" FROM import_runs '
-                                "WHERE finished_at IS NULL").fetchall()
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        log.warning("tasks: could not read unfinished import runs", exc_info=True)
-        return 0
-    for inst, by in rows:
-        name = by.rsplit(" (", 1)[0] if isinstance(by, str) and by.endswith(")") else by
-        reg.note_interrupted("import-history", instrument=inst, by=name,
-                             open_url="/admin/hub#import-history")
-    return len(rows)
 
 
 __all__ = ["REGISTRY", "Registry", "jobs_probe", "phase_text", "RETAIN_SECONDS"]
