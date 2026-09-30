@@ -44,8 +44,7 @@
     // ── HTTP ───────────────────────────────────────────────────────────────
     async function getJSON(path) {
         const r = await fetch(path, { headers: { Accept: 'application/json' } });
-        let body = null;
-        try { body = await r.json(); } catch (_e) { body = null; }
+        const body = (await window.GCSession.readJson(r)).body;
         return { status: r.status, body };
     }
 
@@ -63,8 +62,7 @@
             body: JSON.stringify(Object.assign({}, payload || {}, { password: pw })),
         });
         if (opts && opts.raw) return r;
-        let body = null;
-        try { body = await r.json(); } catch (_e) { body = null; }
+        const body = (await window.GCSession.readJson(r)).body;
         if (r.status >= 400 && !(opts && opts.quiet)) {
             flash((body && body.error) || ('HTTP ' + r.status), 'err');
         }
@@ -292,7 +290,7 @@
             { confirm_revoke: !!confirmRevoke }, { raw: true });
         if (!r) return;
         let body = null;
-        if (r.status !== 200) { try { body = await r.json(); } catch (_e) { body = null; } }
+        if (r.status !== 200) { body = (await window.GCSession.readJson(r)).body; }
         const out = L.installerOutcome(r.status, body);
         if (out.kind === 'download') {
             const blob = await r.blob();

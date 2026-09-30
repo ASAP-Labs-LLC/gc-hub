@@ -589,8 +589,9 @@ def _guard():
                      "hub_control: refused %s %s from %s (Host %r): not local",
                      request.method, request.path, addr, request.host)
         return None, None, _err(LOOPBACK_ONLY_MESSAGE, 403)
-    if admin_auth._cross_site():
-        return None, None, _err("Cross-site request refused", 403)
+    refusal = netctx.cross_site_refusal()
+    if refusal:
+        return None, None, _err(refusal, 403)
     body, err = admin_auth._json_body()
     if err:
         return None, None, err

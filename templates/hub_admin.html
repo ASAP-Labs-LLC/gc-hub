@@ -6,7 +6,7 @@
   <title>Hub admin</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=2">
-  <script src="{{ url_for('static', filename='js/session.js') }}?v=1"></script>
+  <script src="{{ url_for('static', filename='js/session.js') }}?v=2"></script>
   <style>
     :root{
       --bg:#0d1117; --panel:#161b22; --line:#30363d;
@@ -170,8 +170,8 @@
     <span id="diag-msg" role="status"></span>
   </div>
 </main>
-<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=4"></script>
-<script src="{{ url_for('static', filename='js/diagnostics.js') }}?v=3"></script>
+<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/diagnostics.js') }}?v=4"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

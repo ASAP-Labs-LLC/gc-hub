@@ -7,7 +7,7 @@
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=2">
-  <script src="{{ url_for('static', filename='js/session.js') }}?v=1"></script>
+  <script src="{{ url_for('static', filename='js/session.js') }}?v=2"></script>
   <style>
     :root{
       --bg:#0d1117; --panel:#161b22; --line:#30363d; --line2:#21262d;
@@ -131,7 +131,7 @@ async function loadInstruments(){
   const sel = $("inst");
   try{
     const r = await fetch("/api/instruments");
-    const j = await r.json();
+    const j = (await GCSession.readJson(r)).body || {};
     for(const inst of (j.instruments || [])){
       const o = document.createElement("option");
       o.value = inst.id;
@@ -172,8 +172,8 @@ async function load(sensitivity, preserveChoices){
     const url = CAL_API +
       (sensitivity != null ? ("?sensitivity=" + sensitivity) : "");
     const r = await fetch(url);
-    const j = await r.json();
-    if(!r.ok){ throw new Error(j.error || ("HTTP "+r.status)); }
+    const j = (await GCSession.readJson(r)).body || {};
+    if(!r.ok || j.error){ throw new Error(j.error || ("HTTP "+r.status)); }
     DATA = j;
     $("cdf-name").textContent = (j.instrument_name ? j.instrument_name + " — " : "") + (j.cdf_name || "") +
       (j.usable ? "" : " (not usable yet: " + (j.problem || "assign the peaks") + ")");
@@ -331,8 +331,8 @@ async function save(){
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({assignments, sensitivity: +$("sens").value, password})
     });
-    const j = await r.json();
-    if(!r.ok){ throw new Error(j.error || ("HTTP "+r.status)); }
+    const j = (await GCSession.readJson(r)).body || {};
+    if(!r.ok || j.error){ throw new Error(j.error || ("HTTP "+r.status)); }
     if(j.anchors < 4){
       setStatus(`Saved, but only ${j.anchors} carbon(s) assigned — assign at least 4 `+
                 `(ideally the full ladder) for accurate distillation numbers.`, "err");

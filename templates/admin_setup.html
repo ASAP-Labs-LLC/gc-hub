@@ -6,7 +6,7 @@
   <title>Admin password setup</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=2">
-  <script src="{{ url_for('static', filename='js/session.js') }}?v=1"></script>
+  <script src="{{ url_for('static', filename='js/session.js') }}?v=2"></script>
   <style>
     :root{
       --bg:#0d1117; --panel:#161b22; --line:#30363d; --line2:#21262d;
@@ -79,7 +79,7 @@
         method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({password: pw, setup_code: document.getElementById("code").value.trim()})
       }).then(function (r) {
-        return r.json().then(function (b) { return {status: r.status, body: b}; });
+        return window.GCSession.readJson(r);
       }).then(function (res) {
         if (res.status === 201) {
           say("Admin password set. You can close this page.", true);

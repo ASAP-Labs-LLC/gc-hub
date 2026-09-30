@@ -232,6 +232,8 @@ app.register_blueprint(web_auth.bp)
 app.before_request(web_auth.require_https)
 app.after_request(web_auth.add_security_headers)
 app.context_processor(web_auth.template_context)
+import api_errors  # noqa: E402  (v3.1.0: every /api/ failure answers JSON {error, status, ref})
+api_errors.install(app)
 
 # ---------------------------------------------------------------------------
 # Global state
@@ -742,12 +744,15 @@ def _refuse_cross_site_writes():
     """Refuse state-changing /api/ requests that a browser marks as coming
     from another site. Registered before the session gate and activity
     tracking, so a refused request does not count as use."""
-    if request.method in _STATE_CHANGING_METHODS and request.path.startswith("/api/") \
-            and netctx.is_cross_site():
-        LOGGER.warning("Refused cross-site %s %s from %s (Origin %r, Sec-Fetch-Site %r)",
+    if request.method not in _STATE_CHANGING_METHODS or not request.path.startswith("/api/"):
+        return None
+    refusal = netctx.cross_site_refusal()
+    if refusal:
+        LOGGER.warning("Refused cross-site %s %s from %s (Origin %r, Sec-Fetch-Site %r): %s",
                        request.method, request.path, netctx.client_ip(),
-                       request.headers.get("Origin"), request.headers.get("Sec-Fetch-Site"))
-        return jsonify({"error": "Cross-site request refused"}), 403
+                       request.headers.get("Origin"), request.headers.get("Sec-Fetch-Site"),
+                       refusal)
+        return jsonify({"error": refusal}), 403
     return None
 
 

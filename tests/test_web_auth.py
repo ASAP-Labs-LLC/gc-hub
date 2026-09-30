@@ -38,6 +38,7 @@ LAN = {"REMOTE_ADDR": "10.0.0.25"}
 LOCAL = {"REMOTE_ADDR": "127.0.0.1"}
 JSON = {"Content-Type": "application/json"}
 ADMIN_PW = "break-glass-pw"
+HTTPS_MESSAGE = "Sign in over https: open https://gc.asaplabs.net"
 
 
 def tunnel(ip="203.0.113.9", proto="https", **extra):
@@ -58,8 +59,10 @@ def make_app():
     def _cross_site():
         from flask import request
         if request.method in ("POST", "PUT", "PATCH", "DELETE") \
-                and request.path.startswith("/api/") and netctx.is_cross_site():
-            return jsonify({"error": "Cross-site request refused"}), 403
+                and request.path.startswith("/api/"):
+            refusal = netctx.cross_site_refusal()      # app._refuse_cross_site_writes
+            if refusal:
+                return jsonify({"error": refusal}), 403
         return None
 
     app.before_request(web_auth.gate)
@@ -664,6 +667,15 @@ def test_no_redirect_loop_when_the_proxy_names_no_scheme(env):
     r = post(c, "/api/login", {"username": "ryan c", "password": "labpass-1"}, environ=LOCAL,
              headers=h)
     assert r.status_code == 403 and env["stub"].requests == []
+    assert r.get_json()["error"] == HTTPS_MESSAGE
+    # what a browser sends: its Origin is https, which the hub (taking the
+    # request for http) would otherwise call cross-site
+    for path in ("/api/login", "/api/login/card"):
+        r = post(c, path, {"username": "ryan c", "password": "labpass-1", "code": "CARD-1"},
+                 environ=LOCAL, headers=dict(h, Origin="https://gc.asaplabs.net",
+                                             **{"Sec-Fetch-Site": "same-origin"}))
+        assert r.status_code == 403 and r.get_json()["error"] == HTTPS_MESSAGE, path
+    assert env["stub"].requests == []
     ok = dict(h, **{"CF-Visitor": '{"scheme":"https"}'})
     r = post(c, "/api/login", {"username": "ryan c", "password": "labpass-1"}, environ=LOCAL,
              headers=ok)

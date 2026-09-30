@@ -30,6 +30,8 @@ sending them is just a LAN client with odd headers.
   ``app``'s guard and ``admin_auth`` both use it: one origin rule.
 * ``throttle_key(ip)`` — IPv6 grouped by /64; IPv4-mapped unwrapped.
 * ``https_url()``   — this request's URL with ``https://`` (the 308 target).
+* ``log_safe(text)`` — request-derived text with its control characters
+  escaped, for a log line (``request.path`` is percent-decoded: ``%0A``).
 
 Stdlib + Flask's ``request`` only; reads ``settings.json`` directly (cached on
 its mtime) so it has no import-time side effects and no store access.
@@ -242,7 +244,73 @@ def is_cross_site(req=None) -> bool:
     return mine is None or host_port(parts.netloc, parts.scheme) != mine
 
 
+CROSS_SITE_MESSAGE = "Cross-site request refused"
+
+
+def https_refusal_message(req=None) -> str:
+    """What to tell someone who reached the hub through the proxy without an
+    https scheme header: ``Sign in over https: open https://<Host>``."""
+    req = _req(req)
+    name = hostname(req.host) or "gc.asaplabs.net"
+    return f"Sign in over https: open https://{name}"
+
+
+def _only_the_scheme_differs(req) -> bool:
+    """Through a trusted proxy that named no scheme (so the hub takes the
+    request for http) and the browser's ``Origin`` is exactly
+    ``https://<this Host>``: not another site, just a missing header."""
+    if not is_proxied(req) or is_https(req) or forwarded_scheme(req) is not None:
+        return False
+    site = req.headers.get("Sec-Fetch-Site")
+    if site is not None and site.strip().lower() not in ALLOWED_FETCH_SITES:
+        return False
+    origin = req.headers.get("Origin")
+    if origin is None:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(origin.strip())
+    except ValueError:
+        return False
+    if parts.scheme != "https" or not parts.netloc:
+        return False
+    mine = host_port(req.host, "https")
+    return mine is not None and host_port(parts.netloc, "https") == mine
+
+
+def cross_site_refusal(req=None) -> Optional[str]:
+    """The cross-site guard's answer: None when the request may proceed, else
+    the message for its 403. A request through Cloudflare without an https
+    scheme header whose ``Origin`` is this host over https is told to use
+    https (``https_refusal_message``), not "Cross-site request refused"."""
+    req = _req(req)
+    if not is_cross_site(req):
+        return None
+    if _only_the_scheme_differs(req):
+        return https_refusal_message(req)
+    return CROSS_SITE_MESSAGE
+
+
 # ── helpers ─────────────────────────────────────────────────────────────────
+
+def _log_escape(ch: str) -> str:
+    code = ord(ch)
+    if code < 32 or 0x7F <= code <= 0x9F:
+        return f"\\x{code:02x}"
+    if code in (0x2028, 0x2029):
+        return f"\\u{code:04x}"
+    return ch
+
+
+def log_safe(value: Any) -> str:
+    """Request-derived text (a path, a ``Host``, an error text that may echo
+    the request) made safe for one log line: C0/C1 control characters, DEL and
+    U+2028/U+2029 become ``\\xNN``/``\\uNNNN`` escapes, so a percent-decoded
+    ``%0A`` can never start a forged line in app.log. Anything else is kept
+    as is; a value that is not text is logged as its ``repr``."""
+    if not isinstance(value, str):
+        value = repr(value)
+    return "".join(_log_escape(ch) for ch in value)
+
 
 def throttle_key(addr: Any) -> str:
     """A throttle bucket for an address: IPv6 by /64, IPv4 as is."""

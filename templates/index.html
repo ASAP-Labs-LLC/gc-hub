@@ -12,7 +12,7 @@
   <!-- App stylesheet (cache-bust) -->
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=38">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=2">
-  <script src="{{ url_for('static', filename='js/session.js') }}?v=1"></script>
+  <script src="{{ url_for('static', filename='js/session.js') }}?v=2"></script>
 
   <!-- Inline critical layout styles (structural only; visual polish lives in style.css) -->
   <style>
@@ -513,36 +513,8 @@
         <div class="panel-body" style="padding:0; overflow:auto;">
           <table class="data-table" id="distill-table">
             <thead>
-              <tr>
-                <th class="col-meta" data-col="Lab ID">Lab ID</th>
-                <th class="col-meta" data-col="InjectionDateTime">Injection Date</th>
-                <th class="col-d86" data-col="D86 IBP">D86 IBP</th>
-                <th class="col-d86" data-col="D86 T5">D86 T5</th>
-                <th class="col-d86" data-col="D86 T10">D86 T10</th>
-                <th class="col-d86" data-col="D86 T20">D86 T20</th>
-                <th class="col-d86" data-col="D86 T30">D86 T30</th>
-                <th class="col-d86" data-col="D86 T40">D86 T40</th>
-                <th class="col-d86" data-col="D86 T50">D86 T50</th>
-                <th class="col-d86" data-col="D86 T60">D86 T60</th>
-                <th class="col-d86" data-col="D86 T70">D86 T70</th>
-                <th class="col-d86" data-col="D86 T80">D86 T80</th>
-                <th class="col-d86" data-col="D86 T90">D86 T90</th>
-                <th class="col-d86" data-col="D86 T95">D86 T95</th>
-                <th class="col-d86" data-col="D86 FBP">D86 FBP</th>
-                <th class="col-d2887" data-col="2887 IBP">2887 IBP</th>
-                <th class="col-d2887" data-col="2887 T5">2887 T5</th>
-                <th class="col-d2887" data-col="2887 T10">2887 T10</th>
-                <th class="col-d2887" data-col="2887 T20">2887 T20</th>
-                <th class="col-d2887" data-col="2887 T30">2887 T30</th>
-                <th class="col-d2887" data-col="2887 T40">2887 T40</th>
-                <th class="col-d2887" data-col="2887 T50">2887 T50</th>
-                <th class="col-d2887" data-col="2887 T60">2887 T60</th>
-                <th class="col-d2887" data-col="2887 T70">2887 T70</th>
-                <th class="col-d2887" data-col="2887 T80">2887 T80</th>
-                <th class="col-d2887" data-col="2887 T90">2887 T90</th>
-                <th class="col-d2887" data-col="2887 T95">2887 T95</th>
-                <th class="col-d2887" data-col="2887 FBP">2887 FBP</th>
-              </tr>
+              <!-- built from /api/table's columns by app.js (DistillView.tableHeader) -->
+              <tr></tr>
             </thead>
             <tbody id="distill-table-body">
               <!-- populated by app.js -->
@@ -1139,9 +1111,10 @@
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/comments.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/comments.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/ladder.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=50"></script>
+<script src="{{ url_for('static', filename='js/distill_view.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=53"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

@@ -275,13 +275,17 @@ async function api(method, url, body, extra) {
     }
     const resp = await fetch(url, opts);
     if (!resp.ok) {
-        let errMsg = `API error ${resp.status}`;
-        try { const j = await resp.json(); errMsg = j.error || j.message || errMsg; } catch { /* ignore */ }
-        throw new Error(errMsg);
+        const j = (await GCSession.readJson(resp)).body || {};
+        throw new Error(j.error || j.message || `API error ${resp.status}`);
     }
     const ct = resp.headers.get('content-type') || '';
-    if (ct.includes('application/json')) return resp.json();
-    return resp;
+    if (!ct.includes('application/json')) return resp;
+    const j = (await GCSession.readJson(resp)).body;
+    // a body that claims to be JSON but doesn't parse comes back as readJson's {error}
+    if (j && typeof j.error === 'string' && j.error.startsWith('The hub answered HTTP ')) {
+        throw new Error(j.error);
+    }
+    return j;
 }
 
 async function apiGet(url) { return api('GET', url); }
@@ -293,7 +297,7 @@ async function apiPostRefusable(url, what, body) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
     });
-    const j = await resp.json().catch(() => ({}));
+    const j = (await GCSession.readJson(resp)).body || {};
     if (!resp.ok) {
         throw new Error((j.refused && j.refused.length)
             ? refusalSummary(what, j.refused, state.files)
@@ -510,12 +514,14 @@ function convertToD86(d2887) {
         const tCurr = d2887[pCurr];
         const tNext = d2887[pNext];
         if (tPrev == null || tCurr == null || tNext == null) continue;
-        d86[cut] = round2(a0 + a1 * tPrev + a2 * tCurr + a3 * tNext);
+        // rounded like distill._round2 (Python's round), so the numbers match the hub's
+        d86[cut] = DistillView.pyRound2(a0 + a1 * tPrev + a2 * tCurr + a3 * tNext);
     }
-    // 40% and 60% have no D86 equation
+    // 40% and 60% have no D86 equation: the midpoints of 30/50 and 50/70, as
+    // distill.x4_midpoints does
     d86["40%"] = null;
     d86["60%"] = null;
-    return d86;
+    return DistillView.x4Midpoints(d86);
 }
 
 /* ===================================================================
@@ -880,7 +886,7 @@ function showContextMenu(e, file) {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ sample_ids }),
                 });
-                const result = await resp.json().catch(() => ({}));
+                const result = (await GCSession.readJson(resp)).body || {};
                 if (!resp.ok && !(result.refused && result.refused.length)) {
                     throw new Error(result.error || `API error ${resp.status}`);
                 }
@@ -1000,7 +1006,7 @@ async function loadDashboardData(file) {
         // recorded blank, calibration and corrections), never recomputed
         // here. Client-side computation is only a fallback for a revision
         // that holds none.
-        let d2887, d86;
+        let d2887, d86, d86Notes = null;
         const csvD2887 = dcData.d2887 || {};
         const csvD86   = dcData.d86   || {};
         const hasCSV = Object.keys(csvD2887).length > 0;
@@ -1012,15 +1018,14 @@ async function loadDashboardData(file) {
             for (const [csvKey, label] of Object.entries(d2887Map)) {
                 d2887[label] = csvD2887[csvKey] != null ? round2(csvD2887[csvKey]) : null;
             }
-            const d86Map = {"D86 IBP":"IBP","D86 T5":"5%","D86 T10":"10%","D86 T20":"20%","D86 T30":"30%","D86 T40":"40%","D86 T50":"50%","D86 T60":"60%","D86 T70":"70%","D86 T80":"80%","D86 T90":"90%","D86 T95":"95%","D86 FBP":"FBP"};
-            // Toggle picks between pre-calculated corrected/uncorrected sets from backend
-            const d86Source = state.correctedD86 ? csvD86 : (dcData.d86_uncorrected || {});
-            d86 = {};
-            for (const [csvKey, label] of Object.entries(d86Map)) {
-                d86[label] = d86Source[csvKey] != null ? round2(d86Source[csvKey]) : null;
-            }
-            if (d86["40%"] === undefined) d86["40%"] = null;
-            if (d86["60%"] === undefined) d86["60%"] = null;
+            // "Corrected D86" on: the stored (corrected) cells; off: the stored
+            // uncorrected conversion (or, for a revision that has none, the X4
+            // conversion of its stored D2887). 40%/60% whenever they exist.
+            const view = DistillView.dashboardD86(
+                { d86: csvD86, d86_uncorrected: dcData.d86_uncorrected, d2887: csvD2887 },
+                state.correctedD86, convertToD86);
+            d86 = view.values;
+            d86Notes = view.notes;       // tooltips: why a cell is empty; 40%/60% midpoints
         } else {
             // Fallback: compute client-side (no blank, no EQM corrections)
             d2887 = computeD2887(dcData.percent, dcData.temperature);
@@ -1059,7 +1064,7 @@ async function loadDashboardData(file) {
         }), PLOTLY_CONFIG);
 
         // -- Populate D2887 and D86 tables --
-        populateDashboardTables(d2887, d86, dcDiv);
+        populateDashboardTables(d2887, d86, dcDiv, d86Notes);
         }   // end distillation curve block
 
     } catch (e) {
@@ -1070,7 +1075,7 @@ async function loadDashboardData(file) {
     }
 }
 
-function populateDashboardTables(d2887, d86, dcDiv) {
+function populateDashboardTables(d2887, d86, dcDiv, d86Notes) {
     // D2887 Table — target the <tbody> inside the table
     const d2887Table = document.getElementById('dash-d2887-table');
     const d2887Body = d2887Table ? (d2887Table.querySelector('tbody') || d2887Table) : null;
@@ -1096,11 +1101,13 @@ function populateDashboardTables(d2887, d86, dcDiv) {
             const label = D86_LABELS[i];
             const temp = d86[label];
             const tr = document.createElement('tr');
-            // 40% and 60% have no D86 equation
-            const tempStr = (label === '40%' || label === '60%') ? '\u2014' : (temp != null ? temp.toFixed(2) : '\u2014');
-            tr.innerHTML = `<td>${escapeHtml(label)}</td><td>${tempStr}</td>`;
-            tr.style.cursor = 'pointer';
-            if (temp != null && label !== '40%' && label !== '60%') {
+            // 40% and 60% (no X4 equation) show the stored value when there is one
+            tr.innerHTML = `<td>${escapeHtml(label)}</td><td>${temp != null ? temp.toFixed(2) : '\u2014'}</td>`;
+            const note = (d86Notes && d86Notes[label])
+                || (temp == null ? DistillView.missingNote(label) : null);
+            if (note) tr.title = note;
+            if (temp != null) {
+                tr.style.cursor = 'pointer';
                 tr.addEventListener('click', () => highlightDCPoint(dcDiv, PERCENT_LEVELS[i], temp, '#d29922'));
             }
             d86Body.appendChild(tr);
@@ -1299,18 +1306,21 @@ function renderDistillTable() {
         });
     }
 
-    // Update header sort indicators on the existing table
+    // The header is built from the same `columns` as the rows (CSV order), so
+    // every header sits over its own value; the sorted column gets an arrow.
     const tableEl = document.getElementById('distill-table');
     if (!tableEl) return;
-    const thead = tableEl.querySelector('thead');
-    if (thead) {
-        thead.querySelectorAll('th').forEach((th, ci) => {
-            // Update sort arrow
-            const col = th.dataset.col || columns[ci] || '';
-            const arrow = tableSortCol === ci ? (tableSortAsc ? ' \u25B2' : ' \u25BC') : '';
-            th.textContent = col + arrow;
-        });
-    }
+    let thead = tableEl.querySelector('thead');
+    if (!thead) { thead = document.createElement('thead'); tableEl.prepend(thead); }
+    const headRow = document.createElement('tr');
+    DistillView.tableHeader(columns).forEach((cell, ci) => {
+        const th = document.createElement('th');
+        if (cell.cls) th.className = cell.cls;
+        th.dataset.col = cell.col;
+        th.textContent = DistillView.headerText(cell, ci, tableSortCol, tableSortAsc);
+        headRow.appendChild(th);
+    });
+    thead.replaceChildren(headRow);
 
     // Build tbody rows
     const tbody = document.getElementById('distill-table-body') || tableEl.querySelector('tbody');
@@ -1359,15 +1369,8 @@ function renderDistillTable() {
         const tr = document.createElement('tr');
         row.forEach((cell, ci) => {
             const td = document.createElement('td');
-            const colName = columns[ci] || '';
-            // Apply column group class
-            if (COL_GROUP_META.includes(colName)) {
-                td.className = 'col-meta';
-            } else if (colName.startsWith('D86') || colName.includes('D86')) {
-                td.className = 'col-d86';
-            } else if (colName.startsWith('2887') || colName.includes('2887')) {
-                td.className = 'col-d2887';
-            }
+            const cls = DistillView.columnClass(columns[ci]);   // the same group as its header
+            if (cls) td.className = cls;
             td.textContent = cell != null ? String(cell) : '';
             tr.appendChild(td);
         });
@@ -3805,7 +3808,9 @@ async function _fetchHealthz(timeoutMs) {
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     try {
         const resp = await fetch('/healthz', { method: 'GET', cache: 'no-store', signal: ctl.signal });
-        return resp.ok ? await resp.json() : null;
+        if (!resp.ok) return null;
+        const j = (await GCSession.readJson(resp)).body;
+        return (j && j.status) ? j : null;     // a page instead of /healthz's JSON: not up
     } finally {
         clearTimeout(timer);
     }

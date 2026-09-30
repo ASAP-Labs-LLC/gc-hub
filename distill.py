@@ -760,6 +760,20 @@ def _convert_to_d86(d2887: Dict[str, float]) -> Dict[str, float]:
     return out
 
 
+def x4_midpoints(d86: Dict[str, float]) -> Dict[str, float]:
+    """A copy of ``d86`` with 40% and 60% filled: ASTM D86 App. X4 has no
+    equations for them, so they are the linear midpoints of the (uncorrected)
+    30%/50% and 50%/70% conversions. The correction factors never touch them.
+    The Dashboard's fallback for a v1 row mirrors this rule
+    (``static/js/distill_view.js`` ``x4Midpoints``)."""
+    out = dict(d86)
+    if "30%" in out and "50%" in out:
+        out["40%"] = _round2((out["30%"] + out["50%"]) / 2)
+    if "50%" in out and "70%" in out:
+        out["60%"] = _round2((out["50%"] + out["70%"]) / 2)
+    return out
+
+
 # Map from JSON "test" names (Agilent GC section) → D86 dict keys
 _D86_CORRECTION_TEST_MAP: Dict[str, str] = {
     "IBP - D86": "IBP",
@@ -1392,12 +1406,7 @@ def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None
     d2887 = dict(zip(keys, map(_round2, vals)))
 
     # 5 D86 correlation
-    d86 = _convert_to_d86(d2887)
-    # ASTM D86 App. X4 has no equations for 40% and 60%; interpolate linearly
-    if "30%" in d86 and "50%" in d86:
-        d86["40%"] = _round2((d86["30%"] + d86["50%"]) / 2)
-    if "50%" in d86 and "70%" in d86:
-        d86["60%"] = _round2((d86["50%"] + d86["70%"]) / 2)
+    d86 = x4_midpoints(_convert_to_d86(d2887))
 
     d86_uncorrected = dict(d86)
 

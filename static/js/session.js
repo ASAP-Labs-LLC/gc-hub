@@ -50,11 +50,81 @@
         return fetchFn('/api/session', { cache: 'no-store', headers: { Accept: 'application/json' } })
             .then(function (r) {
                 if (r.status === 401) { onLoginRequired(); return null; }
-                return r.ok ? r.json() : null;
+                if (!r.ok) return null;
+                // readJson: a web page here (Cloudflare's, say) is "no session", never
+                // "Unexpected token '<'"
+                return readJson(r).then(function (res) {
+                    const b = res.body;
+                    return b && typeof b === 'object' && !Array.isArray(b) && !b.error ? b : null;
+                });
             });
     }
 
-    const api = { safeNext, loginUrl, isLoginRequired, wrapFetch, checkSession };
+    // ── readJson (v3.1.0) ──────────────────────────────────────────────
+    // Every fetch that expects data parses it through readJson(resp) →
+    // {status, body}. When the answer is not JSON (a hub error page, or a
+    // Cloudflare block/challenge/5xx page in front of gc.asaplabs.net) body
+    // is {error: "The hub answered HTTP <status> with a web page instead of
+    // data (Cloudflare: <title or 'error code: N'>)."} instead of the
+    // browser's "Unexpected token '<'". The hub marks its own responses with
+    // X-GC-Hub: 1 (api_errors.py); through the tunnel every response also
+    // has cf-ray, so only an unmarked HTML page counts as Cloudflare's.
+    // An answer under another content type (or none) whose body parses as
+    // JSON and is not a web page (does not start with '<') is data too.
+    const JSON_CT_RE = /[/+]json\b/i;
+    const HTML_RE = /<!doctype|<html/i;
+    const CF_CODE_RE = /error code:\s*(\d+)/i;
+    const TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
+
+    function header(headers, name) {
+        if (!headers || typeof headers.get !== 'function') return null;
+        const v = headers.get(name);
+        return v == null ? null : String(v);
+    }
+
+    function decodeEntities(s) {
+        return s.replace(/&(amp|lt|gt|quot|#39|#x27|apos);/gi, function (_m, e) {
+            return { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", '#x27': "'", apos: "'" }[e.toLowerCase()];
+        });
+    }
+
+    function cloudflareDetail(headers, text) {
+        if (header(headers, 'x-gc-hub') === '1') return null;          // the hub's own page
+        const code = CF_CODE_RE.exec(text);
+        const viaCf = header(headers, 'cf-ray') !== null
+            || /cloudflare/i.test(header(headers, 'server') || '');
+        if (!code && !(viaCf && HTML_RE.test(text))) return null;
+        const title = TITLE_RE.exec(text);
+        const t = title ? decodeEntities(title[1]).replace(/\s+/g, ' ').trim().slice(0, 120) : '';
+        return t || (code ? 'error code: ' + code[1] : '');
+    }
+
+    function looksLikeJson(text) {
+        const t = text.trim();
+        return t !== '' && t[0] !== '<' && !HTML_RE.test(t);
+    }
+
+    function parseBody(status, headers, text) {
+        text = typeof text === 'string' ? text : '';
+        if (status === 204 && !text) return {};
+        if (JSON_CT_RE.test(header(headers, 'content-type') || '')) {
+            try { return JSON.parse(text); } catch (_e) { /* a page after all */ }
+        } else if (looksLikeJson(text)) {
+            try { return JSON.parse(text); } catch (_e) { /* not JSON after all */ }
+        }
+        const cf = cloudflareDetail(headers, text);
+        const extra = cf === null ? '' : (cf ? ' (Cloudflare: ' + cf + ')' : ' (Cloudflare)');
+        return { error: 'The hub answered HTTP ' + status + ' with a web page instead of data' +
+                        extra + '.' };
+    }
+
+    function readJson(resp) {
+        return resp.text().then(function (text) {
+            return { status: resp.status, body: parseBody(resp.status, resp.headers, text) };
+        });
+    }
+
+    const api = { safeNext, loginUrl, isLoginRequired, wrapFetch, checkSession, parseBody, readJson };
 
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 
