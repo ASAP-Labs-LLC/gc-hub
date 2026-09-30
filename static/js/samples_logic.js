@@ -352,7 +352,7 @@
                        tickfont: { color: c.axis, size: 11 }, title: { font: { color: c.axis, size: 11 } } };
         return {
             paper_bgcolor: c.bg, plot_bgcolor: c.bg, font: { family: c.font, color: c.axis, size: 11 },
-            margin: { l: 48, r: 12, t: 30, b: 40 }, showlegend: false, dragmode: 'zoom', hovermode: 'closest',
+            margin: { l: 48, r: 16, t: 30, b: 40 }, showlegend: false, dragmode: 'zoom', hovermode: 'closest',
             xaxis: Object.assign({}, axis, { title: { text: 'Retention time (min)', font: { color: c.axis, size: 11 } } }),
             yaxis: Object.assign({}, axis),
         };

@@ -653,7 +653,7 @@ def test_server_search_with_filters(hub_app):
 def test_index_has_no_scan_controls_and_loads_the_sample_helpers(hub_app):
     import urllib.request
     port, _hub, _ = hub_app
-    html = get_text(port, "/")
+    html = get_text(port, "/classic")
     for gone in ('id="btn-scan"', 'id="btn-stop"', 'id="btn-rebuild-db"', 'id="btn-reindex-times"',
                  'id="modal-log"'):
         assert gone not in html, gone
