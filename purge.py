@@ -75,8 +75,9 @@ nothing):
    under ``<data>/cdf/`` are ever moved. Each move is idempotent (the file
    system says what is done), so an interrupted move is simply finished.
 7. ``new_results_path`` is applied through ``HubExporter.new_path``; an
-   ``instrument_events`` row is written when that table exists (schema v4,
-   another v3.1 branch); a notification is raised; ``live`` events are
+   ``instrument_events`` row (kind ``purge``: scope and counts; that table is
+   the instrument's history and is never purged) is written; a notification
+   is raised; ``live`` events are
    published (the instrument and the purged sample ids); the journal becomes
    ``done``.
    A failure in any step after the commit never fails the purge: it is
@@ -720,16 +721,9 @@ def _verify(conn: sqlite3.Connection) -> None:
 
 
 def _record_event(db, instrument_id: str, by: str, detail: dict) -> None:
-    """An ``instrument_events`` row (schema v4, another v3.1 branch) when that
-    table exists."""
-    with store.connection(db) as conn:
-        cols = {r[1] for r in conn.execute('PRAGMA table_info("instrument_events")')}
-        if not {"instrument_id", "kind", "by", "at", "detail"} <= cols:
-            return
-        with store.write_txn(conn):
-            conn.execute('INSERT INTO instrument_events(instrument_id, kind, "by", at, detail) '
-                         "VALUES (?, 'purge', ?, ?, ?)",
-                         (instrument_id, by, store.now_iso(), json.dumps(detail)))
+    """The instrument's history (``instrument_events``, kind ``purge``): scope
+    and counts only, never a server path (the Activity feed is session-visible)."""
+    store.instrument_events.add(db, instrument_id, "purge", by=by, detail=detail)
 
 
 def _publish(journal: dict) -> None:
@@ -855,7 +849,7 @@ def _finish(journal: dict, jpath: Path, *, db, data_dir: Path, exporter, notifie
     if not journal.get("event_recorded"):
         try:
             _record_event(db, inst_id, journal.get("by") or "", {k: journal.get(k) for k in (
-                "scope", "samples", "tables", "backup", "purged_folder", "appended")})
+                "scope", "samples", "appended")})
         except Exception:  # noqa: BLE001 - the purge is done; the record is extra
             log.exception("purge: could not record the instrument event")
         journal["event_recorded"] = True

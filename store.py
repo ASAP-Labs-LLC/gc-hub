@@ -295,7 +295,7 @@ GATE_SQL = "status='final' AND (backfill=0 OR released_at IS NOT NULL)"
 EVENT_KINDS: tuple[str, ...] = (
     "created", "installer", "token_revoked", "calibration_cdf", "calibration_saved",
     "corrections_saved", "method_mapped", "export_path", "export_adopted", "live_since",
-    "export_hub_only",
+    "export_hub_only", "purge",
 )
 
 Db = Union[None, str, os.PathLike, sqlite3.Connection]

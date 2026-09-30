@@ -74,6 +74,9 @@ def test_every_table_referencing_samples_is_handled(tmp_path):
         "a table referencing samples (or a table that does) is not handled by purge.py: "
         f"{sorted(found ^ purge.KNOWN_REFERENCES)}")
     assert {t for t, _c, _p in found} == set(purge.OWNER_COLUMNS)
+    # the instrument's history (schema v4) references instruments, not samples
+    assert "instrument_events" not in purge.OWNER_COLUMNS
+    assert not any(t == "instrument_events" for t, _c, _p in found)
 
 
 def test_a_new_referencing_table_is_found_and_refused(h):
@@ -108,8 +111,9 @@ def test_purge_gc1_leaves_gc2_and_the_settings_row_for_row(h):
 
     summary = h.run()
 
-    after = dump(h.db)
+    after, events = ph.split_purge_events(dump(h.db))
     assert after == without(before, gc1_ids)            # every other row, byte for byte
+    assert [(e["instrument_id"], e["kind"]) for e in events] == [("gc1", "purge")]
     assert not ph.instrument_sample_ids(h.db, "gc1")
     # the settings: instrument rows, corrections, audit, standards, kv, presets...
     for t in ("instruments", "instrument_corrections", "corrections_audit", "standards",
@@ -172,7 +176,9 @@ def test_preview_counts_match_what_was_removed(h):
     for table, n in pv["tables"].items():
         assert removed[table] == n, table
     assert summary["tables"] == pv["tables"]
-    assert {t for t, n in removed.items() if n} <= set(pv["tables"]) | {"samples"}
+    assert {t for t, n in removed.items() if n > 0} <= set(pv["tables"]) | {"samples"}
+    assert "instrument_events" not in pv["tables"]          # history, kept (one row added)
+    assert removed.get("instrument_events", -1) == -1
     moved = {p: s for p, s in files_before.items() if p not in tree(h.data / "cdf")}
     assert pv["files"]["move"] == summary["files"]["moved"] == len(moved)
     assert pv["files"]["bytes"] == sum(
@@ -209,7 +215,8 @@ def test_scope_backfill_spares_live_samples_and_a_blank_they_used(h):
     summary = h.run(scope="backfill")
 
     purged = bf - kept
-    assert dump(h.db) == without(before, purged)
+    after, events = ph.split_purge_events(dump(h.db))
+    assert after == without(before, purged) and len(events) == 1
     assert ph.instrument_sample_ids(h.db, "gc1") == live | kept
     assert blank_file.is_file()                          # still referenced: never moved
     assert summary["samples"] == len(purged) == pv["samples"]
@@ -395,16 +402,19 @@ def test_claim_next_can_exclude_instruments(h):
 
 # ── records ─────────────────────────────────────────────────────────────────
 
-def test_an_instrument_events_row_when_the_table_exists(h):
-    with store.connection(h.db) as conn:
-        conn.execute('CREATE TABLE instrument_events(id INTEGER PRIMARY KEY, instrument_id TEXT, '
-                     'kind TEXT, "by" TEXT, at TEXT, detail TEXT)')
+def test_the_purge_is_recorded_in_instrument_events_and_history_is_kept(h):
+    """``instrument_events`` (schema v4) is the instrument's history: the purge
+    keeps every row there and adds its own (kind ``purge``, no server paths)."""
+    store.instrument_events.add(h.db, "gc1", "calibration_saved", by="Ryan C (x)",
+                                detail={"assigned": 20})
+    before = store.instrument_events.list("gc1", db=h.db)
     summary = h.run()
-    with store.connection(h.db) as conn:
-        rows = [dict(r) for r in conn.execute("SELECT * FROM instrument_events")]
-    assert len(rows) == 1 and rows[0]["kind"] == "purge" and rows[0]["instrument_id"] == "gc1"
-    assert rows[0]["by"] == "Ryan C (10.0.0.9)"
-    assert json.loads(rows[0]["detail"])["samples"] == summary["samples"]
+    rows = store.instrument_events.list("gc1", db=h.db)
+    assert [r for r in rows if r["kind"] != "purge"] == before
+    [ev] = [r for r in rows if r["kind"] == "purge"]
+    assert ev["by"] == "Ryan C (10.0.0.9)"
+    assert ev["detail"] == {"scope": "all", "samples": summary["samples"],
+                            "appended": summary["appended"]}
 
 
 def test_nightly_pruning_never_removes_a_pre_purge_backup(h):

@@ -211,6 +211,18 @@ OWNER = {"samples": "id", "sample_results": "sample_id", "export_rows": "sample_
          "sample_comments": "sample_id", "report_log": "sample_id"}
 
 
+def split_purge_events(after: dict) -> tuple:
+    """``(dump without the purges' own instrument_events rows, those rows)``.
+    ``instrument_events`` (schema v4) is instrument history, never sample
+    data: a purge keeps every row there and adds one (kind ``purge``)."""
+    rows = after.get("instrument_events")
+    if rows is None:
+        return after, []
+    out = dict(after)
+    out["instrument_events"] = [r for r in rows if r["kind"] != "purge"]
+    return out, [r for r in rows if r["kind"] == "purge"]
+
+
 def without(before: dict, purged: set) -> dict:
     """``before`` minus every row owned by a purged sample."""
     out = {}
@@ -220,5 +232,5 @@ def without(before: dict, purged: set) -> dict:
     return out
 
 
-__all__ = ["build_two_gc_hub", "HubCopy", "store_worker", "dump", "tree", "instrument_sample_ids", "without", "OWNER",
+__all__ = ["build_two_gc_hub", "HubCopy", "store_worker", "split_purge_events", "dump", "tree", "instrument_sample_ids", "without", "OWNER",
            "hub_boot", "fx"]

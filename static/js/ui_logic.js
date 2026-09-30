@@ -150,6 +150,8 @@
                     : [who, T(' downloaded the '), S(e.lab_id || '?'), T(' report')];
             case 'export_written': return [S(e.lab_id || '?'), T(' · Written to results CSV ('), inst, T(')')];
             case 'agent_seen': return [inst, T(' agent checked in')];
+            case 'purge': return [who, T(' purged '), S(d.samples !== undefined ? d.samples : '?'),
+                T(' samples of '), inst, T(d.scope === 'backfill' ? ' (imported history)' : '')];
             default: return [inst, T(' · ' + String(e.kind || 'activity'))];
         }
     }

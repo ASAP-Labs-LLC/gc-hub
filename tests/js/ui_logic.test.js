@@ -99,6 +99,8 @@ module.exports = (t) => {
     t.eq(seg(Object.assign({ kind: 'token_revoked' }, base, { by: null })), 'The hub revoked the *GC-2* agent key');
     t.eq(seg(Object.assign({ kind: 'nonsense' }, base)), '*GC-2* · nonsense');
     // never "Sent to LEM": the hub writes the results CSV (LEM reads it)
+    t.eq(seg({ kind: 'purge', by: 'Ryan C (10.0.0.9)', instrument_id: 'gc1', instrument_name: 'GC-1',
+        detail: { scope: 'backfill', samples: 12 } }), 'Ryan C purged *12* samples of *GC-1* (imported history)');
     t.eq(U.ACTIVITY_KINDS.every(k => !seg(Object.assign({ kind: k, detail: {} }, base)).includes('LEM')), true);
 
     // ... and the merge that prepends new entries

@@ -99,7 +99,9 @@ def _assert_unchanged(h, before):
 def _assert_finished(h, before):
     db, files = before
     gc1 = {r["id"] for r in db["samples"] if r["instrument_id"] == "gc1"}
-    assert dump(h.db) == without(db, gc1)
+    after, events = ph.split_purge_events(dump(h.db))
+    assert after == without(db, gc1)
+    assert len(events) == 1                         # recorded once, even when recovered twice
     [j] = _journals(h)
     assert j["state"] == "done" and j["recovered"] is True and j["export_relinked"]
     moves = j["moves"]
