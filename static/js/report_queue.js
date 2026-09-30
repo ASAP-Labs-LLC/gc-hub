@@ -297,19 +297,21 @@
 
         el.user = h('input', { type: 'text', id: 'rq-qb-user', autocomplete: 'username', spellcheck: 'false' });
         el.pass = h('input', { type: 'password', id: 'rq-qb-pass', autocomplete: 'current-password' });
-        el.signin = h('div', { className: 'rq-signin', 'data-testid': 'rq-signin', hidden: true },
+        el.signin = h('form', { className: 'rq-signin', 'data-testid': 'rq-signin', hidden: true,
+                                onsubmit: (e) => { e.preventDefault(); startUpload(); } },
             h('h3', { text: 'QBench sign-in' }),
             h('p', { className: 'caption', text: 'Leave the password empty to use the saved QBench sign-in.' }),
             h('div', { className: 'rq-fields' },
                 h('label', { className: 'field' }, h('span', { text: 'Username' }), el.user),
                 h('label', { className: 'field' }, h('span', { text: 'Password' }), el.pass)));
         el.reauthPass = h('input', { type: 'password', id: 'rq-reauth-pass', autocomplete: 'current-password' });
-        el.reauth = h('div', { className: 'rq-reauth', role: 'alert', 'data-testid': 'rq-reauth', hidden: true },
+        el.reauth = h('form', { className: 'rq-reauth', role: 'alert', 'data-testid': 'rq-reauth', hidden: true,
+                                onsubmit: (e) => { e.preventDefault(); submitCreds(); } },
             h('p', { text: 'QBench refused the sign-in. Enter the password again and the upload carries on.' }),
             h('div', { className: 'rq-fields' },
                 h('label', { className: 'field' }, h('span', { text: 'Password' }), el.reauthPass),
-                h('button', { type: 'button', className: 'btn btn-primary btn-sm', 'data-testid': 'rq-reauth-submit',
-                              text: 'Sign in again', onclick: submitCreds })));
+                h('button', { type: 'submit', className: 'btn btn-primary btn-sm', 'data-testid': 'rq-reauth-submit',
+                              text: 'Sign in again' })));
         el.bar = h('span', { style: 'width:0%' });
         el.progress = h('div', { className: 'rq-progress-block', 'data-testid': 'rq-progress', hidden: true },
             h('div', { className: 'progress', role: 'progressbar', 'aria-label': 'Upload progress' }, el.bar),
@@ -366,8 +368,9 @@
         el.download.disabled = !items.length || busy.download;
         el.clear.disabled = !items.length;
         const signing = !el.signin.hidden;
+        el.upload.hidden = up.active && !unsent.length;          // Stop and the progress say it
         if (up.active) {
-            el.upload.textContent = unsent.length ? `Add ${unsent.length} to the upload` : 'Uploading…';
+            el.upload.textContent = `Add ${unsent.length} to the upload`;
             el.upload.disabled = !unsent.length;
         } else if (signing) {
             el.upload.textContent = `Start upload (${unsent.length})`;

@@ -18,6 +18,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/shell.css') }}?v=3">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=3">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/status_shell.css') }}?v=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/report_queue.css') }}?v=1">
   {% block head %}{% endblock %}
 </head>
 <body class="gc" data-nav="{{ nav or '' }}">
@@ -26,6 +27,8 @@
     <div class="main-col">
       <header class="topbar" data-testid="topbar">
         {% block topbar %}{% endblock %}
+        {#- v5.0.0 lane C: "Report queue N" (report_queue.js); shown while it holds reports or uploads -#}
+        <button type="button" class="rq-btn" id="report-queue-btn" data-testid="report-queue-button" hidden><span class="ico rq-ico" aria-hidden="true"></span><span class="rq-label">Report queue</span><span class="rq-count" hidden></span><span class="rq-progress" hidden></span></button>
         {#- a page with its own unlock at the top (Hub admin) replaces the chip -#}
         {% block unlock_chip %}
         <span id="unlock-chip" class="unlock-chip" hidden data-testid="unlock-chip">
@@ -61,6 +64,8 @@
   <script src="{{ url_for('static', filename='js/live.js') }}?v=5"></script>
   <script src="{{ url_for('static', filename='js/live_adapter.js') }}?v=2"></script>
   <script src="{{ url_for('static', filename='js/running_now.js') }}?v=5"></script>
+  <script src="{{ url_for('static', filename='js/report_payload.js') }}?v=4"></script>
+  <script src="{{ url_for('static', filename='js/report_queue.js') }}?v=1"></script>
   {% block scripts %}{% endblock %}
 
   <!-- Which build is running, bottom-right. Same string /healthz reports. -->
