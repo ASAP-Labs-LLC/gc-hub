@@ -68,6 +68,23 @@ def test_release_per_id_results(hub):
     assert again[0]["ok"] is False and "already released" in again[0]["error"]
 
 
+def test_list_carries_what_the_why_line_needs(hub):
+    """v5.0: each row says why it is backfill, from its injection_dt and
+    received_at against the instrument's live_since and when that was set."""
+    _backfill(hub)
+    out = ia.backfill_list("gc1", db=hub.db)
+    assert out["live_since"] == "2030-01-01 00:00:00"
+    assert out["live_since_set_at"] is None                 # set without an event
+    assert out["samples"][0]["received_at"]
+    ia.update("gc1", {"live_since": "2031-02-03 04:05"}, by="Ryan C (10.0.0.5)", db=hub.db)
+    out = ia.backfill_list("gc1", db=hub.db)
+    assert out["live_since"] == "2031-02-03 04:05:00"
+    ev = store.instrument_events.latest_by_kind("gc1", db=hub.db)["live_since"]
+    assert out["live_since_set_at"] == ev["at"]
+    ia.update("gc1", {"live_since": None}, by="Ryan C (10.0.0.5)", db=hub.db)
+    assert ia.backfill_list("gc1", db=hub.db)["live_since"] is None
+
+
 @pytest.mark.parametrize("ids", [None, "1", [], ["x"], [True], list(range(501))])
 def test_release_refusals(hub, ids):
     _backfill(hub)

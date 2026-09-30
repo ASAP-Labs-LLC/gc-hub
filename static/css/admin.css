@@ -123,3 +123,9 @@ table.counts td:last-child { text-align: right; padding-left: var(--s6); font-va
 .adm-main button:not(.btn).quiet { border-color: transparent; background: transparent; }
 .adm-main button:not(.btn).quiet:hover { background: var(--bg-hover); }
 .adm-main button:disabled { opacity: 0.5; cursor: default; }
+
+/* v5.0 lane R: Restart in Admin · Server, confirmed inline */
+.restart-confirm { display: grid; gap: var(--s2); padding: var(--s3) var(--s4); border: 1px solid var(--border-light); border-radius: var(--radius-md); background: var(--bg-card); }
+.restart-confirm p { margin: 0; color: var(--text); }
+.restart-confirm ul { margin: 0; padding-left: 20px; color: var(--text); }
+.restart-confirm ul:empty { display: none; }

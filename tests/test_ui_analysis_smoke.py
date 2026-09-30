@@ -104,7 +104,7 @@ def page():
         with booted(tmp) as (port, _proc, _data, _home):
             drv = _driver()
             browser_sign_in(drv, port)
-            drv.get(f"http://127.0.0.1:{port}/")
+            drv.get(f"http://127.0.0.1:{port}/classic")
             _wait(lambda: drv.execute_script(
                 "return state.files && state.files.length > 0 && "
                 "state.comparisonStandards.some(s => s.name === 'Base')"))

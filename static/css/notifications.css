@@ -1,0 +1,25 @@
+/* notifications.css (v5.0 lane R): the notifications panel the shell's bell
+   opens (notifications_panel.js), on tokens.css + shell.css. Level is a
+   glyph and a word, never colour alone. Colours are tokens only
+   (tests/test_ui_contrast.py). */
+
+.notes-panel { width: 400px; max-width: calc(100vw - 24px); max-height: min(70vh, 560px); padding: 0; display: flex; flex-direction: column; overflow: hidden; }
+.notes-head { display: flex; align-items: center; gap: var(--s2); padding: var(--s3) var(--s3) var(--s2) var(--s4); border-bottom: 1px solid var(--border-light); }
+.notes-head h2 { font-size: var(--fs-md); margin: 0; }
+.notes-head .spacer { flex: 1; }
+.gc .notes { list-style: none; margin: 0; padding: 0 var(--s2); overflow-y: auto; }
+.gc .notes li.note { display: grid; grid-template-columns: 14px minmax(0, 1fr) 28px; gap: var(--s2) var(--s3); align-items: start; padding: var(--s3) var(--s2); border-top: 1px solid var(--border-light); }
+.gc .notes li.note:first-child { border-top: 0; }
+.notes .glyph { margin-top: 5px; }
+.note-body { min-width: 0; display: grid; gap: 2px; }
+.note-meta { display: flex; gap: 6px; font-size: var(--fs-xs); color: var(--text-muted); }
+.note-level { font-weight: 600; color: var(--text); }
+.note-error .note-level { color: var(--st-error); }
+.note-held .note-level { color: var(--warn-text); }
+.note-msg { margin: 0; font-size: var(--fs-sm); color: var(--text); overflow-wrap: anywhere; }
+.note-go { font-size: var(--fs-xs); color: var(--text); text-decoration: underline; text-underline-offset: 2px; justify-self: start; }
+.note-dismiss { width: 28px; height: 28px; }
+.note.leaving { opacity: 0.4; }
+.notes-empty { margin: 0; padding: var(--s5) var(--s4); font-size: var(--fs-sm); color: var(--text-muted); }
+
+.ico-x { --m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M6 6l12 12M18 6 6 18'/%3E%3C/svg%3E"); }

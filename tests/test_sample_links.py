@@ -40,6 +40,7 @@ import web_auth  # noqa: E402
 from labcore_stub import LabCoreStub  # noqa: E402
 
 CLASSIC = "<p>the classic page</p>"
+SAMPLES = "<p>the Samples page</p>"
 LAN = {"REMOTE_ADDR": "10.0.0.25"}
 
 
@@ -53,9 +54,14 @@ def make_app():
     app.before_request(web_auth.gate)
     app.context_processor(web_auth.template_context)
 
-    @app.route("/")
-    def index():
+    # v5.0.0: stand-ins for app.py's classic page and the new Samples page
+    @app.route("/classic")
+    def classic_page():
         return CLASSIC
+
+    @app.route("/samples")
+    def samples_list_page():
+        return SAMPLES
 
     return app
 
@@ -205,13 +211,23 @@ def test_an_unknown_lab_id_is_a_404(env):
 
 # ── the pages ───────────────────────────────────────────────────────────────
 
-def test_the_lab_page_opens_the_classic_page(env):
+def test_the_lab_page_lands_on_the_samples_page(env):
+    """v5.0.0: /lab/<lab_id> redirects to /samples/<its newest run>."""
     signed_in(env)
     add(env["db"], "40329", "2026-09-28 10:00:00")
+    newest = add(env["db"], "40329", "2026-09-29 10:00:00")
     r = get(env, "/lab/40329")
-    assert r.status_code == 200 and r.get_data(as_text=True) == CLASSIC
+    assert r.status_code == 302 and r.headers["Location"] == f"/samples/{newest}"
     r = get(env, "/lab/40329%2DX")      # unknown
     assert r.status_code == 404
+
+
+def test_the_classic_lab_page_opens_the_classic_page(env):
+    signed_in(env)
+    add(env["db"], "40329", "2026-09-28 10:00:00")
+    r = get(env, "/classic/lab/40329")
+    assert r.status_code == 200 and r.get_data(as_text=True) == CLASSIC
+    assert get(env, "/classic/lab/99999").status_code == 404
 
 
 def test_an_unknown_lab_id_gets_a_friendly_page(env):
@@ -235,17 +251,26 @@ def test_the_not_found_page_escapes_the_lab_id(env):
 
 
 @pytest.mark.parametrize("suffix", ["", "/compare", "/compare?standard=Diesel", "/data"])
-def test_sample_pages_open_the_classic_page(env, suffix):
+def test_sample_pages_open_the_samples_page(env, suffix):
     signed_in(env)
     sid = add(env["db"], "40329", "2026-09-28 10:00:00")
     r = get(env, f"/samples/{sid}{suffix}")
+    assert r.status_code == 200 and r.get_data(as_text=True) == SAMPLES
+
+
+@pytest.mark.parametrize("suffix", ["", "/compare", "/compare?standard=Diesel", "/data"])
+def test_classic_sample_pages_open_the_classic_page(env, suffix):
+    signed_in(env)
+    sid = add(env["db"], "40329", "2026-09-28 10:00:00")
+    r = get(env, f"/classic/samples/{sid}{suffix}")
     assert r.status_code == 200 and r.get_data(as_text=True) == CLASSIC
 
 
+@pytest.mark.parametrize("prefix", ["", "/classic"])
 @pytest.mark.parametrize("suffix", ["", "/compare", "/data"])
-def test_an_unknown_sample_gets_the_friendly_page(env, suffix):
+def test_an_unknown_sample_gets_the_friendly_page(env, prefix, suffix):
     signed_in(env)
-    r = get(env, f"/samples/424242{suffix}")
+    r = get(env, f"{prefix}/samples/424242{suffix}")
     assert r.status_code == 404
     html = r.get_data(as_text=True)
     assert "No GC result" in html and "424242" in html
@@ -260,7 +285,8 @@ def test_safe_next_accepts_the_link_paths(path):
 
 
 @pytest.mark.parametrize("path", ["/lab/40329", "/api/lab/40329", "/samples/7",
-                                  "/samples/7/compare", "/samples/7/data"])
+                                  "/samples/7/compare", "/samples/7/data", "/samples", "/classic",
+                                  "/classic/lab/40329", "/classic/samples/7/data"])
 def test_every_link_route_needs_a_session(path):
     assert web_auth.route_class(path) == "session"
 
@@ -283,7 +309,7 @@ def test_a_signed_out_link_lands_back_on_it_after_sign_in(env):
                headers={"Content-Type": "application/json"}, environ_base=LAN)
     assert r.status_code == 200 and r.get_json()["next"] == "/lab/40329"
     r = get(env, "/lab/40329")
-    assert r.status_code == 200 and r.get_data(as_text=True) == CLASSIC
+    assert r.status_code == 302 and r.headers["Location"].startswith("/samples/")
 
 
 @pytest.mark.parametrize("raw", ["40%3F1", "40%231", "40%2541", "40%25", "a%5Cb", "a%20b",

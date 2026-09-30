@@ -93,7 +93,7 @@ def test_two_instruments_same_lab_id_are_distinguishable_and_filterable(tmp_path
         drv = _driver()
         browser_sign_in(drv, port)
         try:
-            drv.get(f"http://127.0.0.1:{port}/")
+            drv.get(f"http://127.0.0.1:{port}/classic")
             assert _wait(lambda: len(_rows(drv)) >= 8), _rows(drv)
             # the instrument names arrive from /api/instruments
             assert _wait(lambda: any(r[1] == "GC-2 FID" for r in _rows(drv))), _rows(drv)
@@ -125,7 +125,7 @@ def test_two_instruments_same_lab_id_are_distinguishable_and_filterable(tmp_path
                 "return document.getElementById('reprocess-instrument').value;") == "gc2"
 
             # remembered by this browser
-            drv.get(f"http://127.0.0.1:{port}/")
+            drv.get(f"http://127.0.0.1:{port}/classic")
             assert _wait(lambda: drv.execute_script(
                 "return document.getElementById('instrument-filter').value;") == "gc2")
             assert _wait(lambda: _rows(drv) and all(r[1] == "GC-2 FID" for r in _rows(drv))), \

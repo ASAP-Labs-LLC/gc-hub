@@ -1,0 +1,138 @@
+{% extends "_layout.html" %}
+{#- v5.0 lane R: Settings, grouped by who changes them (settings_logic.js).
+    Admin sections save through the page's one unlock (GCAdminUnlock); the
+    server paths are read-only facts, collapsed. -#}
+{% block title %}Settings{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/gc_pages.css') }}?v=2">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/controls.css') }}?v=1">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}?v=1">{% endblock %}
+{% block topbar %}
+  <h1>Settings</h1>
+  <span class="spacer"></span>
+  <span class="caption" id="saved-state" role="status" data-testid="settings-state"></span>
+{% endblock %}
+{% block content %}
+<div class="set-frame">
+  <nav class="set-nav" id="set-nav" aria-label="Settings sections" data-testid="settings-nav"></nav>
+  <main class="content set-main" id="main" data-testid="settings-page">
+
+    <section class="sec" id="browser" data-testid="section-browser" data-audience="you">
+      <div class="about"><h2>This browser</h2><p class="intro"></p></div>
+      <div class="body">
+        <div class="set-row">
+          <div><b>Theme</b><p class="caption">System follows this computer's light or dark setting.</p></div>
+          <div class="seg seg-lg" role="radiogroup" aria-label="Theme" id="theme-choice" data-testid="settings-theme">
+            <button type="button" role="radio" data-choice="system" aria-checked="false">System</button>
+            <button type="button" role="radio" data-choice="light" aria-checked="false">Light</button>
+            <button type="button" role="radio" data-choice="dark" aria-checked="false">Dark</button>
+          </div>
+        </div>
+        <div class="set-row">
+          <div><b>Show D86 with correction factors</b>
+            <p class="caption">What the Results table shows first. The results file always has them.</p></div>
+          <label class="switch"><input type="checkbox" id="d86-default" data-testid="settings-d86">
+            <span class="track" aria-hidden="true"></span><span class="visually-hidden">Show D86 with correction factors</span></label>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="flags" data-testid="section-flags" data-audience="operator">
+      <div class="about"><h2>Sample flags</h2><p class="intro"></p></div>
+      <div class="body">
+        <div class="rules" id="rules" data-testid="flag-rules"></div>
+        <div class="row">
+          <button type="button" class="btn btn-sm" id="add-rule" data-testid="add-rule"><span class="ico ico-plus" aria-hidden="true"></span>Add rule</button>
+          <span class="spacer"></span>
+          <span class="msg" id="flags-msg" role="status"></span>
+          <button type="button" class="btn btn-primary btn-sm" id="save-flags" data-testid="save-flags">Save flags</button>
+        </div>
+        <details class="more">
+          <summary>Classic page chart colours</summary>
+          <label class="field"><span>Series colours (CSS, comma-separated; the classic page only)</span>
+            <input type="text" id="series-colors" placeholder="e.g. #58a6ff, #3fb950" spellcheck="false"></label>
+        </details>
+      </div>
+    </section>
+
+    {% for sec in [('bestfit', 'Best fit'), ('findings', 'Findings'), ('compare', 'Compare defaults')] %}
+    <section class="sec" id="{{ sec[0] }}" data-testid="section-{{ sec[0] }}" data-audience="admin">
+      <div class="about"><h2>{{ sec[1] }}<span class="ico ico-lock lockmark" aria-hidden="true"></span></h2><p class="intro"></p>
+        <p class="caption needs">Saving needs the admin password.</p></div>
+      <div class="body">
+        <div class="grid3" id="fields-{{ sec[0] }}"></div>
+        <div class="row">
+          <span class="spacer"></span>
+          <span class="msg" id="{{ sec[0] }}-msg" role="status"></span>
+          <button type="button" class="btn btn-primary btn-sm" data-save="{{ sec[0] }}" data-testid="save-{{ sec[0] }}">Save {{ sec[1]|lower }}</button>
+        </div>
+      </div>
+    </section>
+    {% endfor %}
+
+    <section class="sec" id="standards" data-testid="section-standards" data-audience="admin">
+      <div class="about"><h2>Comparison standards<span class="ico ico-lock lockmark" aria-hidden="true"></span></h2><p class="intro"></p>
+        <p class="caption needs">Changes need the admin password.</p></div>
+      <div class="body">
+        <div class="tablewrap">
+          <table class="tbl std-tbl" data-testid="standards-table">
+            <thead><tr><th scope="col">Standard</th><th scope="col">GC</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+            <tbody id="std-rows"></tbody>
+          </table>
+        </div>
+        <p class="empty-note" id="std-empty" hidden>No comparison standards yet. Add one from a run below.</p>
+        <form class="row add-std" id="add-std" data-testid="add-standard">
+          <label class="field"><span>Lab ID of the run</span><input type="text" id="add-lab" required spellcheck="false" maxlength="64"></label>
+          <label class="field grow"><span>Standard name</span><input type="text" id="add-name" required spellcheck="false" maxlength="120" placeholder="e.g. Diesel ULSD Std"></label>
+          <button type="submit" class="btn btn-sm">Add standard</button>
+          <span class="msg" id="std-msg" role="status"></span>
+        </form>
+      </div>
+    </section>
+
+    <section class="sec" id="qbench" data-testid="section-qbench" data-audience="operator">
+      <div class="about"><h2>QBench</h2><p class="intro"></p></div>
+      <div class="body">
+        <h3 class="sub">API key<span class="ico ico-lock lockmark" aria-hidden="true"></span></h3>
+        <p class="status-line"><span class="glyph never" id="qb-glyph" aria-hidden="true"></span><span id="qb-status" data-testid="qbench-api-status">Checking…</span></p>
+        <form class="qb-form" id="qb-form" autocomplete="off">
+          <label class="field"><span>Client ID</span><input type="text" id="qb-id" spellcheck="false" placeholder="Paste a new client ID"></label>
+          <label class="field"><span>Client secret</span><input type="password" id="qb-secret" autocomplete="new-password" spellcheck="false"></label>
+          <div class="row"><button type="submit" class="btn btn-sm" id="qb-save" data-testid="qbench-save">Test &amp; save</button>
+            <span class="msg" id="qb-msg" role="status"></span></div>
+        </form>
+        <p class="caption">QBench checks the pair first; it is saved only if QBench accepts it, and the secret is never shown again. <span id="qb-store"></span></p>
+        <h3 class="sub">Web login</h3>
+        <p class="status-line" id="qb-web" data-testid="qbench-web-login">Checking…</p>
+        <p class="caption">Used to attach report PDFs. It is entered in the upload itself, and asked again if QBench refuses it.</p>
+      </div>
+    </section>
+
+    <section class="sec" id="lem" data-testid="section-lem" data-audience="admin">
+      <div class="about"><h2>LEM address<span class="ico ico-lock lockmark" aria-hidden="true"></span></h2><p class="intro"></p>
+        <p class="caption needs">Saving needs the admin password.</p></div>
+      <div class="body">
+        <div class="grid3" id="fields-lem"></div>
+        <div class="row"><span class="spacer"></span><span class="msg" id="lem-msg" role="status"></span>
+          <button type="button" class="btn btn-primary btn-sm" data-save="lem" data-testid="save-lem">Save LEM address</button></div>
+      </div>
+    </section>
+
+    <section class="sec" id="server" data-testid="section-server" data-audience="readonly">
+      <div class="about"><h2>Server</h2><p class="intro"></p></div>
+      <div class="body">
+        <details class="more" id="paths" data-testid="server-paths">
+          <summary>Show the folders</summary>
+          <dl class="kv" id="path-list"></dl>
+        </details>
+        <p class="caption">Restart the hub, or install a staged update, from <a class="link" href="/admin/hub#server" data-testid="restart-link">Admin · Server</a>.</p>
+      </div>
+    </section>
+  </main>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/settings_logic.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/settings_page.js') }}?v=1"></script>
+{% endblock %}

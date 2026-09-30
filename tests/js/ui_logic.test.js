@@ -171,13 +171,23 @@ module.exports = (t) => {
     t.eq(U.recentClean([{ href: 'javascript:alert(1)', label: 'x' }, { href: '//evil', label: 'y' },
                         { href: '/ok', label: 'ok', at: 1 }, null, 'junk']).map(r => r.href), ['/ok']);
 
-    // ── theme: light by default
-    t.eq(U.resolveTheme('dark', false), 'dark');
+    // ── theme (v5.0): System, Light or Dark; System (follow the OS) unless chosen
+    t.eq(U.THEME_CHOICES, ['system', 'light', 'dark']);
+    t.eq(U.themeChoice('dark'), 'dark');
+    t.eq(U.themeChoice('light'), 'light');
+    t.eq(U.themeChoice('system'), 'system');
+    t.eq(U.themeChoice(null), 'system');              // never chosen
+    t.eq(U.themeChoice(''), 'system');
+    t.eq(U.themeChoice('purple'), 'system');          // junk in storage
+    t.eq(U.resolveTheme('dark', false), 'dark');      // a choice wins over the OS
+    t.eq(U.resolveTheme('dark', true), 'dark');
     t.eq(U.resolveTheme('light', true), 'light');
-    t.eq(U.resolveTheme('system', true), 'dark');
+    t.eq(U.resolveTheme('light', false), 'light');
+    t.eq(U.resolveTheme('system', true), 'dark');     // System follows the OS
     t.eq(U.resolveTheme('system', false), 'light');
-    t.eq(U.resolveTheme(null, true), 'light');
-    t.eq(U.resolveTheme('purple', true), 'light');
+    t.eq(U.resolveTheme(null, true), 'dark');         // nothing stored: System
+    t.eq(U.resolveTheme(null, false), 'light');
+    t.eq(U.resolveTheme('purple', true), 'dark');
 
     // ── the fallback poll (no live.js): which instruments changed
     const s1 = [{ id: 'gc1', name: 'GC-1', agent: { last_seen: 'x' }, counts: { final: 1 } }];

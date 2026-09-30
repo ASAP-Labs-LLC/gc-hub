@@ -45,6 +45,7 @@ from flask import (
     Flask,
     Response,
     jsonify,
+    redirect,
     request,
     send_file,
     stream_with_context,
@@ -229,6 +230,7 @@ app.register_blueprint(comments_api.bp)
 import hub_control  # noqa: E402  (hub tray: status, pause/resume processing, stop)
 app.register_blueprint(hub_control.bp)
 import sample_links; app.register_blueprint(sample_links.bp)  # noqa: E402,E702 (v4.0 sendable links)
+import results_pages; app.register_blueprint(results_pages.bp)  # noqa: E402,E702 (v5.0 lane R: /results, /settings, /help)
 import web_auth  # noqa: E402  (sign-in: LabLink sessions, the session gate)
 app.register_blueprint(web_auth.bp)
 # Order matters (before_request runs in registration order): the https
@@ -1704,23 +1706,13 @@ def api_files():
         offset = max(int(args.get("offset", 0)), 0)
     except ValueError:
         return _error("limit and offset must be integers")
-    backfill = args.get("backfill")
     ids = None
     if args.get("ids") is not None:
         raw_ids = _list_arg(args.get("ids")) or []
         if len(raw_ids) > FILES_MAX_IDS or not all(i.isascii() and i.isdigit() and len(i) <= 18 for i in raw_ids):
             return _error(f"ids must be a comma list of at most {FILES_MAX_IDS} sample ids")
         ids = [int(i) for i in raw_ids]
-    filters = {
-        "ids": ids,
-        "q": (args.get("q") or "").strip() or None,
-        "instrument": _list_arg(args.get("instrument")),
-        "date_from": args.get("date_from") or None,
-        "date_to": args.get("date_to") or None,
-        "status": _list_arg(args.get("status")),
-        "method_name": _list_arg(args.get("method")),
-        "backfill": None if backfill in (None, "") else backfill.lower() in ("1", "true", "yes"),
-    }
+    filters = dict(_files_filters(args), ids=ids)
     fps = _cache_fingerprints(settings_mod.load_settings())
     try:
         with store.connection(db) as conn:
@@ -1754,6 +1746,44 @@ def api_files():
 FILES_DEFAULT_LIMIT = 500
 FILES_MAX_LIMIT = 5000
 FILES_MAX_IDS = 1000
+FILES_IDS_CAP = 20000
+
+
+def _flag_arg(raw: Optional[str]) -> Optional[bool]:
+    return None if raw in (None, "") else raw.lower() in ("1", "true", "yes")
+
+
+def _files_filters(args) -> dict:
+    """The list filters ``/api/files`` and ``/api/files/ids`` share (``ids``
+    aside). v5.0.0: ``notsent=1`` = final results not uploaded to QBench."""
+    return {
+        "q": (args.get("q") or "").strip() or None,
+        "instrument": _list_arg(args.get("instrument")),
+        "date_from": args.get("date_from") or None,
+        "date_to": args.get("date_to") or None,
+        "status": _list_arg(args.get("status")),
+        "method_name": _list_arg(args.get("method")),
+        "backfill": _flag_arg(args.get("backfill")),
+        "qbench_sent": False if _flag_arg(args.get("notsent")) else None,
+    }
+
+
+@app.route("/api/files/ids", methods=["GET"])
+def api_files_ids():
+    """v5.0.0 (read-only): the ids of every sample matching ``/api/files``'s
+    filters (same query, same order), at most ``FILES_IDS_CAP`` (20,000):
+    the Samples page's "Select all N matching this filter", whose bulk
+    actions then go through the existing endpoints in chunks. ``{ids, total,
+    capped}``; ``capped`` when more match than are returned."""
+    _data, db = _hub()
+    filters = _files_filters(request.args)
+    try:
+        with store.connection(db) as conn:
+            ids = store.samples.search_ids(limit=FILES_IDS_CAP, db=conn, **filters)
+            total = store.samples.count(db=conn, **filters)
+    except ValueError as exc:            # a malformed date bound
+        return _error(str(exc))
+    return jsonify({"ids": ids, "total": total, "capped": total > len(ids)})
 
 
 def _list_arg(raw: Optional[str]) -> Optional[list]:
@@ -1811,6 +1841,9 @@ def _sample_entry(s: dict, cache: Optional[dict], recorded, fps: dict, run_no: i
         "time_corrected": s["time_corrected"],
         "method_name": s["method_name"],
         "current_revision": s["current_revision"],
+        # v5.0.0: the Samples page's "Not sent to QBench" and "New" marks
+        "qbench_uploaded_at": s.get("qbench_uploaded_at"),
+        "received_at": s.get("received_at"),
     }, stale
 
 
@@ -1892,6 +1925,19 @@ def api_sample_trace(sample_id: int):
                         "cal_times": cal_times, "cal_carbons": cal_carbons})
     except Exception as exc:
         return _error(str(exc), 500)
+
+
+@app.route("/api/samples/<int:sample_id>/cdf", methods=["GET"])
+def api_sample_cdf(sample_id: int):
+    """v5.0.0 (read-only): the stored CDF of the sample's current revision
+    (else its file), as a download: the Samples page's "Download CDF". 404
+    for an unknown id or a result-only import (no CDF)."""
+    data, db = _hub()
+    s = _sample_or_404(sample_id, db, from_path=True)
+    rev = store.get_revision(s["id"], db=db) if s["current_revision"] else None
+    p = _revision_cdf(s, rev, data)
+    name = f"{_safe_filename(s['lab_id'])}{p.suffix or '.CDF'}"
+    return send_file(p, mimetype="application/octet-stream", as_attachment=True, download_name=name)
 
 
 # ===================================================================== #
@@ -3772,8 +3818,32 @@ def healthz():
     return jsonify(body)
 
 
+def samples_page():
+    """v5.0.0: the Samples page (``templates/samples.html``, lane S) at ``/``,
+    ``/samples`` and ``/samples/<id>[/compare|/data]`` (``sample_links``);
+    ``static/js/samples_router.js`` reads the view from the URL."""
+    from flask import render_template
+    return render_template("samples.html", app_version=version.APP_VERSION, nav="samples")
+
+
 @app.route("/")
 def index():
+    """The Samples page (v5.0.0). The old user-menu links ``/?open=settings|help``
+    go to the Settings and Help pages."""
+    what = request.args.get("open")
+    if what in ("settings", "help"):
+        return redirect(f"/{what}")
+    return samples_page()
+
+
+@app.route("/samples")
+def samples_list_page():
+    return samples_page()
+
+
+@app.route("/classic")
+def classic_page():
+    """The classic main page (``templates/index.html``), kept for v5.0.0 only."""
     from flask import render_template
     try:
         return render_template("index.html", app_version=version.APP_VERSION)

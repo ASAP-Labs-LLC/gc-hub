@@ -48,6 +48,8 @@ modules and are skipped automatically if the dep is absent.
 | `test_analysis_settings_routes.py` | Deviation-bullet admin settings are validated when saved (400, nothing written); Set as Default keeps the saved overlays unless sent. |
 | `test_report_content.py` | `app._report_content` is identical across `/api/analysis`, the direct export, the ZIP and the QBench PDF (`report_harness.py` drives all four in one app process in a subprocess, with fake `comments` and QBench uploader); PDFs print the computed bullets, never client ones; escaping, footer, `report_log` rows; annotation comments print `text (Cx–Cy, a–b min; initials, date)` from the report's ladder; `comments` is a hard import. |
 | `test_ui_ladder_per_instrument.py` | Carbon labels per instrument: `/api/samples/<id>/trace` serves the (current or `?revision=`) revision's ladder; in headless Chrome, a gc2 sample whose anchors differ from gc1's is labelled with its own ladder on the dashboard, in the Chromatogram overlay (first visible trace's, named when traces disagree) and in the annotation modal; no `(i + 5)` fallback, no `/api/calibration` read. |
+| `test_ui_backfill_select.py`, `js/backfill.test.js` | v5.0 Backfill select-many: range, drag (from the selection the drag began with), select-all states, pruning, 500-id chunks, the why-backfill line (the `store.is_backfill` comparison; `live_since_set_at` for runs that arrived before it was set); headless Chrome on 30 runs: a mouse drag held across a live update, a drag back, shift-click, Space/Shift+Space, rows released elsewhere drop out, Select all + indeterminate, release in chunks with progress, a touch drag. |
+| `js/compare_logic.test.js`, `js/report_queue.test.js`, `test_ui_compare_smoke.py` (+ `ui_compare_harness.py`, `fixtures/compare_harness.*`) | v5.0.0 lane C: the Compare logic (slider mapping, defaults, `?standard=`, the standard pick and remembered picks, findings rows = the server's lines, Adjust validation) and the report queue store (sessionStorage, one item per sample, payloads unchanged, broken storage) under Node; in headless Chrome on a test-only harness (the real `_layout.html` rendered by jinja2, a proxy to a booted hub with a realistic diesel sample and two standards): both themes at 1366x768 and 1440x900 (no sideways scroll, AA, charts 240/150 px at 1366x768, the drawer beside the page and `gc:adjust`, "Report queue N" and its sheet), the sticky right column at 1680, best fit → pick remembered → `setStandard`, Adjust validation then recompute then Save as default through the admin dialog, the Conclusion's Edit, Add to queue, Export report (a real PDF), Download all (a real ZIP job), the QBench upload over a scripted stream (sign-in, progress, a new password, Skip, Stop), Annotate, comments, re-theme, unmount. |
 | `test_ui_analysis_smoke.py` | Headless Chrome: range boxes from the analysis windows, threshold lines and spike markers, read-only bullets, queue items capture params and carry no bullets. |
 
 ## Not covered here
@@ -62,7 +64,8 @@ smoke test against a real sample.
 
 Pure, DOM-free helpers in `static/js/` (`selection.js`, `report_payload.js`,
 `samples.js`, `flagrules.js`, `restart.js`, `qbench_api.js`,
-`instruments_logic.js`, `comments.js`, `ladder.js`, `live.js`, and the pure parts of
+`instruments_logic.js`, `comments.js`, `ladder.js`, `live.js`, `results_logic.js`,
+`settings_logic.js`, `notifications_panel.js`, and the pure parts of
 `hub_admin.js` and `diagnostics.js`) are unit-tested under Node:
 
 ```bash
@@ -71,3 +74,15 @@ node tests/js/run.js        # requires Node
 
 The runner (`tests/js/run.js`) is zero-dependency (uses Node's `assert`). Keep
 the helpers DOM/fetch-free so they `require` cleanly outside the browser.
+
+## Results, Settings, Help and notifications (v5.0 lane R)
+
+- `test_results_settings_pages.py`: source checks (shell pages, no inline
+  script, text-only DOM, `readJson`, no `window.prompt`, no hard-coded
+  D2887/D86 column, key lists equal to `settings.py`, bell and menu wiring,
+  Restart in Admin) and a booted app (session-gated pages, `/api/settings`
+  rules unchanged).
+- `test_results_d86_js.py`: the Results page's uncorrected D86 equals
+  `distill.x4_midpoints(distill._convert_to_d86(...))` (node).
+- `test_ui_results_settings_smoke.py`: Selenium, both themes at 1366x768 and
+  1440x900, Results/Settings/Help/the panel; screenshots to `GC_UI_SHOTS`.

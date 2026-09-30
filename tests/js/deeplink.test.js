@@ -31,6 +31,13 @@ module.exports = (t) => {
     t.eq(D.parseLocation('/samples/x', ''), null);
     t.eq(D.parseLocation('/samples/0', ''), null);
 
+    // v5.0.0: the classic page's own links, under /classic
+    t.eq(D.parseLocation('/classic/lab/40329', ''), { kind: 'lab', labId: '40329' });
+    t.eq(D.parseLocation('/classic/samples/12/compare', '?standard=D'),
+         { kind: 'sample', sampleId: 12, tab: 'analysis', standard: 'D' });
+    t.eq(D.parseLocation('/classic', '?q=40329'), { kind: 'search', q: '40329' });
+    t.eq(D.parseLocation('/classic/', ''), null);
+    t.eq(D.parseLocation('/classicx/samples/12', ''), null);
     t.eq(D.parseLocation('/', '?q=40329'), { kind: 'search', q: '40329' });
     t.eq(D.parseLocation('/', '?q=%3Cb%3E'), { kind: 'search', q: '<b>' });
     t.eq(D.parseLocation('/', ''), null);

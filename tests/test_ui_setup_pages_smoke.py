@@ -170,12 +170,12 @@ def test_the_three_pages_in_both_themes_at_both_sizes(tmp_path):
                     assert "Written to results CSV" in feed and "LEM" not in feed
                     assert _wait(lambda: not _js(drv, "return document.getElementById('nav-setup').hidden;"))
                     assert _js(drv, "return document.getElementById('nav-setup-step').textContent;") == "GC-2 · 5/8"
-                    # the mark goes home; there is no separate Results item (same page as Samples)
+                    # the mark goes home; v5.0 lane R: Results is its own page
                     assert _js(drv, "return document.querySelector('.sb-mark').getAttribute('href');") == "/"
-                    assert _js(drv, "return document.querySelectorAll('.sb-nav [data-nav=results]').length;") == 0
-                    # Settings and Help open the classic page's modals
+                    assert _js(drv, "return document.querySelector('.sb-nav [data-nav=results]').getAttribute('href');") == "/results"
+                    # v5.0 lane R: Settings and Help are pages
                     hrefs = _js(drv, "return Array.from(document.querySelectorAll('#user-menu a')).map(a => a.getAttribute('href'));")
-                    assert "/?open=settings" in hrefs and "/?open=help" in hrefs, hrefs
+                    assert "/settings" in hrefs and "/help" in hrefs, hrefs
                     assert _tid(drv, "add-gc") == 1
                     live = _js(drv, "return document.querySelector('[data-instrument=gc1] [data-role=agent-pill]').textContent;")
                     assert live == "Live"
@@ -312,10 +312,14 @@ def test_the_user_menu_opens_settings_and_help_on_the_classic_page(tmp_path):
         browser_sign_in(drv, port)
         try:
             for what in ("settings", "help"):
-                drv.get(f"http://127.0.0.1:{port}/?open={what}")
+                # v5.0.0: the classic page is at /classic, and ?open= still opens its modals there
+                drv.get(f"http://127.0.0.1:{port}/classic?open={what}")
                 assert _wait(lambda: _js(drv, f"return document.getElementById('modal-{what}')"
                                               ".classList.contains('open');"), timeout=30), what
                 # the address no longer says ?open=, so a reload doesn't reopen it
                 assert "open=" not in drv.current_url
+                # the old /?open= link goes to the new Settings / Help page
+                drv.get(f"http://127.0.0.1:{port}/?open={what}")
+                assert _wait(lambda: drv.current_url.endswith(f"/{what}")), drv.current_url
         finally:
             drv.quit()

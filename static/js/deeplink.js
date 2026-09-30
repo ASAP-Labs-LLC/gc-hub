@@ -1,5 +1,7 @@
 /* Sendable sample links (v4.0): what a link URL opens on the classic page,
-   and "Copy link". Pure helpers first (window globals + module.exports, node
+   and "Copy link". v5.0.0: the classic page is at /classic, so its links are
+   /classic/lab/<id> and /classic/samples/<id>[/compare|/data] (the paths
+   below, after /classic); the plain paths open the new Samples page. Pure helpers first (window globals + module.exports, node
    tested in tests/js/deeplink.test.js), then a thin browser hook:
 
      /lab/<lab_id>                         the lab ID's newest run (GET /api/lab/<id>),
@@ -40,7 +42,8 @@
         {kind: 'sample', sampleId, tab, standard} | {kind: 'search', q}.
         ``pathname`` is as the browser keeps it (encoded): decoded once. */
     function parseLocation(pathname, search) {
-        const path = String(pathname || '').replace(/\/+$/, '');
+        // v5.0.0: the classic page lives at /classic, its links under /classic/…
+        const path = String(pathname || '').replace(/\/+$/, '').replace(/^\/classic(?=\/|$)/, '');
         let m = /^\/lab\/([^/]+)$/.exec(path);
         if (m) return { kind: 'lab', labId: _decodeOnce(m[1]) };
         m = /^\/samples\/([1-9][0-9]*)(?:\/(compare|data))?$/.exec(path);
@@ -49,7 +52,7 @@
             return { kind: 'sample', sampleId: Number(m[1]), tab,
                      standard: tab === 'analysis' ? _query(search, 'standard') : null };
         }
-        if (path === '' && pathname) {
+        if (path === '' && pathname) {          // / or /classic
             const q = _query(search, 'q');
             if (q !== null) return { kind: 'search', q };
         }

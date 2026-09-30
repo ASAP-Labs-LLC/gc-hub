@@ -118,6 +118,47 @@ PAIRS = [
     ("--text", ["--bg", "--bg-active"], TEXT, "the admin sub-nav's current item"),
     ("--pill-error-fg", ["--bg-sunken"], TEXT, "an error in the path editor"),
     ("--ink-fg", ["--ink-hover"], TEXT, "primary buttons on hover"),
+    # v5.0.0 lane S: the Samples page (samples.css): rows on hover/active, reasons, tags, chips
+    ("--text-muted-sunken", ["--bg", "--bg-hover"], TEXT, "a hovered row's caption"),
+    ("--text-muted-sunken", ["--bg", "--bg-active"], TEXT, "the open or a checked row's caption"),
+    ("--text", ["--bg", "--bg-active"], TEXT, "the open or a checked row's lab ID"),
+    ("--warn-text", ["--bg", "--bg-hover"], TEXT, "a held row's reason on hover"),
+    ("--pill-held-fg", ["--bg", "--bg-active"], TEXT, "a held row's reason, open or checked"),
+    ("--st-error", ["--bg", "--bg-hover"], TEXT, "an error row's reason on hover"),
+    ("--st-error", ["--bg", "--bg-active"], TEXT, "an error row's reason, open or checked"),
+    ("--text-muted-sunken", ["--bg", "--bg-sunken"], TEXT, "the Ctrl K hint and the view switch"),
+    ("--text", ["--bg-elevated"], TEXT, "the bulk bar"),
+    ("--text-muted", ["--bg-elevated"], TEXT, "the bulk bar's progress line"),
+    ("--text", ["--bg-card", "--bg-hover"], TEXT, "a hovered chip"),
+    ("--warn-text", ["--bg-card"], TEXT, "a held sample's reason in the header"),
+    ("--st-error", ["--bg-card"], TEXT, "an error sample's reason in the header"),
+    # v5.0: the Backfill rows (gc_pages.css): selected and hovered rows, their why line
+    ("--text", ["--bg", "--bg-active"], TEXT, "a selected backfill row"),
+    ("--text-muted-sunken", ["--bg", "--bg-active"], TEXT, "the why line on a selected row"),
+    ("--text-muted-sunken", ["--bg", "--bg-hover"], TEXT, "the why line on a hovered row"),
+    ("--text-muted-sunken", ["--bg-card", "--bg-active"], TEXT, "the why line on a selected row (card)"),
+    # v5.0.0 lane C: Compare (compare.css) and the report queue sheet (report_queue.css)
+    ("--text-muted-sunken", ["--bg", "--bg-sunken"], TEXT, "a marginal finding's badge"),
+    ("--text-muted-sunken", ["--bg-card", "--chart-band"], TEXT, "a range band's label"),
+    ("--chart-axis", ["--bg"], TEXT, "chart labels full screen"),
+    ("--pill-final-fg", ["--bg-elevated"], TEXT, "an uploaded report in the queue sheet"),
+    ("--pill-held-fg", ["--bg-elevated"], TEXT, "a partial upload's line"),
+    ("--pill-error-fg", ["--bg-elevated"], TEXT, "a failed upload in the queue sheet"),
+    ("--text", ["--bg-elevated", "--bg-sunken"], TEXT, "the queue sheet's sign-in-again box"),
+    ("--text-muted-sunken", ["--bg-elevated", "--bg-sunken"], TEXT, "the empty queue, sign-in labels"),
+    ("--text", ["--bg-elevated", "--bg-hover"], TEXT, "a menu item on hover (Clear annotations)"),
+    # v5.0 lane R: Results, Settings, Help, the notifications panel (results.css,
+    # settings.css, controls.css, notifications.css)
+    ("--st-error", ["--bg-elevated"], TEXT, "an error notification's level"),
+    ("--warn-text", ["--bg-elevated"], TEXT, "a warning notification's level"),
+    ("--text-muted", ["--bg-elevated"], TEXT, "a notification's time"),
+    ("--ink-fg", ["--ink"], TEXT, "a pressed filter chip"),
+    ("--pill-final-fg", ["--bg"], TEXT, "a saved setting's line"),
+    ("--st-error", ["--bg"], TEXT, "a field's error"),
+    ("--text", ["--bg-card"], TEXT, "results numbers"),
+    ("--text-muted", ["--bg-card"], TEXT, "a held run's reason and empty cells"),
+    ("--text-muted-sunken", ["--bg-card", "--bg-sunken"], TEXT, "backfill and flag tags"),
+    ("--text", ["--bg-sunken"], TEXT, "keys on the help page"),
     ("--accent", ["--bg"], UI, "focus ring"),
     ("--accent", ["--sidebar-bg"], UI, "focus ring in the sidebar"),
     ("--accent", ["--bg-sunken"], UI, "focus ring on sunken fields"),
@@ -163,7 +204,12 @@ def test_the_version_badge_is_readable():
 
 # v4.0 lane E2: the new pages' stylesheets use only the checked tokens for
 # colour (no literal colours), and only token pairs listed above for text.
-PAGE_CSS = [ROOT / "static" / "css" / "admin.css", ROOT / "static" / "css" / "calibration.css"]
+PAGE_CSS = [ROOT / "static" / "css" / "admin.css", ROOT / "static" / "css" / "calibration.css",
+            ROOT / "static" / "css" / "samples.css",
+            ROOT / "static" / "css" / "compare.css", ROOT / "static" / "css" / "report_queue.css",
+            # v5.0 lane R
+            ROOT / "static" / "css" / "results.css", ROOT / "static" / "css" / "settings.css",
+            ROOT / "static" / "css" / "controls.css", ROOT / "static" / "css" / "notifications.css"]
 CHECKED_FG = {p[0] for p in PAIRS}
 
 

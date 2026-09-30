@@ -9,9 +9,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 JS = ["ui_logic.js", "shell.js", "live_adapter.js", "instrument_actions.js", "instruments_home.js",
-      "instrument_detail.js", "setup_guide.js", "hub_admin.js", "admin_page.js", "calibration.js"]
+      "instrument_detail.js", "setup_guide.js", "hub_admin.js", "admin_page.js", "calibration.js",
+      "samples_router.js", "samples_logic.js", "samples_page.js", "compare_logic.js", "compare_view.js", "report_queue.js"]
 TEMPLATES = ["_layout.html", "_shell.html", "instruments_home.html", "instrument_detail.html",
-             "setup_guide.html", "instrument_missing.html", "hub_admin.html", "calibration.html"]
+             "setup_guide.html", "instrument_missing.html", "hub_admin.html", "calibration.html",
+             "samples.html", "_compare_assets.html"]
 HTML_SINKS = re.compile(r"\.(innerHTML|outerHTML)\b|insertAdjacentHTML|document\.write|"
                         r"\beval\s*\(|new\s+Function\s*\(")
 

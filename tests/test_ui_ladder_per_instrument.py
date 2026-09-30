@@ -168,7 +168,7 @@ def page(hub_app):
     drv = _driver()
     browser_sign_in(drv, port)
     try:
-        drv.get(f"http://127.0.0.1:{port}/")
+        drv.get(f"http://127.0.0.1:{port}/classic")
         assert _wait(lambda: drv.execute_script("return state.files.length") >= 5)
         yield drv, hub, ladders
     finally:

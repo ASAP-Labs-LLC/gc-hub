@@ -22,16 +22,43 @@
     }
 
     // ── theme, before first paint ───────────────────────────────────────────
+    // v5.0 (shared by every shell page): the choice is System (the
+    // default: follows prefers-color-scheme, live), Light or Dark, kept in
+    // localStorage 'gc.theme'. <html data-theme> is set here, in <head>,
+    // before <body> exists. The API is window.GCTheme:
+    //   GCTheme.get()        -> { choice: 'system'|'light'|'dark', mode: 'light'|'dark' }
+    //   GCTheme.set(choice)  -> stores it and applies it; returns get()
+    // and a 'gc:theme' event on document (detail = get()) whenever the mode
+    // or the choice changes, so a page's charts can re-theme.
     const media = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
     function themePref() {
-        const v = load(THEME_KEY);
-        return v === 'dark' || v === 'system' || v === 'light' ? v : 'light';
+        return U.themeChoice(load(THEME_KEY));
+    }
+    let themeNow = null;
+    function themeGet() {
+        return { choice: themePref(), mode: document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light' };
     }
     function applyTheme() {
         document.documentElement.setAttribute('data-theme', U.resolveTheme(themePref(), !!(media && media.matches)));
+        const now = themeGet();
+        const changed = themeNow && (themeNow.choice !== now.choice || themeNow.mode !== now.mode);
+        themeNow = now;
+        if (changed) document.dispatchEvent(new CustomEvent('gc:theme', { detail: now }));
     }
+    function themeSet(choice) {
+        if (!U.THEME_CHOICES.includes(choice)) throw new Error('GCTheme.set: system, light or dark, not ' + choice);
+        save(THEME_KEY, choice);
+        applyTheme();
+        document.querySelectorAll('[data-theme-choice]').forEach(b =>
+            b.setAttribute('aria-checked', b.dataset.themeChoice === choice ? 'true' : 'false'));
+        return themeGet();
+    }
+    window.GCTheme = { get: themeGet, set: themeSet };
     applyTheme();
     if (media && media.addEventListener) media.addEventListener('change', applyTheme);
+    else if (media && media.addListener) media.addListener(applyTheme);
+    // another tab changed the choice
+    window.addEventListener('storage', (ev) => { if (ev.key === THEME_KEY) applyTheme(); });
     const side = load(SIDEBAR_KEY);
     if (side === 'rail' || side === 'full') document.documentElement.setAttribute('data-sidebar', side);
 
@@ -225,32 +252,8 @@
     }
 
     // ── bell ────────────────────────────────────────────────────────────────
-    let notes = [];
-    async function loadNotes(background) {
-        const r = await getJSON('/api/notifications', !!background);
-        if (r.status !== 200 || !Array.isArray(r.body)) return;
-        notes = r.body;
-        renderNotes(notes.length);
-    }
-    function renderNotes(count) {
-        const c = $('bell-count');
-        c.hidden = !count;
-        c.textContent = count > 99 ? '99+' : String(count || '');
-        $('bell').setAttribute('aria-label', count ? 'Notifications: ' + count : 'Notifications');
-        const ul = $('bell-list');
-        ul.replaceChildren(...notes.map(n => h('li', {},
-            glyph(n.level === 'error' ? 'error' : n.level === 'warning' ? 'held' : 'never'),
-            h('span', { className: 'msg', text: n.message || '' }),
-            h('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: 'Dismiss',
-                          onclick: () => dismiss(n.id) }))));
-        $('bell-empty').hidden = notes.length > 0;
-        $('bell-clear').hidden = !notes.length;
-    }
-    async function dismiss(id) {
-        const r = await fetch('/api/notifications/' + encodeURIComponent(id) + '/dismiss', { method: 'POST' });
-        if (!r.ok) toast('Could not dismiss it (HTTP ' + r.status + ').', 'err');
-        loadNotes();
-    }
+    // v5.0 lane R: the panel's contents (list, Go to, dismiss, dismiss all,
+    // live) are notifications_panel.js (GCNotes); the shell only opens it.
 
     // ── menus ───────────────────────────────────────────────────────────────
     function toggle(panel, button, open) {
@@ -286,7 +289,6 @@
 
     function onLive(update) {
         lastUpdateAt = Date.now();
-        if (typeof update.notifications_unread === 'number' && update.notifications_unread !== notes.length) loadNotes(true);
         const hub = update.hub || null;
         const upd = $('menu-update');
         if (upd && hub && hub.staged_update) {
@@ -325,24 +327,16 @@
         });
         document.querySelectorAll('[data-theme-choice]').forEach(b => b.addEventListener('click', (ev) => {
             ev.stopPropagation();
-            save(THEME_KEY, b.dataset.themeChoice);
-            applyTheme();
-            syncThemeSwitch();
+            themeSet(b.dataset.themeChoice);
         }));
         $('menu-signout').addEventListener('click', () => {
             if (window.GCSession && window.GCSession.signOut) window.GCSession.signOut($('menu-signout'));
-        });
-        $('bell-clear').addEventListener('click', async () => {
-            const r = await fetch('/api/notifications/dismiss-all', { method: 'POST' });
-            if (!r.ok) toast('Could not dismiss them (HTTP ' + r.status + ').', 'err');
-            loadNotes();
         });
         if ($('unlock-lock')) {
             $('unlock-lock').addEventListener('click', () => { gate.clear(); syncUnlockChip(); toast('Admin locked.'); });
         }
 
         renderRecent();
-        loadNotes();
         loadInstruments(false);
         if (window.GCLiveAdapter) window.GCLiveAdapter.subscribe(onLive);
         setInterval(renderLive, 1000);

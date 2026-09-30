@@ -301,6 +301,8 @@
             clearTimeout(sensTimer);
             sensTimer = setTimeout(() => load(+e.target.value, true), 250);
         });
+        // v5.0: the chart's colours come from the tokens: redraw on a theme change
+        document.addEventListener('gc:theme', drawChart);
         loadInstruments();
         load();
     }
