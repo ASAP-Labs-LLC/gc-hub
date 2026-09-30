@@ -118,7 +118,7 @@ PAIRS = [
     ("--text", ["--bg", "--bg-active"], TEXT, "the admin sub-nav's current item"),
     ("--pill-error-fg", ["--bg-sunken"], TEXT, "an error in the path editor"),
     ("--ink-fg", ["--ink-hover"], TEXT, "primary buttons on hover"),
-    # v4.0.1: the Backfill rows (gc_pages.css): selected and hovered rows, their why line
+    # v5.0: the Backfill rows (gc_pages.css): selected and hovered rows, their why line
     ("--text", ["--bg", "--bg-active"], TEXT, "a selected backfill row"),
     ("--text-muted-sunken", ["--bg", "--bg-active"], TEXT, "the why line on a selected row"),
     ("--text-muted-sunken", ["--bg", "--bg-hover"], TEXT, "the why line on a hovered row"),

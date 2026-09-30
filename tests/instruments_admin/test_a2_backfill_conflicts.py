@@ -69,7 +69,7 @@ def test_release_per_id_results(hub):
 
 
 def test_list_carries_what_the_why_line_needs(hub):
-    """v4.0.1: each row says why it is backfill, from its injection_dt and
+    """v5.0: each row says why it is backfill, from its injection_dt and
     received_at against the instrument's live_since and when that was set."""
     _backfill(hub)
     out = ia.backfill_list("gc1", db=hub.db)

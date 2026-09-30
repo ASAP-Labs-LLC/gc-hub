@@ -106,7 +106,7 @@ details.more[open] > summary { margin-bottom: var(--s2); }
 .lem-picker { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
 .lem-picker select { min-width: 220px; }
 
-/* ── Backfill: select many (v4.0.1) ───────────────────────────────────── */
+/* ── Backfill: select many (v5.0) ───────────────────────────────────── */
 .bf-bar { display: flex; align-items: center; gap: var(--s3); min-height: 44px; padding: var(--s1) 0 var(--s1) var(--s3); border-top: 1px solid var(--border-light); border-bottom: 1px solid var(--border-light); margin-bottom: calc(-1 * var(--s4)); }
 .bf-bar .count { font-size: var(--fs-sm); color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .bf-bar[data-some="true"] .count { color: var(--text); font-weight: 500; }

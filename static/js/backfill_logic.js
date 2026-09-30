@@ -1,4 +1,4 @@
-// The Backfill section's pure logic (v4.0.1): selecting many rows at once
+// The Backfill section's pure logic (v5.0): selecting many rows at once
 // (select all, shift-click ranges, drag), pruning the selection when rows go
 // away, chunking releases to the route's limit, and the muted line that says
 // why each row is backfill. No DOM; node-tested (tests/js/backfill.test.js).

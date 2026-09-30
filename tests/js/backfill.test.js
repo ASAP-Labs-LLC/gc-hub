@@ -1,4 +1,4 @@
-// v4.0.1: the Backfill section's pure logic (static/js/backfill_logic.js):
+// v5.0: the Backfill section's pure logic (static/js/backfill_logic.js):
 // selecting many rows (select all, shift-click range, drag), pruning after a
 // release or a live update, chunking releases, and why each row is backfill.
 const B = require('../../static/js/backfill_logic.js');

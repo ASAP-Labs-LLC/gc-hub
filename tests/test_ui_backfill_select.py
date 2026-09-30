@@ -1,4 +1,4 @@
-"""v4.0.1: selecting many backfill runs on /instruments/<id> (headless
+"""v5.0: selecting many backfill runs on /instruments/<id> (headless
 Chrome on a booted hub with 30 backfill runs on GC-2).
 
 * a drag down the checkboxes sets every row it passes to the first row's new

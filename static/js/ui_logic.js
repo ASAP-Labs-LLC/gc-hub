@@ -221,10 +221,16 @@
             .concat(rest).slice(0, max || 6);
     }
 
+    // v5.0: System (follow the OS's prefers-color-scheme, live), Light or
+    // Dark; anyone who hasn't chosen (or junk in storage) gets System.
+    const THEME_CHOICES = ['system', 'light', 'dark'];
+    function themeChoice(stored) {
+        return THEME_CHOICES.includes(stored) ? stored : 'system';
+    }
     function resolveTheme(pref, prefersDark) {
-        if (pref === 'dark') return 'dark';
-        if (pref === 'system') return prefersDark ? 'dark' : 'light';
-        return 'light';
+        const choice = themeChoice(pref);
+        if (choice === 'system') return prefersDark ? 'dark' : 'light';
+        return choice;
     }
 
     // ── the 5 s fallback poll when live.js is absent ───────────────────────
@@ -308,7 +314,7 @@
         LIVE_SECONDS, ACTIVITY_KINDS, relTime, clockTime, actorName, initials, agentStatus, agentAge,
         sampleStatus,
         setupLabel, stepBadge, setupNav, activityText, activityIcon, mergeActivity, makeAdminGate,
-        recentAdd, recentClean, resolveTheme, diffSummaries, agentsFromStatus, lemTitle,
+        recentAdd, recentClean, resolveTheme, themeChoice, THEME_CHOICES, diffSummaries, agentsFromStatus, lemTitle,
         goLiveTime, liveSinceState, RESERVED_IDS, instrumentHref, activitySample,
     };
     root.GCUi = api;

@@ -353,7 +353,7 @@
             h('tbody', {}, ...body)))];
     }
 
-    // ── backfill (v4.0.1: select many) ──────────────────────────────────────
+    // ── backfill (v5.0: select many) ──────────────────────────────────────
     // The selection is kept by sample id, outside the DOM, so the list can be
     // redrawn by live updates without losing it; rows that are released or
     // change drop out (GCBackfill.prune). A live reload is held back while a
@@ -650,7 +650,7 @@
         renderHead();
         renderChecklist();
         for (const key of Object.keys(SECTIONS)) {
-            // v4.0.1: live updates redraw only the Backfill rows, never its
+            // v5.0: live updates redraw only the Backfill rows, never its
             // controls, so the filter and the selection stay as they are
             if (key === 'backfill' && background && backfillEls) continue;
             renderSection(key, background);
