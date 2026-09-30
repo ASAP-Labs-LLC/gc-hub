@@ -62,7 +62,8 @@ smoke test against a real sample.
 
 Pure, DOM-free helpers in `static/js/` (`selection.js`, `report_payload.js`,
 `samples.js`, `flagrules.js`, `restart.js`, `qbench_api.js`,
-`instruments_logic.js`, `comments.js`, `ladder.js`, `live.js`, and the pure parts of
+`instruments_logic.js`, `comments.js`, `ladder.js`, `live.js`, `results_logic.js`,
+`settings_logic.js`, `notifications_panel.js`, and the pure parts of
 `hub_admin.js` and `diagnostics.js`) are unit-tested under Node:
 
 ```bash
@@ -71,3 +72,15 @@ node tests/js/run.js        # requires Node
 
 The runner (`tests/js/run.js`) is zero-dependency (uses Node's `assert`). Keep
 the helpers DOM/fetch-free so they `require` cleanly outside the browser.
+
+## Results, Settings, Help and notifications (v5.0 lane R)
+
+- `test_results_settings_pages.py`: source checks (shell pages, no inline
+  script, text-only DOM, `readJson`, no `window.prompt`, no hard-coded
+  D2887/D86 column, key lists equal to `settings.py`, bell and menu wiring,
+  Restart in Admin) and a booted app (session-gated pages, `/api/settings`
+  rules unchanged).
+- `test_results_d86_js.py`: the Results page's uncorrected D86 equals
+  `distill.x4_midpoints(distill._convert_to_d86(...))` (node).
+- `test_ui_results_settings_smoke.py`: Selenium, both themes at 1366x768 and
+  1440x900, Results/Settings/Help/the panel; screenshots to `GC_UI_SHOTS`.
