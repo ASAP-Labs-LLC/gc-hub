@@ -139,13 +139,19 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/api/samples/<int:sample_id>/comments/<int:comment_id>/delete` | POST | new | session | phase 4 `comments_api`: `{initials}` → `{comment}`; soft delete recording `deleted_by_initials`/`deleted_by_ip`; 404 not this sample's comment, 409 already deleted |
 | `/api/comment-presets` | GET | new | session | phase 4 `comments_api`: → `{presets:[{id, text, sort}]}` (active, in order) |
 | `/api/admin/comment-presets` | POST | new | session | phase 4 `comments_api` (admin password): `{password, action: list\|create\|update\|reorder\|deactivate\|activate, text?, id?, ids?}` → `{presets, preset?}` (create 201; ≤ 200 chars, ≤ 50 active; reorder names every preset once) |
-| `/instruments` | GET | new | session | 2A2 `instruments_api` blueprint: the Instruments page |
+| `/instruments` | GET | new | session | 2A2 `instruments_api` blueprint: the Instruments page; v3.1: the new design (card grid, Add a GC, Activity feed; `templates/instruments_home.html`) |
+| `/instruments/classic` | GET | new | session | v3.1 `instruments_api`: the 2A2 page (`templates/instruments.html`), kept for this release |
+| `/instruments/<iid>` | GET | new | session | v3.1 `instruments_api`: one instrument in the new design (setup checklist, Agent, Calibration, Correction factors, Results file, Methods, Backfill, Conflicts) over the same `/api/` routes; 404 for an unknown id |
+| `/setup` | GET | new | session | v3.1 `instruments_api`: the GC setup guide (`?instrument=<id>`, `?new=1` starts at step 1) |
+| `/api/instruments/activity` | GET | new | session | v3.1 `instruments_api`: the Activity feed, `?limit=` (default 30, 1–200; 400 if not a number) → `{entries:[{key, kind, at, instrument_id, instrument_name, by, sample_id, lab_id, injection_dt, detail}]}` newest first (`instrument_activity.feed`: `instrument_events` + samples received, corrections saved, reports, results CSV writes, agent check-ins) |
+| `/api/instruments/<iid>/setup` | GET | new | session | v3.1 `instruments_api`: the setup guide's steps → `{instrument_id, steps:[{key, n, title, status: done\|current\|waiting\|blocked, detail, blocker, action, done_by, done_at}], summary:{total, done, step, ready}}` (`setup_state`); 404 unknown id |
 | `/api/instruments` | GET | new | session | 2A2 `instruments_api` blueprint: every instrument + summary (open read) |
 | `/api/instruments/<iid>` | GET | new | session | 2A2 `instruments_api` blueprint: one instrument with corrections/methods/export (open read) |
 | `/api/admin/instruments` | POST | new | session | 2A2 `instruments_api` blueprint: admin: create |
 | `/api/admin/instruments/<iid>` | POST | new | session | 2A2 `instruments_api` blueprint: admin: edit name/enabled/method/live_since/lem_machine_uid |
 | `/api/lem/machines` | GET | new | session | D10 `instruments_api` blueprint: LEM's machine list for the LEM machine dropdown, fetched server-side by `lem_machines` (60 s cache, stale on failure; read-only, never writes to LEM) |
 | `/api/admin/instruments/<iid>/export-path` | POST | new | session | 2A2 `instruments_api` blueprint: admin: HubExporter.new_path |
+| `/api/admin/instruments/<iid>/export-hub-only` | POST | new | session | v3.1 `instruments_api`: admin: record the explicit choice to keep the hub's own results file (`results/<id>_results.csv`, which LEM does not read) as an `export_hub_only` instrument event; 409 when an export path is set (the setup guide's step 7 needs a path or this choice) |
 | `/api/admin/instruments/<iid>/export-adopt` | POST | new | session | 2A2 `instruments_api` blueprint: admin: HubExporter.adopt |
 | `/api/instruments/<iid>/calibration` | GET | new | session | 2A2 `instruments_api` blueprint: the Calibration page payload for the instrument |
 | `/api/instruments/<iid>/calibration-candidates` | GET | new | session | 2A2 `instruments_api` blueprint: the instrument's own samples (open read) |

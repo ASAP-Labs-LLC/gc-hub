@@ -1,0 +1,74 @@
+{#- The v3.1 sidebar (spec "Shell"): the GC Hub mark, nav (pages not yet
+    redesigned go to the classic ones; the mark is home, Samples), "Setup guide · Step N" only while an
+    instrument is unfinished (shell.js shows it), Recent "on this computer"
+    (localStorage), and the footer: the Live dot, the bell and the user chip
+    (the name only: there are no roles). shell.js wires it. -#}
+<aside class="sb" id="sidebar" data-testid="sidebar" aria-label="Main">
+  <div class="sb-head">
+    <a class="sb-mark" href="/" aria-label="GC Hub: Samples (home)">
+      <span class="mark-logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 20h18M5 20l3-12 2 7 2-11 3 13 2-5 2 8"/></svg></span>
+      <span class="sb-label">GC Hub</span>
+    </a>
+    <button type="button" class="icon-btn" id="sb-toggle" data-testid="sidebar-toggle" aria-label="Collapse or expand the sidebar" title="Collapse or expand the sidebar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 4.5v15"/></svg>
+    </button>
+  </div>
+
+  <nav class="sb-nav" aria-label="Pages">
+    <a class="nav-item" href="/" data-nav="samples" title="Samples">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 19h18M5 19l3-9 2 5 3-11 3 12 2-4 1 7"/></svg>
+      <span class="sb-label">Samples</span></a>
+    <a class="nav-item{% if nav == 'instruments' %} active{% endif %}" href="/instruments" data-nav="instruments" title="Instruments"{% if nav == 'instruments' %} aria-current="page"{% endif %}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="6" rx="1.5"/><rect x="3.5" y="13.5" width="17" height="6" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>
+      <span class="sb-label">Instruments</span></a>
+    <a class="nav-item{% if nav == 'setup' %} active{% endif %}" href="/setup" id="nav-setup" data-nav="setup" data-testid="nav-setup" title="Setup guide"{% if nav == 'setup' %} aria-current="page"{% else %} hidden{% endif %}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7l2 2 3-4M4 16l2 2 3-4M13 7h7M13 16h7"/></svg>
+      <span class="sb-label">Setup guide</span><span class="nav-meta" id="nav-setup-step"></span></a>
+    <a class="nav-item" href="/admin/hub" data-nav="admin" title="Admin">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></svg>
+      <span class="sb-label">Admin</span></a>
+  </nav>
+
+  <section class="sb-recent" data-testid="recent" aria-labelledby="recent-caption">
+    <h2 class="sb-caption" id="recent-caption">Recent · on this computer</h2>
+    <ul id="recent-list"></ul>
+    <p class="sb-empty" id="recent-empty">Nothing opened yet.</p>
+  </section>
+
+  <div class="sb-foot">
+    <div class="live-row" data-testid="live-status">
+      <span class="live-dot" id="live-dot" data-state="connecting" aria-hidden="true"></span>
+      <span class="sb-label" id="live-text">Connecting…</span>
+      <button type="button" class="icon-btn" id="bell" data-testid="bell" aria-label="Notifications" aria-haspopup="dialog" aria-expanded="false" title="Notifications">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20.5h4"/></svg>
+        <span class="bell-count" id="bell-count" hidden></span>
+      </button>
+    </div>
+    <div class="popover" id="bell-panel" role="dialog" aria-label="Notifications" hidden data-testid="bell-panel">
+      <h2>Notifications<span class="spacer"></span><button type="button" class="btn btn-ghost btn-sm" id="bell-clear">Dismiss all</button></h2>
+      <ul id="bell-list"></ul>
+      <p class="caption" id="bell-empty">No notifications.</p>
+    </div>
+
+    <button type="button" class="user-chip" id="user-chip" data-testid="user-chip" aria-haspopup="menu" aria-expanded="false" aria-controls="user-menu" title="{{ web_user.name if web_user else 'Not signed in' }}">
+      <span class="avatar" id="user-initials" aria-hidden="true"></span>
+      <span class="sb-label user-name" id="user-name">{{ web_user.name if web_user else 'Not signed in' }}</span>
+      <span class="ico ico-chev chev" aria-hidden="true"></span>
+    </button>
+    <div class="menu" id="user-menu" role="menu" hidden data-testid="user-menu">
+      <div class="menu-head" id="menu-name">{{ web_user.name if web_user else 'Not signed in' }}</div>
+      <div class="menu-row"><span>Theme</span>
+        <div class="seg" role="radiogroup" aria-label="Theme" data-testid="theme-switch">
+          <button type="button" role="radio" data-theme-choice="light" aria-checked="false">Light</button>
+          <button type="button" role="radio" data-theme-choice="dark" aria-checked="false">Dark</button>
+          <button type="button" role="radio" data-theme-choice="system" aria-checked="false">Auto</button>
+        </div>
+      </div>
+      <a role="menuitem" href="/?open=settings" title="Opens Settings on the Samples page">Settings</a>
+      <a role="menuitem" href="/?open=help" title="Opens Help on the Samples page">Help</a>
+      <a role="menuitem" class="update" id="menu-update" href="/" hidden></a>
+      <button type="button" role="menuitem" class="menu-item" id="menu-signout" data-testid="sign-out">Sign out</button>
+      <div class="menu-foot">GC Hub {{ app_version }}</div>
+    </div>
+  </div>
+</aside>

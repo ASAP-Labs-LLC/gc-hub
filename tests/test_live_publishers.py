@@ -227,7 +227,7 @@ class FakeExporter:
     def __init__(self, db):
         self.db = db
 
-    def new_path(self, instrument, path):
+    def new_path(self, instrument, path, *, event_by=None):
         pass
 
     def adopt(self, instrument, by=None):

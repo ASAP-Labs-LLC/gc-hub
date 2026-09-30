@@ -46,8 +46,8 @@ def _v2_db(path: Path) -> Path:
     return path
 
 
-def test_schema_version_is_3():
-    assert store.SCHEMA_VERSION == 3 == len(store.MIGRATIONS)
+def test_schema_version_is_at_least_3():
+    assert store.SCHEMA_VERSION == len(store.MIGRATIONS) >= 3
 
 
 def test_v2_to_v3_is_additive(tmp_path):
@@ -60,9 +60,9 @@ def test_v2_to_v3_is_additive(tmp_path):
         conn.execute("INSERT INTO sample_comments(sample_id, text, source, author_initials, "
                      "created_at) VALUES (1, 'kept', 'free', 'RB', 'x')")
         before = [tuple(r) for r in conn.execute("SELECT * FROM sample_comments")]
-    assert store.migrate(db) == 3
+    assert store.migrate(db) == store.SCHEMA_VERSION
     with store.connection(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
         assert SESSION_COLUMNS <= _cols(conn, "web_sessions")
         assert {"author_name", "deleted_by_name"} <= _cols(conn, "sample_comments")
         assert "user_name" in _cols(conn, "report_log")
@@ -126,9 +126,9 @@ def test_v2_0_0_store_starts_on_a_v3_database(tmp_path):
                          cwd=tmp_path, timeout=60)
     assert out.returncode == 0, out.stderr
     got = json.loads(out.stdout.strip().splitlines()[-1])
-    assert got["schema"] == 1 and got["version"] == 3
+    assert got["schema"] == 1 and got["version"] == store.SCHEMA_VERSION
     assert [s["name"] for s in store.web_sessions.list_active(db=db)] == ["Ryan C"]
-    assert store.migrate(db) == 3
+    assert store.migrate(db) == store.SCHEMA_VERSION
 
 
 # ── the helpers ─────────────────────────────────────────────────────────────

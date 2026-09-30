@@ -303,8 +303,22 @@ def test_admin_page_dry_run_polls_the_job_and_shows_the_summary(admin_hub, tmp_p
     except Exception as exc:  # noqa: BLE001 - no Chrome / driver here
         pytest.skip(f"headless Chrome unavailable: {exc}")
     try:
+        # The hub is shared with the module's earlier tests: let any admin job
+        # they left running finish first (a busy store can make the page's
+        # first load slow or fail; CI saw no #pw once), then load the page
+        # until its form is there, and say what was shown if it never is.
+        job = _job(port, pw)
+        assert job is None or wait_for(lambda: (_job(port, pw) or {}).get("state") != "running",
+                                       timeout=120)
         browser_sign_in(drv, port)
-        drv.get(f"http://127.0.0.1:{port}/admin/hub")
+
+        def page_ready() -> bool:
+            drv.get(f"http://127.0.0.1:{port}/admin/hub")
+            return _poll_until(lambda: drv.execute_script(
+                "return !!document.getElementById('pw');"), timeout=10, interval=0.2)
+
+        assert wait_for(page_ready, timeout=60, interval=1.0), \
+            (drv.current_url, drv.execute_script("return document.body ? document.body.innerText.slice(0, 300) : ''"))
         drv.find_element("id", "pw").send_keys(pw)
         drv.find_element("id", "btn-refresh").click()
         # the refresh's admin calls finish (one password check per client at a time)

@@ -1,0 +1,11 @@
+{% extends "_layout.html" %}
+{% block title %}Unknown instrument{% endblock %}
+{% block topbar %}
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="/instruments">Instruments</a></nav>
+{% endblock %}
+{% block content %}
+<main class="content" id="main" data-testid="instrument-missing-page">
+  <h1 style="font-size:22px;margin-bottom:8px">No instrument “{{ instrument_id }}”</h1>
+  <p class="muted">It may have a different id. <a class="link" href="/instruments">See every instrument</a> or <a class="link" href="/setup?new=1">add a GC</a>.</p>
+</main>
+{% endblock %}

@@ -154,6 +154,20 @@ def test_live_answer_is_normalised_and_sorted_by_title(stub):
     assert stub.paths == ["/api/machines"]
 
 
+def test_title_peeks_at_the_cache_and_never_fetches(stub):
+    """v3.1: the setup guide names the LEM machine from whatever list is
+    cached, without ever waiting on LEM."""
+    cache = _cache()
+    assert cache.title(stub.url, "bf8e64b59f12") is None       # nothing cached: no fetch
+    assert stub.paths == []
+    cache.get(stub.url)
+    assert cache.title(stub.url, "bf8e64b59f12") == "Agilent GC 1"
+    assert cache.title(stub.url, "unknown") is None
+    assert cache.title(stub.url, "") is None
+    assert cache.title("http://127.0.0.1:1", "bf8e64b59f12") is None   # another LEM's list
+    assert stub.paths == ["/api/machines"]
+
+
 def test_request_headers(stub):
     import version
     _cache().get(stub.url)

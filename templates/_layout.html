@@ -1,0 +1,60 @@
+{#- The v3.1 page layout (spec "Visual system"): tokens + shell, the sidebar
+    (_shell.html), a top bar and the page. session.js is the FIRST script, as
+    on every page. Pages extend this and fill title/topbar/content/scripts.
+    No inline script: page code is in static/js. -#}
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}GC Hub{% endblock %} · GC Hub</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+  <script src="{{ url_for('static', filename='js/session.js') }}?v=2"></script>
+  <script src="{{ url_for('static', filename='js/ui_logic.js') }}?v=3"></script>
+  <script src="{{ url_for('static', filename='js/shell.js') }}?v=3"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v=2">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/shell.css') }}?v=2">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=3">
+  {% block head %}{% endblock %}
+</head>
+<body class="gc" data-nav="{{ nav or '' }}">
+  <div class="app">
+    {% include "_shell.html" %}
+    <div class="main-col">
+      <header class="topbar" data-testid="topbar">
+        {% block topbar %}{% endblock %}
+        <span id="unlock-chip" class="unlock-chip" hidden data-testid="unlock-chip">
+          <span class="ico ico-lock" aria-hidden="true"></span>
+          <span id="unlock-text">Admin unlocked</span>
+          <button type="button" id="unlock-lock">Lock</button>
+        </span>
+      </header>
+      {% block content %}{% endblock %}
+    </div>
+  </div>
+
+  <dialog class="sheet" id="admin-dialog" data-testid="admin-dialog">
+    <form method="dialog" class="form" id="admin-form">
+      <h2>Admin password</h2>
+      <p id="admin-reason">This change needs the admin password. It is kept in this tab for 15 minutes, never saved.</p>
+      <label class="field"><span>Password</span>
+        <input type="password" id="admin-password" autocomplete="off" spellcheck="false" required></label>
+      <p id="admin-error" class="caption" role="alert" hidden></p>
+      <div class="actions">
+        <button type="button" class="btn" id="admin-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="admin-ok">Unlock</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  {#- live.js (lane A, GCLive) loads here, before live_adapter.js; without it
+      the adapter polls every 5 s. -#}
+  <script src="{{ url_for('static', filename='js/live.js') }}?v=3"></script>
+  <script src="{{ url_for('static', filename='js/live_adapter.js') }}?v=2"></script>
+  {% block scripts %}{% endblock %}
+
+  <!-- Which build is running, bottom-right. Same string /healthz reports. -->
+  <div id="app-version" aria-hidden="true">{{ app_version }}</div>
+</body>
+</html>

@@ -111,6 +111,8 @@ SPEC_COLUMNS = {
     # schema v3 (sign-in): browser sessions
     "web_sessions": {"id", "token_hash", "name", "method", "created_at", "last_seen",
                      "expires_at", "ip", "user_agent", "revoked_at"},
+    # schema v4 (v3.1, the setup guide)
+    "instrument_events": {"id", "instrument_id", "kind", "by", "at", "detail"},
 }
 
 

@@ -53,6 +53,11 @@ import store
 log = logging.getLogger("instrument_admin")
 
 ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+# Ids a page URL uses (/instruments/classic, /api/instruments/activity): an
+# instrument with one of these ids could never be opened.
+RESERVED_IDS = frozenset({"activity", "classic", "new", "setup"})
+# ...of which these can't be opened at /instruments/<id> (the page or its API is shadowed)
+UNREACHABLE_IDS = frozenset({"activity", "classic"})
 NAME_MAX = 64
 UID_MAX = 128
 SKEW_WARN_SECONDS = 120
@@ -109,6 +114,18 @@ def get(instrument_id: Any, *, db: store.Db = None) -> dict:
 
 
 # ── field validation ────────────────────────────────────────────────────────
+
+def reserved_id_warnings(*, db: store.Db = None) -> list:
+    """One message per existing instrument whose id is now reserved (made
+    before v3.1): its new page can't be opened at /instruments/<id>."""
+    out = []
+    for r in store.instruments.list(db=db):
+        if r["id"] in RESERVED_IDS:
+            out.append(f"Instrument {r['name']} has the id \"{r['id']}\", which is now reserved by the hub's "
+                       f"pages, so /instruments/{r['id']} does not open it. Manage it on the "
+                       f"classic page: /instruments/classic?instrument={r['id']}.")
+    return out
+
 
 def _name(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -170,7 +187,7 @@ def _clean(fields: Any, allowed: frozenset) -> dict:
 
 # ── create / update ─────────────────────────────────────────────────────────
 
-def create(fields: Any, *, db: store.Db = None) -> dict:
+def create(fields: Any, *, db: store.Db = None, by: Optional[str] = None) -> dict:
     if not isinstance(fields, dict):
         raise AdminError("Expected an object of instrument fields.")
     fields = dict(fields)
@@ -178,6 +195,8 @@ def create(fields: Any, *, db: store.Db = None) -> dict:
     if not isinstance(iid, str) or not ID_RE.match(iid):
         raise AdminError("The id must be 1-32 characters: a lower-case letter, then lower-case "
                          "letters, digits, '-' or '_' (e.g. gc2). It can't be changed later.")
+    if iid in RESERVED_IDS:
+        raise AdminError(f"The id {iid!r} is reserved by the hub's pages; choose another (e.g. gc2).")
     if "name" not in fields:
         raise AdminError("A name is required.")
     clean = _clean(fields, EDITABLE)
@@ -189,13 +208,19 @@ def create(fields: Any, *, db: store.Db = None) -> dict:
                 raise AdminError(f"An instrument with id {iid!r} already exists.", 409)
             row = store.instruments.upsert(dict(
                 clean, id=iid, method_map=json.dumps(instruments.DEFAULT_METHOD_MAP)), db=conn)
+            store.instrument_events.add(conn, iid, "created", by=by, detail={"name": row["name"]})
+            if clean.get("live_since"):
+                store.instrument_events.add(conn, iid, "live_since", by=by, detail={
+                    "live_since": clean["live_since"], "old": None})
     log.warning("instrument %s created (%s)", iid, row["name"])
     _changed(iid)
     return public_row(row)
 
 
-def update(instrument_id: Any, fields: Any, *, db: store.Db = None) -> tuple:
-    """Change editable fields; ``(public row, warnings)``."""
+def update(instrument_id: Any, fields: Any, *, db: store.Db = None,
+           by: Optional[str] = None) -> tuple:
+    """Change editable fields; ``(public row, warnings)``. A changed
+    ``live_since`` is recorded as an ``instrument_events`` row."""
     clean = _clean(fields, EDITABLE)
     if not clean:
         raise AdminError("Nothing to change.")
@@ -203,6 +228,9 @@ def update(instrument_id: Any, fields: Any, *, db: store.Db = None) -> tuple:
         with store.write_txn(conn):
             old = get(instrument_id, db=conn)
             row = store.instruments.upsert(dict(clean, id=instrument_id), db=conn)
+            if "live_since" in clean and clean["live_since"] != old.get("live_since"):
+                store.instrument_events.add(conn, instrument_id, "live_since", by=by, detail={
+                    "live_since": clean["live_since"], "old": old.get("live_since")})
     log.warning("instrument %s updated: %s", instrument_id, sorted(clean))
     _changed(instrument_id)
     warnings: list = []
@@ -296,7 +324,7 @@ def export_status(instrument_id: str, exporter) -> dict:
     return st
 
 
-def set_export_path(instrument_id: str, path: Any, exporter) -> dict:
+def set_export_path(instrument_id: str, path: Any, exporter, *, by: Optional[str] = None) -> dict:
     """Point the instrument's export at ``path`` (absolute, ``.csv``, as
     hub_admin's new-path route requires). A file already
     there must then be adopted before the hub appends to it."""
@@ -307,7 +335,8 @@ def set_export_path(instrument_id: str, path: Any, exporter) -> dict:
         raise AdminError("The export path must be an absolute path to a .csv file, e.g. "
                          r"\\asapserver\Labsharedrive\...\distill_results.csv.")
     try:
-        exporter.new_path(instrument_id, path.strip())
+        # the export_path event is written in the same transaction as the path
+        exporter.new_path(instrument_id, path.strip(), event_by=by)
     except exports.ExportRefused as err:
         raise _refused(err) from None
     log.warning("instrument %s export path set to %s", instrument_id, path.strip())
@@ -323,8 +352,26 @@ def adopt_export(instrument_id: str, exporter, *, by: Optional[str]) -> dict:
         side = exporter.adopt(instrument_id, by=by)
     except exports.ExportRefused as err:
         raise _refused(err) from None
+    store.instrument_events.add(exporter.db, instrument_id, "export_adopted", by=by,
+                                detail={"size": (side or {}).get("size")})
     _changed(instrument_id)
     return {"adopted": side, "status": export_status(instrument_id, exporter)}
+
+
+def keep_hub_only_export(instrument_id: str, exporter, *, by: Optional[str]) -> dict:
+    """Record the explicit choice to keep the hub's own results file
+    (``results/<id>_results.csv``, which LEM does not read): the setup guide's
+    step 7 needs a configured path or this choice. 409 when a path is set."""
+    row = get(instrument_id, db=exporter.db)
+    if (row.get("export_path") or "").strip():
+        raise AdminError(f"{row['name']} already writes to {row['export_path']}; the hub-only file "
+                         f"is not in use.", 409)
+    st = export_status(instrument_id, exporter)
+    store.instrument_events.add(exporter.db, instrument_id, "export_hub_only", by=by,
+                                detail={"path": st.get("path")})
+    log.warning("instrument %s: results kept in the hub-only file %s (by %s)", instrument_id,
+                st.get("path"), by)
+    return st
 
 
 # ── calibration (Processing per instrument) ─────────────────────────────────
@@ -402,7 +449,8 @@ def _check_cdf(path: Path) -> None:
 
 
 def set_calibration_cdf(instrument_id: str, conf: dict, *, sample_id: Any = None,
-                        path: Any = None, db: store.Db = None, data_dir=None) -> dict:
+                        path: Any = None, db: store.Db = None, data_dir=None,
+                        by: Optional[str] = None) -> dict:
     """Set the calibration CDF from one of the instrument's own samples (stored
     data-relative) or an absolute path to an existing file. A changed CDF
     clears the saved assignments (they belong to one file). When the result is
@@ -439,6 +487,9 @@ def set_calibration_cdf(instrument_id: str, conf: dict, *, sample_id: Any = None
             _clear_cal_cache()
             st = calibration_status(instrument_id, conf, db=conn, data_dir=data_dir)
             st["queued"] = pipeline.on_calibration_saved(instrument_id, db=conn) if st["usable"] else 0
+            store.instrument_events.add(conn, instrument_id, "calibration_cdf", by=by, detail={
+                "sample_id": sid if sample_id is not None else None, "file": Path(new).name,
+                "usable": st["usable"]})
     log.warning("instrument %s calibration CDF set to %s", instrument_id, new)
     _changed(instrument_id)
     return st
@@ -478,7 +529,7 @@ def _sensitivity(value: Any) -> float:
 
 
 def save_calibration(instrument_id: str, assignments: Any, sensitivity: Any, conf: dict, *,
-                     db: store.Db = None, data_dir=None) -> dict:
+                     db: store.Db = None, data_dir=None, by: Optional[str] = None) -> dict:
     """Save the peak assignments (and sensitivity) for the instrument's
     calibration CDF and, in the same transaction, queue its
     ``awaiting_calibration`` samples (``pipeline.on_calibration_saved``; nothing
@@ -499,6 +550,9 @@ def save_calibration(instrument_id: str, assignments: Any, sensitivity: Any, con
             _clear_cal_cache()
             queued = pipeline.on_calibration_saved(instrument_id, db=conn)
             st = calibration_status(instrument_id, conf, db=conn, data_dir=data_dir)
+            store.instrument_events.add(conn, instrument_id, "calibration_saved", by=by, detail={
+                "file": cal.name, "assigned": st["assigned"], "usable": st["usable"],
+                "queued": queued})
     anchors = distill.anchors_for(distill.parse_assignment_map(
         distill.upsert_assignments("", cal, clean)), cal) if clean else None
     log.warning("instrument %s calibration saved (%d entries, %d queued)", instrument_id,
@@ -570,6 +624,8 @@ def _write_corrections(instrument_id: str, values: dict, reason: str, by: Option
             get(instrument_id, db=conn)
             changed = store.corrections.set_all(conn, instrument_id, values, by=by, reason=reason)
             queued = store.jobs.enqueue_for_status(instrument_id, "pending_corrections", db=conn)
+            store.instrument_events.add(conn, instrument_id, "corrections_saved", by=by,
+                                        detail={"changed": changed, "reason": reason})
     _changed(instrument_id)
     return {"changed": changed, "queued": queued}
 
@@ -638,6 +694,8 @@ def seed_gc1(conf: dict, *, by: Optional[str], db: store.Db = None) -> dict:
             changed = store.corrections.set_all(conn, instruments.GC1, values, by=by,
                                                 reason=SEED_REASON)
             queued = store.jobs.enqueue_for_status(instruments.GC1, "pending_corrections", db=conn)
+            store.instrument_events.add(conn, instruments.GC1, "corrections_saved", by=by,
+                                        detail={"changed": changed, "reason": SEED_REASON})
     log.warning("gc1 corrections seeded from %s by %s", conf.get("correction_factors_json"), by)
     _changed(instruments.GC1)
     return {"changed": changed, "queued": queued, "values": values}
@@ -666,7 +724,7 @@ def methods_view(instrument_id: str, *, db: store.Db = None) -> dict:
 
 
 def set_method_mapping(instrument_id: str, method_name: Any, hub_method: Any, *,
-                       db: store.Db = None) -> dict:
+                       db: store.Db = None, by: Optional[str] = None) -> dict:
     """Map a ChemStation method name (normalised) to a hub method, or unmap it
     (``hub_method`` None). Mapping queues that name's ``other_method`` samples
     (``pipeline.on_method_mapped``) in the same transaction; unmapping never
@@ -691,6 +749,8 @@ def set_method_mapping(instrument_id: str, method_name: Any, hub_method: Any, *,
                 mapping[name] = target
             store.instruments.upsert({"id": instrument_id, "method_map": json.dumps(mapping)}, db=conn)
             queued = pipeline.on_method_mapped(instrument_id, name, db=conn) if target else 0
+            store.instrument_events.add(conn, instrument_id, "method_mapped", by=by, detail={
+                "method": name, "hub_method": target, "queued": queued})
     log.warning("instrument %s: method %s %s", instrument_id, name,
                 f"mapped to {target} ({queued} queued)" if target else "unmapped")
     _changed(instrument_id)

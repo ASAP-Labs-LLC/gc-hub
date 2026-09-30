@@ -6,13 +6,18 @@
   <title>Calibration — Peak Assignment</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=2">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=3">
   <script src="{{ url_for('static', filename='js/session.js') }}?v=2"></script>
+  <!-- v3.1: the new design's tokens and theme, applied lightly (the full re-home comes later) -->
+  <script src="{{ url_for('static', filename='js/ui_logic.js') }}?v=3"></script>
+  <script src="{{ url_for('static', filename='js/shell.js') }}?v=3"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v=2">
   <style>
     :root{
-      --bg:#0d1117; --panel:#161b22; --line:#30363d; --line2:#21262d;
-      --txt:#e6edf3; --muted:#7d8590; --accent:#388bfd; --green:#3fb950;
-      --grey:#6e7681; --warn:#d29922; --danger:#f85149;
+      /* mapped onto tokens.css (light by default, dark with the user's theme) */
+      --panel:var(--bg-card); --line:var(--border); --line2:var(--bg-sunken);
+      --txt:var(--text); --accent:var(--ink); --green:var(--st-final);
+      --grey:var(--text-muted); --danger:var(--st-error); --muted:var(--text-muted-sunken); --warn:var(--warn-text);
     }
     *{box-sizing:border-box}
     html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);
@@ -27,14 +32,16 @@
     .btn{background:var(--line2);border:1px solid var(--line);color:var(--txt);
       border-radius:6px;padding:6px 13px;font-size:12px;cursor:pointer;font-family:inherit}
     .btn:hover{border-color:var(--accent)}
-    .btn.primary{background:var(--green);border-color:var(--green);color:#0d1117;font-weight:600}
+    .btn.primary{background:var(--ink);border-color:var(--ink);color:var(--ink-fg);font-weight:600}
     .btn.primary:hover{filter:brightness(1.08)}
     .sens{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
     .sens input[type=range]{width:130px;accent-color:var(--accent)}
     .sens #sens-val{min-width:20px;text-align:right;color:var(--txt);font-variant-numeric:tabular-nums}
     .status{font-size:12px;color:var(--muted)}
     .status.ok{color:var(--green)} .status.err{color:var(--danger)}
-    .wrap{display:grid;grid-template-columns:1fr 420px;gap:12px;padding:12px;
+    /* the bottom padding keeps the help text clear of the fixed
+       "Signed in as" line and the version badge */
+    .wrap{display:grid;grid-template-columns:1fr 420px;gap:12px;padding:12px 12px 30px;
       height:calc(100% - 53px)}
     @media(max-width:980px){.wrap{grid-template-columns:1fr;height:auto}}
     .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;
@@ -51,7 +58,8 @@
       font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px}
     tbody td{padding:5px 9px;border-bottom:1px solid var(--line2)}
     tbody tr.assigned{background:rgba(63,185,80,.07)}
-    tbody tr.ignored{opacity:.55}
+    /* ignored peaks: muted and italic (not faded: faded text fails AA) */
+    tbody tr.ignored td{color:var(--muted);font-style:italic}
     tbody tr.sel{outline:1px solid var(--accent);outline-offset:-1px}
     tbody tr:hover{background:rgba(56,139,253,.08);cursor:pointer}
     select{background:var(--bg);color:var(--txt);border:1px solid var(--line);
@@ -264,37 +272,42 @@ function updateCounts(){
   $("assigned-count").textContent = a + " assigned";
 }
 
+// Chart colours from tokens.css, so the chart follows the theme.
+function tok(name, fallback){
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
 function colorFor(choice){
-  if(choice==="ignore") return "#6e7681";
-  if(choice!=="") return "#3fb950";
-  return "#388bfd";
+  if(choice==="ignore") return tok("--text-muted", "#6e7681");
+  if(choice!=="") return tok("--st-final", "#3fb950");
+  return tok("--chart-ink", "#388bfd");
 }
 
 function drawChart(){
   if(!DATA || !DATA.trace) return;
   const trace = {
     x: DATA.trace.x, y: DATA.trace.y, type:"scatter", mode:"lines",
-    line:{color:"#388bfd", width:1}, name:"chromatogram", hoverinfo:"x+y"
+    line:{color:tok("--chart-ink", "#388bfd"), width:1}, name:"chromatogram", hoverinfo:"x+y"
   };
   const markers = {
     x: STATE.map(s=>s.rt), y: STATE.map(s=>s.intensity),
     type:"scatter", mode:"markers+text",
     marker:{size:9, color:STATE.map(s=>colorFor(s.choice)),
-            line:{width:1, color:"#0d1117"}},
+            line:{width:1, color:tok("--bg-card", "#0d1117")}},
     text: STATE.map(s=> s.choice==="ignore" ? "ign"
         : (s.choice!=="" ? "C"+s.choice : "")),
-    textposition:"top center", textfont:{size:10, color:"#e6edf3"},
+    textposition:"top center", textfont:{size:10, color:tok("--text", "#e6edf3")},
     name:"peaks", hovertemplate:"RT %{x:.3f} min<extra></extra>"
   };
   const shapes = (selectedIdx>=0 && STATE[selectedIdx]) ? [{
     type:"line", x0:STATE[selectedIdx].rt, x1:STATE[selectedIdx].rt,
-    yref:"paper", y0:0, y1:1, line:{color:"#d29922", width:1, dash:"dot"}
+    yref:"paper", y0:0, y1:1, line:{color:tok("--warn-text", "#d29922"), width:1, dash:"dot"}
   }] : [];
   const layout = {
-    paper_bgcolor:"#161b22", plot_bgcolor:"#161b22",
-    font:{color:"#7d8590", size:11}, margin:{l:55,r:12,t:10,b:40}, showlegend:false,
-    xaxis:{title:"Retention time (min)", gridcolor:"#21262d", zeroline:false},
-    yaxis:{title:"Intensity", gridcolor:"#21262d", zeroline:false},
+    paper_bgcolor:tok("--bg-card", "#161b22"), plot_bgcolor:tok("--bg-card", "#161b22"),
+    font:{color:tok("--chart-axis", "#7d8590"), size:11}, margin:{l:55,r:12,t:10,b:40}, showlegend:false,
+    xaxis:{title:"Retention time (min)", gridcolor:tok("--chart-grid", "#21262d"), zeroline:false},
+    yaxis:{title:"Intensity", gridcolor:tok("--chart-grid", "#21262d"), zeroline:false},
     shapes
   };
   Plotly.react("chart", [trace, markers], layout, {responsive:true, displayModeBar:false});
