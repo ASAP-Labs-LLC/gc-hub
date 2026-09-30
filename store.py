@@ -95,7 +95,8 @@ Jobs (durable queue)::
 
     jobs.enqueue(kind, payload, not_before=None, *, sample_id=None, db) -> int
     jobs.enqueue_for_status(instrument_id, status, *, method_name=None, kind='process', db) -> int
-    jobs.claim_next(now=None, *, kind=None, db) -> dict | None   # atomic; payload decoded
+    jobs.claim_next(now=None, *, kind=None, exclude_instruments=(), db) -> dict | None
+        # atomic; payload decoded; a paused instrument's jobs are skipped
     jobs.complete(job_id, *, db)
     jobs.fail(job_id, error, retry_at=None, *, db)   # retry_at -> queued again, else 'failed'
     jobs.requeue_stale_running(*, db) -> int
@@ -108,6 +109,8 @@ Small tables::
     settings_kv.get(key, default=None, *, db) / .set(key, value, *, db) / .delete(key, *, db)
     import_runs.start(instrument_id, *, by, sources, db) -> int      # 2D history import runs
     import_runs.finish(run_id, counts, *, stopped=None, db)
+    import_runs.progress(run_id, counts, *, db)      # counts so far (after each batch)
+    import_runs.unfinished(*, db) -> list[dict]      # finished_at IS NULL
     import_runs.list(instrument_id=None, *, db) -> list[dict]       # newest first
     conflicts.add(instrument_id, lab_id, injection_dt, existing_sample_id, cdf_sha256,
                   cdf_path, *, received_at=None, db) -> int
@@ -1593,18 +1596,24 @@ class jobs:  # noqa: N801
 
     @staticmethod
     def claim_next(now: Union[None, str, datetime] = None, *, kind: Optional[str] = None,
-                   db: Db = None) -> Optional[dict]:
+                   exclude_instruments: Sequence[str] = (), db: Db = None) -> Optional[dict]:
         """Atomically take the oldest due ``queued`` job (``not_before`` NULL or ≤ ``now``).
 
         Marks it ``running`` and increments ``attempts``; returns it with
         ``payload`` decoded, or ``None``. A job whose payload isn't JSON is
         marked ``failed`` and skipped. ``BEGIN IMMEDIATE`` makes the
         select-and-update exclusive, so two workers never claim one job.
+        Jobs of samples on ``exclude_instruments`` (paused for a purge) are
+        left queued, untouched.
         """
         stamp = _ts(now) or now_iso()
+        excluded = [str(i) for i in exclude_instruments]
         sql = ("SELECT * FROM jobs WHERE state='queued' AND (not_before IS NULL OR not_before <= ?)"
-               + (" AND kind=?" if kind else "") + " ORDER BY id LIMIT 1")
-        args = [stamp] + ([kind] if kind else [])
+               + (" AND kind=?" if kind else "")
+               + (" AND NOT EXISTS (SELECT 1 FROM samples s WHERE s.id=jobs.sample_id "
+                  f"AND s.instrument_id IN ({_in(excluded)}))" if excluded else "")
+               + " ORDER BY id LIMIT 1")
+        args = [stamp] + ([kind] if kind else []) + excluded
         with _writing(db) as conn:
             while True:
                 r = conn.execute(sql, args).fetchone()
@@ -1751,6 +1760,21 @@ class import_runs:  # noqa: N801
                 'INSERT INTO import_runs(instrument_id, started_at, "by", sources) VALUES (?,?,?,?)',
                 (instrument_id, now_iso(), by, _enc(sources)))
             return int(cur.lastrowid)
+
+    @staticmethod
+    def progress(run_id: int, counts: Any, *, db: Db = None) -> None:
+        """The counts so far of a run still going (after each committed batch),
+        so a run the process died in can say how far it got."""
+        with _writing(db) as conn:
+            conn.execute("UPDATE import_runs SET counts=? WHERE id=? AND finished_at IS NULL",
+                         (_enc(counts), run_id))
+
+    @staticmethod
+    def unfinished(*, db: Db = None) -> list:
+        """Runs with no ``finished_at``: the process died while they ran."""
+        with connection(db) as conn:
+            return _rows(conn.execute("SELECT * FROM import_runs WHERE finished_at IS NULL "
+                                      "ORDER BY id"))
 
     @staticmethod
     def finish(run_id: int, counts: Any, *, stopped: Optional[str] = None, db: Db = None) -> None:

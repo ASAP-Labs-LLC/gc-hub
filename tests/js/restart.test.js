@@ -1,8 +1,20 @@
 // Restart button: labelling from POST /api/restart {dry_run:true}, and the
 // "server has been replaced" check made while polling /healthz.
-const { restartLabel, restartConfirmText, serverReplaced, switchOutcomeNotice } = require('../../static/js/restart.js');
+const { restartLabel, restartConfirmText, serverReplaced, switchOutcomeNotice, restartBusyPrompt } = require('../../static/js/restart.js');
 
 module.exports = (t) => {
+    // The busy guard (v3.1): the dry run's busy/blocked lists.
+    t.eq(restartBusyPrompt({ mode: 'restart', busy: [], blocked: [] }), null);
+    t.eq(restartBusyPrompt(null), null);
+    const busy = restartBusyPrompt({ busy: ['an admin job (import-history) is running'], blocked: [] });
+    t.eq(busy.canForce, true);
+    t.eq(busy.text.includes('- an admin job (import-history) is running'), true);
+    t.eq(busy.text.includes('Restart anyway?'), true);
+    const purge = restartBusyPrompt({ busy: ['a purge of gc1 is running'], blocked: ['a purge of gc1 is running'] });
+    t.eq(purge.canForce, false);
+    t.eq(purge.text.includes('cannot be overridden'), true);
+    t.eq(purge.text.includes('Restart anyway'), false);
+
     t.eq(restartLabel({ mode: 'switch', tag: 'v1.4.0', pid: 1 }), 'Restart & install v1.4.0');
     t.eq(restartLabel({ mode: 'restart', tag: null, pid: 1 }), 'Restart');
     t.eq(restartLabel(null), 'Restart');

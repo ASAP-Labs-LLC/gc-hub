@@ -5,7 +5,7 @@ const assert = require('assert');
 const t = {
     eq(a, b) { assert.deepStrictEqual(a, b); },
 };
-const tests = ['./selection.test.js', './report_payload.test.js', './flagrules.test.js', './restart.test.js', './qbench_api.test.js', './samples.test.js', './instruments.test.js', './instrument_filter.test.js', './comments.test.js', './ladder.test.js', './diagnostics.test.js', './lem_machines.test.js', './session.test.js', './hub_admin.test.js', './report_zip.test.js', './distill_view.test.js', './live.test.js', './live_poller.test.js', './deeplink.test.js', './ui_logic.test.js', './live_adapter.test.js'];
+const tests = ['./selection.test.js', './report_payload.test.js', './flagrules.test.js', './restart.test.js', './qbench_api.test.js', './samples.test.js', './instruments.test.js', './instrument_filter.test.js', './comments.test.js', './ladder.test.js', './diagnostics.test.js', './lem_machines.test.js', './session.test.js', './hub_admin.test.js', './report_zip.test.js', './distill_view.test.js', './live.test.js', './live_poller.test.js', './deeplink.test.js', './ui_logic.test.js', './live_adapter.test.js', './purge.test.js'];
 (async () => {
     let failed = 0;
     for (const f of tests) {
