@@ -9,9 +9,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}GC Hub{% endblock %} · GC Hub</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
-  <script src="{{ url_for('static', filename='js/session.js') }}?v=1"></script>
-  <script src="{{ url_for('static', filename='js/ui_logic.js') }}?v=2"></script>
-  <script src="{{ url_for('static', filename='js/shell.js') }}?v=2"></script>
+  <script src="{{ url_for('static', filename='js/session.js') }}?v=2"></script>
+  <script src="{{ url_for('static', filename='js/ui_logic.js') }}?v=3"></script>
+  <script src="{{ url_for('static', filename='js/shell.js') }}?v=3"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v=2">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/shell.css') }}?v=2">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=3">
@@ -50,7 +50,8 @@
 
   {#- live.js (lane A, GCLive) loads here, before live_adapter.js; without it
       the adapter polls every 5 s. -#}
-  <script src="{{ url_for('static', filename='js/live_adapter.js') }}?v=1"></script>
+  <script src="{{ url_for('static', filename='js/live.js') }}?v=3"></script>
+  <script src="{{ url_for('static', filename='js/live_adapter.js') }}?v=2"></script>
   {% block scripts %}{% endblock %}
 
   <!-- Which build is running, bottom-right. Same string /healthz reports. -->

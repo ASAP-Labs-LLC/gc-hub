@@ -109,7 +109,7 @@
             { confirm_revoke: !!confirmRevoke }, { raw: true, reason: 'Downloading the installer creates ' + inst.name + "'s agent key, so it needs the admin password." });
         if (!r || r.status === 403) return false;
         let body = null;
-        if (r.status !== 200) { try { body = await r.json(); } catch (_e) { body = null; } }
+        if (r.status !== 200) body = (await window.GCSession.readJson(r)).body;
         const out = L.installerOutcome(r.status, body);
         if (out.kind === 'download') {
             const blob = await r.blob();

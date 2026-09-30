@@ -85,18 +85,12 @@
         return Object.assign({}, SAMPLE_STATUS[status] || { glyph: 'held', text: String(status || 'Unknown') });
     }
 
+    // One wording on every page: "5 of 8 done · Next: Wait for the agent to check in".
     function setupLabel(summary) {
         if (!summary) return '';
         if (summary.ready) return 'Ready';
-        return 'Step ' + summary.step + ' of ' + summary.total;
-    }
-
-    // Short step names (the cards' "next: …"), in setup_state.ORDER.
-    const STEP_SHORT = ['Create', 'Correction factors', 'Install the agent', 'Agent checks in', 'Calibration',
-        'Method', 'Go live', 'First result'];
-    function nextStepText(summary) {
-        if (!summary || summary.ready || !summary.step) return '';
-        return 'next: ' + (STEP_SHORT[summary.step - 1] || 'step ' + summary.step).toLowerCase();
+        return summary.done + ' of ' + summary.total + ' done' +
+            (summary.next_title ? ' · Next: ' + summary.next_title : '');
     }
 
     const STEP_BADGE = { done: 'Done', current: 'Now', waiting: 'Waiting', blocked: 'Blocked' };
@@ -108,7 +102,8 @@
         const open = (instruments || []).filter(i => i && i.enabled && i.setup && !i.setup.ready && i.setup.step)
             .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
         if (!open.length) return null;
-        return { instrument_id: open[0].id, step: open[0].setup.step, text: 'Step ' + open[0].setup.step };
+        const sm = open[0].setup;
+        return { instrument_id: open[0].id, step: sm.step, text: 'Setup · ' + sm.done + '/' + sm.total };
     }
 
     // ── the Activity feed ──────────────────────────────────────────────────
@@ -288,7 +283,7 @@
     }
 
     const api = {
-        LIVE_SECONDS, ACTIVITY_KINDS, STEP_SHORT, nextStepText, relTime, clockTime, actorName, initials, agentStatus, sampleStatus,
+        LIVE_SECONDS, ACTIVITY_KINDS, relTime, clockTime, actorName, initials, agentStatus, sampleStatus,
         setupLabel, stepBadge, setupNav, activityText, activityIcon, mergeActivity, makeAdminGate,
         recentAdd, recentClean, resolveTheme, diffSummaries, agentsFromStatus, lemTitle,
         goLiveTime, liveSinceState, RESERVED_IDS, instrumentHref, activitySample,

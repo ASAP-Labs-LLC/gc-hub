@@ -82,9 +82,8 @@
             if (background) headers['X-GC-Background'] = '1';
             r = await fetch(path, { headers, cache: 'no-store' });
         }
-        let body = null;
-        try { body = await r.json(); } catch (_e) { body = null; }
-        return { status: r.status, body };
+        // GCSession.readJson: a web page where data was expected becomes a sentence
+        return window.GCSession.readJson(r);
     }
 
     // ── the admin password: in this closure only, for 15 minutes ────────────
@@ -148,8 +147,7 @@
                 body: JSON.stringify(Object.assign({}, payload || {}, { password: pw })),
             });
             if (r.status === 403) {
-                let body = null;
-                try { body = await r.clone().json(); } catch (_e) { body = null; }
+                const body = (await window.GCSession.readJson(r)).body;
                 const msg = (body && body.error) || 'The admin password was refused.';
                 gate.clear();
                 syncUnlockChip();
@@ -164,8 +162,7 @@
                 if (!chipTimer) chipTimer = setInterval(syncUnlockChip, 15000);
             }
             if (opts && opts.raw) return r;
-            let body = null;
-            try { body = await r.json(); } catch (_e) { body = null; }
+            const body = (await window.GCSession.readJson(r)).body;
             if (r.status >= 400 && !(opts && opts.quiet)) toast((body && body.error) || ('HTTP ' + r.status), 'err');
             return { status: r.status, body };
         }

@@ -44,6 +44,9 @@ def test_session_js_check_parses_with_read_json():
 def test_session_js_is_loaded_first_wherever_read_json_is_used():
     for p in sorted((ROOT / "templates").glob("*.html")):
         text = p.read_text(encoding="utf-8")
+        if '{% extends "_layout.html" %}' in text:
+            # v3.1 pages: the layout's <head> scripts come before the page's own
+            text = (ROOT / "templates" / "_layout.html").read_text(encoding="utf-8") + text
         scripts = re.findall(r"js/([a-z_]+\.js)", text)
         if not scripts or p.name.startswith("_"):
             continue

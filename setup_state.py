@@ -269,13 +269,16 @@ def steps(instrument_row: dict, facts: dict) -> list:
 
 
 def summary(step_list: list) -> dict:
-    """``{total, done, step, ready}``: ``step`` is the current step's number
-    ("Step N of 8"), else the first unfinished one; ``None`` once ready."""
+    """``{total, done, step, ready, next_title}``: ``step`` is the current
+    step's number, else the first unfinished one (``None`` once ready), and
+    ``next_title`` its title. Every page says "5 of 8 done · Next: <title>"."""
     done = sum(1 for s in step_list if s["status"] == "done")
     cur = next((s["n"] for s in step_list if s["status"] == "current"), None)
     if cur is None:
         cur = next((s["n"] for s in step_list if s["status"] != "done"), None)
-    return {"total": len(step_list), "done": done, "step": cur, "ready": done == len(step_list)}
+    title = next((s["title"] for s in step_list if s["n"] == cur), None) if cur else None
+    return {"total": len(step_list), "done": done, "step": cur, "ready": done == len(step_list),
+            "next_title": title}
 
 
 # ── the facts, from the store ───────────────────────────────────────────────

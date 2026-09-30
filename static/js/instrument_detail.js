@@ -84,8 +84,7 @@
         const box = $('checklist');
         box.dataset.ready = sm.ready ? 'true' : 'false';
         $('checklist-title').textContent = sm.ready ? 'Setup complete' : 'Setup checklist';
-        $('checklist-count').textContent = sm.ready ? 'Ready · all 8 steps done'
-            : sm.done + ' of ' + sm.total + ' done · step ' + sm.step + ' is next';
+        $('checklist-count').textContent = sm.ready ? 'Ready · all 8 steps done' : U.setupLabel(sm);
         const toggle = $('checklist-toggle');
         toggle.hidden = !sm.ready;
         toggle.textContent = checklistOpen ? 'Hide the steps' : 'Show the steps';

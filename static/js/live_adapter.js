@@ -94,7 +94,7 @@
             const fb = createFallback({
                 fetchJSON: (path) => fetch(path, { headers: { Accept: 'application/json', 'X-GC-Background': '1' },
                                                    cache: 'no-store' })
-                    .then(r => (r.ok ? r.json() : null)),
+                    .then(r => (r.ok ? window.GCSession.readJson(r).then(x => x.body) : null)),
                 hidden: () => document.visibilityState === 'hidden',
             });
             document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') fb.poke(); });

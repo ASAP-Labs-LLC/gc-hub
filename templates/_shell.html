@@ -1,11 +1,11 @@
 {#- The v3.1 sidebar (spec "Shell"): the GC Hub mark, nav (pages not yet
-    redesigned go to the classic ones), "Setup guide · Step N" only while an
+    redesigned go to the classic ones; the mark is home, Samples), "Setup guide · Step N" only while an
     instrument is unfinished (shell.js shows it), Recent "on this computer"
     (localStorage), and the footer: the Live dot, the bell and the user chip
     (the name only: there are no roles). shell.js wires it. -#}
 <aside class="sb" id="sidebar" data-testid="sidebar" aria-label="Main">
   <div class="sb-head">
-    <a class="sb-mark" href="/instruments" aria-label="GC Hub">
+    <a class="sb-mark" href="/" aria-label="GC Hub: Samples (home)">
       <span class="mark-logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 20h18M5 20l3-12 2 7 2-11 3 13 2-5 2 8"/></svg></span>
       <span class="sb-label">GC Hub</span>
     </a>
@@ -18,9 +18,6 @@
     <a class="nav-item" href="/" data-nav="samples" title="Samples">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 19h18M5 19l3-9 2 5 3-11 3 12 2-4 1 7"/></svg>
       <span class="sb-label">Samples</span></a>
-    <a class="nav-item" href="/" data-nav="results" title="Results (the Distillation Data tab of the Samples page)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 10h17M3.5 15h17M9.5 4.5v15"/></svg>
-      <span class="sb-label">Results</span></a>
     <a class="nav-item{% if nav == 'instruments' %} active{% endif %}" href="/instruments" data-nav="instruments" title="Instruments"{% if nav == 'instruments' %} aria-current="page"{% endif %}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="6" rx="1.5"/><rect x="3.5" y="13.5" width="17" height="6" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>
       <span class="sb-label">Instruments</span></a>
@@ -67,8 +64,8 @@
           <button type="button" role="radio" data-theme-choice="system" aria-checked="false">Auto</button>
         </div>
       </div>
-      <a role="menuitem" href="/" title="Settings are on the Samples page for now">Settings</a>
-      <a role="menuitem" href="/" title="Help is on the Samples page for now">Help</a>
+      <a role="menuitem" href="/?open=settings" title="Opens Settings on the Samples page">Settings</a>
+      <a role="menuitem" href="/?open=help" title="Opens Help on the Samples page">Help</a>
       <a role="menuitem" class="update" id="menu-update" href="/" hidden></a>
       <button type="button" role="menuitem" class="menu-item" id="menu-signout" data-testid="sign-out">Sign out</button>
       <div class="menu-foot">GC Hub {{ app_version }}</div>

@@ -42,7 +42,7 @@
                 stat(inst.today, 'samples today', 'stat-today'), stat(inst.held, 'held', 'stat-held'),
                 stat(inst.export_pending, 'waiting to export', 'stat-export')),
             h('div', { className: 'setup-row' },
-                h('span', { text: setup && !setup.ready ? 'Setup · ' + U.nextStepText(setup) : 'Setup' }),
+                h('span', { text: 'Setup' }),
                 h('b', { 'data-testid': 'setup-label', text: U.setupLabel(setup) || '—' })),
             h('div', { className: 'progress', role: 'progressbar', 'aria-label': 'Setup progress',
                        'aria-valuemin': 0, 'aria-valuemax': 8, 'aria-valuenow': setup ? setup.done : 0 },

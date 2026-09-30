@@ -168,7 +168,7 @@ def test_an_ingested_cdf_appears_without_a_reload(tmp_path):
             assert drv.execute_script("return window.__sameDocument === true;")
 
             # the classic Instruments page: a heartbeat redraws the agent's status
-            drv.get(f"http://127.0.0.1:{port}/instruments?instrument=gc1")
+            drv.get(f"http://127.0.0.1:{port}/instruments/classic?instrument=gc1")   # v3.1: the 2A2 page moved
             assert _wait(lambda: "Agent version" in _detail(drv))
             drv.execute_script("window.__sameDocument = true;")
             code, _ = _heartbeat(port, token, version="v8.8.8")

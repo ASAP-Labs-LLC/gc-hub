@@ -431,10 +431,11 @@ def test_first_result_blocked_by_a_refused_results_file():
 
 def test_summary_step_n_of_8_is_the_current_step():
     sm = ss.summary(ss.steps(row(), facts()))
-    assert sm == {"total": 8, "done": 1, "step": 2, "ready": False}
+    assert sm == {"total": 8, "done": 1, "step": 2, "ready": False,
+                  "next_title": "Enter the 11 correction factors"}
     sm = ss.summary(ss.steps(row(token_issued_at="t", live_since="2026-10-01 08:00:00"),
                              complete_facts()))
-    assert sm == {"total": 8, "done": 8, "step": None, "ready": True}
+    assert sm == {"total": 8, "done": 8, "step": None, "ready": True, "next_title": None}
 
 
 # ── gather: the facts from a real store ─────────────────────────────────────

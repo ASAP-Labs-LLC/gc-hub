@@ -163,12 +163,19 @@ def test_the_three_pages_in_both_themes_at_both_sizes(tmp_path):
                     labels = _js(drv, "return Object.fromEntries(Array.from(document.querySelectorAll("
                                       "'[data-testid=instrument-card]')).map(c => [c.dataset.instrument, "
                                       "c.querySelector('[data-testid=setup-label]').textContent]));")
-                    assert labels == {"gc1": "Ready", "gc2": "Step 4 of 8"}, labels
+                    assert labels == {"gc1": "Ready",
+                                      "gc2": "5 of 8 done · Next: Wait for the agent to check in"}, labels
                     assert _wait(lambda: _js(drv, "return document.querySelectorAll('#feed li').length;") > 0)
                     feed = _js(drv, "return document.getElementById('feed').textContent;")
                     assert "Written to results CSV" in feed and "LEM" not in feed
                     assert _wait(lambda: not _js(drv, "return document.getElementById('nav-setup').hidden;"))
-                    assert _js(drv, "return document.getElementById('nav-setup-step').textContent;") == "Step 4"
+                    assert _js(drv, "return document.getElementById('nav-setup-step').textContent;") == "Setup · 5/8"
+                    # the mark goes home; there is no separate Results item (same page as Samples)
+                    assert _js(drv, "return document.querySelector('.sb-mark').getAttribute('href');") == "/"
+                    assert _js(drv, "return document.querySelectorAll('.sb-nav [data-nav=results]').length;") == 0
+                    # Settings and Help open the classic page's modals
+                    hrefs = _js(drv, "return Array.from(document.querySelectorAll('#user-menu a')).map(a => a.getAttribute('href'));")
+                    assert "/?open=settings" in hrefs and "/?open=help" in hrefs, hrefs
                     assert _tid(drv, "add-gc") == 1
                     live = _js(drv, "return document.querySelector('[data-instrument=gc1] [data-role=agent-pill]').textContent;")
                     assert live == "Live"
@@ -180,6 +187,8 @@ def test_the_three_pages_in_both_themes_at_both_sizes(tmp_path):
                     statuses = _js(drv, "return Array.from(document.querySelectorAll("
                                         "'[data-testid=checklist-step]')).map(t => t.dataset.status);")
                     assert statuses.count("current") == 1 and statuses[3] == "current", statuses
+                    assert _js(drv, "return document.getElementById('checklist-count').textContent;") == \
+                        "5 of 8 done · Next: Wait for the agent to check in"
                     for sec in ("agent", "calibration", "corrections", "export", "methods", "backfill",
                                 "conflicts"):
                         assert _tid(drv, "section-" + sec) == 1, sec
@@ -197,7 +206,9 @@ def test_the_three_pages_in_both_themes_at_both_sizes(tmp_path):
                     _open(drv, port, "/setup?instrument=gc2", theme, size)
                     assert _wait(lambda: _js(drv, "return document.querySelectorAll('#steps > li').length;") == 8)
                     assert _js(drv, "return document.querySelector('[data-testid=step-checkin]').dataset.status;") == "current"
-                    assert _js(drv, "return document.querySelector('[data-testid=guide-step]').textContent;") == "Step 4 of 8"
+                    assert _js(drv, "return document.querySelector('[data-testid=guide-step]').textContent;") == \
+                        "5 of 8 done · Next: Wait for the agent to check in"
+                    assert _js(drv, "return document.getElementById('checklist-count') === null;")
                     assert _js(drv, "return document.getElementById('picker').value;") == "gc2"
                     _common(drv, theme, size[0])
             assert _errors(drv) == []
@@ -222,7 +233,8 @@ def test_the_guide_moves_on_when_the_agent_checks_in_and_add_a_gc(tmp_path):
             ui_setup_demo.touch_agent(hub.db, "gc2")               # the agent says hello
             assert _wait(lambda: _js(drv, "return document.querySelector('[data-testid=step-checkin]')"
                                           ".dataset.status;") == "done", timeout=20)
-            assert _js(drv, "return document.querySelector('[data-testid=guide-step]').textContent;") == "Step 7 of 8"
+            assert _js(drv, "return document.querySelector('[data-testid=guide-step]').textContent;") == \
+                "6 of 8 done · Next: Choose the results file and go live"
             # everything fetched because of the live update or a timer is background
             later = _js(drv, "return window.__gets.slice(window.__settled);")
             assert later and all(bg == "1" for _url, bg in later), later
@@ -289,5 +301,21 @@ def test_step_7_asks_for_the_results_file_first_and_live_updates_keep_what_is_ty
             time.sleep(1.0)
             assert _js(drv, "return document.querySelector('#corrections-body input').value;") == "-7.25"
             assert _errors(drv) == []
+        finally:
+            drv.quit()
+
+
+def test_the_user_menu_opens_settings_and_help_on_the_classic_page(tmp_path):
+    ui_setup_demo.build(tmp_path)
+    with booted(tmp_path) as (port, _proc, _data, _home):
+        drv = _driver()
+        browser_sign_in(drv, port)
+        try:
+            for what in ("settings", "help"):
+                drv.get(f"http://127.0.0.1:{port}/?open={what}")
+                assert _wait(lambda: _js(drv, f"return document.getElementById('modal-{what}')"
+                                              ".classList.contains('open');"), timeout=30), what
+                # the address no longer says ?open=, so a reload doesn't reopen it
+                assert "open=" not in drv.current_url
         finally:
             drv.quit()

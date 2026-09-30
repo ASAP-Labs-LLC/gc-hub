@@ -4218,6 +4218,17 @@ async function exportAnalysisReport() {
    22. HELP MODAL
    =================================================================== */
 
+function openFromQuery() {
+    const params = new URLSearchParams(window.location.search);
+    const what = params.get('open');
+    if (!what) return;
+    params.delete('open');
+    const rest = params.toString();
+    window.history.replaceState(null, '', window.location.pathname + (rest ? '?' + rest : '') + window.location.hash);
+    if (what === 'settings') openSettingsModal();
+    else if (what === 'help') openHelpModal();
+}
+
 function openHelpModal() {
     const modal = document.getElementById('modal-help');
     if (modal) openModal(modal);
@@ -4470,6 +4481,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (typeof DeepLink !== 'undefined') DeepLink.start();
 
     showNotification('GC Viewer ready', 'success');
+
+    // v3.1: the new pages' user menu links here with ?open=settings|help
+    // (after the settings have loaded, so the Settings form is filled).
+    openFromQuery();
 
     // Load persistent system notifications (GCLive reports new ones).
     loadNotifications();

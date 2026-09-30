@@ -56,22 +56,22 @@ module.exports = (t) => {
     t.eq(U.sampleStatus('whatever').glyph, 'held');
 
     // ── setup labels
-    t.eq(U.setupLabel({ total: 8, done: 3, step: 4, ready: false }), 'Step 4 of 8');
+    // one wording everywhere: "5 of 8 done · Next: <step>"; the sidebar says "Setup · 5/8"
+    t.eq(U.setupLabel({ total: 8, done: 5, step: 4, ready: false, next_title: 'Wait for the agent to check in' }),
+        '5 of 8 done · Next: Wait for the agent to check in');
+    t.eq(U.setupLabel({ total: 8, done: 3, step: 4, ready: false }), '3 of 8 done');
     t.eq(U.setupLabel({ total: 8, done: 8, step: null, ready: true }), 'Ready');
     t.eq(U.setupLabel(null), '');
-    t.eq(U.STEP_SHORT.length, 8);
-    t.eq(U.nextStepText({ total: 8, done: 3, step: 4, ready: false }), 'next: agent checks in');
-    t.eq(U.nextStepText({ ready: true }), '');
     t.eq(U.stepBadge('done'), 'Done');
     t.eq(U.stepBadge('current'), 'Now');
     t.eq(U.stepBadge('waiting'), 'Waiting');
     t.eq(U.stepBadge('blocked'), 'Blocked');
     const insts = [
         { id: 'gc1', name: 'GC-1', enabled: 1, setup: { ready: true, step: null } },
-        { id: 'gc3', name: 'GC-3', enabled: 0, setup: { ready: false, step: 2 } },
-        { id: 'gc2', name: 'GC-2', enabled: 1, setup: { ready: false, step: 4 } },
+        { id: 'gc3', name: 'GC-3', enabled: 0, setup: { ready: false, step: 2, done: 1, total: 8 } },
+        { id: 'gc2', name: 'GC-2', enabled: 1, setup: { ready: false, step: 4, done: 5, total: 8 } },
     ];
-    t.eq(U.setupNav(insts), { instrument_id: 'gc2', step: 4, text: 'Step 4' });
+    t.eq(U.setupNav(insts), { instrument_id: 'gc2', step: 4, text: 'Setup · 5/8' });
     t.eq(U.setupNav([insts[0]]), null);
     t.eq(U.setupNav([{ id: 'x', enabled: 1, setup: null }]), null);
 

@@ -192,7 +192,7 @@
         $('guide-title').textContent = 'Add a new GC';
         $('guide-sub').textContent = 'Eight steps, about 20 minutes. You can stop at any point: the hub remembers where you got to.';
         $('guide-bar').style.width = '0%';
-        $('guide-step').textContent = 'Step 1 of 8';
+        $('guide-step').textContent = '0 of 8 done · Next: Create the instrument';
         const name = h('input', { type: 'text', maxlength: 64, placeholder: 'GC-3', required: true, 'data-testid': 'new-name', 'aria-label': 'Name' });
         const id = h('input', { type: 'text', maxlength: 32, placeholder: 'gc3', required: true, pattern: '[a-z][a-z0-9_\\-]{0,31}',
                                 'data-testid': 'new-id', 'aria-label': 'Id' });
@@ -246,7 +246,7 @@
 
     function renderPicker(current) {
         const pick = $('picker');
-        const opts = (LIST.instruments || []).map(i => h('option', { value: i.id, text: i.name + (i.setup && !i.setup.ready ? ' · ' + U.setupLabel(i.setup) : '') }));
+        const opts = (LIST.instruments || []).map(i => h('option', { value: i.id, text: i.name + (i.setup && !i.setup.ready ? ' · ' + i.setup.done + ' of ' + i.setup.total + ' done' : '') }));
         opts.push(h('option', { value: NEW, text: 'Add a new GC' }));
         pick.replaceChildren(...opts);
         pick.value = current;
