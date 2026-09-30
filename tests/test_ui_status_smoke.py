@@ -267,9 +267,9 @@ def test_hub_admin_unlocks_once_and_starts_a_folder_load(tmp_path):
         browser_sign_in(drv, port)
         try:
             drv.get(f"http://127.0.0.1:{port}/admin/hub")
-            home = drv.find_element("css selector", "[data-testid='back-home']")
-            assert home.text.startswith("← Back to GC Hub") and home.is_displayed()
-            assert home.get_attribute("href").endswith("/")
+            # v4.0 lane E2: the page is in the shell; the sidebar's mark leads home
+            home = drv.find_element("css selector", "#sidebar .sb-mark")
+            assert home.is_displayed() and home.get_attribute("href").endswith("/")
             # the instrument selects are filled without the password (the old bug)
             assert _wait(lambda: _js(drv, "return document.querySelectorAll('#lf-inst option')"
                                           ".length;") >= 2)

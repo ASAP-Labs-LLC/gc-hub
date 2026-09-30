@@ -67,7 +67,21 @@
         return Math.ceil(ms / 60000) + ' min';
     }
 
-    const pure = { TTL_MS, createUnlock, remainingText };
+    /** v4.0 lane E2: the shell's admin gate (GCShell.adminPost, the unlock
+        chip) as a view of an unlock closure, so a page has ONE unlock: the
+        shell dialog, the Hub admin bar and Calibration's Save share it. */
+    function gateFor(unlock) {
+        return {
+            get: () => unlock.get(),
+            set: (pw) => unlock.set(String(pw)),
+            clear: () => unlock.forget(),
+            remainingMs: () => unlock.remainingMs(),
+            onChange: (fn) => unlock.onChange(fn),
+            toJSON: () => ({}),
+        };
+    }
+
+    const pure = { TTL_MS, createUnlock, remainingText, gateFor };
     if (typeof module !== 'undefined' && module.exports) {
         module.exports = pure;
         return;
@@ -84,8 +98,18 @@
         return e;
     }
 
-    /** The masked password dialog; resolves the password or null. */
+    /** The masked password dialog; resolves the password or null. On a
+        shell page it is the shell's own dialog (#admin-dialog, the tokens). */
     function dialog(what) {
+        const shell = root.GCShell;
+        if (shell && typeof shell.askPassword === 'function' && document.getElementById('admin-dialog')) {
+            return shell.askPassword((what ? 'To ' + what + ', enter the admin password. ' : '') +
+                'It stays unlocked in this tab for 15 minutes, never saved.').then((pw) => {
+                // not kept yet: only once the hub accepts it (accepted())
+                if (pw) pending = pw;
+                return pw || null;
+            });
+        }
         return new Promise((resolve) => {
             const overlay = el('div', null, 'position:fixed;inset:0;z-index:20000;display:flex;' +
                 'align-items:center;justify-content:center;background:rgba(13,17,23,.75)');

@@ -87,7 +87,11 @@
     }
 
     // ── the admin password: in this closure only, for 15 minutes ────────────
-    const gate = U.makeAdminGate({ ttlMs: 15 * 60 * 1000 });
+    // v4.0 lane E2: ONE unlock per page. With admin_unlock.js loaded (the
+    // layout loads it first) the gate is a view of GCAdminUnlock.page, so the
+    // shell's dialog, Hub admin's Unlock and Calibration's Save share it.
+    const AU = window.GCAdminUnlock;
+    const gate = AU && AU.gateFor ? AU.gateFor(AU.page) : U.makeAdminGate({ ttlMs: 15 * 60 * 1000 });
     let chipTimer = null;
     function syncUnlockChip() {
         const chip = $('unlock-chip');
@@ -96,7 +100,9 @@
         chip.hidden = left <= 0;
         $('unlock-text').textContent = 'Admin unlocked · ' + Math.max(1, Math.ceil(left / 60000)) + ' min';
         if (left <= 0 && chipTimer) { clearInterval(chipTimer); chipTimer = null; }
+        if (left > 0 && !chipTimer) chipTimer = setInterval(syncUnlockChip, 15000);
     }
+    if (gate.onChange) gate.onChange(() => syncUnlockChip());
 
     function askPassword(reason, error) {
         const dlg = $('admin-dialog');
@@ -158,8 +164,8 @@
             }
             if (fresh) {
                 gate.set(pw);
+                if (AU && AU.accepted) AU.accepted(pw);
                 syncUnlockChip();
-                if (!chipTimer) chipTimer = setInterval(syncUnlockChip, 15000);
             }
             if (opts && opts.raw) return r;
             const body = (await window.GCSession.readJson(r)).body;
@@ -325,7 +331,9 @@
             await fetch('/api/notifications/dismiss-all', { method: 'POST' });
             loadNotes();
         });
-        $('unlock-lock').addEventListener('click', () => { gate.clear(); syncUnlockChip(); toast('Admin locked.'); });
+        if ($('unlock-lock')) {
+            $('unlock-lock').addEventListener('click', () => { gate.clear(); syncUnlockChip(); toast('Admin locked.'); });
+        }
 
         renderRecent();
         loadNotes();

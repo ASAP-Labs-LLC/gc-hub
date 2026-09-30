@@ -50,4 +50,20 @@ module.exports = (t) => {
     a.set('topsecret');
     t.eq(JSON.stringify(a).includes('topsecret'), false);
     t.eq(String(a).includes('topsecret'), false);
+
+    // v4.0 lane E2: the shell's gate (GCShell.adminPost, the unlock chip) is a
+    // view of the page's closure, so there is ONE unlock per page
+    const page = U.createUnlock({ now: () => now });
+    const gate = U.gateFor(page);
+    t.eq(gate.get(), null);
+    gate.set('shared');
+    t.eq(page.get(), 'shared');              // unlocking in the shell unlocks the page
+    t.eq(gate.remainingMs(), U.TTL_MS);
+    page.forget();
+    t.eq(gate.get(), null);                  // Lock on the page locks the shell
+    page.set('back');
+    t.eq(gate.get(), 'back');
+    gate.clear();
+    t.eq(page.isUnlocked(), false);
+    t.eq(JSON.stringify(gate).includes('back'), false);
 };

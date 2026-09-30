@@ -11,7 +11,9 @@
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <script src="{{ url_for('static', filename='js/session.js') }}?v=2"></script>
   <script src="{{ url_for('static', filename='js/ui_logic.js') }}?v=4"></script>
-  <script src="{{ url_for('static', filename='js/shell.js') }}?v=3"></script>
+  {#- v4.0 lane E2: the one admin unlock (a 15-minute closure); shell.js's gate is a view of it -#}
+  <script src="{{ url_for('static', filename='js/admin_unlock.js') }}?v=3"></script>
+  <script src="{{ url_for('static', filename='js/shell.js') }}?v=4"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v=2">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/shell.css') }}?v=2">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=3">
@@ -24,11 +26,14 @@
     <div class="main-col">
       <header class="topbar" data-testid="topbar">
         {% block topbar %}{% endblock %}
+        {#- a page with its own unlock at the top (Hub admin) replaces the chip -#}
+        {% block unlock_chip %}
         <span id="unlock-chip" class="unlock-chip" hidden data-testid="unlock-chip">
           <span class="ico ico-lock" aria-hidden="true"></span>
           <span id="unlock-text">Admin unlocked</span>
           <button type="button" id="unlock-lock">Lock</button>
         </span>
+        {% endblock %}
       </header>
       {#- v4.0 lane E: one line while processing is paused (running_now.js) -#}
       <div id="paused-banner" class="paused-banner" data-testid="paused-banner" role="status" hidden></div>

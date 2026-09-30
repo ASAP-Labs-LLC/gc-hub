@@ -108,6 +108,16 @@ PAIRS = [
     ("--text-inverse", ["--bad"], TEXT, "an error toast"),
     ("--badge-fg", ["--bg"], TEXT, "the version badge"),
     ("--chart-axis", ["--bg-card"], TEXT, "chart labels"),
+    # v4.0 lane E2: Hub admin and Calibration in the shell (admin.css, calibration.css)
+    ("--pill-final-fg", ["--bg"], TEXT, "admin/calibration success lines"),
+    ("--pill-final-fg", ["--bg-card"], TEXT, "a finished job's line"),
+    ("--st-error", ["--bg-card"], TEXT, "a failed job's line"),
+    ("--pill-held-fg", ["--bg-card"], TEXT, "a job's warnings"),
+    ("--text-muted", ["--bg-card"], TEXT, "peak numbers"),
+    ("--text", ["--bg-card", "--bg-active"], TEXT, "the selected peak"),
+    ("--text", ["--bg", "--bg-active"], TEXT, "the admin sub-nav's current item"),
+    ("--pill-error-fg", ["--bg-sunken"], TEXT, "an error in the path editor"),
+    ("--ink-fg", ["--ink-hover"], TEXT, "primary buttons on hover"),
     ("--accent", ["--bg"], UI, "focus ring"),
     ("--accent", ["--sidebar-bg"], UI, "focus ring in the sidebar"),
     ("--accent", ["--bg-sunken"], UI, "focus ring on sunken fields"),
@@ -149,3 +159,20 @@ def test_the_version_badge_is_readable():
     op = re.search(r"opacity:\s*([\d.]+)", rule)
     assert op is None or float(op.group(1)) == 1.0
     assert "var(--badge-fg" in rule
+
+
+# v4.0 lane E2: the new pages' stylesheets use only the checked tokens for
+# colour (no literal colours), and only token pairs listed above for text.
+PAGE_CSS = [ROOT / "static" / "css" / "admin.css", ROOT / "static" / "css" / "calibration.css"]
+CHECKED_FG = {p[0] for p in PAIRS}
+
+
+@pytest.mark.parametrize("css", PAGE_CSS, ids=lambda p: p.name)
+def test_the_new_pages_use_tokens_only(css):
+    text = re.sub(r"/\*.*?\*/", "", css.read_text(encoding="utf-8"), flags=re.S)
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(", text), css.name
+    for m in re.finditer(r"(?<![-\w])color\s*:\s*([^;}]+)", text):
+        value = m.group(1).strip()
+        token = re.fullmatch(r"var\((--[\w-]+)\)", value)
+        assert token, (css.name, value)
+        assert token.group(1) in CHECKED_FG, (css.name, token.group(1))
