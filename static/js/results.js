@@ -12,7 +12,7 @@
      distillation curves (Plotly, the token-driven monochrome template,
      re-themed on 'gc:theme').
    * Live: a GCLive update naming samples (or a reset) reloads the rows in the
-     background, at most every 5 s; the selection is kept. */
+     background, at most every 15 s; the selection is kept. */
 (function () {
     'use strict';
     const R = window.GCResults;
@@ -445,11 +445,12 @@
     // ── live ────────────────────────────────────────────────────────────────
     let liveTimer = null;
     let lastLive = 0;
+    const LIVE_GAP_MS = 15000;          // /api/table is every sample: not more often during an import
     function onLive(u) {
         if (!state.loadedOnce || !u) return;
         if (!(u.reset || (u.samples && u.samples.length))) return;
         clearTimeout(liveTimer);
-        const wait = Math.max(0, 5000 - (Date.now() - lastLive));
+        const wait = Math.max(0, LIVE_GAP_MS - (Date.now() - lastLive));
         liveTimer = setTimeout(() => { lastLive = Date.now(); reload(true); }, wait);
     }
 
