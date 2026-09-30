@@ -631,7 +631,7 @@
         const wants = [
             e.trace ? null : getJSON('/api/samples/' + id + '/trace', background).then(r => { e.trace = r.ok ? r.body : { error: errText(r, 'The chromatogram') }; }),
             e.curve || !row.current_revision ? null : getJSON('/api/samples/' + id + '/distillation-curve', background).then(r => { e.curve = r.ok ? r.body : { error: errText(r, 'The results') }; }),
-            e.lab || !row.lab_id ? null : getJSON('/api/lab/' + encodeURIComponent(row.lab_id), true).then(r => { e.lab = r.ok ? r.body : { runs: [] }; }),
+            e.lab || !row.lab_id || String(row.lab_id).includes('/') ? null : getJSON('/api/lab/' + encodeURIComponent(row.lab_id), true).then(r => { e.lab = r.ok ? r.body : { runs: [] }; }),
         ].filter(Boolean);
         if (!e.trace) $('chrom').replaceChildren(h('div', { className: 'chart-empty', text: 'Loading the chromatogram…' }));
         await Promise.all(wants);
