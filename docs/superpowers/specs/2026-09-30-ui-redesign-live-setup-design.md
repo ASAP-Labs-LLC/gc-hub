@@ -279,6 +279,76 @@ The site-wide UX review (session scratchpad `ui/UX-REVIEW.md`) drives this secti
   Back and Forward navigate views, and reloading restores the view. Links are relative to the host in use, so `http://asapsv1:5560/...` works on the lab network and `https://gc.asaplabs.net/...` works anywhere. "Copy link" keeps copying the gc.asaplabs.net form, and the address bar gives the local form. `/lab/<lab_id>` resolves as today.
 - **Dynamic themes on every page:** System (the default; follows the OS live), Light and Dark.
 
+## v5.0.0: the build plan (2026-09-30, ship target: today)
+
+Ryan: "roll it all into the next major update, and send it out today". v5.0.0 contains:
+- the v4.0.1 hotfix work (Backfill select all, shift-click and drag; System/Light/Dark);
+- the redesigned main page and Analysis;
+- the address bar as the link;
+- "select all matching this filter".
+
+Integration branch: `release/v5`.
+
+**Template.** `/instruments/<id>` (the shell, tokens, sections, hairline rows). The mockups are `ui/mock/shots/samples-*.png` and `results.png`/`settings.png`, adjusted by the critique folded into "Later releases" above: status glyphs plus reason, AA contrast, Plotly kept, "Add to queue" not "Send to QBench", a Report queue with Download ZIP plus Upload to QBench, and held samples linking to their fix.
+
+**Routes.** All pages extend `_layout.html`.
+- `/`, `/samples` and `/samples/<id>[/compare|/data]` all render `templates/samples.html` (lane S). The client router (`static/js/samples_router.js`) keeps the URL current with `pushState`: filters, search and sort go in the query (`?instrument=&status=&q=&sort=&notsent=1`), and a reload restores the view.
+- `/lab/<lab_id>` resolves as today and lands on `/samples/<id>`.
+- `/results` (lane R): the all-samples table.
+- `/settings` (lane R): the settings page.
+- `/classic`: the old `index.html`, kept for one release. Every old deep link (`?sample=`, `/samples/<id>` on classic) keeps working, or redirects.
+
+**Lanes, with fixed contracts between them.**
+
+**Lane S: Samples page.**
+- The list:
+  - filter chips (instrument and status, including "Not sent to QBench"), an inline lab-ID filter, day headings, the sort switch (`sample_order.js`);
+  - live rows (`live.js`) and held-reason text linking to the fix;
+  - multi-select: hover checkbox, shift-click, drag, keyboard;
+  - a bulk bar (Re-process, Export to LIMS, Add to report queue, Download reports), plus **"Select all N matching this filter"**, which runs as a server-side task with a confirmation.
+- The detail pane:
+  - header: lab ID, status pill with reason, instrument, injection time, revision; actions **Export report**, **Add to queue**, and "⋯" (Re-process, Export to LIMS, Download CDF, Copy link);
+  - a segmented control, Overview · Compare · Data.
+- **Overview:** the chromatogram (Plotly monochrome template, drag to zoom, carbon ticks from `ladder.js`), the Results card (Recovery | D86 | D2887, the corrected toggle, 40/60 midpoints with tooltip, best fit, flags), and other runs of this lab ID.
+- **Data:** the full numbers, the calibration used, revision history (why), the blank used, `qbench_uploaded_at`.
+- **Compare:** mounts lane C's module through the contract below.
+- Keyboard: up/down and j/k through the list, and Ctrl K to focus the filter.
+- The main page's "running now", GC summary and paused banner come from the shell footer; nothing is duplicated.
+
+**Lane C: Compare, report export and the report queue.**
+- It provides `static/js/compare_view.js`: `window.GCCompare.mount(el, {sample, standards, settings, onUrlChange}) -> {unmount(), setStandard(name)}`. It owns:
+  - the standard picker (default is the best fit; a manual pick is remembered per sample in localStorage);
+  - the Trend and Difference graphs with range bands, Annotate, fullscreen, drag-zoom;
+  - **Findings** (the deviation bullets as a list), **Conclusion** (read-only until Edit), and **Comments** (`comments.js`, with preset chips and the composer);
+  - the **Adjust** drawer (baseline, detail, smoothing, thresholds, range overlays, x-max, Save as default with the admin unlock); opening it hides the list, via a `gc:adjust` event the page listens to.
+  - It calls `onUrlChange({standard})` so lane S can keep `?standard=` in the URL.
+- It also provides `static/js/report_queue.js`: `window.GCReportQueue` (`add(item)`, `remove(id)`, `clear()`, `items()`, `openSheet()`). The queue is persisted in sessionStorage. The sheet offers Download all (ZIP job via `download_jobs`) and Upload to QBench (the existing SSE flow: sign-in, progress, skip, stop, re-entering credentials).
+- An **Export report** sheet (one sample: PDF download with the current Compare parameters). Report payloads are built by `report_payload.js`, unchanged in format, so the server is untouched.
+- The shell top bar shows "Report queue N" (a button that opens the sheet).
+
+**Lane R: Results, Settings, Help and notifications.**
+- `/results`: the table with grouped D2887 and D86 headers built from `/api/table` `columns`; Key points by default and All points on a toggle (remembered); filters in the URL; CSV download; a row links to `/samples/<id>/data`; select rows to overlay distillation curves.
+- `/settings`: grouped sections.
+  - Display: flag rules and their editor (`flagrules.js`).
+  - Best fit and analysis defaults: admin.
+  - Comparison standards: tag, rename, delete; admin.
+  - QBench: API credentials (admin) and the web login.
+  - Server paths: read-only, collapsed.
+  - Everything the classic Settings modal did, with no `window.prompt`.
+- `/help`: a short plain-language page.
+- A notifications panel in the shell (the bell), replacing the classic dropdown.
+- Wire the user menu's Settings and Help to these pages.
+
+**Shared rules.**
+- `readJson` everywhere; `GCLive.bgFetch` for background GETs; `textContent` only.
+- One admin unlock per page (`GCAdminUnlock`).
+- System/Light/Dark from the shell.
+- AA contrast (`test_ui_contrast.py`).
+- Selenium smoke tests keyed on `data-testid` at 1366x768 and 1440x900, in both themes.
+- No server behaviour changes except small read-only additions, which must be listed in the lane report.
+- Comparison Export is not offered.
+- Each lane adds its own section to `docs/release-notes/v5.0.0.md`.
+
 ## Build rules
 
 - No build step: window globals plus `module.exports`, as today; `package_release.sh` ships tracked source only.
