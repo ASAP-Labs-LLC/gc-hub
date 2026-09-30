@@ -134,3 +134,14 @@ def test_other_pages_have_a_way_home():
         assert _read(T / name).lstrip().startswith('{% extends "_layout.html" %}'), name
     # the login page keeps no sidebar
     assert "_shell.html" not in _read(T / "login.html") and "_layout" not in _read(T / "login.html")
+
+
+def test_no_page_has_its_own_admin_password_box():
+    """ONE unlock mechanism on every page (lane E2 review): no page reads a
+    plain password input of its own; they use admin_unlock.js."""
+    for name in ("instruments.html", "calibration.html", "hub_admin.html", "index.html"):
+        assert 'id="admin-pw"' not in _read(T / name), name
+    for name in ("instruments.js", "calibration.js", "app.js"):
+        assert "admin-pw" not in _read(JS / name), name
+    assert "GCAdminUnlock" in _read(JS / "instruments.js")
+    assert "js/admin_unlock.js" in _read(T / "instruments.html")

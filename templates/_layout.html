@@ -10,12 +10,12 @@
   <title>{% block title %}GC Hub{% endblock %} · GC Hub</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <script src="{{ url_for('static', filename='js/session.js') }}?v=2"></script>
-  <script src="{{ url_for('static', filename='js/ui_logic.js') }}?v=4"></script>
+  <script src="{{ url_for('static', filename='js/ui_logic.js') }}?v=5"></script>
   {#- v4.0 lane E2: the one admin unlock (a 15-minute closure); shell.js's gate is a view of it -#}
   <script src="{{ url_for('static', filename='js/admin_unlock.js') }}?v=3"></script>
-  <script src="{{ url_for('static', filename='js/shell.js') }}?v=4"></script>
+  <script src="{{ url_for('static', filename='js/shell.js') }}?v=5"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v=2">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/shell.css') }}?v=2">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/shell.css') }}?v=3">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=3">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/status_shell.css') }}?v=1">
   {% block head %}{% endblock %}
@@ -60,7 +60,7 @@
       the adapter polls every 5 s. -#}
   <script src="{{ url_for('static', filename='js/live.js') }}?v=5"></script>
   <script src="{{ url_for('static', filename='js/live_adapter.js') }}?v=2"></script>
-  <script src="{{ url_for('static', filename='js/running_now.js') }}?v=3"></script>
+  <script src="{{ url_for('static', filename='js/running_now.js') }}?v=5"></script>
   {% block scripts %}{% endblock %}
 
   <!-- Which build is running, bottom-right. Same string /healthz reports. -->

@@ -83,4 +83,14 @@ module.exports = (t) => {
 
     // ── the admin-call queue: a hung request is abandoned after 30 s ──
     t.eq(H.CALL_TIMEOUT_MS, 30000);
+
+    // ── following the feed (lane E2 review): poll the job only when a task is
+    //    there and moved; a finished task dropping off sends nothing (a POST
+    //    would count as activity)
+    const run = { id: 'a', state: 'running', progress: { done: 1 } };
+    t.eq(H.shouldFollow(null, run), true);
+    t.eq(H.shouldFollow(run, Object.assign({}, run, { progress: { done: 2 } })), true);
+    t.eq(H.shouldFollow(run, run), false);
+    t.eq(H.shouldFollow({ id: 'a', state: 'done' }, null), false);
+    t.eq(H.shouldFollow(null, null), false);
 };

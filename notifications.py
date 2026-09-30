@@ -66,7 +66,10 @@ class NotificationStore:
 
     # ── public API ───────────────────────────────────────────────────
     def add(self, level: str, message: str) -> dict:
-        """Append a notification (stored newest-first) and persist it."""
+        """Append a notification (stored newest-first) and persist it. An
+        identical one (same level and text) still in the tray is returned
+        instead of added again (v4.0 lane E2 review: e.g. a start-up warning
+        repeated on every boot)."""
         entry = {
             "id": uuid.uuid4().hex,
             "ts": datetime.now().isoformat(timespec="seconds"),
@@ -74,6 +77,9 @@ class NotificationStore:
             "message": str(message),
         }
         with self._lock:
+            for item in self._items:
+                if item.get("level") == entry["level"] and item.get("message") == entry["message"]:
+                    return dict(item)
             self._items.insert(0, entry)
             self._save()
         live.publish("notification")

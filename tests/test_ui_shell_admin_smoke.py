@@ -73,7 +73,8 @@ def _frame_checks(drv, theme, width, where):
     assert _js(drv, "return document.querySelectorAll('#sidebar').length;") == 1
     assert _js(drv, "return document.querySelector('#sidebar .sb-mark').getAttribute('href');") == "/"
     assert _js(drv, "return !!document.getElementById('running-now') && "
-                    "!!document.getElementById('gc-summary');")
+                    "!!document.getElementById('gc-summary') && "
+                    "!!document.getElementById('paused-banner');")
     sb = _js(drv, "return document.getElementById('sidebar').getBoundingClientRect().width;")
     assert (sb <= 72) if width < 1400 else (sb >= 250), (where, sb)
     bg = _js(drv, "return getComputedStyle(document.body).backgroundColor;")
@@ -118,6 +119,9 @@ def test_admin_and_calibration_in_the_shell_both_themes_both_sizes(tmp_path):
                                     ".getAttribute('href');") == "#status"
                     assert _wait(lambda: "Version" in _js(
                         drv, "return document.getElementById('server-facts').textContent;"))
+                    # the sidebar footer: "N of M GCs live", the same words as the main page
+                    assert _wait(lambda: _js(drv, "return document.getElementById('gc-summary')"
+                                                  ".textContent;").endswith("of 2 GCs live"))
                     # the one unlock is at the top; the shell's own chip is not shown twice
                     assert _js(drv, "return document.getElementById('unlock-chip');") is None
                     assert drv.find_element("id", "pw").is_displayed()

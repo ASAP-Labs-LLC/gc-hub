@@ -14,7 +14,7 @@
                            Ended tasks stay 30 minutes (the hub drops them) or
                            until dismissed in this browser (localStorage, keyed
                            "<boot id>:<task id>": task ids restart with the hub).
-     #gc-strip             ONE compact chip, "2/2 GCs live" (glyph + text, never
+     #gc-strip             ONE compact chip, "2 of 2 GCs live" (glyph + text, never
                            colour alone); click for each GC's status and a link
                            to its page. `live` is the hub's rule (seen within
                            90 s on the hub's clock); the age ticks from when the
@@ -105,8 +105,11 @@
             const p = t.progress || {};
             const total = _num(p.total);
             let tail = '';
-            if (total !== null) tail = ' · ' + fmtNum(_num(p.done) || 0) + '/' + fmtNum(total);
-            else if (p.text) tail = ' · ' + p.text;
+            // the phase with its count: a count that restarts in the next phase
+            // ("Reading CDFs 1,500/5,000" → "Classifying samples 40/5,000") never looks like going backwards
+            const count = total !== null ? fmtNum(_num(p.done) || 0) + '/' + fmtNum(total) : '';
+            const parts = [p.text, count].filter(Boolean).join(' ');
+            if (parts) tail = ' · ' + parts;
             return { text: t.title + tail, glyph: 'spinner', state: 'running', count: list.length };
         }
         const t = list[0];                     // the hub sends the most recent first
@@ -181,7 +184,7 @@
         return { id, name, glyph, text, cls, href, title: bits.join(' · ') };
     }
 
-    /** The toolbar's one chip: {text: "2/2 GCs live", glyph, cls, title}, or
+    /** The toolbar's one chip: {text: "2 of 2 GCs live", glyph, cls, title}, or
         null without any GC. Disabled GCs are not counted. */
     function gcStrip(agents, nowMs) {
         const all = agents || [];
@@ -191,18 +194,23 @@
         const live = on.filter(c => c.cls === 'live').length;
         const allLive = on.length > 0 && live === on.length;
         const noneSeen = on.length > 0 && on.every(c => c.cls === 'never');
-        return { text: live + '/' + on.length + (on.length === 1 ? ' GC live' : ' GCs live'),
+        return { text: liveText(live, on.length),
                  glyph: allLive ? '●' : '○',
                  cls: allLive ? 'live' : (noneSeen ? 'never' : 'quiet'),
                  title: chips.map(c => c.name + ': ' + c.text).join(' · ') };
     }
 
-    /** "2 of 2 GCs connected" (enabled GCs only); '' without any. */
+    /** One wording everywhere (lane E2 review): "1 of 2 GCs live". */
+    function liveText(live, total) {
+        return live + ' of ' + total + (total === 1 ? ' GC live' : ' GCs live');
+    }
+
+    /** "2 of 2 GCs live" (enabled GCs only); '' without any. */
     function gcSummary(agents, nowMs) {
         const on = (agents || []).filter(a => a.enabled !== false);
         if (!on.length) return '';
         const live = on.filter(a => LV.agentLive(a, nowMs)).length;
-        return live + ' of ' + on.length + (on.length === 1 ? ' GC' : ' GCs') + ' connected';
+        return liveText(live, on.length);
     }
 
     /** The processing-paused banner's line, or null. */
@@ -372,7 +380,7 @@
         }
     }
 
-    // The shell's sidebar footer: "2 of 2 GCs connected" (glyph + text).
+    // The shell's sidebar footer: "2 of 2 GCs live" (glyph + text).
     function renderGcSummary() {
         const a = $('gc-summary');
         if (!a) return;

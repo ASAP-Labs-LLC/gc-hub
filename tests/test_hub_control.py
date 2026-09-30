@@ -529,6 +529,29 @@ def test_note_agent_updates_the_cache_at_once_and_publishes(env):
     assert any(x["instrument_id"] == "gc9" for x in hub_control.live_agents())
 
 
+def test_a_new_instruments_first_heartbeat_carries_its_name_at_once(env):
+    """v4.0 lane E2 review: /api/live never shows ``name: None`` for a GC
+    whose first check-in lands between two refreshes."""
+    import ingest_api
+    assert hub_control.refresh_cache()
+    store.instruments.upsert({"id": "gc7", "name": "GC-7", "enabled": 0}, db=env["db"])
+    ingest_api.record_heartbeat("gc7", {"state": "idle"}, db=env["db"])
+    a = [x for x in hub_control.live_agents() if x["instrument_id"] == "gc7"][0]
+    assert a["name"] == "GC-7" and a["enabled"] is False
+    # note_agent on its own takes the name, too
+    hub_control.note_agent("gc8", {"state": "idle"}, "2026-09-30T10:00:01+00:00", name="GC-8")
+    a = [x for x in hub_control.live_agents() if x["instrument_id"] == "gc8"][0]
+    assert a["name"] == "GC-8" and a["enabled"] is True
+
+
+def test_a_refresh_keeps_the_newer_heartbeat_but_takes_the_name_from_the_store(env):
+    store.instruments.upsert({"id": "gc6", "name": "GC-6"}, db=env["db"])
+    hub_control.note_agent("gc6", {"state": "idle"}, "2999-01-01T00:00:00+00:00")
+    assert hub_control.refresh_cache()
+    a = [x for x in hub_control.live_agents() if x["instrument_id"] == "gc6"][0]
+    assert a["name"] == "GC-6" and a["last_seen"] == "2999-01-01T00:00:00+00:00"
+
+
 def test_a_refresh_racing_a_heartbeat_never_rolls_the_agent_back(env):
     """The refresher may read the store just before a heartbeat commits and
     store its (older) row after ``note_agent``: the newer ``last_seen`` wins."""

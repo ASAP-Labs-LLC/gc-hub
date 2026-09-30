@@ -82,8 +82,21 @@ module.exports = (t) => {
         { id: 'gc3', name: 'GC-3', enabled: 0, setup: { ready: false, step: 2, done: 1, total: 8 } },
         { id: 'gc2', name: 'GC-2', enabled: 1, setup: { ready: false, step: 4, done: 5, total: 8 } },
     ];
-    t.eq(U.setupNav(insts), { instrument_id: 'gc2', step: 4, text: 'Setup · 5/8' });
+    // the sidebar names the GC (v4.0 lane E2 review)
+    t.eq(U.setupNav(insts), { instrument_id: 'gc2', step: 4, text: 'GC-2 · 5/8', title: 'Setup: GC-2 · 5 of 8 done' });
     t.eq(U.setupNav([insts[0]]), null);
+    // several unfinished: the one being viewed first, then the furthest along; all listed
+    const many = [
+        { id: 'gc1', name: 'GC-1', enabled: 1, setup: { ready: false, step: 3, done: 2, total: 8 } },
+        { id: 'gc2', name: 'GC-2', enabled: 1, setup: { ready: false, step: 4, done: 5, total: 8 } },
+        { id: 'gc4', name: 'GC-4', enabled: 1, setup: { ready: false, step: 2, done: 1, total: 8 } },
+    ];
+    t.eq(U.setupNav(many).instrument_id, 'gc2');
+    t.eq(U.setupNav(many).text, 'GC-2 · 5/8, GC-1 · 2/8, GC-4 · 1/8');
+    t.eq(U.setupNav(many, 'gc1').instrument_id, 'gc1');
+    t.eq(U.setupNav(many, 'gc1').text, 'GC-1 · 2/8, GC-2 · 5/8, GC-4 · 1/8');
+    t.eq(U.setupNav(many, 'nope').instrument_id, 'gc2');
+    t.eq(U.setupNav([{ id: 'gc9', enabled: 1, setup: { ready: false, step: 1, done: 0, total: 8 } }]).text, 'gc9 · 0/8');
     t.eq(U.setupNav([{ id: 'x', enabled: 1, setup: null }]), null);
 
     // ── the Activity feed: text segments (rendered with textContent) ...

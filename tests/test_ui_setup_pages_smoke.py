@@ -169,7 +169,7 @@ def test_the_three_pages_in_both_themes_at_both_sizes(tmp_path):
                     feed = _js(drv, "return document.getElementById('feed').textContent;")
                     assert "Written to results CSV" in feed and "LEM" not in feed
                     assert _wait(lambda: not _js(drv, "return document.getElementById('nav-setup').hidden;"))
-                    assert _js(drv, "return document.getElementById('nav-setup-step').textContent;") == "Setup · 5/8"
+                    assert _js(drv, "return document.getElementById('nav-setup-step').textContent;") == "GC-2 · 5/8"
                     # the mark goes home; there is no separate Results item (same page as Samples)
                     assert _js(drv, "return document.querySelector('.sb-mark').getAttribute('href');") == "/"
                     assert _js(drv, "return document.querySelectorAll('.sb-nav [data-nav=results]').length;") == 0

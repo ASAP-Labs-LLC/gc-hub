@@ -228,22 +228,28 @@ def record_heartbeat(instrument_id: str, values: dict, *, db=None,
             row = conn.execute("SELECT pending_command FROM agents WHERE instrument_id=?",
                                (instrument_id,)).fetchone()
             command = row["pending_command"] if row and take_command else None
+            # the display name, so /api/live names a first check-in at once (lane E2 review)
+            inst = conn.execute("SELECT name, enabled FROM instruments WHERE id=?",
+                                (instrument_id,)).fetchone()
             if command is not None:
                 conn.execute("UPDATE agents SET pending_command=NULL WHERE instrument_id=?",
                              (instrument_id,))
     if publish:
-        _note_live_agent(instrument_id, values, seen)
+        _note_live_agent(instrument_id, values, seen,
+                         name=inst["name"] if inst else None,
+                         enabled=bool(inst["enabled"]) if inst and inst["enabled"] is not None else None)
     if command is not None and command not in AGENT_COMMANDS:
         log.warning("dropping unknown pending command %r for %s", command, instrument_id)
         return None
     return command
 
 
-def _note_live_agent(instrument_id: str, values: dict, seen: str) -> None:
+def _note_live_agent(instrument_id: str, values: dict, seen: str, *, name=None,
+                     enabled=None) -> None:
     """The live agent snapshot and ``agent`` event (never breaks a heartbeat)."""
     try:
         import hub_control
-        hub_control.note_agent(instrument_id, values, seen)
+        hub_control.note_agent(instrument_id, values, seen, name=name, enabled=enabled)
     except Exception:  # noqa: BLE001
         log.exception("heartbeat: live update failed")
         live.publish("agent", {"instrument_id": instrument_id})
