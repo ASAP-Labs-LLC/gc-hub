@@ -193,9 +193,12 @@ except Exception:  # noqa: BLE001 - never stop the app starting
 # N PDFs in the request outlasted Cloudflare's 100 s). Leftovers of a previous
 # process are garbage too.
 import download_jobs  # noqa: E402
+import tasks  # noqa: E402  (v4.0 lane E: the running-now feed in /api/live)
 
 REPORT_ZIP_TMP = "report-zips-tmp"
-REPORT_ZIPS = download_jobs.DownloadJobs(lambda: paths.require_data_dir() / REPORT_ZIP_TMP)
+REPORT_ZIPS = download_jobs.DownloadJobs(
+    lambda: paths.require_data_dir() / REPORT_ZIP_TMP, tasks=tasks.REGISTRY,
+    download_url=lambda jid: f"/api/export-analysis-reports-zip/{jid}/download")
 try:
     REPORT_ZIPS.cleanup()
 except Exception:  # noqa: BLE001 - never stop the app starting
@@ -264,6 +267,38 @@ _creds_needed = threading.Event()   # set by upload thread when it needs creds
 _creds_ready  = threading.Event()   # set by API when user submits new creds
 _creds_lock   = threading.Lock()
 _creds_new: dict = {}               # {"username": ..., "password": ...}
+
+# ── v4.0 lane E: the upload as a task in tasks.REGISTRY (the running-now feed) ──
+_upload_task_id: Optional[str] = None
+_UPLOAD_ENDED = ("ok", "failed", "error", "skipped")
+
+
+def _upload_counts() -> tuple:
+    """``(finished, total, ok, failed)`` of the upload queue's items."""
+    with _upload_items_lock:
+        statuses = [s.get("status") for s in _upload_item_status]
+    return (sum(1 for s in statuses if s in _UPLOAD_ENDED), len(statuses),
+            statuses.count("ok"), sum(1 for s in statuses if s in ("failed", "error")))
+
+
+def _upload_task_progress() -> None:
+    if _upload_task_id is not None:
+        done, total, ok, failed = _upload_counts()
+        tasks.REGISTRY.update(_upload_task_id, done=done, total=total,
+                              text=f"{ok} of {total} uploaded" + (f" · {failed} failed"
+                                                                  if failed else ""))
+
+
+def _upload_task_end() -> None:
+    """The upload thread ended (done, cancelled or crashed): end its task."""
+    if _upload_task_id is None:
+        return
+    done, total, ok, failed = _upload_counts()
+    state = "stopped" if _upload_stop.is_set() else ("failed" if failed else "done")
+    tasks.REGISTRY.finish(_upload_task_id, state, done=done, total=total,
+                          text=f"{ok} of {total} uploaded" + (f" · {failed} failed"
+                                                              if failed else ""),
+                          counts={"ok": ok, "failed": failed})
 
 # ── Activity tracking & auto-restart ─────────────────────────────────
 _last_activity: float = time.time()
@@ -1762,6 +1797,9 @@ def _sample_entry(s: dict, cache: Optional[dict], recorded, fps: dict, run_no: i
         "name": name,
         "display_name": name if run_no <= 1 else f"{name} ({run_no})",
         "injection_dt": s["injection_dt"],
+        # v4.0 lane E: 'mtime' = the CDF had no injection time (the list's
+        # "No injection time" group)
+        "injection_dt_source": s.get("injection_dt_source"),
         "status": s["status"],
         "error": s["error"],
         "review_note": s.get("review_note"),
@@ -2257,6 +2295,9 @@ def api_reprocess():
     if queued:
         LOGGER.info("Reprocess of %d sample(s) requested by %s: %s", len(queued), _who(),
                     ", ".join(str(i) for i in queued[:50]))
+        # v4.0 lane E: the batch is a task; its jobs are counted off the request path
+        tid = tasks.REGISTRY.begin("reprocess", by=web_auth.current_name(), total=len(job_ids))
+        tasks.REGISTRY.watch(tid, tasks.jobs_probe(job_ids, db))
     return jsonify({"status": "queued", "count": len(queued), "sample_ids": queued,
                     "job_ids": job_ids, "refused": refused})
 
@@ -2319,9 +2360,17 @@ def api_live():
     (``_NON_ACTIVITY_PATHS``), so an open tab neither blocks the idle
     restart/deploy nor keeps its session alive."""
     resp = jsonify(live.poll(request.args.get("since"), agents=hub_control.live_agents,
-                             hub=hub_control.live_hub, unread=live.notifications_unread))
+                             hub=hub_control.live_hub, unread=live.notifications_unread,
+                             tasks=_live_tasks))
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+def _live_tasks() -> list:
+    """v4.0 lane E: the running-now feed for the signed-in viewer (memory
+    only; a download link only for its owner), titled with the GCs' names."""
+    names = {a["instrument_id"]: a.get("name") for a in hub_control.live_agents()}
+    return tasks.REGISTRY.snapshot(web_auth.current_name(), names=names)
 
 
 # ── Persistent system-notification tray ──────────────────────────────
@@ -3145,7 +3194,7 @@ def api_qbench_upload():
         if not password:
             password = auto_p
 
-    global _upload_thread
+    global _upload_thread, _upload_task_id
 
     # ── If the upload thread is already running, APPEND items ─────────
     if _upload_thread and _upload_thread.is_alive():
@@ -3159,6 +3208,7 @@ def api_qbench_upload():
                     "status": "waiting", "step": 0, "steps": 1, "msg": "Waiting",
                 })
         _upload_new_items.set()  # wake the thread
+        _upload_task_progress()  # v4.0 lane E: the task's total grows
         # Tell all SSE clients about the new items
         with _upload_items_lock:
             total = len(_upload_items)
@@ -3229,6 +3279,7 @@ def api_qbench_upload():
             with _upload_items_lock:
                 if idx < len(_upload_item_status):
                     _upload_item_status[idx] = evt
+            _upload_task_progress()     # v4.0 lane E
             print(f"[UPLOAD] [{idx+1}/{total}] {lab_id}: {status} — {msg}", flush=True)
             try:
                 _publish_json(_upload_subscribers, _upload_sub_lock, evt)
@@ -3501,7 +3552,17 @@ def api_qbench_upload():
         except Exception:
             pass
 
-    _upload_thread = threading.Thread(target=_do_upload, daemon=True)
+    def _run_upload():
+        try:
+            _do_upload()
+        finally:
+            _upload_task_end()          # v4.0 lane E
+
+    _upload_thread = threading.Thread(target=_run_upload, daemon=True)
+    # v4.0 lane E: the upload is a task (alive: not started yet, or running)
+    _upload_task_id = tasks.REGISTRY.begin(
+        "qbench-upload", by=web_auth.current_name(), total=len(new_queue),
+        alive=lambda t=_upload_thread: t.ident is None or t.is_alive())
     _upload_thread.start()
     return jsonify({"status": "started", "count": len(new_queue)})
 
@@ -3556,6 +3617,7 @@ def api_qbench_skip_item():
         with _upload_items_lock:
             if idx < len(_upload_item_status):
                 _upload_item_status[idx] = evt
+        _upload_task_progress()         # v4.0 lane E
         _publish_json(_upload_subscribers, _upload_sub_lock, evt)
     return jsonify({"status": "ok"})
 

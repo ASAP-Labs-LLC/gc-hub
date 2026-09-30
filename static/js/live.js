@@ -14,12 +14,27 @@
                            added later gets its own {reset: true} at once).
                            update = {reset, samples: [ids], instruments: [ids],
                                      kinds: [event kinds], agents: [{instrument_id,
-                                     last_seen, version, host, status}],
-                                     notifications_unread, hub: {state, staged_update},
-                                     version, version_changed}
+                                     name, enabled, last_seen, version, host, status,
+                                     live, last_seen_age_s}],
+                                     notifications_unread, hub: {state, staged_update,
+                                     processing_paused, queue, exports_pending,
+                                     paused_by, paused_since},
+                                     version, version_changed, tasks, boot}
+                           (v4.0 lane E: `live` is the server's one liveness
+                           rule; an agent's age alone changing is not an
+                           update; `tasks` is the running-now feed; `boot` the
+                           hub process's boot id, from the cursor.)
                            On reset, reload your data: samples/instruments are
                            then empty (the ring could not say what changed).
      agents()              the latest agent snapshot (a copy).
+     tasks(), hub()        the latest running-now tasks and hub state (copies).
+                           agents() is refreshed on every poll, update or not:
+                           each agent carries read_at (ms, this browser's clock,
+                           when the answer arrived), so agentAge(agent, now) =
+                           the hub's last_seen_age_s + the time since, and
+                           agentLive(agent, now) applies the hub's 90 s rule to
+                           it (v4.0 lane E review: a timer re-renders from these).
+     serverToday()         the hub's own date ("YYYY-MM-DD"; day headings).
      status()              {connected, last_ok_at (ms), error}; statusText()
                            turns it into "Live · updated 12 s ago" /
                            "Reconnecting… · last update 40 s ago".
@@ -43,6 +58,7 @@
     const VISIBLE_MAX_MS = 12000;
     const HIDDEN_MAX_MS = 60000;
     const BG_HEADER = 'X-GC-Background';
+    const LIVE_SECONDS = 90;        // live.LIVE_SECONDS on the hub
 
     /** Milliseconds to the next poll. */
     function nextDelay(visible, failures) {
@@ -54,7 +70,7 @@
 
     function initialState() {
         return { cursor: null, agents: [], notifications_unread: null, hub: null, version: null,
-                 seen: false };
+                 tasks: [], server_today: null, seen: false };
     }
 
     function _same(a, b) {
@@ -63,6 +79,43 @@
 
     function _arr(v) {
         return Array.isArray(v) ? v.slice() : [];
+    }
+
+    function _copyAll(list) {
+        return (list || []).map(a => Object.assign({}, a));
+    }
+
+    /** The agents without their age, which ticks on every poll (v4.0 lane E). */
+    function _agentsKey(agents) {
+        return JSON.stringify((agents || []).map(a => {
+            const o = Object.assign({}, a);
+            delete o.last_seen_age_s;
+            delete o.read_at;
+            return o;
+        }));
+    }
+
+    /** Seconds since the agent's last check-in: the hub's age when read plus
+        the time since it was read (null when the hub gave no age). */
+    function agentAge(agent, nowMs) {
+        const age = agent && agent.last_seen_age_s;
+        if (typeof age !== 'number' || !isFinite(age)) return null;
+        const at = agent.read_at;
+        const extra = (typeof at === 'number' && isFinite(at) && typeof nowMs === 'number')
+            ? Math.max(0, (nowMs - at) / 1000) : 0;
+        return Math.round(age + extra);
+    }
+
+    /** The hub said live, and it is still within the hub's 90 s rule. */
+    function agentLive(agent, nowMs) {
+        if (!agent || agent.live !== true) return false;
+        const age = agentAge(agent, nowMs);
+        return age === null || age <= LIVE_SECONDS;
+    }
+
+    function _boot(cursor) {
+        const i = typeof cursor === 'string' ? cursor.indexOf(':') : -1;
+        return i > 0 ? cursor.slice(0, i) : null;
     }
 
     /** Fold one /api/live answer into the state: {state, update}; update is
@@ -79,8 +132,13 @@
             : (state.notifications_unread == null ? 0 : state.notifications_unread);
         const h = response.hub && typeof response.hub === 'object' ? response.hub
             : (state.hub || {});
-        const hub = { state: h.state == null ? null : h.state,
-                      staged_update: h.staged_update == null ? null : h.staged_update };
+        const hub = Object.assign({}, h, { state: h.state == null ? null : h.state,
+                                           staged_update: h.staged_update == null ? null : h.staged_update });
+        const tasks = Array.isArray(response.tasks) ? _copyAll(response.tasks)
+            : _copyAll(state.tasks);
+        const today = typeof response.server_today === 'string' ? response.server_today
+            : (state.server_today || null);
+        const dayChanged = !!(state.server_today && today && today !== state.server_today);
         const version = typeof response.version === 'string' ? response.version : state.version;
         const versionChanged = !!(state.version && version && version !== state.version);
         const reset = !!response.reset || !state.seen;
@@ -88,14 +146,16 @@
         const instruments = reset ? [] : _arr(response.instruments);
         const kinds = _arr(response.kinds);
         const changed = reset || samples.length > 0 || instruments.length > 0 || kinds.length > 0
-            || versionChanged || !_same(state.agents, agents)
-            || state.notifications_unread !== unread || !_same(state.hub, hub);
+            || versionChanged || _agentsKey(state.agents) !== _agentsKey(agents)
+            || state.notifications_unread !== unread || !_same(state.hub, hub)
+            || !_same(state.tasks || [], tasks) || dayChanged;
         const next = { cursor: response.cursor, agents, notifications_unread: unread, hub,
-                       version, seen: true };
+                       version, tasks, server_today: today, seen: true };
         const update = changed
             ? { reset, samples, instruments, kinds, agents: agents.map(a => Object.assign({}, a)),
                 notifications_unread: unread, hub: Object.assign({}, hub), version,
-                version_changed: versionChanged }
+                version_changed: versionChanged, tasks: _copyAll(tasks),
+                boot: _boot(response.cursor), server_today: today, day_changed: dayChanged }
             : null;
         return { state: next, update };
     }
@@ -192,6 +252,10 @@
                     const out = applyResponse(state, body);
                     if (out.state === state) throw new Error('bad /api/live answer');
                     state = out.state;
+                    // every agent read now: its age ticks from here (v4.0 lane E)
+                    const readAt = d.now();
+                    for (const a of state.agents) a.read_at = readAt;
+                    if (out.update) for (const a of out.update.agents) a.read_at = readAt;
                     failures = 0;
                     status = { connected: true, last_ok_at: d.now(), error: null };
                     if (out.update) emit(out.update);
@@ -243,7 +307,9 @@
                                agents: state.agents.map(a => Object.assign({}, a)),
                                notifications_unread: state.notifications_unread,
                                hub: Object.assign({}, state.hub), version: state.version,
-                               version_changed: false };
+                               version_changed: false, tasks: _copyAll(state.tasks),
+                               boot: _boot(state.cursor), server_today: state.server_today,
+                               day_changed: false };
                 Promise.resolve().then(() => {        // after subscribe() has returned
                     if (subs.includes(fn)) { try { fn(snap); } catch (_) { /* its problem */ } }
                 });
@@ -254,6 +320,9 @@
         return {
             start, stop, subscribe, pollNow,
             agents: () => state.agents.map(a => Object.assign({}, a)),
+            tasks: () => _copyAll(state.tasks),
+            hub: () => (state.hub ? Object.assign({}, state.hub) : null),
+            serverToday: () => state.server_today,
             status: () => Object.assign({}, status),
         };
     }
@@ -279,7 +348,9 @@
 
     const api = {
         start: () => page.start(), stop: () => page.stop(), subscribe: fn => page.subscribe(fn),
-        agents: () => page.agents(), status: () => page.status(), pollNow: () => page.pollNow(),
+        agents: () => page.agents(), tasks: () => page.tasks(), hub: () => page.hub(),
+        serverToday: () => page.serverToday(), agentAge, agentLive, LIVE_SECONDS,
+        status: () => page.status(), pollNow: () => page.pollNow(),
         bgFetch, nextDelay, initialState, applyResponse, pollUrl, statusText, agoText, createPoller,
     };
     root.GCLive = api;

@@ -319,19 +319,28 @@ def test_admin_page_dry_run_polls_the_job_and_shows_the_summary(admin_hub, tmp_p
 
         assert wait_for(page_ready, timeout=60, interval=1.0), \
             (drv.current_url, drv.execute_script("return document.body ? document.body.innerText.slice(0, 300) : ''"))
+        # v4.0 lane E: unlock once, then everything loads by itself (one
+        # password check per client at a time)
         drv.find_element("id", "pw").send_keys(pw)
-        drv.find_element("id", "btn-refresh").click()
-        # the refresh's admin calls finish (one password check per client at a time)
+        drv.find_element("id", "btn-unlock").click()
         assert _poll_until(lambda: drv.execute_script(
             "return document.querySelectorAll('#ih-inst option').length"
             " && document.querySelectorAll('#presets li').length") > 0, timeout=30)
+        # the form is filled from the last run once it has loaded: then type ours
+        assert _poll_until(lambda: drv.find_element("id", "ih-last").text != "", timeout=30)
+        drv.find_element("id", "ih-processed").clear()
         drv.find_element("id", "ih-processed").send_keys(str(processed))
         drv.find_element("id", "btn-ih-dryrun").click()
-        assert _poll_until(lambda: "Dry run done (nothing written)"
-                           in drv.find_element("id", "ih-result").text, timeout=60), \
-            drv.find_element("id", "ih-result").text + " | " + drv.find_element("id", "msg").text
-        text = drv.find_element("id", "ih-result").text
-        assert '"dry_run": true' in text
-        assert "Dry run done" in drv.find_element("id", "msg").text
+        assert _poll_until(lambda: "Dry run finished at "
+                           in drv.find_element("id", "ih-job").text, timeout=60), \
+            drv.find_element("id", "ih-job").text + " | " + drv.find_element("id", "ih-msg").text
+        text = drv.find_element("id", "ih-job").text
+        # the summary is a short table of counts, never JSON; shown once, in its own card,
+        # with the time it finished and no "Finished" repeated (v4.0 lane E review)
+        assert "CDF files" in text and "{" not in text and '"dry_run"' not in text
+        assert text.count("Dry run") == 1 and "nothing written" in text
+        assert drv.find_element("id", "lf-job").text == ""
+        # "Dry run started…" is stale once it finished: cleared
+        assert _poll_until(lambda: drv.find_element("id", "ih-msg").text == "", timeout=10)
     finally:
         drv.quit()

@@ -82,6 +82,7 @@
         const { status, body } = await getJSON('/api/instruments');
         if (status !== 200) { flash((body && body.error) || 'Could not load instruments', 'err'); return; }
         STATE.list = body.instruments || [];
+        STATE.list.forEach(i => stampRead(i.agent));
         STATE.hubUrl = body.hub_url || null;
         STATE.commands = body.agent_commands || [];
         STATE.hubMethods = body.hub_methods || [];
@@ -128,6 +129,7 @@
         if (stale(gen)) return;
         if (status !== 200) { flash((body && body.error) || 'Could not load ' + id, 'err'); return; }
         STATE.detail = body;
+        if (body && body.instrument) stampRead(body.instrument.agent);
         renderDetail();
     }
 
@@ -269,7 +271,7 @@
         const table = h('table', {}, h('tbody', {}, ...rows.map(([k, v]) =>
             h('tr', {}, h('th', { text: k }), h('td', { className: k === 'Last file' || k === 'Last error' ? 'mono' : '',
                                                          'data-live': k === 'Last seen' ? 'last-seen' : null,
-                                                         text: k === 'Last seen' ? lastSeenText(v) : txt(v) })))));
+                                                         text: k === 'Last seen' ? lastSeenText(a) : txt(v) })))));
         const cmds = STATE.commands.filter(c => c !== 'adopt-mirror').map(c =>
             h('button', { className: 'btn', text: c, onclick: () => command(inst.id, c) }));
         return card(['Agent', h('span', { className: 'badge ' + (health.level === 'ok' ? 'ok' : 'warn'), text: health.text })],
@@ -638,10 +640,21 @@
     // A heartbeat updates the list's dot and the selected instrument's Agent
     // card without a reload (only that card is redrawn, so a form being
     // filled in elsewhere on the page is left alone); "Last seen" ticks on
-    // the client. Lane B's new Instruments page replaces this one.
-    function lastSeenText(v) {
+    // the client from the hub's age (v4.0 lane E: the hub decides live, on
+    // its own clock; the browser's clock is never compared with last_seen).
+    // Lane B's new Instruments page replaces this one.
+    function stampRead(agent) {
+        if (agent && typeof agent === 'object') agent._readAt = Date.now();
+        return agent;
+    }
+
+    function lastSeenText(a) {
+        const v = a && a.last_seen;
         if (v === null || v === undefined || v === '') return '—';
-        return window.GCLive ? String(v) + ' (' + GCLive.agoText(v, Date.now()) + ')' : String(v);
+        const now = Date.now();
+        const age = L.lastSeenAge(a, a._readAt || now, now);
+        return (age !== null && window.GCLive)
+            ? String(v) + ' (' + GCLive.agoText(now - age * 1000, now) + ')' : String(v);
     }
 
     async function redrawAgentCard() {
@@ -653,6 +666,7 @@
         if (stale(gen) || status !== 200 || !STATE.detail || !body || !body.instrument) return;
         const inst = STATE.detail.instrument;
         for (const k of AGENT_FIELDS) inst[k] = body.instrument[k];
+        stampRead(inst.agent);
         const fresh = agentCard(STATE.detail);
         if (AGENT_CARD && AGENT_CARD.parentNode) AGENT_CARD.replaceWith(fresh);
         AGENT_CARD = fresh;
@@ -664,10 +678,12 @@
             const inst = STATE.list.find(i => i.id === a.instrument_id);
             if (!inst) continue;
             const old = inst.agent || {};
-            if (old.last_seen === a.last_seen && old.version === a.version
-                && old.host === a.host && old.state === a.status) continue;
-            inst.agent = Object.assign({}, old, { last_seen: a.last_seen, version: a.version,
-                                                  host: a.host, state: a.status });
+            const same = old.last_seen === a.last_seen && old.version === a.version
+                && old.host === a.host && old.state === a.status && old.live === a.live;
+            inst.agent = stampRead(Object.assign({}, old, {
+                last_seen: a.last_seen, version: a.version, host: a.host, state: a.status,
+                live: a.live, last_seen_age_s: a.last_seen_age_s }));
+            if (same) continue;
             if (a.instrument_id === STATE.selected) selectedChanged = true;
         }
         renderList();
@@ -677,14 +693,15 @@
     function tick() {
         const cell = AGENT_CARD && AGENT_CARD.querySelector('[data-live="last-seen"]');
         const a = STATE.detail && STATE.detail.instrument && STATE.detail.instrument.agent;
-        if (cell && a) cell.textContent = lastSeenText(a.last_seen);
+        if (cell && a) cell.textContent = lastSeenText(a);
     }
 
     if (window.GCLive) {
         GCLive.subscribe(onLive);
         GCLive.start();
         setInterval(tick, 1000);
-        setInterval(renderList, 15000);        // the dots go stale on the client too
+        // (v4.0 lane E: no client-side stale timer; the hub's `live` flips in
+        // an /api/live update)
     }
 
     loadList(false);

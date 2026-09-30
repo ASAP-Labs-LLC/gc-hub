@@ -36,6 +36,12 @@
   </section>
 
   <div class="sb-foot">
+    {#- v4.0 lane E: what is running (running_now.js) and how many GCs are live -#}
+    <button type="button" class="sb-running" id="running-now" data-testid="running-now"
+            aria-haspopup="true" aria-expanded="false" aria-controls="running-now-popover" hidden></button>
+    <div class="popover sb-running-pop" id="running-now-popover" data-testid="running-now-popover"
+         role="region" aria-label="Running now" hidden></div>
+    <a class="sb-gcs" id="gc-summary" href="/instruments" data-testid="gc-summary" hidden></a>
     <div class="live-row" data-testid="live-status">
       <span class="live-dot" id="live-dot" data-state="connecting" aria-hidden="true"></span>
       <span class="sb-label" id="live-text">Connecting…</span>

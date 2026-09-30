@@ -39,10 +39,14 @@ def test_live_end_to_end(tmp_path):
         first = _live(port)
         assert first["reset"] is True
         assert set(first) == {"cursor", "reset", "samples", "instruments", "kinds", "agents",
-                              "notifications_unread", "hub", "version"}
+                              "notifications_unread", "hub", "version", "tasks",
+                        "server_now", "server_today"}
         boot, _, seq = first["cursor"].partition(":")
         assert boot and seq.isdigit()
-        assert set(first["hub"]) == {"state", "staged_update"}
+        # v4.0 lane E: the queue counts and the processing pause too
+        assert set(first["hub"]) == {"state", "staged_update", "processing_paused", "queue",
+                                     "exports_pending", "paused_by", "paused_since"}
+        assert first["tasks"] == []
         assert isinstance(first["notifications_unread"], int)
 
         # the refresher's agent snapshot: every instrument, none heard from yet
@@ -86,6 +90,10 @@ def test_live_end_to_end(tmp_path):
         a = agents["gc1"]
         assert a["version"] == "v7.7.7" and a["host"] == "GC1-PC" and a["status"] == "sending"
         assert a["last_seen"]
+        # one liveness rule, on the hub's clock (v4.0 lane E)
+        assert a["live"] is True and 0 <= a["last_seen_age_s"] <= 5
+        assert a["name"] and a["enabled"] is True
+        assert agents["gc2"]["live"] is False and agents["gc2"]["last_seen_age_s"] is None
 
 
 BG = {"X-GC-Background": "1"}

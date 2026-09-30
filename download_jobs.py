@@ -18,6 +18,10 @@ done, navigates to a one-time link that streams the file and deletes it
   finished job and its file expire ``ttl`` seconds after it ended.
 - ``busy()`` (a build running or a file waiting) holds off the 3 AM restart
   and the hub tray's Stop.
+- With ``tasks=`` (a ``tasks.Registry``; v4.0 lane E) each build is also a
+  task: its kind, owner and ``done``/``total``, and once done the owner's
+  ``download_url(job_id)`` until the file is fetched or expires. The job id
+  (the link's secret) is never the task's id.
 
 Stdlib only; no import-time side effects.
 """
@@ -57,12 +61,15 @@ def _now_iso() -> str:
 
 class DownloadJobs:
     def __init__(self, folder: Callable[[], Path], *, max_running: int = 2,
-                 ttl: float = 600.0) -> None:
+                 ttl: float = 600.0, tasks=None,
+                 download_url: Optional[Callable[[str], str]] = None) -> None:
         self._folder = folder
         self.max_running = max_running
         self.ttl = ttl
         self._lock = threading.Lock()
         self._jobs: dict = {}
+        self._tasks = tasks                  # v4.0 lane E: the running-now feed
+        self._download_url = download_url
 
     # ── internals ──
     def _purge(self, now: float) -> None:
@@ -107,7 +114,10 @@ class DownloadJobs:
             job = {"id": jid, "kind": kind, "state": "running", "name": name, "done": 0,
                    "total": total, "size": None, "result": None, "error": None,
                    "started_at": _now_iso(), "finished_at": None, "_owner": owner,
-                   "_part": folder / f"{jid}.part", "_path": None, "_ended": None}
+                   "_part": folder / f"{jid}.part", "_path": None, "_ended": None,
+                   "_task": None}
+            if self._tasks is not None:
+                job["_task"] = self._tasks.begin(kind, by=owner, owner=owner, total=total)
             self._jobs[jid] = job
         threading.Thread(target=self._run, args=(job, fn), daemon=True,
                          name=f"download-{kind}").start()
@@ -119,6 +129,8 @@ class DownloadJobs:
                 job["done"] = done
             if total is not None:
                 job["total"] = total
+            if job.get("_task") is not None:
+                self._tasks.update(job["_task"], done=done, total=total)
 
     def _run(self, job: dict, fn: Callable) -> None:
         part: Path = job["_part"]
@@ -141,6 +153,14 @@ class DownloadJobs:
         with self._lock:
             job.update(state=state, error=error, result=result, size=size, _path=final,
                        _part=None, finished_at=_now_iso(), _ended=time.time())
+            if job.get("_task") is not None:
+                url = (self._download_url(job["id"])
+                       if state == "done" and self._download_url is not None else None)
+                written = (result or {}).get("written") if isinstance(result, dict) else None
+                self._tasks.finish(job["_task"], state, download=url,
+                                   download_until=job["_ended"] + self.ttl,
+                                   counts={"reports": written if isinstance(written, int)
+                                           else job.get("done")})
 
     def status(self, job_id: str, owner: str) -> Optional[dict]:
         """The job, or None (unknown, expired, or someone else's)."""
@@ -159,6 +179,8 @@ class DownloadJobs:
             if job is None or job["_owner"] != owner or job["state"] != "done":
                 return None
             job["state"] = "streaming"
+            if job.get("_task") is not None:
+                self._tasks.set_download(job["_task"], None)     # fetched: no more link
             return {"id": job["id"], "path": str(job["_path"]), "name": job["name"],
                     "size": job["size"]}
 

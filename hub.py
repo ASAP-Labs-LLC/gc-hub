@@ -518,7 +518,27 @@ def run_startup_recovery(db, data_dir, notifier: Optional[Notifier]) -> Optional
         out = {"purges": recover_purges(db, data_dir, notifier),
                "imports": mark_interrupted_imports(db, data_dir, notifier)}
         _recovered_dirs.add(key)
+        _note_recovered_tasks(out)
         return out
+
+
+def _note_recovered_tasks(recovered: dict) -> None:
+    """v4.0 lane E: what the start-up recovery found shows in the running-now
+    indicator for 30 minutes as an interrupted task (the notification says
+    the rest). Never fails a start."""
+    try:
+        import tasks
+        for s in recovered.get("purges") or []:
+            if isinstance(s, dict) and not s.get("nothing_to_do"):
+                tasks.REGISTRY.note_interrupted("purge", instrument=s.get("instrument"),
+                                                open_url="/admin/hub#purge-panel")
+        for r in recovered.get("imports") or []:
+            by = r["by"] if "by" in r.keys() else None
+            name = by.rsplit(" (", 1)[0] if isinstance(by, str) and by.endswith(")") else by
+            tasks.REGISTRY.note_interrupted("import-history", instrument=r["instrument_id"],
+                                            by=name, open_url="/admin/hub#import-history")
+    except Exception:  # noqa: BLE001
+        log.exception("hub: noting interrupted work as tasks failed")
 
 
 def _live_job_instruments(kinds: tuple) -> set:

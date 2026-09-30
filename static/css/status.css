@@ -1,0 +1,99 @@
+/* status.css (v4.0 lane E): the classic main page's "running now" indicator,
+   GC strip, processing-paused banner and sample list order. Loaded after
+   index.html's inline styles. Colour only ever repeats what a glyph and a
+   word already say. */
+
+/* ── the GC strip (toolbar): one compact chip, a popover per GC ───────── */
+.gc-strip { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; padding: 3px 9px;
+  font: inherit; font-size: 11px; color: #c9d1d9; background: #0d1117; border: 1px solid #30363d;
+  border-radius: 12px; white-space: nowrap; cursor: pointer; }
+.gc-strip[hidden] { display: none; }
+.gc-strip:hover { border-color: #58a6ff; color: #fff; }
+.gc-chip-glyph { font-size: 10px; line-height: 1; }
+.gc-strip-live .gc-chip-glyph, .gc-chip-live .gc-chip-glyph { color: #3fb950; }
+.gc-strip-quiet .gc-chip-glyph, .gc-chip-quiet .gc-chip-glyph { color: #d29922; }
+.gc-strip-never .gc-chip-glyph, .gc-chip-never .gc-chip-glyph,
+.gc-chip-off .gc-chip-glyph { color: #7d8590; }
+#gc-strip-popover { position: fixed; z-index: 10004; width: 320px; max-height: 60vh; overflow-y: auto;
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .5); font-size: 12px; color: #c9d1d9; }
+#gc-strip-popover[hidden] { display: none; }
+.gc-row { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid #21262d; }
+.gc-row:last-child { border-bottom: 0; }
+.gc-row-name { font-weight: 600; color: #e6edf3; text-decoration: none; }
+.gc-row-name:hover { text-decoration: underline; color: #58a6ff; }
+.gc-row-text { margin-left: auto; color: #9ea7b3; }
+
+/* "More": the toolbar's rarely used actions (fixed: the toolbar scrolls and would clip it) */
+.more-menu { position: fixed; z-index: 10004; display: flex; flex-direction: column; gap: 2px;
+  min-width: 180px; padding: 4px; background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .5); }
+.more-menu[hidden] { display: none; }
+.more-menu .tb-btn { justify-content: flex-start; background: transparent; border-color: transparent; }
+.more-menu .tb-btn:hover { background: #21262d; }
+#universal-search { width: 180px !important; min-width: 0 !important; }
+
+/* the toolbar's one link looks and sits like its buttons */
+a.tb-btn { text-decoration: none; line-height: normal; font-family: inherit; }
+
+/* ── the processing-paused banner ───────────────────────────────────── */
+#paused-banner { flex-shrink: 0; padding: 6px 14px; font-size: 12px; color: #e3b341;
+  background: rgba(210, 153, 34, 0.12); border-bottom: 1px solid rgba(210, 153, 34, 0.45); }
+#paused-banner::before { content: "\2016  "; font-weight: 700; }
+#paused-banner[hidden] { display: none; }
+
+/* ── "running now" (status bar, bottom-left) ────────────────────────── */
+#running-now { display: inline-flex; align-items: center; gap: 6px; max-width: 46vw; padding: 1px 10px;
+  font: inherit; font-size: 11px; color: #c9d1d9; background: #0d1117; border: 1px solid #30363d;
+  border-radius: 10px; cursor: pointer; white-space: nowrap; }
+#running-now[hidden] { display: none; }
+#running-now:hover { border-color: #58a6ff; }
+#running-now .rn-text { overflow: hidden; text-overflow: ellipsis; }
+#running-now .rn-bar { width: 48px; height: 4px; background: #21262d; border-radius: 2px;
+  overflow: hidden; flex-shrink: 0; }
+#running-now .rn-bar-fill { display: block; height: 100%; background: #58a6ff; }
+.rn-glyph { display: inline-block; width: 10px; text-align: center; font-size: 10px; line-height: 1;
+  flex-shrink: 0; }
+.rn-glyph-spinner { width: 8px; height: 8px; border: 1.5px solid #58a6ff; border-right-color: transparent;
+  border-radius: 50%; animation: rn-spin .9s linear infinite; }
+.rn-glyph-dot { color: #3fb950; }
+.rn-glyph-triangle { color: #f85149; }
+.rn-glyph-ring { color: #d29922; }
+@keyframes rn-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .rn-glyph-spinner { animation: none; } }
+
+#running-now-popover { position: fixed; left: 8px; bottom: 32px; z-index: 10004; width: min(380px, 92vw);
+  max-height: 60vh; overflow-y: auto; background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .5); font-size: 12px; color: #c9d1d9; }
+#running-now-popover[hidden] { display: none; }
+.rn-pop-title { padding: 8px 12px; font-weight: 600; border-bottom: 1px solid #21262d; }
+.rn-list { list-style: none; margin: 0; padding: 0; }
+.rn-task { padding: 8px 12px; border-bottom: 1px solid #21262d; }
+.rn-task:last-child { border-bottom: 0; }
+.rn-task-title { display: flex; align-items: center; gap: 6px; font-weight: 600; color: #e6edf3; }
+.rn-task-meta { color: #7d8590; font-size: 11px; margin: 2px 0 0 16px; }
+.rn-task-line { margin: 2px 0 0 16px; }
+.rn-actions { display: flex; gap: 12px; margin: 6px 0 0 16px; }
+.rn-action { background: none; border: 0; padding: 0; font: inherit; font-size: 12px; color: #58a6ff;
+  cursor: pointer; text-decoration: none; }
+.rn-action:hover { text-decoration: underline; }
+
+/* ── the sample lists: full lab IDs, the run's time, day headings ───── */
+.file-list li[data-uid] { flex-wrap: wrap; white-space: normal; row-gap: 0; }
+.file-list li .file-item-name { flex: 0 1 auto; overflow: visible; text-overflow: clip; white-space: nowrap;
+  min-width: max-content; }
+.file-list li .bestfit-badge, .file-list li .status-badge, .file-list li .instrument-badge {
+  flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.file-list li .file-item-time { flex-basis: 100%; font-size: 10px; color: #7d8590; line-height: 1.3;
+  font-variant-numeric: tabular-nums; }
+.file-list li.selected .file-item-time { color: #cfe3ff; }
+.file-list li.list-day { display: block; padding: 8px 8px 2px; font-size: 10px; font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase; color: #7d8590; cursor: default; background: none; }
+.file-list li.list-day:hover { background: none; }
+
+.sample-sort { display: flex; flex-shrink: 0; border: 1px solid #30363d;
+  border-radius: 6px; overflow: hidden; }
+.sample-sort button { flex: 1; padding: 3px 8px; font: inherit; font-size: 11px; color: #9ea7b3; background: #0d1117;
+  border: 0; cursor: pointer; white-space: nowrap; }
+.sample-sort button + button { border-left: 1px solid #30363d; }
+.sample-sort button[aria-pressed="true"] { color: #fff; background: #21262d; }

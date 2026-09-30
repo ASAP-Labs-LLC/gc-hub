@@ -259,6 +259,8 @@
     #comment-list .comment-meta { color:#7d8590; font-size:10px; white-space:nowrap; }
     #comment-list .comment-delete { background:none; border:none; color:#f85149; cursor:pointer; font-size:13px; line-height:1; padding:0 2px; }
   </style>
+  <!-- v4.0 lane E: running now, GC strip, paused banner, sample list order (after the inline styles) -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/status.css') }}?v=2">
 </head>
 <body>
 
@@ -274,25 +276,32 @@
     </button>
     <button class="tb-btn" id="btn-calibration" title="Assign carbon numbers to calibration peaks" onclick="window.location.href='/calibration'">Calibration</button>
     <button class="tb-btn" id="btn-instruments" title="Instruments: calibration, corrections, agents, backfill, conflicts" onclick="window.location.href='/instruments'">Instruments</button>
-    <button class="tb-btn" id="btn-hub-admin" title="Admin: load CDFs from a folder, export files" onclick="window.location.href='/admin/hub'">Hub admin</button>
+    <a class="tb-btn" id="btn-hub-admin" title="Admin: imports, results files, diagnostics" href="/admin/hub">Hub admin</a>
     <button class="tb-btn" id="btn-export" title="Export current chromatogram to PDF">Export</button>
-    <button class="tb-btn" id="btn-comparison-export" title="Export comparison charts">Comparison Export</button>
 
     <span class="tb-sep"></span>
 
+    <!-- v4.0 lane E: the GC strip (running_now.js): one compact chip, "2/2 GCs live", where Refresh was -->
+    <button type="button" id="gc-strip" class="gc-strip" data-testid="gc-strip" aria-haspopup="true"
+            aria-expanded="false" aria-controls="gc-strip-popover" hidden></button>
+    <div id="gc-strip-popover" data-testid="gc-strip-popover" role="region" aria-label="GC agents" hidden></div>
 
     <span class="tb-sep"></span>
 
     <button class="tb-btn" id="btn-reprocess" title="Re-process specific Lab IDs">Re-process</button>
+    <!-- v4.0 lane E: the rarely used actions sit behind "More" so the toolbar fits
+         at 1366 px (toolbar.js); their ids and handlers are unchanged -->
+    <button type="button" class="tb-btn" id="btn-more" aria-haspopup="true" aria-expanded="false"
+            aria-controls="more-menu" data-testid="btn-more">More &#9662;</button>
+    <div id="more-menu" class="more-menu" role="menu" hidden>
+      <button class="tb-btn" id="btn-advanced-views" role="menuitem" title="Toggle advanced tabs (Chromatograms, Distillation Data, Distillation Curve)">Advanced Views</button>
+      <button class="tb-btn" id="btn-comparison-export" role="menuitem" title="Export comparison charts">Comparison Export</button>
+      <button class="tb-btn" id="btn-help" role="menuitem" title="Help">Help</button>
+      <button class="tb-btn" id="btn-restart-server" role="menuitem" title="Restart the server process (auto-restarts daily at 3 AM if idle)">Restart Server</button>
+    </div>
 
     <span class="tb-sep"></span>
 
-    <button class="tb-btn" id="btn-help" title="Help">Help</button>
-    <button class="tb-btn" id="btn-restart-server" title="Restart the server process (auto-restarts daily at 3 AM if idle)">Restart Server</button>
-
-    <span class="tb-sep"></span>
-
-    <button class="tb-btn" id="btn-advanced-views" title="Toggle advanced tabs (Chromatograms, Distillation Data, Distillation Curve)">Advanced Views</button>
     <label class="tb-checkbox" title="Apply EQM correction factors to D86 values">
       <input type="checkbox" id="chk-corrected-d86"> Corrected D86
     </label>
@@ -351,6 +360,9 @@
   </div>
 </div>
 
+  <!-- v4.0 lane E: one line while processing is paused (running_now.js) -->
+  <div id="paused-banner" data-testid="paused-banner" role="status" hidden></div>
+
   <!-- ================================================================
        TAB BAR
        ================================================================ -->
@@ -375,6 +387,12 @@
       <!-- Sidebar: Sample Library -->
       <div id="dash-sidebar">
         <div class="panel-header">Sample Library</div>
+        <!-- v4.0 lane E: the sample lists' order (sample_order.js), remembered per browser;
+             every tab's list follows it -->
+        <div id="sample-sort" class="sample-sort" role="group" aria-label="Sort samples" data-testid="sample-sort">
+          <button type="button" data-sort="newest" aria-pressed="true" title="Injection time, newest first, by day">Newest run</button>
+          <button type="button" data-sort="lab" aria-pressed="false" title="Lab ID, in number order">Lab ID</button>
+        </div>
         <!-- Search is now universal via toolbar -->
         <div id="dash-file-list-wrap">
           <ul class="file-list" id="dash-file-list">
@@ -773,8 +791,13 @@
   <!-- Persistent status bar -->
   <div id="status-bar">
     <div id="live-indicator" data-testid="live-indicator" aria-live="off">Connecting&hellip;</div>
-    <div id="status-scan-info" style="flex:1;">Ready</div>
+    <!-- v4.0 lane E: "running now" (running_now.js) replaced "Ready" -->
+    <button type="button" id="running-now" data-testid="running-now" aria-haspopup="true"
+            aria-expanded="false" aria-controls="running-now-popover" hidden></button>
+    <div style="flex:1;"></div>
   </div>
+  <div id="running-now-popover" data-testid="running-now-popover" role="region"
+       aria-label="Running now" hidden></div>
 
 </div><!-- /app-shell -->
 
@@ -1113,7 +1136,11 @@
 <script src="{{ url_for('static', filename='js/selection.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/report_payload.js') }}?v=4"></script>
 <script src="{{ url_for('static', filename='js/samples.js') }}?v=5"></script>
-<script src="{{ url_for('static', filename='js/live.js') }}?v=3"></script>
+<script src="{{ url_for('static', filename='js/live.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/sample_order.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/running_now.js') }}?v=3"></script>
+<script src="{{ url_for('static', filename='js/admin_unlock.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/toolbar.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=4"></script>
 <script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
@@ -1121,7 +1148,7 @@
 <script src="{{ url_for('static', filename='js/ladder.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/distill_view.js') }}?v=2"></script>
 <script src="{{ url_for('static', filename='js/deeplink.js') }}?v=3"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=57"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=58"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

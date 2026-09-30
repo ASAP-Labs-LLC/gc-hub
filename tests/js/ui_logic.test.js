@@ -26,26 +26,37 @@ module.exports = (t) => {
     t.eq(U.initials('ann'), 'A');
     t.eq(U.initials(''), '?');
 
-    // ── agent status: Live / last seen N min ago / Never, with a glyph
+    // ── agent status: Live / last seen N min ago / Never, with a glyph.
+    //    v4.0 lane E: live is the hub's one rule (last_seen at most 90 s old on
+    //    the hub's clock: `live`, `last_seen_age_s`); the age ticks from when it
+    //    was read (`read_at`); the browser's clock is never compared with last_seen.
+    const L = (over) => Object.assign({ last_seen: '2026-09-30T11:59:48+00:00', live: true,
+                                        last_seen_age_s: 12, read_at: now }, over || {});
     t.eq(U.agentStatus(null, now), { glyph: 'never', label: 'Never checked in', since: null });
     t.eq(U.agentStatus({ last_seen: null }, now).glyph, 'never');
-    const live = U.agentStatus({ last_seen: '2026-09-30T11:59:48+00:00', state: 'running' }, now);
-    t.eq(live, { glyph: 'final', label: 'Live', since: 'checked in 12 s ago' });
-    const late = U.agentStatus({ last_seen: '2026-09-30T11:50:00+00:00' }, now);
-    t.eq(late, { glyph: 'held', label: 'Last seen 10 min ago', since: 'checked in 10 min ago' });
-    t.eq(U.agentStatus({ last_seen: '2026-09-30T11:59:50+00:00', state: 'paused' }, now).label, 'Paused');
-    t.eq(U.agentStatus({ last_seen: '2026-09-30T11:59:50+00:00', last_error: 'disk full' }, now),
+    t.eq(U.agentStatus(L({ state: 'running' }), now),
+         { glyph: 'final', label: 'Live', since: 'checked in 12 s ago' });
+    t.eq(U.agentStatus(L({ live: false, last_seen_age_s: 600 }), now),
+         { glyph: 'held', label: 'Last seen 10 min ago', since: 'checked in 10 min ago' });
+    // live when read, 2 minutes on without an answer: no longer live
+    t.eq(U.agentStatus(L(), now + 120000).label, 'Last seen 2 min ago');
+    // the hub's clock decides, not the browser's: an old-looking stamp the hub calls live is live
+    t.eq(U.agentStatus(L({ last_seen: '2026-09-30T08:00:00+00:00' }), now).label, 'Live');
+    // an older hub without `live`: never guessed live
+    t.eq(U.agentStatus({ last_seen: '2026-09-30T11:59:48+00:00' }, now).glyph, 'held');
+    t.eq(U.agentStatus(L({ state: 'paused' }), now).label, 'Paused');
+    t.eq(U.agentStatus(L({ last_seen_age_s: 10, last_error: 'disk full' }), now),
         { glyph: 'error', label: 'Reporting an error', since: 'checked in 10 s ago' });
+    t.eq(U.LIVE_SECONDS, 90);
 
     // GCLive's agents[].status is the agent's own state (idle, sending, paused,
     // hub-unreachable, auth-error, config-error, unknown)
-    const fresh = '2026-09-30T11:59:50+00:00';
-    t.eq(U.agentStatus({ last_seen: fresh, status: 'sending' }, now).label, 'Live');
-    t.eq(U.agentStatus({ last_seen: fresh, status: 'paused' }, now).label, 'Paused');
-    t.eq(U.agentStatus({ last_seen: fresh, status: 'auth-error' }, now).glyph, 'error');
-    t.eq(U.agentStatus({ last_seen: fresh, status: 'config-error' }, now).label, 'Reporting an error');
-    t.eq(U.agentStatus({ last_seen: fresh, status: 'hub-unreachable' }, now).glyph, 'error');
-    t.eq(U.agentStatus({ last_seen: fresh, state: 'idle', status: 'paused' }, now).label, 'Paused');
+    t.eq(U.agentStatus(L({ status: 'sending' }), now).label, 'Live');
+    t.eq(U.agentStatus(L({ status: 'paused' }), now).label, 'Paused');
+    t.eq(U.agentStatus(L({ status: 'auth-error' }), now).glyph, 'error');
+    t.eq(U.agentStatus(L({ status: 'config-error' }), now).label, 'Reporting an error');
+    t.eq(U.agentStatus(L({ status: 'hub-unreachable' }), now).glyph, 'error');
+    t.eq(U.agentStatus(L({ state: 'idle', status: 'paused' }), now).label, 'Paused');
 
     // ── sample status: never by colour alone (glyph + text)
     t.eq(U.sampleStatus('final'), { glyph: 'final', text: 'Final' });

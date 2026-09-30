@@ -13,100 +13,134 @@
       --txt:#e6edf3; --muted:#7d8590; --accent:#388bfd; --green:#3fb950; --danger:#f85149;
       --warn:#d29922;
     }
-    *{box-sizing:border-box}
+    *{box-sizing:border-box} [hidden]{display:none !important}
     html,body{margin:0;min-height:100%;background:var(--bg);color:var(--txt);
       font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
     a{color:var(--accent)}
-    main{max-width:880px;margin:32px auto;padding:0 16px}
+    main{max-width:880px;margin:20px auto 64px;padding:0 16px}
+    .home{display:inline-block;margin-bottom:10px;font-size:14px;text-decoration:none}
+    .home:hover{text-decoration:underline}
     .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:18px;
-      margin-bottom:18px}
+      margin-bottom:18px;scroll-margin-top:12px}
     h1{font-size:18px;margin:0 0 12px} h2{font-size:15px;margin:0 0 8px}
+    h3{font-size:13px;margin:14px 0 6px;color:var(--muted);font-weight:600}
     p{color:var(--muted);margin:0 0 10px}
     label{font-size:12px;color:var(--muted);margin-right:6px}
     input[type=text],input[type=password],select{background:var(--bg);color:var(--txt);
       border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
     input.wide{width:100%;margin:4px 0 8px}
-    button{background:var(--accent);border:0;color:#fff;border-radius:6px;padding:6px 12px;
+    button{background:#21262d;color:var(--txt);border:1px solid var(--line);border-radius:6px;
+      padding:6px 12px;
       font:inherit;cursor:pointer;margin:4px 4px 4px 0}
-    button.warn{background:var(--warn);color:#0d1117}
+    button:disabled{opacity:.45;cursor:not-allowed}
+    button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+    button.warn{color:var(--warn);border-color:#d2992266}
+    button.quiet{background:#21262d;color:var(--txt);border:1px solid var(--line)}
     table{width:100%;border-collapse:collapse;font-size:13px}
     th,td{text-align:left;border-bottom:1px solid var(--line);padding:5px 6px;vertical-align:top}
+    td.path{overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+    td.actions{white-space:nowrap}
+    tr.path-edit td{background:var(--bg)}
+    tr.path-edit input{width:100%;margin:2px 0 6px}
+    table.counts{width:auto;min-width:260px;margin:6px 0}
+    table.counts td:last-child{text-align:right;font-variant-numeric:tabular-nums;padding-left:24px}
     .err{color:var(--danger)} .ok{color:var(--green)} .muted{color:var(--muted)} .warn{color:var(--warn)}
+    .msg{font-size:13px;margin-left:6px}
+    .row{display:flex;flex-wrap:wrap;align-items:center;gap:4px}
+    .job{margin-top:8px}
+    .job-line{margin:4px 0;color:var(--txt)}
+    .locked-note{font-size:13px}
+    #unlock-bar .unlocked{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    ul.tasks{list-style:none;margin:0;padding:0}
+    ul.tasks li{padding:6px 0;border-bottom:1px solid var(--line)}
+    ul.tasks li:last-child{border-bottom:0}
     ul.presets{list-style:none;margin:8px 0;padding:0}
     ul.presets li{display:flex;gap:6px;align-items:center;border-bottom:1px solid var(--line);
       padding:4px 0}
     ul.presets li input.preset-text{flex:1}
     ul.presets li.inactive input.preset-text{color:var(--muted);text-decoration:line-through}
     ul.presets li button{margin:0;padding:3px 8px}
-    pre{white-space:pre-wrap;background:var(--bg);border:1px solid var(--line);border-radius:6px;
-      padding:8px;font-size:12px;max-height:240px;overflow:auto}
+    details summary{cursor:pointer;color:var(--muted);font-size:13px}
   </style>
 </head>
 <body>
 <main>
+  <!-- v4.0 lane E: a visible way home; lane E2 moves this page into the shell -->
+  <a class="home" href="/" data-testid="back-home">&larr; Back to GC Hub</a>
   <h1>Hub admin</h1>
-  <div class="panel">
-    <label for="pw">Admin password</label>
-    <input id="pw" type="password" autocomplete="current-password">
-    <button id="btn-refresh">Refresh</button>
-    <span id="msg" role="status"></span>
-    <p style="margin-top:8px">Every action below needs the admin password (set once at
-      <a href="/admin/setup">/admin/setup</a>). <a href="/">Back to the app</a></p>
+
+  <!-- Unlock once: the password is kept in this tab for 15 minutes (admin_unlock.js) -->
+  <div class="panel" id="unlock-bar" data-testid="unlock-bar">
+    <form class="row locked" id="unlock-form" autocomplete="on">
+      <label for="pw">Admin password</label>
+      <input id="pw" type="password" autocomplete="current-password">
+      <button id="btn-unlock" class="primary" type="submit">Unlock</button>
+      <span id="unlock-msg" class="msg" role="status"></span>
+    </form>
+    <div class="unlocked" id="unlocked" hidden>
+      <span class="ok">&#9679; Unlocked</span>
+      <span class="muted" id="unlocked-left"></span>
+      <button id="btn-lock" type="button" class="quiet">Lock</button>
+    </div>
+    <p class="locked-note" id="locked-note" style="margin:8px 0 0">Running work shows without the
+      password. Everything else loads once you unlock (the password is set once at
+      <a href="/admin/setup">/admin/setup</a>).</p>
   </div>
 
-  <div class="panel">
-    <h2>Hub address</h2>
-    <p>The address the GC PCs' agents and the hub tray's "Open in browser" use:
-      <strong id="hub-url-effective">{{ hub_url_effective }}</strong>. New agent installers get it
-      (with this machine's LAN address as their fallback). Empty = https://gc.asaplabs.net;
-      http:// only for a lab-network name or IP.</p>
-    <input id="hub-url" class="wide" type="text" value="{{ hub_url }}"
-      placeholder="https://gc.asaplabs.net">
-    <button id="btn-hub-url">Save hub address</button>
+  <div class="panel" id="status" data-testid="admin-status">
+    <h2>Running now</h2>
+    <p id="hub-line" class="muted">Checking the hub&hellip;</p>
+    <ul class="tasks" id="status-tasks"></ul>
   </div>
 
-  <div class="panel">
-    <h2>Signed-in sessions</h2>
-    <p>Who is signed in (browser sessions; idle ones end after 12 hours, all after 14 days,
-      7 through gc.asaplabs.net). Revoke signs that browser out at once.</p>
-    <button id="btn-sessions">Load sessions</button>
+  <div class="panel" id="exports">
+    <h2>Results files</h2>
+    <p>Each GC's results CSV (append-only; LEM tails it). A refused file is never written until it
+      is adopted or the export moves to another path. Never point LEM at a freshly written file
+      without setting its tail offset to the end.</p>
     <table>
-      <thead><tr><th>Name</th><th>Method</th><th>Address</th><th>Last seen</th><th></th></tr></thead>
-      <tbody id="sessions"></tbody>
+      <thead><tr><th>Instrument</th><th>Path</th><th>Pending</th><th>State</th><th></th></tr></thead>
+      <tbody id="exports-rows"></tbody>
     </table>
+    <span id="exports-msg" class="msg" role="status"></span>
   </div>
 
-  <div class="panel">
+  <div class="panel" id="load-folder">
     <h2>Load CDFs from a folder</h2>
-    <p>One-shot and read-only on the folder: every <code>*.CDF</code> under it is submitted in
-      injection-time order and processed by the hub. Re-running resumes (duplicates are skipped).
-      Backfill samples are never exported until released.</p>
-    <label for="lf-inst">Instrument</label><select id="lf-inst"></select>
+    <p>Read-only on the folder: every <code>*.CDF</code> under it is submitted in injection-time
+      order and processed by the hub. Running it again resumes (duplicates are skipped). Backfill
+      samples are never exported until released.</p>
+    <label for="lf-inst">Instrument</label><select id="lf-inst" class="inst-select"></select>
     <label><input id="lf-backfill" type="checkbox"> force backfill</label>
     <input id="lf-folder" class="wide" type="text" placeholder="Folder on the server, absolute path">
-    <button id="btn-load">Start</button>
-    <div id="job"></div>
+    <div class="row">
+      <button id="btn-load" class="primary" type="button">Start</button>
+      <button id="btn-lf-stop" type="button" class="quiet" disabled>Stop</button>
+      <span id="lf-msg" class="msg" role="status"></span>
+    </div>
+    <div id="lf-job" class="job" data-testid="lf-job"></div>
   </div>
 
-  <div class="panel">
+  <div class="panel" id="import-history">
     <h2>Import v1 history</h2>
-    <p>Import one instrument's v1 processed CDFs and results CSV (read-only on both). Every
-      imported sample is backfill and is never exported automatically. A dry run only classifies;
-      the real import runs as a job like the loader above (one job at a time), resumable, and
-      can be stopped between batches.</p>
+    <p>One instrument's v1 processed CDFs and results CSV (read-only on both). Every imported
+      sample is backfill and is never exported automatically. A dry run only classifies; the real
+      import is resumable and can be stopped between batches. One job at a time.</p>
     <label for="ih-inst">Instrument</label><select id="ih-inst" class="inst-select"></select>
-    <button id="btn-ih-last">Load last run</button>
-    <div id="ih-last"></div>
+    <div id="ih-last" class="muted"></div>
     <input id="ih-processed" class="wide" type="text"
       placeholder="Processed CDF folder on the server, absolute path">
     <input id="ih-csv" class="wide" type="text"
       placeholder="Results CSV on the server, absolute path (blank: CDFs only)">
     <input id="ih-aliases" class="wide" type="text"
       placeholder="Folder aliases the CSV's Source File names (comma-separated)">
-    <button id="btn-ih-dryrun">Dry run</button>
-    <button id="btn-ih-start" class="warn">Start real import</button>
-    <button id="btn-ih-stop" class="warn">Stop</button>
-    <div id="ih-result"></div>
+    <div class="row">
+      <button id="btn-ih-dryrun" class="primary" type="button">Dry run</button>
+      <button id="btn-ih-start" type="button" class="warn">Start real import…</button>
+      <button id="btn-ih-stop" type="button" class="quiet" disabled>Stop</button>
+      <span id="ih-msg" class="msg" role="status"></span>
+    </div>
+    <div id="ih-job" class="job" data-testid="ih-job"></div>
   </div>
 
   <div class="panel" id="purge-panel">
@@ -131,59 +165,39 @@
       <option value="all">all samples</option>
       <option value="backfill">backfill (imported history) only</option>
     </select>
-    <button id="btn-purge-preview">Preview</button>
-    <button id="btn-purge-status">Show progress</button>
+    <div class="row">
+      <button id="btn-purge-preview" class="primary" type="button">Preview</button>
+    </div>
     <div id="purge-preview"></div>
     <input id="purge-new-path" class="wide" type="text"
       placeholder="Optional: a new results CSV for this instrument after the purge, absolute path">
     <input id="purge-confirm" class="wide" type="text" autocomplete="off" spellcheck="false"
       placeholder="Preview first, then type the confirmation shown">
-    <button id="btn-purge-start" class="warn" disabled>Start purge</button>
-    <span id="purge-msg" role="status"></span>
-    <div id="purge-job"></div>
+    <div class="row">
+      <button id="btn-purge-start" class="warn" type="button" disabled>Start purge</button>
+      <span id="purge-msg" class="msg" role="status"></span>
+    </div>
+    <div id="purge-job" class="job" data-testid="purge-job"></div>
   </div>
 
-  <div class="panel">
-    <h2>Comment presets</h2>
-    <p>The one-click comments on the Analysis tab. Their text is copied into a sample's comment
-      when it is added (editing a preset later does not change existing comments), and comments
-      print in reports that may reach customers: word them for a report. At most 50 active,
-      200 characters each. Deactivated presets are kept and can be reactivated.</p>
-    <button id="btn-presets-load">Load presets</button>
-    <ul id="presets" class="presets"></ul>
-    <input id="preset-new-text" class="wide" type="text" maxlength="200"
-      placeholder="New preset text">
-    <button id="btn-preset-add">Add preset</button>
-  </div>
-
-  <div class="panel">
-    <h2>Exports</h2>
-    <p>Each instrument's results CSV (append-only; LEM tails it). A refused file is never
-      written until it is adopted or the export is moved to another path. Never point LEM at
-      a freshly written file without setting its tail offset to the end.</p>
-    <table>
-      <thead><tr><th>Instrument</th><th>Path</th><th>Pending</th><th>State</th><th></th></tr></thead>
-      <tbody id="exports"></tbody>
-    </table>
-  </div>
-
-  <div class="panel" id="diag-panel">
+  <div class="panel" id="diagnostics">
+    <div id="diag-panel">
     <h2>Diagnostics</h2>
-    <p>Download one zip with what is needed to debug this hub: version and runtime state, logs,
-      the store's tables, a copy of the database, export health, parity reports, calibration
-      files, the updater's log and state, and the CDFs of samples that are held or in error.
-      Secrets are left out or replaced by <code>[REDACTED]</code>: the admin password (and its
-      hash), agent tokens, the setup code, the QBench API credentials, the QBench web login
-      (<code>qbenchlogin.txt</code> on the share) and GitHub tokens. The hub keeps working while
-      it builds; one bundle at a time.</p>
+    <p>One zip with what is needed to debug this hub, to hand to Claude. Secrets are left out or
+      replaced by <code>[REDACTED]</code>. The hub keeps working while it builds.</p>
     <p class="warn">The database copy holds everything in the store, including soft-deleted
-      comments and the operators' IP addresses (internal lab addresses), as well as sample IDs,
-      results and CDFs. Treat the zip as lab data.</p>
-    <p><strong>To have Claude look at it:</strong> save the zip where Claude can read it (for
-      example the Downloads folder of the computer you run Claude Code on, or a folder you give
-      Claude access to), then tell Claude its path, e.g. <em>"debug the GC hub from
-      ~/Downloads/gc-diagnostics-&hellip;.zip"</em>. Don't email it or post it anywhere
-      public.</p>
+      comments and the operators' IP addresses: treat the zip as lab data.</p>
+    <details>
+      <summary>What's inside, and how to hand it to Claude</summary>
+      <p style="margin-top:8px">Version and runtime state, logs, the store's tables, a copy of the
+        database, export health, parity reports, calibration files, the updater's log and state,
+        and the CDFs of samples that are held or in error. Left out: the admin password (and its
+        hash), agent tokens, the setup code, the QBench API credentials, the QBench web login
+        (<code>qbenchlogin.txt</code> on the share) and GitHub tokens.</p>
+      <p>Save the zip where Claude can read it (e.g. your Downloads folder) and tell Claude its
+        path: <em>"debug the GC hub from ~/Downloads/gc-diagnostics-&hellip;.zip"</em>. Don't email
+        it or post it anywhere public.</p>
+    </details>
     <table>
       <thead><tr><th></th><th>Include</th><th>Expected size</th></tr></thead>
       <tbody id="diag-options">
@@ -199,14 +213,59 @@
     </table>
     <p id="diag-total" class="muted" style="margin-top:8px"></p>
     <p id="diag-warning" class="warn"></p>
-    <button id="btn-diag-estimate">Check sizes</button>
-    <button id="btn-diag-download">Download diagnostics</button>
-    <span id="diag-msg" role="status"></span>
+    <div class="row">
+      <button id="btn-diag-download" class="primary" type="button">Download diagnostics</button>
+      <button id="btn-diag-estimate" type="button" class="quiet">Check sizes again</button>
+      <span id="diag-msg" class="msg" role="status"></span>
+    </div>
+    </div>
+  </div>
+
+  <div class="panel" id="sessions">
+    <h2>Signed-in sessions</h2>
+    <p>Browser sessions (idle ones end after 12 hours, all after 14 days, 7 through
+      gc.asaplabs.net). Revoke signs that browser out at once.</p>
+    <table>
+      <thead><tr><th>Name</th><th>Method</th><th>Address</th><th>Last seen</th><th></th></tr></thead>
+      <tbody id="sessions-rows"></tbody>
+    </table>
+    <span id="sessions-msg" class="msg" role="status"></span>
+  </div>
+
+  <div class="panel" id="presets-panel">
+    <h2>Comment presets</h2>
+    <p>The one-click comments on the Analysis tab. Their text is copied into a sample's comment
+      (editing a preset later does not change existing comments), and comments print in reports
+      that may reach customers. At most 50 active, 200 characters each.</p>
+    <ul id="presets" class="presets"></ul>
+    <div class="row">
+      <input id="preset-new-text" type="text" maxlength="200" placeholder="New preset text"
+             style="flex:1">
+      <button id="btn-preset-add" class="primary" type="button">Add preset</button>
+      <span id="presets-msg" class="msg" role="status"></span>
+    </div>
+  </div>
+
+  <div class="panel" id="hub-address">
+    <h2>Hub address</h2>
+    <p>Set once. The address the GC PCs' agents and the hub tray's "Open in browser" use:
+      <strong id="hub-url-effective">{{ hub_url_effective }}</strong>. New agent installers get it
+      (with this machine's LAN address as their fallback). Empty = https://gc.asaplabs.net;
+      http:// only for a lab-network name or IP.</p>
+    <input id="hub-url" class="wide" type="text" value="{{ hub_url }}"
+      placeholder="https://gc.asaplabs.net">
+    <div class="row">
+      <button id="btn-hub-url" class="primary" type="button">Save hub address</button>
+      <span id="hub-url-msg" class="msg" role="status"></span>
+    </div>
   </div>
 </main>
-<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=5"></script>
-<script src="{{ url_for('static', filename='js/diagnostics.js') }}?v=4"></script>
-<script src="{{ url_for('static', filename='js/purge.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/live.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/running_now.js') }}?v=3"></script>
+<script src="{{ url_for('static', filename='js/admin_unlock.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=7"></script>
+<script src="{{ url_for('static', filename='js/diagnostics.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/purge.js') }}?v=6"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

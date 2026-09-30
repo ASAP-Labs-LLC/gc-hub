@@ -280,8 +280,9 @@ def test_queued_items_carry_no_annotations(page):
 def test_presets_admin_panel(page):
     drv, hub, port, pw = page
     drv.get(f"http://127.0.0.1:{port}/admin/hub")
+    # v4.0 lane E: unlock once, the presets load by themselves
     _js(drv, "document.getElementById('pw').value = arguments[0];"
-             "document.getElementById('btn-presets-load').click();", pw)
+             "document.getElementById('btn-unlock').click();", pw)
     assert _wait(lambda: _js(drv, "return document.querySelectorAll('#presets li').length") >= 4)
     _js(drv, "document.getElementById('preset-new-text').value = arguments[0];"
              "document.getElementById('btn-preset-add').click();", EVIL)
@@ -425,8 +426,9 @@ def test_a_slow_earlier_analysis_does_not_render_over_a_newer_one(page):
 def test_admin_reorder_keeps_unsaved_edits(page):
     drv, hub, port, pw = page
     drv.get(f"http://127.0.0.1:{port}/admin/hub")
+    # v4.0 lane E: unlock once, the presets load by themselves
     _js(drv, "document.getElementById('pw').value = arguments[0];"
-             "document.getElementById('btn-presets-load').click();", pw)
+             "document.getElementById('btn-unlock').click();", pw)
     assert _wait(lambda: _js(drv, "return document.querySelectorAll('#presets li').length") >= 3)
     ids = [p["id"] for p in store.comment_presets.list(include_inactive=True, db=hub.db)]
     _js(drv, "document.querySelector(`#presets li[data-id='${arguments[0]}'] input.preset-text`)"

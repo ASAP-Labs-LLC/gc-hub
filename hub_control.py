@@ -284,9 +284,8 @@ def _read_store(db: Path) -> tuple:
             "(SELECT COUNT(*) FROM samples WHERE status='received'), "
             "(SELECT COUNT(*) FROM export_rows WHERE hub_appended_at IS NULL)",
             (stamp,)).fetchone()
-        agents = [_agent_view(dict(zip(("instrument_id", "last_seen", "version", "host",
-                                        "status"), a))) for a in conn.execute(
-            "SELECT i.id, a.last_seen, a.version, a.host, a.state "
+        agents = [_agent_view(dict(zip(AGENT_FIELDS, a))) for a in conn.execute(
+            "SELECT i.id, a.last_seen, a.version, a.host, a.state, i.name, i.enabled "
             "FROM instruments i LEFT JOIN agents a ON a.instrument_id=i.id ORDER BY i.id")]
     finally:
         conn.close()
@@ -295,13 +294,16 @@ def _read_store(db: Path) -> tuple:
              "received_samples": r[3]}, r[4], (url[0] if url else None) or None, agents)
 
 
-AGENT_FIELDS = ("instrument_id", "last_seen", "version", "host", "status")
+AGENT_FIELDS = ("instrument_id", "last_seen", "version", "host", "status", "name", "enabled")
 
 
 def _agent_view(row: dict) -> dict:
     """One ``/api/live`` agent entry: ``status`` is the agent's reported
-    heartbeat state (``idle``, ``sending``, ...; None = never reported)."""
-    return {k: row.get(k) for k in AGENT_FIELDS}
+    heartbeat state (``idle``, ``sending``, ...; None = never reported);
+    ``name`` the instrument's display name, ``enabled`` a bool (v4.0 lane E)."""
+    out = {k: row.get(k) for k in AGENT_FIELDS}
+    out["enabled"] = bool(out["enabled"]) if out["enabled"] is not None else True
+    return out
 
 
 def refresh_cache() -> bool:
@@ -342,10 +344,26 @@ def refresh_cache() -> bool:
 
 # ── live updates (v3.1): what /api/live reads, from memory only ───────────
 
+def _by_name(by: Any) -> Optional[str]:
+    """``"Ryan C (10.0.0.5)"`` -> ``"Ryan C"``: who, never the address."""
+    if not isinstance(by, str) or not by.strip():
+        return None
+    name = re.sub(r"\s*\([^()]*\)\s*$", "", by.strip())[:64]
+    try:
+        ipaddress.ip_address(name)      # the tray without a user: only an address
+        return None
+    except ValueError:
+        return name or None
+
+
 def _live_hub_now() -> dict:
-    """``{state, staged_update}`` as ``status_snapshot`` computes them (no SQLite)."""
+    """``{state, staged_update, processing_paused, queue: {waiting, running},
+    exports_pending, paused_by, paused_since}`` as ``status_snapshot``
+    computes them (no SQLite: the refresher's cache)."""
     with _cache_lock:
         flag = _cache.get("flag")
+        queue = dict(_cache.get("queue") or EMPTY_QUEUE)
+        pending = _cache.get("pending")
     try:
         rt = _hooks.runtime()
     except Exception:  # noqa: BLE001
@@ -354,8 +372,13 @@ def _live_hub_now() -> dict:
         mode, tag = restart_policy.decide(paths.data_dir(), version.APP_VERSION)
     except Exception:  # noqa: BLE001
         mode, tag = "restart", None
+    rt_paused = bool(getattr(rt, "paused", False)) if rt is not None else False
     return {"state": _state(rt), "staged_update": tag if mode == "switch" else None,
-            "processing_paused": flag is not None}
+            "processing_paused": flag is not None or rt_paused,
+            "queue": {"waiting": queue.get("jobs_queued"), "running": queue.get("jobs_running")},
+            "exports_pending": pending,
+            "paused_by": _by_name((flag or {}).get("by")),
+            "paused_since": (flag or {}).get("since")}
 
 
 def _refresh_live_hub() -> None:
@@ -371,22 +394,28 @@ def _refresh_live_hub() -> None:
         live.publish("hub", {})
 
 
-def live_agents() -> list:
+def live_agents(now: Optional[float] = None) -> list:
     """The agent snapshot for /api/live: every instrument's
-    ``{instrument_id, last_seen, version, host, status}`` from the refresher's
-    cache, updated at once by each heartbeat (``note_agent``)."""
+    ``{instrument_id, name, enabled, last_seen, version, host, status, live,
+    last_seen_age_s}`` from the refresher's cache, updated at once by each
+    heartbeat (``note_agent``). ``live``/``last_seen_age_s`` follow the one
+    rule, ``live.agent_liveness``, on the hub's clock at ``now``."""
+    t = time.time() if now is None else now
     with _cache_lock:
-        return [dict(a) for a in (_cache.get("agents") or [])]
+        agents = [dict(a) for a in (_cache.get("agents") or [])]
+    for a in agents:
+        a["live"], a["last_seen_age_s"] = live.agent_liveness(a.get("last_seen"), t)
+    return agents
 
 
 def live_hub() -> dict:
-    """``{state, staged_update}`` for /api/live (cached; computed once if the
-    refresher has not run yet: no SQLite either way)."""
+    """The hub's state for /api/live (``_live_hub_now``'s keys; cached,
+    computed once if the refresher has not run yet: no SQLite either way)."""
     with _cache_lock:
         h = _cache.get("live_hub")
     if h is None:
         h = _live_hub_now()
-    return {"state": h.get("state"), "staged_update": h.get("staged_update")}
+    return dict(h)
 
 
 def note_agent(instrument_id: str, values: dict, last_seen: Optional[str]) -> None:
@@ -400,6 +429,7 @@ def note_agent(instrument_id: str, values: dict, last_seen: Optional[str]) -> No
             agents = list(_cache.get("agents") or [])
             for i, a in enumerate(agents):
                 if a.get("instrument_id") == instrument_id:
+                    entry["name"], entry["enabled"] = a.get("name"), a.get("enabled", True)
                     agents[i] = entry
                     break
             else:
@@ -575,6 +605,33 @@ def busy_reasons(*, cached: bool = False, export_pass: bool = True) -> List[str]
             out.append("a diagnostics bundle is being built")
     except Exception:  # noqa: BLE001 - not there yet, or broken: not busy
         pass
+    out.extend(_task_reasons(out, job))
+    return out
+
+
+def _task_reasons(reasons: List[str], job: Optional[dict]) -> List[str]:
+    """v4.0 lane E: a running task the running-now indicator shows (and a
+    restart would cut short) that none of the checks above named: so the
+    indicator and this guard never disagree. Named once per kind."""
+    try:
+        import tasks
+        running = tasks.REGISTRY.running_blocking()
+    except Exception:  # noqa: BLE001
+        return []
+    text = " ".join(reasons).lower()
+    covered = set()
+    if job is not None:
+        covered.add(job.get("kind"))
+    for kind, words in (("qbench-upload", "qbench upload"), ("reports-zip", "report zip"),
+                        ("diagnostics-bundle", "diagnostics bundle")):
+        if words in text:
+            covered.add(kind)
+    out, seen = [], set()
+    for t in running:
+        if t["kind"] in covered or t["kind"] in seen:
+            continue
+        seen.add(t["kind"])
+        out.append(f"{t['title']} is running")
     return out
 
 

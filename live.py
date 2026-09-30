@@ -15,10 +15,15 @@ process's one ``BUS``; importable by the pipeline, the exporter and tools.
 * ``Bus.since(cursor)``: the sample and instrument ids changed after the
   cursor, or ``reset`` when the cursor is missing or garbled, from another
   boot, from the future, or older than the ring (events were dropped).
-* ``poll(cursor, agents=, unread=, hub=)`` builds ``GET /api/live``'s answer
-  from memory only: the agent snapshot and hub state come from
-  ``hub_control``'s refresher cache and the unread count from the in-memory
-  notification store, so the request path never opens SQLite.
+* ``poll(cursor, agents=, unread=, hub=, tasks=)`` builds ``GET /api/live``'s
+  answer from memory only: the agent snapshot and hub state come from
+  ``hub_control``'s refresher cache, the unread count from the in-memory
+  notification store and ``tasks`` from ``tasks.REGISTRY`` (v4.0 lane E), so
+  the request path never opens SQLite.
+* ``agent_liveness(last_seen, now)`` is the **one** agent-liveness rule
+  (v4.0 lane E): live means ``last_seen`` at most ``LIVE_SECONDS`` (3 × the
+  agents' 30 s heartbeat) old, measured on the hub's clock. Every page uses the
+  server's ``live``; none keeps a rule of its own.
 """
 from __future__ import annotations
 
@@ -26,6 +31,7 @@ import collections
 import logging
 import secrets
 import threading
+from datetime import datetime
 from typing import Any, Callable, Iterable, Optional
 
 log = logging.getLogger("live")
@@ -34,6 +40,26 @@ RING_SIZE = 1000
 KINDS = ("sample", "agent", "instrument", "notification", "hub")
 CURSOR_MAX = 128
 LOG_EVERY = 100          # log at most one publish failure in this many
+LIVE_SECONDS = 90        # an agent is live when seen this recently (3 heartbeats)
+HUB_KEYS = ("state", "staged_update", "processing_paused", "queue", "exports_pending",
+            "paused_by", "paused_since")
+
+
+def agent_liveness(last_seen: Any, now: float) -> tuple:
+    """``(live, age_s)`` of an agent's ``last_seen`` (the store's UTC ISO
+    stamp) at ``now`` (the hub's ``time.time()``). Never seen, unreadable or
+    without an offset: ``(False, None)``. A stamp ahead of ``now`` (the hub's
+    clock stepped back) is age 0."""
+    if not isinstance(last_seen, str) or not last_seen:
+        return False, None
+    try:
+        seen = datetime.fromisoformat(last_seen)
+    except ValueError:
+        return False, None
+    if seen.tzinfo is None:
+        return False, None
+    age = max(0, int(round(now - seen.timestamp())))
+    return age <= LIVE_SECONDS, age
 
 
 def _ints(values: Iterable[Any]) -> list:
@@ -178,14 +204,21 @@ def _safe(fn: Optional[Callable[[], Any]], default: Any) -> Any:
 def poll(cursor: Any, *, bus: Optional[Bus] = None,
          agents: Optional[Callable[[], list]] = None,
          unread: Optional[Callable[[], int]] = None,
-         hub: Optional[Callable[[], dict]] = None) -> dict:
+         hub: Optional[Callable[[], dict]] = None,
+         tasks: Optional[Callable[[], list]] = None,
+         now: Optional[Callable[[], datetime]] = None) -> dict:
     """``GET /api/live``'s answer: ``{cursor, reset, samples, instruments,
-    kinds, agents, notifications_unread, hub: {state, staged_update},
-    version}`` (``version``: this process's, so an open tab can offer a
-    reload after an update). From memory only; never raises."""
+    kinds, agents, notifications_unread, hub: {state, staged_update, ...},
+    version, tasks}`` (``version``: this process's, so an open tab can offer a
+    reload after an update; ``hub`` carries the ``HUB_KEYS`` its source has;
+    ``tasks``: the running-now feed). From memory only; never raises."""
     b = bus or BUS
     s = b.since(cursor)
     h = _safe(hub, None)
+    h = h if isinstance(h, dict) else {}
+    hub_out = {"state": h.get("state"), "staged_update": h.get("staged_update")}
+    hub_out.update({k: h[k] for k in HUB_KEYS if k in h})
+    stamp = _safe(now, None) or datetime.now().astimezone()
     return {
         "cursor": s["cursor"],
         "reset": s["reset"],
@@ -194,8 +227,12 @@ def poll(cursor: Any, *, bus: Optional[Bus] = None,
         "kinds": s["kinds"],
         "agents": list(_safe(agents, [])),
         "notifications_unread": int(_safe(unread, 0)),
-        "hub": {"state": (h or {}).get("state"), "staged_update": (h or {}).get("staged_update")},
+        "hub": hub_out,
         "version": _version(),
+        "tasks": list(_safe(tasks, [])),
+        # v4.0 lane E: the hub's own clock and date (day headings, "today")
+        "server_now": stamp.isoformat(timespec="seconds"),
+        "server_today": stamp.date().isoformat(),
     }
 
 

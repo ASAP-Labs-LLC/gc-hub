@@ -40,9 +40,12 @@
         if (d.status !== 200) { S.toast((d.body && d.body.error) || 'Could not load ' + IID, 'err'); return; }
         D = d.body;
         if (st.status === 200) SETUP = st.body;
-        const server = D.instrument.agent || {};
+        // v4.0 lane E: the hub's age was read now (read_at), so it ticks from here;
+        // a newer live answer keeps its own last_seen, live flag and age
+        const server = Object.assign({}, D.instrument.agent || {}, { read_at: Date.now() });
         const liveNewer = agent && agent.last_seen && (!server.last_seen || agent.last_seen > server.last_seen);
-        agent = Object.assign({}, server, liveNewer ? { last_seen: agent.last_seen } : {});
+        agent = Object.assign({}, server, liveNewer ? { last_seen: agent.last_seen, live: agent.live,
+            last_seen_age_s: agent.last_seen_age_s, read_at: agent.read_at } : {});
         render(bg);
     }
 

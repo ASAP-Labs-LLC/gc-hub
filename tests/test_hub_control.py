@@ -487,11 +487,13 @@ def test_refresher_caches_every_instruments_agent_for_live(env):
     agents = {a["instrument_id"]: a for a in hub_control.live_agents()}
     assert set(agents) == {"gc1", "gc2"}
     a = agents["gc1"]
-    assert set(a) == {"instrument_id", "last_seen", "version", "host", "status"}
+    assert set(a) == {"instrument_id", "last_seen", "version", "host", "status", "name",
+                      "enabled", "live", "last_seen_age_s"}
     assert a["version"] == "1.4.0" and a["host"] == "GC1-PC" and a["status"] == "idle"
-    assert a["last_seen"]
+    assert a["last_seen"] and a["live"] is True and a["name"] == "GC-1"
     assert agents["gc2"] == {"instrument_id": "gc2", "last_seen": None, "version": None,
-                             "host": None, "status": None}
+                             "host": None, "status": None, "name": "GC-2", "enabled": True,
+                             "live": False, "last_seen_age_s": None}
 
 
 def test_refresher_publishes_an_agent_event_only_when_the_snapshot_changes(env):
@@ -516,8 +518,11 @@ def test_note_agent_updates_the_cache_at_once_and_publishes(env):
     hub_control.note_agent("gc1", {"version": "2.0", "host": "H", "state": "paused"},
                            "2026-09-30T10:00:00+00:00")
     a = [x for x in hub_control.live_agents() if x["instrument_id"] == "gc1"][0]
+    assert isinstance(a.pop("live"), bool) and "last_seen_age_s" in a
+    a.pop("last_seen_age_s")
     assert a == {"instrument_id": "gc1", "last_seen": "2026-09-30T10:00:00+00:00",
-                 "version": "2.0", "host": "H", "status": "paused"}
+                 "version": "2.0", "host": "H", "status": "paused", "name": "GC-1",
+                 "enabled": True}
     assert "agent" in _events_since(cur)["kinds"]
     # an instrument the cache has not seen yet is added
     hub_control.note_agent("gc9", {"state": "idle"}, "2026-09-30T10:00:01+00:00")
@@ -539,11 +544,16 @@ def test_a_refresh_racing_a_heartbeat_never_rolls_the_agent_back(env):
 def test_live_hub_state_follows_pause_and_publishes(env):
     import live
     assert hub_control.refresh_cache()
-    assert hub_control.live_hub() == {"state": "running", "staged_update": None}
+    assert hub_control.live_hub() == {"state": "running", "staged_update": None,
+                                      "processing_paused": False,
+                                      "queue": {"waiting": 0, "running": 0},
+                                      "exports_pending": 0, "paused_by": None,
+                                      "paused_since": None}
     cur = live.BUS.cursor()
     assert _post(env["client"], "/api/admin/hub/pause-processing")[0] == 202
     assert _wait(lambda: hub_control.live_hub()["state"] == "processing-paused")
     assert "hub" in _events_since(cur)["kinds"]
+    assert hub_control.live_hub()["processing_paused"] is True
     cur = live.BUS.cursor()
     assert _post(env["client"], "/api/admin/hub/resume-processing")[0] == 202
     assert _wait(lambda: hub_control.live_hub()["state"] == "running")

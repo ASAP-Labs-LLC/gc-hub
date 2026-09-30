@@ -71,7 +71,7 @@ def _wait(pred, timeout=20.0):
 def _rows(drv):
     """``[(name, instrument badge text, status badge text)]`` of the dashboard list."""
     return drv.execute_script("""
-        return Array.from(document.querySelectorAll('#dash-file-list li')).map(li => [
+        return Array.from(document.querySelectorAll('#dash-file-list li[data-uid]')).map(li => [
             (li.querySelector('.file-item-name') || {}).textContent || '',
             (li.querySelector('.instrument-badge') || {}).textContent || '',
             (li.querySelector('.status-badge') || {}).textContent || '']);
@@ -116,7 +116,7 @@ def test_two_instruments_same_lab_id_are_distinguishable_and_filterable(tmp_path
                 _rows(drv)
             assert any(r[0].startswith("40304") for r in _rows(drv))
             ids = drv.execute_script("return Array.from(document.querySelectorAll("
-                                     "'#dash-file-list li')).map(li => li.dataset.sampleId);")
+                                     "'#dash-file-list li[data-uid]')).map(li => li.dataset.sampleId);")
             assert str(twin) in ids and str(hub.ids["final"]) not in ids
 
             # the Re-process modal resolves lab IDs on the list's instrument

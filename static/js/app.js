@@ -276,8 +276,13 @@ async function api(method, url, body, extra) {
     const resp = await fetch(url, opts);
     if (!resp.ok) {
         const j = (await GCSession.readJson(resp)).body || {};
-        throw new Error(j.error || j.message || `API error ${resp.status}`);
+        const err = new Error(j.error || j.message || `API error ${resp.status}`);
+        err.status = resp.status;        // v4.0 lane E: a 403 forgets the admin unlock
+        throw err;
     }
+    // v4.0 lane E: the hub accepted an admin password: keep it 15 minutes
+    if (body && typeof body.password === 'string' && body.password
+        && typeof GCAdminUnlock !== 'undefined') GCAdminUnlock.accepted(body.password);
     const ct = resp.headers.get('content-type') || '';
     if (!ct.includes('application/json')) return resp;
     const j = (await GCSession.readJson(resp)).body;
@@ -308,10 +313,16 @@ async function apiPostRefusable(url, what, body) {
 async function apiPost(url, body) { return api('POST', url, body); }
 async function apiDelete(url) { return api('DELETE', url); }
 
-/** Ask for the admin password for one action (null if cancelled). */
-function adminPassword(what) {
-    const pw = window.prompt(`Admin password to ${what}:`);
-    return pw ? pw : null;
+/** The admin password for one action (null if cancelled): unlocked once per
+    tab for 15 minutes in a masked dialog (admin_unlock.js; v4.0 lane E),
+    never window.prompt, which shows it in plain text. */
+async function adminPassword(what) {
+    return (await GCAdminUnlock.ask(what)) || null;
+}
+
+/** An admin call failed: a 403 (wrong password, throttled) forgets it. */
+function adminRefused(err) {
+    if (typeof GCAdminUnlock !== 'undefined') GCAdminUnlock.refused(err);
 }
 
 /** Download a blob response (for PDF/file exports). */
@@ -605,6 +616,8 @@ async function onLiveUpdate(u) {
         loadNotifications({ bg: true });
     }
     if (u.version_changed) showVersionBanner(u.version);
+    // v4.0 lane E: the hub's date moved on (midnight): Today/Yesterday shift
+    if (u.day_changed) _renderListsKeepingScroll();
 }
 
 /** The hub was updated while this page was open: offer a reload (never
@@ -723,12 +736,58 @@ function _listShows(file) {
 const _LIST_MODES = { 'dash-file-list': 'dashboard', 'chrom-file-list': 'chrom',
                       'dcurve-file-list': 'dc', 'analysis-sample-list': 'analysis' };
 
+// v4.0 lane E: the lists' order (sample_order.js): Newest run under day
+// headings, or Lab ID in number order; remembered per browser.
+let sampleSortMode = (typeof SampleOrder !== 'undefined') ? SampleOrder.loadSortMode() : 'newest';
+
+/** The hub's date for the day headings (its clock: injection times are
+    hub-local); the browser's until the first /api/live answer. */
+function _hubToday() {
+    const t = (typeof GCLive !== 'undefined' && GCLive.serverToday) ? GCLive.serverToday() : null;
+    return t || new Date();
+}
+
 function renderFileList(containerId, files, mode) {
     const container = document.getElementById(containerId);
     if (!container) return;
     const filtered = (files || []).filter(_listShows);
     container.innerHTML = '';
-    for (const file of filtered) container.appendChild(_fileItem(file, mode));
+    if (typeof SampleOrder === 'undefined') {
+        for (const file of filtered) container.appendChild(_fileItem(file, mode));
+        return;
+    }
+    for (const group of SampleOrder.groupSamples(filtered, sampleSortMode, _hubToday())) {
+        if (group.label) {
+            const h = document.createElement('li');
+            h.className = 'list-day';
+            h.setAttribute('role', 'presentation');
+            h.textContent = group.label;
+            container.appendChild(h);
+        }
+        for (const file of group.items) container.appendChild(_fileItem(file, mode));
+    }
+}
+
+/** A row's place in the order: a change moves it (a full re-render). */
+function _sortKey(file) {
+    return [file.injection_dt || '', file.injection_dt_source || '', file.lab_id || file.name || ''].join('|');
+}
+
+/** The sort switch (Newest run / Lab ID). */
+function initSampleSort() {
+    const box = document.getElementById('sample-sort');
+    if (!box || typeof SampleOrder === 'undefined') return;
+    const show = () => box.querySelectorAll('button[data-sort]').forEach(b =>
+        b.setAttribute('aria-pressed', b.dataset.sort === sampleSortMode ? 'true' : 'false'));
+    box.addEventListener('click', (e) => {
+        const b = e.target.closest('button[data-sort]');
+        if (!b || b.dataset.sort === sampleSortMode) return;
+        sampleSortMode = b.dataset.sort;
+        SampleOrder.saveSortMode(sampleSortMode);
+        show();
+        _renderListsKeepingScroll();
+    });
+    show();
 }
 
 /** v3.1 live updates: replace just these rows' <li> in every list. False
@@ -741,6 +800,7 @@ function patchFileRows(rows) {
         for (const file of rows) {
             const old = container.querySelector(`li[data-uid="${CSS.escape(sampleUid(file))}"]`);
             const shows = _listShows(file);
+            if (old && shows && old.dataset.sortKey !== _sortKey(file)) return false;   // it moves
             if (old && shows) old.replaceWith(_fileItem(file, mode));
             else if (old) old.remove();
             else if (shows) return false;
@@ -758,6 +818,7 @@ function _fileItem(file, mode) {
         // uid (= the sample id) distinguishes re-runs that share a name, so
         // each injection selects independently.
         item.dataset.uid = sampleUid(file);
+        item.dataset.sortKey = _sortKey(file);
 
         // One colored tag per matched flag rule (early_signal kept as the
         // legacy any-flag bool for styling)
@@ -816,6 +877,18 @@ function _fileItem(file, mode) {
             bf.textContent = file.best_fit.label;
             bf.title = `Best fit: ${file.best_fit.label} (score ${Number(file.best_fit.score).toFixed(3)})`;
             item.appendChild(bf);
+        }
+
+        // v4.0 lane E: the run's injection date and time, on its own line
+        if (typeof SampleOrder !== 'undefined') {
+            // under a day heading (Newest run) the time alone; the date is the heading's
+            const rt = SampleOrder.rowTime(file, {
+                underDay: sampleSortMode !== 'lab' && SampleOrder.hasInjectionTime(file) });
+            const time = document.createElement('span');
+            time.className = 'file-item-time';
+            time.textContent = rt.text;
+            time.title = rt.title;
+            item.appendChild(time);
         }
 
         // Highlight if currently selected (universal selection). Compare by
@@ -1055,12 +1128,13 @@ function showContextMenu(e, file) {
             const name = prompt('Enter a name for this comparison standard:', file.name.replace(/\.CDF$/i, ''));
             if (!name) return;
             try {
-                const password = adminPassword('save a comparison standard');
+                const password = await adminPassword('save a comparison standard');
                 if (!password) return;
                 await apiPost('/api/comparison-standard', { sample_id: file.sample_id, name, password });
                 showNotification(`Saved comparison standard: ${name}`, 'success');
                 await loadComparisonStandards();
             } catch (err) {
+                adminRefused(err);
                 showNotification('Failed to save standard: ' + err.message, 'error');
             }
         });
@@ -1839,7 +1913,7 @@ function showStandardContextMenu(e, std) {
             const newName = prompt(`Rename "${std.name}" to:`, std.name);
             if (!newName || newName === std.name) return;
             try {
-                const password = adminPassword('rename a comparison standard');
+                const password = await adminPassword('rename a comparison standard');
                 if (!password) return;
                 await apiPost('/api/comparison-standard/rename', { old_name: std.name, new_name: newName, password });
                 showNotification(`Renamed to: ${newName}`, 'success');
@@ -1848,6 +1922,7 @@ function showStandardContextMenu(e, std) {
                 }
                 await loadComparisonStandards();
             } catch (err) {
+                adminRefused(err);
                 showNotification('Rename failed: ' + err.message, 'error');
             }
         });
@@ -1862,7 +1937,7 @@ function showStandardContextMenu(e, std) {
             removeContextMenu();
             if (!confirm(`Delete comparison standard "${std.name}"?`)) return;
             try {
-                const password = adminPassword('delete a comparison standard');
+                const password = await adminPassword('delete a comparison standard');
                 if (!password) return;
                 await api('DELETE', `/api/comparison-standard/${encodeURIComponent(std.name)}`, { password });
                 showNotification(`Deleted standard: ${std.name}`, 'success');
@@ -1871,6 +1946,7 @@ function showStandardContextMenu(e, std) {
                 }
                 await loadComparisonStandards();
             } catch (err) {
+                adminRefused(err);
                 showNotification('Failed to delete standard: ' + err.message, 'error');
             }
         });
@@ -2005,8 +2081,8 @@ function hslToHex(h, s, l) {
 }
 
 async function saveAnalysisDefaults() {
-    const pw = prompt('Enter admin password to save current settings as defaults:');
-    if (pw === null) return;  // cancelled
+    const pw = await adminPassword('save these settings as the defaults');
+    if (!pw) return;  // cancelled
     readAnalysisParams();
     const body = {
         password: pw,
@@ -2019,6 +2095,7 @@ async function saveAnalysisDefaults() {
         await apiPost('/api/save-analysis-defaults', body);
         showNotification('Defaults saved — will persist across restarts', 'success');
     } catch (e) {
+        adminRefused(e);
         showNotification(e.message || 'Failed to save defaults', 'error');
     }
 }
@@ -3592,13 +3669,14 @@ function renderSettingsStandards() {
         li.querySelector('.range-delete').addEventListener('click', async () => {
             if (!confirm(`Remove standard "${std.name}"?`)) return;
             try {
-                const password = adminPassword('delete a comparison standard');
+                const password = await adminPassword('delete a comparison standard');
                 if (!password) return;
                 await api('DELETE', '/api/comparison-standard/' + encodeURIComponent(std.name), { password });
                 await loadComparisonStandards();
                 renderSettingsStandards();
                 showNotification(`Removed: ${std.name}`, 'success');
             } catch (err) {
+                adminRefused(err);
                 showNotification('Failed: ' + err.message, 'error');
             }
         });
@@ -3642,7 +3720,7 @@ async function saveSettings() {
     const bfChanged = Object.entries(bf).some(
         ([k, v]) => String(v) !== String(state.settings[k] == null ? '' : state.settings[k]));
     if (bfChanged) {
-        const password = adminPassword('change the best-fit / deviation-bullet settings');
+        const password = await adminPassword('change the best-fit / deviation-bullet settings');
         if (!password) { showNotification('Best-fit / deviation-bullet settings not saved (no admin password)', 'info'); }
         else { Object.assign(body, bf); body.password = password; }
     }
@@ -3655,6 +3733,7 @@ async function saveSettings() {
         await refreshAll();
         showNotification('Data refreshed with new settings', 'success');
     } catch (e) {
+        adminRefused(e);
         showNotification('Failed to save settings: ' + e.message, 'error');
     }
 }
@@ -4448,6 +4527,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Set up event listeners
     setupEventListeners();
+    initSampleSort();               // v4.0 lane E: Newest run / Lab ID
     showPendingRestartNotice();
 
     // Populate analysis parameter inputs with defaults

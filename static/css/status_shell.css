@@ -1,0 +1,51 @@
+/* status_shell.css (v4.0 lane E): the shell's sidebar footer rows for
+   "running now" and the GCs' liveness, and the processing-paused banner, on
+   the v3.1 token system. The markup and logic are running_now.js's, shared
+   with the classic main page (status.css). Colour only repeats what a glyph
+   and a word already say. */
+
+.sb-running { display: flex; align-items: center; gap: var(--s2); width: 100%; min-height: 32px;
+  padding: 0 var(--s2); font: inherit; font-size: var(--fs-xs); color: var(--text);
+  background: var(--bg-sunken); border: 1px solid var(--border-light); border-radius: var(--radius-md);
+  cursor: pointer; text-align: left; }
+.sb-running[hidden] { display: none; }
+.sb-running:hover { background: var(--bg-hover); }
+.sb-running .rn-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-running .rn-bar { width: 36px; height: 4px; flex: none; background: var(--border); border-radius: 2px;
+  overflow: hidden; }
+.sb-running .rn-bar-fill { display: block; height: 100%; background: var(--ink); }
+.sb .rn-glyph { display: inline-block; width: 10px; flex: none; text-align: center; font-size: 10px; line-height: 1; }
+.sb .rn-glyph-spinner { width: 8px; height: 8px; border: 1.5px solid var(--st-working);
+  border-right-color: transparent; border-radius: 50%; animation: sb-rn-spin .9s linear infinite; }
+.sb .rn-glyph-dot { color: var(--st-final); }
+.sb .rn-glyph-triangle { color: var(--st-error); }
+.sb .rn-glyph-ring { color: var(--st-held); }
+@keyframes sb-rn-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .sb .rn-glyph-spinner { animation: none; } }
+
+.sb-running-pop .rn-pop-title { font-size: var(--fs-md); font-weight: 600; margin-bottom: var(--s2); }
+.sb-running-pop .rn-task { display: block; }
+.sb-running-pop .rn-task-title { display: flex; align-items: center; gap: var(--s2); font-weight: 600; }
+.sb-running-pop .rn-task-line, .sb-running-pop .rn-task-meta { margin-left: 18px; color: var(--text-muted); }
+.sb-running-pop .rn-actions { display: flex; gap: var(--s3); margin: var(--s1) 0 0 18px; }
+.sb-running-pop .rn-action { background: none; border: 0; padding: 0; font: inherit; color: var(--text);
+  text-decoration: underline; cursor: pointer; }
+
+.sb-gcs { display: flex; align-items: center; gap: var(--s2); padding: 0 var(--s2); min-height: 24px;
+  font-size: var(--fs-xs); color: var(--text-muted); text-decoration: none; }
+.sb-gcs[hidden] { display: none; }
+.sb-gcs:hover { color: var(--text); }
+.sb-gcs .gc-chip-glyph { font-size: 10px; line-height: 1; }
+.sb-gcs.gc-strip-live .gc-chip-glyph { color: var(--st-final); }
+.sb-gcs.gc-strip-quiet .gc-chip-glyph { color: var(--st-held); }
+.sb-gcs.gc-strip-never .gc-chip-glyph { color: var(--text-muted); }
+
+.paused-banner { padding: var(--s2) var(--s4, 16px); font-size: var(--fs-sm); color: var(--warn-text);
+  background: var(--warn-soft); border-bottom: 1px solid var(--border-light); }
+.paused-banner::before { content: "\2016  "; font-weight: 700; }
+.paused-banner[hidden] { display: none; }
+
+/* the icon rail: glyphs only */
+:root[data-sidebar="rail"] .sb .sb-running .rn-text,
+:root[data-sidebar="rail"] .sb .sb-running .rn-bar,
+:root[data-sidebar="rail"] .sb .sb-gcs .sb-label { display: none; }
