@@ -1,0 +1,74 @@
+{% extends "_layout.html" %}
+{#- v5.0 lane R: every sample's results. The table's grouped D2887 / D86
+    headers are built from /api/table's columns (results_logic.js), the rows
+    from /api/files with the filters in the address bar. -#}
+{% block title %}Results{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/controls.css') }}?v=1">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/results.css') }}?v=1">{% endblock %}
+{% block topbar %}
+  <h1>Results</h1>
+  <span class="spacer"></span>
+  <div class="seg seg-lg" role="radiogroup" aria-label="Points shown" data-testid="points-switch">
+    <button type="button" role="radio" data-points="key" aria-checked="true" title="IBP, 10 %, 50 %, 90 % and FBP">Key points</button>
+    <button type="button" role="radio" data-points="all" aria-checked="false" title="Every cut, the fit score and the source file">All points</button>
+  </div>
+  <button type="button" class="btn btn-sm" id="csv" data-testid="download-csv"><span class="ico ico-download" aria-hidden="true"></span>Download CSV</button>
+{% endblock %}
+{% block content %}
+<main class="content content-wide" id="main" data-testid="results-page">
+  <form class="filters" id="filters" role="search" aria-label="Filter the results" data-testid="results-filters">
+    <label class="search">
+      <span class="visually-hidden">Filter by lab ID</span>
+      <span class="ico ico-search" aria-hidden="true"></span>
+      <input type="text" id="f-q" placeholder="Filter by lab ID" autocomplete="off" spellcheck="false" maxlength="64" data-testid="filter-q">
+    </label>
+    <div class="chips" id="f-inst" role="group" aria-label="Instruments" data-testid="filter-instruments"></div>
+    <label class="select"><span class="visually-hidden">When</span>
+      <select id="f-range" data-testid="filter-range"></select></label>
+    <label class="select"><span class="visually-hidden">Status</span>
+      <select id="f-status" data-testid="filter-status"></select></label>
+    <button type="button" class="chip" id="f-flagged" aria-pressed="false" data-testid="filter-flagged">Flagged</button>
+    <span class="spacer"></span>
+    <label class="switch" title="Corrected D86: the numbers written to the results file (with this GC's correction factors). Off: before the correction factors.">
+      <input type="checkbox" id="corrected" data-testid="corrected-d86">
+      <span class="track" aria-hidden="true"></span>
+      <span>Corrected D86</span>
+    </label>
+  </form>
+
+  <section class="card overlay" id="overlay" data-testid="overlay" hidden aria-labelledby="overlay-title">
+    <div class="overlay-bar">
+      <h2 id="overlay-title">Distillation curves</h2>
+      <span class="caption">Temperature against % recovered · drag to zoom, double-click to reset</span>
+      <span class="spacer"></span>
+      <ul class="picked" id="picked" aria-label="Runs on the chart"></ul>
+      <button type="button" class="btn btn-ghost btn-sm" id="overlay-clear">Clear</button>
+    </div>
+    <div class="chart" id="chart" data-testid="overlay-chart" role="img" aria-label="Distillation curves of the selected runs"></div>
+    <p class="caption" id="chart-note" hidden></p>
+  </section>
+
+  <section class="card table-card" aria-labelledby="count">
+    <div class="table-head">
+      <h2 id="count" data-testid="results-count">Loading…</h2>
+      <span class="caption" id="count-note"></span>
+      <span class="spacer"></span>
+      <span class="caption" id="select-hint">Tick up to 6 runs to compare their curves.</span>
+    </div>
+    <div class="tablewrap" id="wrap" tabindex="0" aria-label="Results table; scrolls sideways with All points">
+      <table class="tbl results" id="results" data-testid="results-table">
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <p class="empty-note" id="empty" hidden data-testid="results-empty"></p>
+    <div class="more-row"><button type="button" class="btn btn-sm" id="more" hidden data-testid="results-more"></button></div>
+  </section>
+</main>
+{% endblock %}
+{% block scripts %}
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<script src="{{ url_for('static', filename='js/distill_view.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/results_logic.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/results.js') }}?v=1"></script>
+{% endblock %}

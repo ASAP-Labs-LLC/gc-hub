@@ -252,32 +252,8 @@
     }
 
     // ── bell ────────────────────────────────────────────────────────────────
-    let notes = [];
-    async function loadNotes(background) {
-        const r = await getJSON('/api/notifications', !!background);
-        if (r.status !== 200 || !Array.isArray(r.body)) return;
-        notes = r.body;
-        renderNotes(notes.length);
-    }
-    function renderNotes(count) {
-        const c = $('bell-count');
-        c.hidden = !count;
-        c.textContent = count > 99 ? '99+' : String(count || '');
-        $('bell').setAttribute('aria-label', count ? 'Notifications: ' + count : 'Notifications');
-        const ul = $('bell-list');
-        ul.replaceChildren(...notes.map(n => h('li', {},
-            glyph(n.level === 'error' ? 'error' : n.level === 'warning' ? 'held' : 'never'),
-            h('span', { className: 'msg', text: n.message || '' }),
-            h('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: 'Dismiss',
-                          onclick: () => dismiss(n.id) }))));
-        $('bell-empty').hidden = notes.length > 0;
-        $('bell-clear').hidden = !notes.length;
-    }
-    async function dismiss(id) {
-        const r = await fetch('/api/notifications/' + encodeURIComponent(id) + '/dismiss', { method: 'POST' });
-        if (!r.ok) toast('Could not dismiss it (HTTP ' + r.status + ').', 'err');
-        loadNotes();
-    }
+    // v5.0 lane R: the panel's contents (list, Go to, dismiss, dismiss all,
+    // live) are notifications_panel.js (GCNotes); the shell only opens it.
 
     // ── menus ───────────────────────────────────────────────────────────────
     function toggle(panel, button, open) {
@@ -313,7 +289,6 @@
 
     function onLive(update) {
         lastUpdateAt = Date.now();
-        if (typeof update.notifications_unread === 'number' && update.notifications_unread !== notes.length) loadNotes(true);
         const hub = update.hub || null;
         const upd = $('menu-update');
         if (upd && hub && hub.staged_update) {
@@ -357,17 +332,11 @@
         $('menu-signout').addEventListener('click', () => {
             if (window.GCSession && window.GCSession.signOut) window.GCSession.signOut($('menu-signout'));
         });
-        $('bell-clear').addEventListener('click', async () => {
-            const r = await fetch('/api/notifications/dismiss-all', { method: 'POST' });
-            if (!r.ok) toast('Could not dismiss them (HTTP ' + r.status + ').', 'err');
-            loadNotes();
-        });
         if ($('unlock-lock')) {
             $('unlock-lock').addEventListener('click', () => { gate.clear(); syncUnlockChip(); toast('Admin locked.'); });
         }
 
         renderRecent();
-        loadNotes();
         loadInstruments(false);
         if (window.GCLiveAdapter) window.GCLiveAdapter.subscribe(onLive);
         setInterval(renderLive, 1000);

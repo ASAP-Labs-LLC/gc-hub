@@ -229,6 +229,7 @@ app.register_blueprint(comments_api.bp)
 import hub_control  # noqa: E402  (hub tray: status, pause/resume processing, stop)
 app.register_blueprint(hub_control.bp)
 import sample_links; app.register_blueprint(sample_links.bp)  # noqa: E402,E702 (v4.0 sendable links)
+import results_pages; app.register_blueprint(results_pages.bp)  # noqa: E402,E702 (v5.0 lane R: /results, /settings, /help)
 import web_auth  # noqa: E402  (sign-in: LabLink sessions, the session gate)
 app.register_blueprint(web_auth.bp)
 # Order matters (before_request runs in registration order): the https
