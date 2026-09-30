@@ -195,6 +195,57 @@ Ryan wants to "purge only GC-1's samples, and keep GC-2 and the settings". A sam
   - a purge crash mid-transaction leaves the DB unchanged;
   - ingest during the purge answers 503 and succeeds after it.
 
+## Global status, a way home, and Hub admin (v4.0 lane E)
+
+Ryan said: "there is no UI indicator for any dry runs, imports running, and a way to get back to the home page from the admin hub … more information does not always equal clarity, deliberate design does … tell me which GC agents are live from the home page … the sample list should be numerical, or chronological, but it seems sporadic."
+
+The site-wide UX review (session scratchpad `ui/UX-REVIEW.md`) drives this section.
+
+- **Task registry.** `tasks.py`, in memory, fed by:
+  - `AdminJobs`: load-folder, history import, dry run, purge;
+  - the diagnostics runner;
+  - `download_jobs` (report ZIPs);
+  - the QBench upload thread;
+  - reprocess batches.
+
+  Each task is `{id, kind, title, instrument?, state: running|done|failed|stopped|interrupted, progress: {done,total,text}?, by, started_at, ended_at, open_url}`. There are no paths, summaries or tokens in it.
+- **Task visibility and the `/api/live` payload.**
+  - Every signed-in user sees titles, progress and "by".
+  - Only the task's owner, or an admin, can open its result or download it. That rule is unchanged; the result stays behind its existing auth.
+  - `/api/live` carries `tasks`: running tasks, plus tasks that finished within the last 30 minutes.
+  - `hub` gains the queue counts and `processing_paused` that `hub_control` already holds.
+- **Agent liveness: one rule, on the server.** Live means `last_seen` within 3× the heartbeat interval (90 s), measured on the hub's clock. `/api/live` `agents[]` carries `{instrument_id, name, live, last_seen_age_s, …}`. Every page uses it; the pages' own 15 min and 150 s rules are removed.
+- **"Running now" indicator on every page.**
+  - It sits in the sidebar footer on shell pages, and replaces "Ready" at bottom-left on the classic main page.
+  - While work runs it reads "Importing GC-2 history · 3,000/12,000".
+  - Click it for a list of tasks with Open / Download / Dismiss.
+  - A finished or failed task stays for 30 minutes with a clear outcome line.
+  - A banner shows on every page while processing is paused.
+- **Home page GC strip.**
+  - Compact chips on the classic main page's top bar, e.g. "GC-1 ● Live · GC-2 ○ Never checked in". They replace the removed Refresh slot.
+  - Clicking a chip opens `/instruments/<id>`.
+  - The sidebar footer shows "2 of 2 GCs connected".
+  - Status shows as glyph + text, never colour alone.
+- **Sample list order.**
+  - Each row shows its injection date/time.
+  - Rows are grouped under day headings: Today / Yesterday / date.
+  - A sort switch offers **Newest run** (the default; `injection_dt` desc) and **Lab ID** (natural numeric, so `40318-RERUN-2` sorts after `40318`). The choice is remembered per browser.
+  - Runs with no readable injection time are grouped last under "No injection time".
+  - Full lab IDs are shown, never truncated to "4…".
+- **A way home everywhere.**
+  - `/admin/hub` and `/calibration` render inside the new shell (sidebar, light tokens), so the logo leads home and nav works.
+  - No page is a dead end.
+- **Hub admin fixes:**
+  - **Bug:** the Load-folder instrument select (`#lf-inst`) is never filled.
+  - **Bug:** history-import progress renders into the Load-folder card; a dry run shows twice.
+  - Unlock once with the admin password: a 15-minute closure, as on the new pages, then everything loads. No per-card "Load" buttons.
+  - A running job is picked up when the page loads.
+  - Messages appear next to the button that caused them.
+  - Summaries render as a short table of counts, never raw JSON.
+  - Stop is enabled only while a job runs.
+  - Sections are reordered by frequency of use: status and running work first; one-time setup (hub address) last.
+  - Settings' admin prompts stop using `window.prompt` (the password shows in plain text); they use the unlock closure.
+
 ## Later releases
 
 - **v3.2:** new Samples page, opt-in at `/next`; classic stays at `/`.
