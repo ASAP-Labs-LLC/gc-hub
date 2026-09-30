@@ -83,12 +83,40 @@
         ];
     }
 
+    // The report ZIP is a background job (v3.0.1: building N PDFs in the
+    // request outlasted Cloudflare's 100 s). Only the hub's own one-time
+    // download path is followed.
+    function isZipDownloadUrl(u) {
+        return typeof u === 'string' &&
+            /^\/api\/export-analysis-reports-zip\/[A-Za-z0-9_-]+\/download$/.test(u);
+    }
+
+    // What the page shows for a polled ZIP job, and the link to fetch once done.
+    function zipJobView(job) {
+        if (job.state === 'running') {
+            return { done: false, cls: 'info', download: null,
+                     message: `Generating reports: ${job.done || 0} of ${job.total}…` };
+        }
+        if (job.state === 'done') {
+            const r = job.result || {};
+            const skipped = r.skipped ? ` (${r.skipped} skipped: unknown sample, no CDF or ` +
+                'standard not found)' : '';
+            return { done: true, cls: 'success',
+                     download: isZipDownloadUrl(job.download) ? job.download : null,
+                     message: `Downloaded ${r.written} reports as ZIP${skipped}` };
+        }
+        return { done: true, cls: 'error', download: null,
+                 message: `Download failed: ${job.error || job.state}` };
+    }
+
     root.overlaysFromSettings = overlaysFromSettings;
     root.rangesForPayload = rangesForPayload;
     root.captureReportParams = captureReportParams;
     root.buildReportItemPayload = buildReportItemPayload;
+    root.zipJobView = zipJobView;
+    root.isZipDownloadUrl = isZipDownloadUrl;
     if (typeof module !== 'undefined' && module.exports) {
         module.exports = { rangesForPayload, captureReportParams, buildReportItemPayload,
-            overlaysFromSettings };
+            overlaysFromSettings, zipJobView, isZipDownloadUrl };
     }
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -163,8 +163,21 @@ def test_first_minutes_through_gc_asaplabs_net(hub):
     code, _, body = call(port, "POST", "/api/admin/import-history/dry-run",
                          {"password": PW, "instrument": "gc2", "processed_dir": str(processed)},
                          cookie=cookie)
-    assert code == 200, body
-    assert "summary" in body
+    # an admin job since v3.0.1 (Cloudflare ends a request after 100 s): 202 at
+    # once, the summary on the finished job, polled through the tunnel too
+    assert code == 202, body
+    assert body["job"]["kind"] == "import-history-dry-run"
+    import time
+    deadline = time.time() + 30
+    while True:
+        code, _, status = call(port, "POST", "/api/admin/jobs/status", {"password": PW},
+                               cookie=cookie)
+        assert code == 200, status
+        if status["job"]["state"] != "running" or time.time() > deadline:
+            break
+        time.sleep(0.05)
+    assert status["job"]["state"] == "done", status
+    assert status["job"]["result"]["summary"]["dry_run"] is True
 
     # every action above is logged with the signed-in name and the real address
     log = (data / "app.log").read_text(encoding="utf-8")

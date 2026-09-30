@@ -48,6 +48,27 @@ def _job(port, pw):
     return post(port, "/api/admin/jobs/status", {"password": pw})[1]["job"]
 
 
+def _dry_run(port, pw, body):
+    """The dry run is an admin job (v3.0.1): 202 at once, then the summary on
+    the finished job (``result.summary``), polled through the status route."""
+    t0 = time.monotonic()
+    code, resp = post(port, "/api/admin/import-history/dry-run", dict(body, password=pw))
+    assert code == 202, resp
+    assert time.monotonic() - t0 < 10
+    assert resp["job"]["kind"] == "import-history-dry-run"
+    assert wait_for(lambda: _job(port, pw)["state"] != "running", timeout=60)
+    job = _job(port, pw)
+    assert job["state"] == "done", job
+    assert job["id"] == resp["job"]["id"]
+    assert job["result"]["summary"] == job["summary"]
+    return job["result"]["summary"]
+
+
+def _import_runs(h) -> int:
+    with store.connection(h.db) as conn:
+        return conn.execute("SELECT COUNT(*) FROM import_runs").fetchone()[0]
+
+
 def _poll_until(predicate, timeout=10.0, interval=0.005) -> bool:
     """Like ``wait_for``, but polls tightly (for catching a fast job mid-run)."""
     deadline = time.time() + timeout
@@ -112,15 +133,14 @@ def test_dry_run_classifies_without_writing(admin_hub, tmp_path):
                {"password": pw, "instrument": "gc1", "processed_dir": str(processed),
                 "results_csv": str(csv_path), "aliases": ALIASES, "batch_size": 0})[0] == 400
 
-    code, body = post(port, "/api/admin/import-history/dry-run",
-                      {"password": pw, "instrument": "gc1", "processed_dir": str(processed),
-                       "results_csv": str(csv_path), "aliases": ALIASES})
-    assert code == 200, body
-    summary = body["summary"]
+    before = dict(table_counts(h), import_runs=_import_runs(h))
+    summary = _dry_run(port, pw, {"instrument": "gc1", "processed_dir": str(processed),
+                                  "results_csv": str(csv_path), "aliases": ALIASES})
     assert summary["dry_run"] is True
     assert summary["counts"]["attached"] == 1
     assert summary["counts"]["result_only"] == 1
     assert samples(h, "gc1") == []   # a dry run writes nothing
+    assert dict(table_counts(h), import_runs=_import_runs(h)) == before   # no run row either
 
 
 # ── the real import ──────────────────────────────────────────────────────────
@@ -191,12 +211,9 @@ def test_last_run_defaults_the_form_and_warns_on_a_different_csv(admin_hub, tmp_
     # a different CSV path than last time is not refused, only warned about
     other_csv = Path(last["results_csv"]).with_name("other.csv")
     shutil.copy2(last["results_csv"], other_csv)
-    code, body = post(port, "/api/admin/import-history/dry-run",
-                      {"password": pw, "instrument": "gc1",
-                       "processed_dir": last["processed_dir"], "results_csv": str(other_csv),
-                       "aliases": ALIASES})
-    assert code == 200, body
-    assert any("different CSV" in w for w in body["summary"]["warnings"])
+    summary = _dry_run(port, pw, {"instrument": "gc1", "processed_dir": last["processed_dir"],
+                                  "results_csv": str(other_csv), "aliases": ALIASES})
+    assert any("different CSV" in w for w in summary["warnings"])
 
 
 # ── stop / resume / refusal while another job runs ───────────────────────────
@@ -267,3 +284,40 @@ def test_admin_page_shows_the_history_import_section(admin_hub):
     port, _h, _pw = admin_hub
     html = get_text(port, "/admin/hub")
     assert 'id="ih-inst"' in html and 'id="btn-ih-start"' in html and 'id="btn-ih-stop"' in html
+
+
+# ── the admin page (v3.0.1: the dry run is a polled job) ─────────────────────
+
+def test_admin_page_dry_run_polls_the_job_and_shows_the_summary(admin_hub, tmp_path):
+    webdriver = pytest.importorskip("selenium.webdriver")
+    from selenium.webdriver.chrome.options import Options
+    from bootapp import browser_sign_in
+    port, _h, pw = admin_hub
+    processed = tmp_path / "page" / "processed_cdfs2"
+    sample(processed, "PG-1", datetime(2026, 9, 19, 10, 0, 0), method=SIMDIS)
+    opts = Options()
+    for arg in ("--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"):
+        opts.add_argument(arg)
+    try:
+        drv = webdriver.Chrome(options=opts)
+    except Exception as exc:  # noqa: BLE001 - no Chrome / driver here
+        pytest.skip(f"headless Chrome unavailable: {exc}")
+    try:
+        browser_sign_in(drv, port)
+        drv.get(f"http://127.0.0.1:{port}/admin/hub")
+        drv.find_element("id", "pw").send_keys(pw)
+        drv.find_element("id", "btn-refresh").click()
+        # the refresh's admin calls finish (one password check per client at a time)
+        assert _poll_until(lambda: drv.execute_script(
+            "return document.querySelectorAll('#ih-inst option').length"
+            " && document.querySelectorAll('#presets li').length") > 0, timeout=30)
+        drv.find_element("id", "ih-processed").send_keys(str(processed))
+        drv.find_element("id", "btn-ih-dryrun").click()
+        assert _poll_until(lambda: "Dry run done (nothing written)"
+                           in drv.find_element("id", "ih-result").text, timeout=60), \
+            drv.find_element("id", "ih-result").text + " | " + drv.find_element("id", "msg").text
+        text = drv.find_element("id", "ih-result").text
+        assert '"dry_run": true' in text
+        assert "Dry run done" in drv.find_element("id", "msg").text
+    finally:
+        drv.quit()

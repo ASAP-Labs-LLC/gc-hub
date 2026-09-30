@@ -2579,6 +2579,23 @@ async function exportQueueToQBench() {
    13d. EXPORT TO PC
    =================================================================== */
 
+/** Poll a report ZIP job until it is over; its zipJobView. Progress goes on
+    the button (and a notification every 20 PDFs), so a long build shows. */
+async function waitForReportZip(job, btn) {
+    let lastNote = 0;
+    for (;;) {
+        const v = zipJobView(job);
+        if (v.done) return v;
+        if (btn) btn.textContent = `Generating ${job.done || 0}/${job.total}...`;
+        if ((job.done || 0) - lastNote >= 20) {
+            lastNote = job.done;
+            showNotification(v.message, 'info');
+        }
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        job = (await apiGet(`/api/export-analysis-reports-zip/${encodeURIComponent(job.id)}`)).job;
+    }
+}
+
 async function exportToPC() {
     if (state.analysisQueue.length === 0) {
         showNotification('Queue is empty — add samples first', 'info');
@@ -2601,12 +2618,20 @@ async function exportToPC() {
             await downloadBlob(resp, `${item.lab_id}_analysis.pdf`);
             showNotification('Download complete', 'success');
         } else {
-            // Multiple files — download as ZIP via browser
+            // Multiple files — a ZIP built in the background (v3.0.1): poll
+            // the job, then let the browser fetch the one-time link.
             const items = state.analysisQueue.map(item =>
                 buildReportItemPayload(item, state.rangeOverlays, state.analysisParams));
-            const resp = await api('POST', '/api/export-analysis-reports-zip', { items });
-            await downloadBlob(resp, 'analysis_reports.zip');
-            showNotification(`Downloaded ${count} reports as ZIP`, 'success');
+            const started = await api('POST', '/api/export-analysis-reports-zip', { items });
+            const v = await waitForReportZip(started.job, btn);
+            if (!v.download) throw new Error(v.message.replace(/^Download failed: /, ''));
+            const a = document.createElement('a');
+            a.href = v.download;
+            a.download = 'analysis_reports.zip';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            showNotification(v.message, 'success');
         }
     } catch (e) {
         console.error('Export failed:', e);

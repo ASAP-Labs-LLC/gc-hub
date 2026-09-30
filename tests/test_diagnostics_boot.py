@@ -54,12 +54,32 @@ def _signed(port, path):
     return urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=cookie_header(port))
 
 
+def _build(port, body, timeout=120):
+    """Start a build (202 at once, v3.0.1) and poll its job; ``(code, headers,
+    data)`` of the start when it was refused, else ``(200, {}, result)``."""
+    code, headers, data = _post(port, "/api/admin/diagnostics/bundle", body, 30)
+    if code != 202:
+        return code, headers, data
+    deadline = time.time() + timeout
+    while True:
+        scode, _h, raw = _post(port, "/api/admin/diagnostics/status",
+                               {"password": body.get("password")}, 30)
+        assert scode == 200, raw
+        job = json.loads(raw)["job"]
+        if job["state"] != "running":
+            break
+        assert time.time() < deadline, job
+        time.sleep(0.05)
+    assert job["state"] == "done", job
+    return 200, {}, job["result"]["summary"]
+
+
 def _download(port, body, timeout=120):
-    """Build (POST) then fetch the one-time download (GET)."""
-    code, headers, data = _post(port, "/api/admin/diagnostics/bundle", body, timeout)
+    """Build (POST, then poll) then fetch the one-time download (GET)."""
+    code, headers, data = _build(port, body, timeout)
     if code != 200:
         return code, headers, data
-    link = json.loads(data)["download"]
+    link = data["download"]
     try:
         with urllib.request.urlopen(_signed(port, link), timeout=timeout) as r:
             return r.status, dict(r.headers), r.read()
@@ -144,8 +164,8 @@ def test_estimate_and_gating(diag_hub):
     assert keys[0] == "summary" and "all_cdfs" in keys
     assert next(o for o in body["options"] if o["key"] == "all_cdfs")["files"] >= 8
     assert _post(port, "/api/admin/diagnostics/bundle", {"password": "wrong"})[0] == 403
-    code, _h2, _d = _post(port, "/api/admin/diagnostics/bundle", {"password": pw})
-    link = json.loads(_d)["download"]
+    code, _h2, _d = _build(port, {"password": pw})
+    link = _d["download"]
     # the download link needs a session too (spec D3)
     try:
         urllib.request.urlopen(f"http://127.0.0.1:{port}{link}", timeout=30)

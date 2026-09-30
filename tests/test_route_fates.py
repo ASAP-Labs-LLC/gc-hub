@@ -36,6 +36,17 @@ LOCAL_ROUTES = {"/api/hub/status", "/api/admin/hub/pause-processing",
                 "/api/admin/hub/resume-processing", "/api/admin/hub/stop", "/api/restart"}
 
 
+# Routes whose work can outlast Cloudflare's 100 s: 202 {job}, then polled (v3.0.1).
+LONG_WORK = {"/api/admin/load-folder", "/api/admin/import-history/start",
+             "/api/admin/import-history/dry-run", "/api/admin/diagnostics/bundle",
+             "/api/export-analysis-reports-zip"}
+# ... and the routes that poll them or fetch what they built.
+POLLED_BY = {"/api/admin/jobs/status": {"POST"}, "/api/admin/diagnostics/status": {"POST"},
+             "/api/admin/diagnostics/download/<token>": {"GET"},
+             "/api/export-analysis-reports-zip/<job_id>": {"GET"},
+             "/api/export-analysis-reports-zip/<job_id>/download": {"GET"}}
+
+
 def _constants(tree: ast.Module) -> dict:
     """Module-level ``NAME = "string"`` assignments."""
     out = {}
@@ -116,7 +127,11 @@ def plan_table() -> list[tuple[str, frozenset, str]]:
 
 
 def plan_rows() -> list[tuple[str, frozenset, str, str]]:
-    """``(path, methods, fate, auth)`` for every row of the table."""
+    return [(p, m, f, a) for p, m, f, a, _n in plan_rows_with_notes()]
+
+
+def plan_rows_with_notes() -> list[tuple[str, frozenset, str, str, str]]:
+    """``(path, methods, fate, auth, notes)`` for every row of the table."""
     text = PLAN.read_text(encoding="utf-8")
     m = re.search(r"<!-- route-fates:begin -->(.*?)<!-- route-fates:end -->", text, re.S)
     assert m, "route-fates markers missing from the T4 plan"
@@ -127,7 +142,7 @@ def plan_rows() -> list[tuple[str, frozenset, str, str]]:
             continue
         path = cells[0].strip("`")
         methods = frozenset(x.strip() for x in cells[1].split(","))
-        rows.append((path, methods, cells[2], cells[3]))
+        rows.append((path, methods, cells[2], cells[3], cells[4] if len(cells) > 4 else ""))
     return rows
 
 
@@ -189,6 +204,21 @@ class RouteFateTests(unittest.TestCase):
                 self.assertEqual(web_auth.route_class(path), auth, path)
         for path in registered_routes():
             self.assertIn(web_auth.route_class(path), AUTH, path)
+
+    def test_long_work_answers_at_once(self):
+        """v3.0.1: through https://gc.asaplabs.net Cloudflare ends a request
+        after 100 s (HTTP 524). Routes whose work can run for minutes answer
+        202 ``{job}`` and are polled (their table rows say so), with their
+        status and download routes registered."""
+        notes = {p: n for p, _m, _f, _a, n in plan_rows_with_notes()}
+        fates = {p: f for p, _m, f in plan_table()}
+        for path in LONG_WORK:
+            self.assertIn(path, notes, path)
+            self.assertIn("202 `{job}`", notes[path], path)
+        registered = registered_routes()
+        for path, methods in POLLED_BY.items():
+            self.assertEqual(registered.get(path), frozenset(methods), path)
+            self.assertEqual(fates[path], "new", path)
 
     def test_no_route_takes_a_file_path(self):
         for path in registered_routes():

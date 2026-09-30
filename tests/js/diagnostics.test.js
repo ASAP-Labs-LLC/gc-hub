@@ -33,4 +33,23 @@ module.exports = (t) => {
     t.eq(D.isDownloadUrl('/api/admin/diagnostics/download/../x'), false);
     t.eq(D.isDownloadUrl('//evil.example/api/admin/diagnostics/download/x'), false);
     t.eq(D.isDownloadUrl(null), false);
+
+    // v3.0.1: the build is a background job, polled; what the panel does next.
+    t.eq(D.buildView({ state: 'running', progress: {} }),
+        { done: false, message: 'Building the bundle… (this page keeps working; large bundles take a while)',
+          cls: '', result: null });
+    t.eq(D.buildView({ state: 'running', progress: { phase: 'logs' } }).message,
+        'Building the bundle: logs… (this page keeps working; large bundles take a while)');
+    t.eq(D.buildView({ state: 'running', progress: { phase: 'database-add' } }).message,
+        'Building the bundle: database-add… (this page keeps working; large bundles take a while)');
+    const result = { download: '/api/admin/diagnostics/download/abc', name: 'x.zip', size: 2048,
+                     files: 3, skipped: 0 };
+    t.eq(D.buildView({ state: 'done', result: { summary: result } }),
+        { done: true, message: null, cls: 'ok', result });
+    t.eq(D.buildView({ state: 'failed', error: 'NoSpace: Not enough free disk space', result: null }),
+        { done: true, message: 'The diagnostics bundle failed: NoSpace: Not enough free disk space',
+          cls: 'err', result: null });
+    t.eq(D.downloadStartedText(result), 'Download started: x.zip (2.0 KB, 3 files)');
+    t.eq(D.downloadStartedText(Object.assign({}, result, { skipped: 2 })),
+        'Download started: x.zip (2.0 KB, 3 files; 2 left out, see summary.txt)');
 };
