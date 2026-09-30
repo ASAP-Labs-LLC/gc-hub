@@ -56,7 +56,12 @@ Public API
         # (the folder loader's "load as history" option).
         # The 2B1 ingest route maps InstrumentDisabled to 403 (the agent holds
         # and retries later) and every other SubmitRejected to 400 (the agent
-        # marks the file rejected).
+        # marks the file rejected). InstrumentPaused (an admin purge of that
+        # instrument is running) is a 503: the agent backs off and retries.
+    pause_instrument(instrument_id, reason='purge in progress')   resume_instrument(id)
+    paused_instruments() -> frozenset      instrument_paused(id) -> bool
+        # per process, in memory: the Worker claims none of a paused
+        # instrument's jobs and submit refuses its files (the v4.0 purge)
     SubmitResult(outcome, sha256, sample_id, status, conflict_id, instrument_id, message)
         # outcome: 'created' | 'duplicate' | 'cross_instrument' | 'conflict'
     is_blank_name(name) -> bool
@@ -226,6 +231,7 @@ import corrections as corrections_mod
 import distill
 import exports
 import instruments
+import live
 import methods
 import paths
 import store
@@ -266,6 +272,50 @@ class InstrumentDisabled(SubmitRejected):
 
 class NotExportable(ValueError):
     """The sample doesn't pass the export gate (or isn't in a state the action needs)."""
+
+
+class InstrumentPaused(RuntimeError):
+    """The instrument's processing is paused while an admin purge runs
+    (``pause_instrument``). Not a verdict on the file: the ingest route answers
+    503 "purge in progress; retry", and the agent backs off and sends it again."""
+
+
+# ── pausing one instrument (a purge, v4.0) ──────────────────────────────────
+# In memory, per process: a purge runs on an admin-job thread of this process
+# and ends (resume_instrument, in a finally) before its job does, and a hub that
+# dies mid-purge starts with nothing paused.
+
+_paused_lock = threading.Lock()
+_paused: dict = {}        # instrument id -> reason
+
+
+def pause_instrument(instrument_id: str, reason: str = "purge in progress") -> None:
+    """Stop the Worker claiming this instrument's jobs and make ``submit``
+    refuse its files (``InstrumentPaused``) until ``resume_instrument``."""
+    with _paused_lock:
+        _paused[str(instrument_id)] = reason
+
+
+def resume_instrument(instrument_id: str) -> None:
+    with _paused_lock:
+        _paused.pop(str(instrument_id), None)
+
+
+def paused_instruments() -> frozenset:
+    with _paused_lock:
+        return frozenset(_paused)
+
+
+def instrument_paused(instrument_id: str) -> bool:
+    with _paused_lock:
+        return str(instrument_id) in _paused
+
+
+def _refuse_if_paused(inst: dict) -> None:
+    with _paused_lock:
+        reason = _paused.get(str(inst["id"]))
+    if reason is not None:
+        raise InstrumentPaused(f"{inst.get('name') or inst['id']}: {reason}; retry in a minute")
 
 
 @dataclass(frozen=True)
@@ -739,6 +789,22 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
            mtime: Union[None, datetime, str, float] = None, source_name: Optional[str] = None, *,
            conf: Optional[dict] = None, data_dir=None, db: store.Db = None,
            notifier: Optional[Notifier] = None, force_backfill: bool = False) -> SubmitResult:
+    """Receive one CDF for ``instrument_id`` (``_submit``), then publish the
+    live update after the transaction committed: a created (or attached)
+    sample as ``sample``, a conflict as ``instrument``."""
+    res = _submit(instrument_id, cdf, mtime, source_name, conf=conf, data_dir=data_dir, db=db,
+                  notifier=notifier, force_backfill=force_backfill)
+    if res.outcome == "created":
+        live.publish("sample", {"sample_id": res.sample_id})
+    elif res.outcome == "conflict":
+        live.publish("instrument", {"instrument_id": res.instrument_id or instrument_id})
+    return res
+
+
+def _submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.PathLike],
+            mtime: Union[None, datetime, str, float] = None, source_name: Optional[str] = None, *,
+            conf: Optional[dict] = None, data_dir=None, db: store.Db = None,
+            notifier: Optional[Notifier] = None, force_backfill: bool = False) -> SubmitResult:
     """Receive one CDF for ``instrument_id``.
 
     ``cdf`` is the file's bytes or a path (read only, never moved or
@@ -759,6 +825,7 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
         raise UnknownInstrument(f"unknown instrument {instrument_id!r}")
     if not inst.get("enabled", 1):
         raise InstrumentDisabled(f"instrument {instrument_id} is disabled")
+    _refuse_if_paused(inst)
     if isinstance(cdf, (bytes, bytearray, memoryview)):
         body = bytes(cdf)
     else:
@@ -812,6 +879,9 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
 
         with store.connection(db) as conn:
             with store.write_txn(conn):
+                # again under the write lock: a purge pauses before its own
+                # transaction, so a sample is either in its snapshot or refused
+                _refuse_if_paused(inst)
                 known = existing_result(sha, instrument_id, conn)
                 if known is not None:
                     return known
@@ -881,6 +951,7 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
                     os.utime(final, (mtime_ts, mtime_ts))
         log.info("pipeline: received %s %s at %s as sample %s", instrument_id, lab_id,
                  injection_dt, sid)
+        live.publish_samples([x["id"] for x in suspects] + list(flagged))   # review notes
         if suspects:
             _notify(notifier, "warning",
                     f"{inst.get('name') or instrument_id}: sample {sid} ({lab_id}, injected "
@@ -926,11 +997,13 @@ def request_reprocess(sample_id: int, *, by: Optional[str] = None, use_current_b
             rj = _replace_job(conn, sample_id)
             if rj is not None:
                 return rj["id"]
-            return store.jobs.enqueue(PROCESS, {
+            job = store.jobs.enqueue(PROCESS, {
                 "sample_id": sample_id, "reason": "reprocess", "by": by,
                 "use_current_blank": bool(use_current_blank),
                 "use_current_corrections": bool(use_current_corrections),
             }, sample_id=sample_id, db=conn)
+    live.publish("sample", {"sample_id": sample_id})
+    return job
 
 
 def _replace_job(conn, sample_id: int) -> Optional[dict]:
@@ -1087,7 +1160,8 @@ class Worker:
 
     def run_once(self) -> bool:
         """Claim and handle one due ``process`` job; False if none was due."""
-        job = store.jobs.claim_next(self.now_fn(), kind=PROCESS, db=self.db)
+        job = store.jobs.claim_next(self.now_fn(), kind=PROCESS, db=self.db,
+                                    exclude_instruments=tuple(paused_instruments()))
         if job is None:
             return False
         try:
@@ -1098,6 +1172,10 @@ class Worker:
                 store.jobs.fail(job["id"], "worker crash", self.now_fn() + TRANSIENT_RETRY, db=self.db)
             except Exception:  # noqa: BLE001
                 log.exception("pipeline: could not reschedule job %s", job["id"])
+        finally:
+            # live update: whatever the job did to its sample is committed now
+            payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+            live.publish("sample", {"sample_id": payload.get("sample_id", job.get("sample_id"))})
         return True
 
     # one job
@@ -1424,6 +1502,9 @@ class Worker:
                 store.jobs.complete(job["id"], db=conn)
         self._stuck.discard(sample["instrument_id"])
         log.info("pipeline: sample %s final at revision %s", sid, rev)
+        live.publish_samples([sid] + list(flagged))
+        if src is not None:          # the conflict is resolved
+            live.publish("instrument", {"instrument_id": cur["instrument_id"]})
         if self.on_final is not None:
             try:
                 self.on_final(sid)
@@ -1490,6 +1571,7 @@ def export_to_lims(sample_id: int, *, by: Optional[str], db: store.Db = None, da
                                      **{k: cur[k] for k in _COPIED})
             seq = store.export_rows.append_pending(conn, s["instrument_id"], sample_id, rev, line)
     log.info("pipeline: sample %s exported to LIMS by %s (revision %s)", sample_id, by, rev)
+    live.publish("sample", {"sample_id": sample_id})
     return {"revision": rev, "seq": seq}
 
 
@@ -1518,6 +1600,7 @@ def release_backfill(sample_id: int, *, by: Optional[str], db: store.Db = None, 
             seq = store.export_rows.append_pending(conn, s["instrument_id"], sample_id,
                                                    cur["revision"], _line_for(s, cur, format_line))
     log.info("pipeline: backfill sample %s released by %s", sample_id, by)
+    live.publish("sample", {"sample_id": sample_id})
     return seq
 
 
@@ -1561,4 +1644,6 @@ def resolve_conflict_replace(conflict_id: int, *, by: Optional[str], conf: Optio
             }, sample_id=sid, db=conn)
     log.info("pipeline: replace of sample %s from conflict %s requested by %s (job %s)", sid,
              conflict_id, by, job)
+    live.publish("sample", {"sample_id": sid})
+    live.publish("instrument", {"instrument_id": c["instrument_id"]})
     return job

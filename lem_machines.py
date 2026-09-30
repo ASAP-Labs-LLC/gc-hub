@@ -358,6 +358,19 @@ class MachineCache:
             out["error"] = error
         return out
 
+    def title(self, url: str, uid: Optional[str]) -> Optional[str]:
+        """The cached title of machine ``uid`` from ``url``'s list, or None.
+        Never fetches (the setup guide must not wait on LEM)."""
+        if not uid:
+            return None
+        with self._lock:
+            if not self._has(url):
+                return None
+            for m in self._machines:
+                if m.get("uid") == uid:
+                    return m.get("title") or None
+        return None
+
     def _recent_failure(self, url: str) -> bool:
         return (self._failed_url == url
                 and self._clock() - self._failed_at < self._retry_after)

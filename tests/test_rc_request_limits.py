@@ -148,4 +148,7 @@ def test_every_template_links_the_favicon():
     for t in sorted((ROOT / "templates").glob("*.html")):
         if t.name.startswith("_"):        # a partial (_signed_in.html), not a page
             continue
-        assert 'rel="icon"' in t.read_text(encoding="utf-8"), t.name
+        text = t.read_text(encoding="utf-8")
+        if '{% extends "_layout.html" %}' in text:      # v3.1 pages: the layout links it
+            text = (ROOT / "templates" / "_layout.html").read_text(encoding="utf-8")
+        assert 'rel="icon"' in text, t.name

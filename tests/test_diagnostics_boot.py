@@ -242,8 +242,10 @@ def test_admin_page_diagnostics_panel(diag_hub):
         drv.get(f"http://127.0.0.1:{port}/admin/hub")
         text = drv.find_element("id", "diag-panel").text
         assert "Diagnostics" in text and "Claude" in text
-        assert "soft-deleted comments" in text and "IP addresses" in text     # M6
-        assert "qbenchlogin.txt on the share" in text
+        assert "soft-deleted comments" in text and "IP addresses" in text     # M6 (in view)
+        # v4.0 lane E: the details sit behind "What's inside" (a disclosure)
+        full = drv.execute_script("return document.getElementById('diag-panel').textContent;")
+        assert "qbenchlogin.txt on the share" in " ".join(full.split())
         boxes = drv.execute_script(
             "return Array.from(document.querySelectorAll('#diag-options input[type=checkbox]'))"
             ".map(b => [b.dataset.key, b.checked]);")
@@ -251,8 +253,9 @@ def test_admin_page_diagnostics_panel(diag_hub):
                                "database": True, "exports": True, "reports": True,
                                "problem_cdfs": True, "calibration": True, "updater": True,
                                "environment": True, "all_cdfs": False}
+        # v4.0 lane E: unlock once; the sizes load by themselves
         drv.find_element("id", "pw").send_keys(pw)
-        drv.find_element("id", "btn-diag-estimate").click()
+        drv.find_element("id", "btn-unlock").click()
         assert _wait(lambda: "B" in drv.find_element("id", "diag-total").text), \
             drv.find_element("id", "diag-total").text
         sizes = drv.execute_script(

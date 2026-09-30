@@ -5,7 +5,6 @@
     'use strict';
 
     const SKEW_WARN_SECONDS = 120;
-    const STALE_MINUTES = 15;          // spec, Notifications: an agent not seen for 15 minutes
 
     function formatSkew(seconds) {
         if (seconds === null || seconds === undefined || !isFinite(seconds)) return 'unknown';
@@ -25,14 +24,16 @@
         return "The GC PC's clock is " + formatSkew(seconds) + " of the hub's clock.";
     }
 
-    // agent: a row of GET /api/agents. level: never | stale | paused | error | ok.
-    function agentHealth(agent, nowMs) {
+    // agent: a row of GET /api/agents (or its /api/live update). level: never |
+    // stale | paused | error | ok. v4.0 lane E: `live` is the hub's one rule
+    // (last_seen at most 90 s old on the hub's clock, live.agent_liveness);
+    // this page keeps no rule of its own and never reads the browser's clock.
+    function agentHealth(agent, _nowMs) {
         if (!agent || !agent.last_seen) return { level: 'never', text: 'Agent has never reported' };
-        const seen = Date.parse(agent.last_seen);
-        if (isNaN(seen)) return { level: 'never', text: 'Agent has never reported' };
-        const ageMin = (nowMs - seen) / 60000;
-        if (ageMin > STALE_MINUTES) {
-            return { level: 'stale', text: 'Not seen for ' + Math.round(ageMin) + ' min' };
+        if (agent.live !== true) {
+            const age = agent.last_seen_age_s;
+            return { level: 'stale', text: (typeof age === 'number' && isFinite(age))
+                ? 'Not seen for ' + Math.max(1, Math.round(age / 60)) + ' min' : 'Not seen recently' };
         }
         if (agent.state === 'paused') return { level: 'paused', text: 'Paused' };
         if (agent.last_error) return { level: 'error', text: 'Reporting an error' };
@@ -208,8 +209,17 @@
         return option.value;
     }
 
+    // Seconds since the agent's last check-in: the hub's age when it was read
+    // (at readAtMs) plus the time since, never the browser's clock against
+    // last_seen. null when the hub gave no age.
+    function lastSeenAge(agent, readAtMs, nowMs) {
+        const age = agent && agent.last_seen_age_s;
+        if (typeof age !== 'number' || !isFinite(age)) return null;
+        return Math.max(0, Math.round(age + (nowMs - readAtMs) / 1000));
+    }
+
     const api = {
-        SKEW_WARN_SECONDS, formatSkew, skewWarning, agentHealth, parseCorrections,
+        SKEW_WARN_SECONDS, formatSkew, skewWarning, agentHealth, lastSeenAge, parseCorrections,
         liveSinceValue, liveSinceInput, liveSinceConfirm, localNow, installerOutcome, methodRows, orderStandards,
         releaseSummary, calibrationBadge, lemMachineOptions, lemAnswerCacheable, lemPickerValue,
     };

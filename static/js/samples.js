@@ -160,7 +160,56 @@
                 parts.push(`${key}=${encodeURIComponent(String(v).trim())}`);
             }
         }
+        const ids = (filters || {}).ids;
+        if (Array.isArray(ids) && ids.length) parts.push(`ids=${encodeURIComponent(ids.join(','))}`);
         return '/api/files?' + parts.join('&');
+    }
+
+    /** The server's list order: newest injection first, then the higher id. */
+    function _newerFirst(a, b) {
+        const da = String(a.injection_dt || ''), db = String(b.injection_dt || '');
+        if (da !== db) return da < db ? 1 : -1;
+        return Number(b.sample_id) - Number(a.sample_id);
+    }
+
+    /** v4.0 live updates: merge the rows fetched for *changedIds*
+        (/api/files?ids=, with the list's own filters) into *files* without
+        reloading it. A returned row replaces its old copy or is inserted in
+        the server's order; a changed id that was not returned no longer
+        matches (or is gone) and is removed. With `pageFull` (the list holds
+        only the newest page) a new row older than the page's last is left
+        out (counted in `skipped`). A replaced row whose injection time
+        changed is moved to its place. Returns {files, added, removed,
+        skipped, replaced: [rows updated in place], orderChanged}; *files*
+        is not modified. */
+    function mergeChangedRows(files, changedIds, rows, opts) {
+        const byId = new Map((rows || []).map(r => [Number(r.sample_id), r]));
+        const changed = new Set((changedIds || []).map(Number));
+        let removed = 0;
+        let moved = false;
+        const replaced = [];
+        const out = [];
+        for (const f of files || []) {
+            const id = Number(f.sample_id);
+            if (!changed.has(id)) { out.push(f); continue; }
+            if (byId.has(id)) {
+                const r = byId.get(id);
+                if (String(r.injection_dt || '') !== String(f.injection_dt || '')) moved = true;
+                out.push(r);
+                replaced.push(r);
+                byId.delete(id);
+            } else removed++;
+        }
+        const last = out.length ? out[out.length - 1] : null;
+        let added = 0, skipped = 0;
+        for (const r of byId.values()) {
+            if (opts && opts.pageFull && last && _newerFirst(r, last) > 0) { skipped++; continue; }
+            out.push(r);
+            added++;
+        }
+        if (added || moved) out.sort(_newerFirst);
+        return { files: out, added, removed, skipped, replaced,
+                 orderChanged: !!(added || removed || moved) };
     }
 
     /** "showing N of M" when the list shows fewer than the server holds. */
@@ -184,7 +233,7 @@
                   needsServerSearch, filesUrl, countLabel, curveFetchable, escapeHtml,
                   reviewNoteTitle, instrumentName, instrumentBadge, traceLabel,
                   instrumentFilterOptions, restoreInstrumentFilter, filterByInstrument,
-                  reprocessDefaultInstrument, reprocessInstrumentError };
+                  reprocessDefaultInstrument, reprocessInstrumentError, mergeChangedRows };
     Object.assign(root, api);
     if (typeof module !== 'undefined' && module.exports) {
         module.exports = api;

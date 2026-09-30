@@ -41,7 +41,9 @@ https carry HSTS (``max-age=31536000``).
   LabLink sign-in exists. Checked by ``admin_auth.check`` (its own throttle).
   Session name ``Admin (break-glass)``, method ``admin``; changing the admin
   password revokes every ``admin`` session.
-* Through Cloudflare a sign-in over plain http is refused (403).
+* Through Cloudflare a sign-in over plain http is refused (403, "Sign in over https:
+  open https://<host>"; also what the cross-site guard says when the proxy
+  named no scheme and the browser's Origin is this host over https).
 * LabCore unreachable (``LabCoreUnavailable``) is 503 with
   ``labcore_unavailable: true``, and is not a failure for the throttle.
 
@@ -64,7 +66,7 @@ cached in memory for 30 s (revoking clears the cache). ``last_seen`` is kept
 in memory and written by a background refresher at most once a minute per
 session, and only for activity (``note_seen``, called by the app's activity
 tracker, which skips its non-activity paths). Sign out is ``POST
-/api/logout``. ``GET /api/session`` → ``{name, method}`` (or the gate's 401).
+/api/logout``. ``GET /api/session`` → ``{name, method, link_url}`` (or the gate's 401).
 
 **Logging**: a sign-in logs the name, method and client address; a failed
 one logs the address, the method and ``sha256(username)[:8]`` — never the
@@ -126,6 +128,7 @@ SETUP_PATHS = frozenset({admin_auth.SETUP_PATH, "/api/admin/setup"})
 NOT_LOCAL_MESSAGE = ("This control works only on the hub machine itself "
                      "(the hub tray, or http://localhost:5560 on ASAPSV1).")
 
+_NEXT_PATH_SAFE = "/:@!$&'()*+,;=-._~"    # RFC 3986 path characters kept as they are
 _NEXT_RE = re.compile(r"^/(?![/\\])[^\\\x00-\x1f]*$")
 
 
@@ -241,10 +244,27 @@ def _valid(view: dict, now: float) -> bool:
     return now - seen < IDLE_SECONDS
 
 
+BACKGROUND_HEADER = "X-GC-Background"
+
+
+def is_background_request() -> bool:
+    """A GET an open tab made on its own (``X-GC-Background: 1``; live.js's
+    ``GCLive.bgFetch``): the follow-ups of a live update. It is not activity
+    and never keeps a session alive. Only GET and HEAD qualify: a write
+    (POST, ...) carrying the header is still activity and still refreshes
+    the session."""
+    try:
+        return (request.method in ("GET", "HEAD")
+                and request.headers.get(BACKGROUND_HEADER) == "1")
+    except RuntimeError:        # outside a request
+        return False
+
+
 def note_seen(session: Optional[dict]) -> None:
     """A signed-in request that counts as activity: remember it; the
-    refresher writes ``last_seen`` at most once a minute per session."""
-    if not session:
+    refresher writes ``last_seen`` at most once a minute per session.
+    A background GET (``is_background_request``) is not remembered."""
+    if not session or is_background_request():
         return
     now = _clock()
     with _lock:
@@ -389,9 +409,11 @@ def _login_required():
         resp.status_code = 401
         resp.headers[LOGIN_REQUIRED_HEADER] = "1"
         return resp
-    nxt = request.path + (("?" + request.query_string.decode("latin-1"))
-                          if request.query_string else "")
     from urllib.parse import quote
+    # request.path is decoded: quote it again, so a link's %3F, %23, %25 or
+    # %5C comes back as the same request after sign-in (sendable links)
+    nxt = quote(request.path, safe=_NEXT_PATH_SAFE) + (
+        ("?" + request.query_string.decode("latin-1")) if request.query_string else "")
     return redirect(f"{LOGIN_PATH}?next={quote(safe_next(nxt), safe='/')}", 302)
 
 
@@ -569,7 +591,7 @@ def _body():
 
 def _refuse_plain_http_through_tunnel():
     if netctx.is_proxied() and not netctx.is_https():
-        return _err("Sign in over https.", 403)
+        return _err(netctx.https_refusal_message(), 403)
     return None
 
 
@@ -744,7 +766,10 @@ def api_session():
     s = current_user()
     if s is None:           # the gate refuses first; kept for safety
         return _login_required()
-    return jsonify({"name": s["name"], "method": s["method"]})
+    # link_url: the base of a copied sample link (sendable links, v4.0): the
+    # hub URL unless it is LAN-only, never this request's origin
+    return jsonify({"name": s["name"], "method": s["method"],
+                    "link_url": admin_auth.sendable_hub_url()})
 
 
 @bp.route(LOGIN_PATH, methods=["GET"])

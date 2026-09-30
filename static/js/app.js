@@ -275,13 +275,22 @@ async function api(method, url, body, extra) {
     }
     const resp = await fetch(url, opts);
     if (!resp.ok) {
-        let errMsg = `API error ${resp.status}`;
-        try { const j = await resp.json(); errMsg = j.error || j.message || errMsg; } catch { /* ignore */ }
-        throw new Error(errMsg);
+        const j = (await GCSession.readJson(resp)).body || {};
+        const err = new Error(j.error || j.message || `API error ${resp.status}`);
+        err.status = resp.status;        // v4.0 lane E: a 403 forgets the admin unlock
+        throw err;
     }
+    // v4.0 lane E: the hub accepted an admin password: keep it 15 minutes
+    if (body && typeof body.password === 'string' && body.password
+        && typeof GCAdminUnlock !== 'undefined') GCAdminUnlock.accepted(body.password);
     const ct = resp.headers.get('content-type') || '';
-    if (ct.includes('application/json')) return resp.json();
-    return resp;
+    if (!ct.includes('application/json')) return resp;
+    const j = (await GCSession.readJson(resp)).body;
+    // a body that claims to be JSON but doesn't parse comes back as readJson's {error}
+    if (j && typeof j.error === 'string' && j.error.startsWith('The hub answered HTTP ')) {
+        throw new Error(j.error);
+    }
+    return j;
 }
 
 async function apiGet(url) { return api('GET', url); }
@@ -293,7 +302,7 @@ async function apiPostRefusable(url, what, body) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
     });
-    const j = await resp.json().catch(() => ({}));
+    const j = (await GCSession.readJson(resp)).body || {};
     if (!resp.ok) {
         throw new Error((j.refused && j.refused.length)
             ? refusalSummary(what, j.refused, state.files)
@@ -304,10 +313,16 @@ async function apiPostRefusable(url, what, body) {
 async function apiPost(url, body) { return api('POST', url, body); }
 async function apiDelete(url) { return api('DELETE', url); }
 
-/** Ask for the admin password for one action (null if cancelled). */
-function adminPassword(what) {
-    const pw = window.prompt(`Admin password to ${what}:`);
-    return pw ? pw : null;
+/** The admin password for one action (null if cancelled): unlocked once per
+    tab for 15 minutes in a masked dialog (admin_unlock.js; v4.0 lane E),
+    never window.prompt, which shows it in plain text. */
+async function adminPassword(what) {
+    return (await GCAdminUnlock.ask(what)) || null;
+}
+
+/** An admin call failed: a 403 (wrong password, throttled) forgets it. */
+function adminRefused(err) {
+    if (typeof GCAdminUnlock !== 'undefined') GCAdminUnlock.refused(err);
 }
 
 /** Download a blob response (for PDF/file exports). */
@@ -355,34 +370,36 @@ async function loadSettings() {
     }
 }
 
-async function loadFiles() {
+/** Load the sample list. Every change to state.files goes through one
+    queue (_listQueue), so a slow answer can't overwrite a newer one.
+    `bg`: the page asked on its own (a live reset), not the user. */
+function loadFiles(opts) {
+    return _listQueue(() => _loadFilesNow(opts));
+}
+
+async function _loadFilesNow(opts) {
+    const bg = !!(opts && opts.bg);
     try {
         // The sample list is a store query (newest first); the lists filter
         // the loaded page client-side as before.
         const url = filesUrl({ instrument: state.listInstrument }, FILES_PAGE_LIMIT);
-        const res = await apiGet(url);
+        const res = await (bg ? apiGetBg(url) : apiGet(url));
         state.files = res.samples || [];
         state.filesTotal = res.total || state.files.length;
         if (res.instruments && res.instruments.length) state.instruments = res.instruments;
         console.log('[GC Viewer] Loaded', state.files.length, 'of', state.filesTotal, 'samples');
-        renderAllFileLists();
+        _renderListsKeepingScroll();
         // Flags/best-fit still being computed in the background: refetch once.
         if (res.cache_pending > 0 && !state._filesRefetchPending) {
             state._filesRefetchPending = true;
-            setTimeout(async () => {
+            setTimeout(() => {
                 state._filesRefetchPending = false;
-                try {
-                    const retry = await apiGet(filesUrl({ instrument: state.listInstrument },
-                                                        FILES_PAGE_LIMIT));
-                    state.files = retry.samples || [];
-                    state.filesTotal = retry.total || state.files.length;
-                    renderAllFileLists();
-                } catch (_) { /* silent retry */ }
+                loadFiles({ bg: true, quiet: true });
             }, 5000);
         }
     } catch (e) {
         console.error('Failed to load files:', e);
-        showNotification('Failed to load sample list: ' + e.message, 'error');
+        if (!(opts && opts.quiet)) showNotification('Failed to load sample list: ' + e.message, 'error');
     }
 }
 
@@ -447,9 +464,15 @@ async function onInstrumentFilterChange() {
     if (needsServerSearch(q, state.filesTotal, state.files.length)) _serverSearch(q);
 }
 
-async function loadTableData() {
+// The Distillation Data tab's table (tab 2). A live change while another
+// tab is showing only marks it stale; switching to it reloads it.
+const DISTILL_DATA_TAB = 2;
+let _tableStale = false;
+
+async function loadTableData(opts) {
     try {
-        state.tableData = await apiGet('/api/table');
+        _tableStale = false;
+        state.tableData = await ((opts && opts.bg) ? apiGetBg('/api/table') : apiGet('/api/table'));
         renderDistillTable();
     } catch (e) {
         console.error('Failed to load table data:', e);
@@ -467,13 +490,182 @@ async function loadComparisonStandards() {
 }
 
 async function refreshAll() {
-    // The sample list is a live store query: just fetch everything again.
+    // The sample list is a live store query: just fetch everything again
+    // (after a settings change; everyday changes arrive through GCLive).
     await Promise.all([
         loadFiles(),
         loadTableData(),
         loadComparisonStandards(),
     ]);
-    showNotification('Data refreshed', 'success');
+}
+
+/* ===================================================================
+   5b. LIVE UPDATES (static/js/live.js; v4.0)
+   New, changed and finalised samples are fetched by id and merged into
+   the list in place; the notification badge follows the live count; a
+   reset (the hub restarted, or this tab fell too far behind) reloads.
+   =================================================================== */
+
+const _LIVE_LISTS = ['dash-file-list', 'chrom-file-list', 'dcurve-file-list', 'analysis-sample-list'];
+const LIVE_IDS_PER_FETCH = 1000;
+let _liveFirstReset = true;
+let _liveUnread = null;
+let _listChain = Promise.resolve();
+
+/** Run list work one at a time, in order (loads and live merges). */
+function _listQueue(fn) {
+    const next = _listChain.then(fn, fn);
+    _listChain = next.catch(() => {});
+    return next;
+}
+
+/** GET for the page's own follow-ups (never activity; GCLive.bgFetch). */
+async function apiGetBg(url) {
+    const resp = (typeof GCLive !== 'undefined')
+        ? await GCLive.bgFetch(url, { headers: { Accept: 'application/json' } })
+        : await fetch(url, { headers: { 'X-GC-Background': '1' } });
+    const j = (await GCSession.readJson(resp)).body;
+    if (!resp.ok) throw new Error((j && (j.error || j.message)) || `API error ${resp.status}`);
+    // as api(): a web page instead of data comes back as readJson's {error}
+    if (j && typeof j.error === 'string' && j.error.startsWith('The hub answered HTTP ')) throw new Error(j.error);
+    return j;
+}
+
+/** Re-render the lists without losing each one's scroll position. */
+function _renderListsKeepingScroll() {
+    const tops = _LIVE_LISTS.map(id => {
+        const el = document.getElementById(id);
+        return el ? el.scrollTop : 0;
+    });
+    renderAllFileLists();
+    _LIVE_LISTS.forEach((id, i) => {
+        const el = document.getElementById(id);
+        if (el) el.scrollTop = tops[i];
+    });
+}
+
+/** Fetch the changed samples (with the list's filter) and merge them in:
+    queued behind any load or earlier merge, so answers land in order. */
+function applyLiveSamples(ids) {
+    return _listQueue(() => _applyLiveSamplesNow(ids));
+}
+
+async function _applyLiveSamplesNow(ids) {
+    let rows = [];
+    for (let i = 0; i < ids.length; i += LIVE_IDS_PER_FETCH) {
+        const chunk = ids.slice(i, i + LIVE_IDS_PER_FETCH);
+        const res = await apiGetBg(filesUrl({ ids: chunk, instrument: state.listInstrument },
+                                            FILES_PAGE_LIMIT));
+        rows = rows.concat(res.samples || []);
+    }
+    const pageFull = state.filesTotal > state.files.length;
+    const m = mergeChangedRows(state.files, ids, rows, { pageFull });
+    state.files = m.files;
+    if (!pageFull) {
+        state.filesTotal = state.files.length + m.skipped;
+    } else if (m.added || m.removed || m.skipped) {
+        // only part of the list is loaded: ask the server for the count
+        try {
+            const res = await apiGetBg(filesUrl({ instrument: state.listInstrument }, 1));
+            state.filesTotal = Math.max(res.total || 0, state.files.length);
+        } catch (_) {
+            state.filesTotal = Math.max(state.files.length,
+                                        state.filesTotal + m.added + m.skipped - m.removed);
+        }
+    }
+    // the selected sample: keep the object current (its badges, status)
+    if (state.selectedFile) {
+        const sel = rows.find(r => sampleUid(r) === sampleUid(state.selectedFile));
+        if (sel) state.selectedFile = sel;
+    }
+    // a server search on screen is re-asked (it has its own query)
+    const q = (document.getElementById('universal-search')?.value || '').trim();
+    const searching = state.searchResult && state.searchResult.q === q && q;
+    if (searching) _serverSearch(q, { bg: true });
+    // only the changed rows' items are redrawn, unless rows came or went
+    if (searching || m.orderChanged || !patchFileRows(m.replaced)) _renderListsKeepingScroll();
+    else _updateSearchCount();
+    if (rows.some(r => r.status === 'final')) _tableChanged();
+}
+
+/** Final results changed: reload the table if it is on screen, else later. */
+function _tableChanged() {
+    if (currentTab === DISTILL_DATA_TAB) _reloadTableSoon();
+    else _tableStale = true;
+}
+
+const _reloadTableSoon = debounce(() => loadTableData({ bg: true }), 2000);
+
+async function onLiveUpdate(u) {
+    try {
+        if (u.reset) {
+            // The first reset is the start: the page's own load covers it.
+            if (!_liveFirstReset) {
+                await loadFiles({ bg: true });
+                _tableChanged();
+            }
+            _liveFirstReset = false;
+        } else if (u.samples && u.samples.length) {
+            await applyLiveSamples(u.samples);
+        }
+    } catch (e) {
+        console.error('Live update failed:', e);
+    }
+    if (u.notifications_unread !== _liveUnread || (u.kinds || []).includes('notification')) {
+        _liveUnread = u.notifications_unread;
+        loadNotifications({ bg: true });
+    }
+    if (u.version_changed) showVersionBanner(u.version);
+    // v4.0 lane E: the hub's date moved on (midnight): Today/Yesterday shift
+    if (u.day_changed) _renderListsKeepingScroll();
+}
+
+/** The hub was updated while this page was open: offer a reload (never
+    forced: the operator may be in the middle of something). */
+function showVersionBanner(version) {
+    let bar = document.getElementById('version-banner');
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'version-banner';
+        bar.setAttribute('role', 'status');
+        bar.setAttribute('data-testid', 'version-banner');
+        const text = document.createElement('span');
+        text.id = 'version-banner-text';
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-secondary';
+        btn.textContent = 'Reload';
+        btn.addEventListener('click', () => window.location.reload());
+        const close = document.createElement('button');
+        close.className = 'version-banner-close';
+        close.title = 'Dismiss';
+        close.textContent = '\u00d7';
+        close.addEventListener('click', () => bar.remove());
+        bar.append(text, btn, close);
+        document.body.appendChild(bar);
+    }
+    document.getElementById('version-banner-text').textContent =
+        `Updated to ${version} \u2014 reload to use it`;
+}
+
+function renderLiveIndicator() {
+    const el = document.getElementById('live-indicator');
+    if (!el || typeof GCLive === 'undefined') return;
+    const st = GCLive.status();
+    el.textContent = GCLive.statusText(st, Date.now());
+    el.classList.toggle('live-offline', !st.connected);
+    el.title = st.error ? `Live updates: ${st.error}` : 'Live updates from the hub';
+}
+
+/** Start live updates (before the first data load, so nothing is missed). */
+function startLive() {
+    if (typeof GCLive === 'undefined') {           // live.js missing: the old poll
+        setInterval(loadNotifications, 30000);
+        return Promise.resolve();
+    }
+    GCLive.subscribe(onLiveUpdate);
+    renderLiveIndicator();
+    setInterval(renderLiveIndicator, 1000);
+    return GCLive.start();                          // resolves after the first answer
 }
 
 /* ===================================================================
@@ -510,12 +702,14 @@ function convertToD86(d2887) {
         const tCurr = d2887[pCurr];
         const tNext = d2887[pNext];
         if (tPrev == null || tCurr == null || tNext == null) continue;
-        d86[cut] = round2(a0 + a1 * tPrev + a2 * tCurr + a3 * tNext);
+        // rounded like distill._round2 (Python's round), so the numbers match the hub's
+        d86[cut] = DistillView.pyRound2(a0 + a1 * tPrev + a2 * tCurr + a3 * tNext);
     }
-    // 40% and 60% have no D86 equation
+    // 40% and 60% have no D86 equation: the midpoints of 30/50 and 50/70, as
+    // distill.x4_midpoints does
     d86["40%"] = null;
     d86["60%"] = null;
-    return d86;
+    return DistillView.x4Midpoints(d86);
 }
 
 /* ===================================================================
@@ -525,33 +719,106 @@ function convertToD86(d2887) {
 // Global filter: show only early-signal-flagged samples
 let earlySignalFilterActive = false;
 
-function renderFileList(containerId, files, mode) {
-    const container = document.getElementById(containerId);
-    if (!container) return;
-
+/** The lists' client-side filters (search box, instrument, Flagged). */
+function _listShows(file) {
     // Universal search — read from the shared search input
     const searchEl = document.getElementById('universal-search');
     const filter = searchEl ? searchEl.value.toLowerCase() : '';
-
     // The instrument filter (the server already applied it; this also covers
     // a list fetched before the filter changed).
-    let filtered = filterByInstrument(files, state.listInstrument).filter(f =>
-        (f.name || '').toLowerCase().includes(filter) ||
-        (f.display_name || '').toLowerCase().includes(filter));
-
+    if (!filterByInstrument([file], state.listInstrument).length) return false;
+    if (!((file.name || '').toLowerCase().includes(filter) ||
+          (file.display_name || '').toLowerCase().includes(filter))) return false;
     // Apply early-signal filter if active
-    if (earlySignalFilterActive) {
-        filtered = filtered.filter(f => f.early_signal);
-    }
+    return !earlySignalFilterActive || !!file.early_signal;
+}
 
+const _LIST_MODES = { 'dash-file-list': 'dashboard', 'chrom-file-list': 'chrom',
+                      'dcurve-file-list': 'dc', 'analysis-sample-list': 'analysis' };
+
+// v4.0 lane E: the lists' order (sample_order.js): Newest run under day
+// headings, or Lab ID in number order; remembered per browser.
+let sampleSortMode = (typeof SampleOrder !== 'undefined') ? SampleOrder.loadSortMode() : 'newest';
+
+/** The hub's date for the day headings (its clock: injection times are
+    hub-local); the browser's until the first /api/live answer. */
+function _hubToday() {
+    const t = (typeof GCLive !== 'undefined' && GCLive.serverToday) ? GCLive.serverToday() : null;
+    return t || new Date();
+}
+
+function renderFileList(containerId, files, mode) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const filtered = (files || []).filter(_listShows);
     container.innerHTML = '';
-    for (const file of filtered) {
+    if (typeof SampleOrder === 'undefined') {
+        for (const file of filtered) container.appendChild(_fileItem(file, mode));
+        return;
+    }
+    for (const group of SampleOrder.groupSamples(filtered, sampleSortMode, _hubToday())) {
+        if (group.label) {
+            const h = document.createElement('li');
+            h.className = 'list-day';
+            h.setAttribute('role', 'presentation');
+            h.textContent = group.label;
+            container.appendChild(h);
+        }
+        for (const file of group.items) container.appendChild(_fileItem(file, mode));
+    }
+}
+
+/** A row's place in the order: a change moves it (a full re-render). */
+function _sortKey(file) {
+    return [file.injection_dt || '', file.injection_dt_source || '', file.lab_id || file.name || ''].join('|');
+}
+
+/** The sort switch (Newest run / Lab ID). */
+function initSampleSort() {
+    const box = document.getElementById('sample-sort');
+    if (!box || typeof SampleOrder === 'undefined') return;
+    const show = () => box.querySelectorAll('button[data-sort]').forEach(b =>
+        b.setAttribute('aria-pressed', b.dataset.sort === sampleSortMode ? 'true' : 'false'));
+    box.addEventListener('click', (e) => {
+        const b = e.target.closest('button[data-sort]');
+        if (!b || b.dataset.sort === sampleSortMode) return;
+        sampleSortMode = b.dataset.sort;
+        SampleOrder.saveSortMode(sampleSortMode);
+        show();
+        _renderListsKeepingScroll();
+    });
+    show();
+}
+
+/** v4.0 live updates: replace just these rows' <li> in every list. False
+    when that isn't enough (a row must appear where it wasn't): the caller
+    then re-renders the lists. */
+function patchFileRows(rows) {
+    for (const [containerId, mode] of Object.entries(_LIST_MODES)) {
+        const container = document.getElementById(containerId);
+        if (!container) continue;
+        for (const file of rows) {
+            const old = container.querySelector(`li[data-uid="${CSS.escape(sampleUid(file))}"]`);
+            const shows = _listShows(file);
+            if (old && shows && old.dataset.sortKey !== _sortKey(file)) return false;   // it moves
+            if (old && shows) old.replaceWith(_fileItem(file, mode));
+            else if (old) old.remove();
+            else if (shows) return false;
+        }
+    }
+    return true;
+}
+
+/** One sample's list item (click, double-click and context menu wired). */
+function _fileItem(file, mode) {
+    {
         const item = document.createElement('li');
         item.dataset.sampleId = file.sample_id;
         item.dataset.name = file.name;
         // uid (= the sample id) distinguishes re-runs that share a name, so
         // each injection selects independently.
         item.dataset.uid = sampleUid(file);
+        item.dataset.sortKey = _sortKey(file);
 
         // One colored tag per matched flag rule (early_signal kept as the
         // legacy any-flag bool for styling)
@@ -612,6 +879,18 @@ function renderFileList(containerId, files, mode) {
             item.appendChild(bf);
         }
 
+        // v4.0 lane E: the run's injection date and time, on its own line
+        if (typeof SampleOrder !== 'undefined') {
+            // under a day heading (Newest run) the time alone; the date is the heading's
+            const rt = SampleOrder.rowTime(file, {
+                underDay: sampleSortMode !== 'lab' && SampleOrder.hasInjectionTime(file) });
+            const time = document.createElement('span');
+            time.className = 'file-item-time';
+            time.textContent = rt.text;
+            time.title = rt.title;
+            item.appendChild(time);
+        }
+
         // Highlight if currently selected (universal selection). Compare by
         // uid so one re-run highlights without lighting up its siblings.
         const fileUid = sampleUid(file);
@@ -643,7 +922,7 @@ function renderFileList(containerId, files, mode) {
             showContextMenu(e, file);
         });
 
-        container.appendChild(item);
+        return item;
     }
 }
 
@@ -658,6 +937,13 @@ function renderAllFileLists() {
     renderFileList('chrom-file-list', files, 'chrom');
     renderFileList('dcurve-file-list', files, 'dc');
     renderFileList('analysis-sample-list', files, 'analysis');
+    _updateSearchCount();
+}
+
+function _updateSearchCount() {
+    const q = (document.getElementById('universal-search')?.value || '').trim();
+    const sr = state.searchResult;
+    const useSearch = sr && sr.q === q && q !== '';
     const countEl = document.getElementById('search-count');
     if (countEl) {
         countEl.textContent = useSearch ? countLabel(sr.samples.length, sr.total)
@@ -668,11 +954,12 @@ function renderAllFileLists() {
 /** Search box changed: filter the loaded page at once and, when the server
     holds more samples than were loaded, ask it (debounced) and show that. */
 let _searchSeq = 0;
-const _serverSearch = debounce(async (q) => {
+const _serverSearch = debounce(async (q, opts) => {
     const seq = ++_searchSeq;
     try {
-        const res = await apiGet(filesUrl({ q, instrument: state.listInstrument,
-                                            status: state.listStatus }, FILES_PAGE_LIMIT));
+        const url = filesUrl({ q, instrument: state.listInstrument, status: state.listStatus },
+                             FILES_PAGE_LIMIT);
+        const res = await ((opts && opts.bg) ? apiGetBg(url) : apiGet(url));
         if (seq !== _searchSeq) return;                 // a newer search is under way
         state.searchResult = { q, samples: res.samples || [], total: res.total || 0 };
         renderAllFileLists();
@@ -841,12 +1128,13 @@ function showContextMenu(e, file) {
             const name = prompt('Enter a name for this comparison standard:', file.name.replace(/\.CDF$/i, ''));
             if (!name) return;
             try {
-                const password = adminPassword('save a comparison standard');
+                const password = await adminPassword('save a comparison standard');
                 if (!password) return;
                 await apiPost('/api/comparison-standard', { sample_id: file.sample_id, name, password });
                 showNotification(`Saved comparison standard: ${name}`, 'success');
                 await loadComparisonStandards();
             } catch (err) {
+                adminRefused(err);
                 showNotification('Failed to save standard: ' + err.message, 'error');
             }
         });
@@ -880,7 +1168,7 @@ function showContextMenu(e, file) {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ sample_ids }),
                 });
-                const result = await resp.json().catch(() => ({}));
+                const result = (await GCSession.readJson(resp)).body || {};
                 if (!resp.ok && !(result.refused && result.refused.length)) {
                     throw new Error(result.error || `API error ${resp.status}`);
                 }
@@ -894,6 +1182,9 @@ function showContextMenu(e, file) {
             }
         });
     }
+
+    // "Copy link" (static/js/deeplink.js): <hub_url>/samples/<id>
+    if (typeof DeepLink !== 'undefined') DeepLink.wireContextItem(file);
 
     // Remove on click elsewhere
     const handler = (ev) => {
@@ -1000,7 +1291,7 @@ async function loadDashboardData(file) {
         // recorded blank, calibration and corrections), never recomputed
         // here. Client-side computation is only a fallback for a revision
         // that holds none.
-        let d2887, d86;
+        let d2887, d86, d86Notes = null;
         const csvD2887 = dcData.d2887 || {};
         const csvD86   = dcData.d86   || {};
         const hasCSV = Object.keys(csvD2887).length > 0;
@@ -1012,15 +1303,14 @@ async function loadDashboardData(file) {
             for (const [csvKey, label] of Object.entries(d2887Map)) {
                 d2887[label] = csvD2887[csvKey] != null ? round2(csvD2887[csvKey]) : null;
             }
-            const d86Map = {"D86 IBP":"IBP","D86 T5":"5%","D86 T10":"10%","D86 T20":"20%","D86 T30":"30%","D86 T40":"40%","D86 T50":"50%","D86 T60":"60%","D86 T70":"70%","D86 T80":"80%","D86 T90":"90%","D86 T95":"95%","D86 FBP":"FBP"};
-            // Toggle picks between pre-calculated corrected/uncorrected sets from backend
-            const d86Source = state.correctedD86 ? csvD86 : (dcData.d86_uncorrected || {});
-            d86 = {};
-            for (const [csvKey, label] of Object.entries(d86Map)) {
-                d86[label] = d86Source[csvKey] != null ? round2(d86Source[csvKey]) : null;
-            }
-            if (d86["40%"] === undefined) d86["40%"] = null;
-            if (d86["60%"] === undefined) d86["60%"] = null;
+            // "Corrected D86" on: the stored (corrected) cells; off: the stored
+            // uncorrected conversion (or, for a revision that has none, the X4
+            // conversion of its stored D2887). 40%/60% whenever they exist.
+            const view = DistillView.dashboardD86(
+                { d86: csvD86, d86_uncorrected: dcData.d86_uncorrected, d2887: csvD2887 },
+                state.correctedD86, convertToD86);
+            d86 = view.values;
+            d86Notes = view.notes;       // tooltips: why a cell is empty; 40%/60% midpoints
         } else {
             // Fallback: compute client-side (no blank, no EQM corrections)
             d2887 = computeD2887(dcData.percent, dcData.temperature);
@@ -1059,7 +1349,7 @@ async function loadDashboardData(file) {
         }), PLOTLY_CONFIG);
 
         // -- Populate D2887 and D86 tables --
-        populateDashboardTables(d2887, d86, dcDiv);
+        populateDashboardTables(d2887, d86, dcDiv, d86Notes);
         }   // end distillation curve block
 
     } catch (e) {
@@ -1070,7 +1360,7 @@ async function loadDashboardData(file) {
     }
 }
 
-function populateDashboardTables(d2887, d86, dcDiv) {
+function populateDashboardTables(d2887, d86, dcDiv, d86Notes) {
     // D2887 Table — target the <tbody> inside the table
     const d2887Table = document.getElementById('dash-d2887-table');
     const d2887Body = d2887Table ? (d2887Table.querySelector('tbody') || d2887Table) : null;
@@ -1096,11 +1386,13 @@ function populateDashboardTables(d2887, d86, dcDiv) {
             const label = D86_LABELS[i];
             const temp = d86[label];
             const tr = document.createElement('tr');
-            // 40% and 60% have no D86 equation
-            const tempStr = (label === '40%' || label === '60%') ? '\u2014' : (temp != null ? temp.toFixed(2) : '\u2014');
-            tr.innerHTML = `<td>${escapeHtml(label)}</td><td>${tempStr}</td>`;
-            tr.style.cursor = 'pointer';
-            if (temp != null && label !== '40%' && label !== '60%') {
+            // 40% and 60% (no X4 equation) show the stored value when there is one
+            tr.innerHTML = `<td>${escapeHtml(label)}</td><td>${temp != null ? temp.toFixed(2) : '\u2014'}</td>`;
+            const note = (d86Notes && d86Notes[label])
+                || (temp == null ? DistillView.missingNote(label) : null);
+            if (note) tr.title = note;
+            if (temp != null) {
+                tr.style.cursor = 'pointer';
                 tr.addEventListener('click', () => highlightDCPoint(dcDiv, PERCENT_LEVELS[i], temp, '#d29922'));
             }
             d86Body.appendChild(tr);
@@ -1299,18 +1591,21 @@ function renderDistillTable() {
         });
     }
 
-    // Update header sort indicators on the existing table
+    // The header is built from the same `columns` as the rows (CSV order), so
+    // every header sits over its own value; the sorted column gets an arrow.
     const tableEl = document.getElementById('distill-table');
     if (!tableEl) return;
-    const thead = tableEl.querySelector('thead');
-    if (thead) {
-        thead.querySelectorAll('th').forEach((th, ci) => {
-            // Update sort arrow
-            const col = th.dataset.col || columns[ci] || '';
-            const arrow = tableSortCol === ci ? (tableSortAsc ? ' \u25B2' : ' \u25BC') : '';
-            th.textContent = col + arrow;
-        });
-    }
+    let thead = tableEl.querySelector('thead');
+    if (!thead) { thead = document.createElement('thead'); tableEl.prepend(thead); }
+    const headRow = document.createElement('tr');
+    DistillView.tableHeader(columns).forEach((cell, ci) => {
+        const th = document.createElement('th');
+        if (cell.cls) th.className = cell.cls;
+        th.dataset.col = cell.col;
+        th.textContent = DistillView.headerText(cell, ci, tableSortCol, tableSortAsc);
+        headRow.appendChild(th);
+    });
+    thead.replaceChildren(headRow);
 
     // Build tbody rows
     const tbody = document.getElementById('distill-table-body') || tableEl.querySelector('tbody');
@@ -1355,24 +1650,23 @@ function renderDistillTable() {
         return;
     }
 
-    for (const row of displayRows) {
+    // Each row's sample id (sample_ids runs parallel to rows): a /data link
+    // marks its sample's row (static/js/deeplink.js).
+    const idOfRow = new Map(rows.map((r, i) => [r, (state.tableData.sample_ids || [])[i]]));
+    displayRows.forEach((row, ri) => {
         const tr = document.createElement('tr');
+        const sid = idOfRow.get(sortedRows[ri]);
+        if (sid != null) tr.dataset.sampleId = sid;
+        if (sid != null && sid === state.linkedTableSampleId) tr.classList.add('linked-row');
         row.forEach((cell, ci) => {
             const td = document.createElement('td');
-            const colName = columns[ci] || '';
-            // Apply column group class
-            if (COL_GROUP_META.includes(colName)) {
-                td.className = 'col-meta';
-            } else if (colName.startsWith('D86') || colName.includes('D86')) {
-                td.className = 'col-d86';
-            } else if (colName.startsWith('2887') || colName.includes('2887')) {
-                td.className = 'col-d2887';
-            }
+            const cls = DistillView.columnClass(columns[ci]);   // the same group as its header
+            if (cls) td.className = cls;
             td.textContent = cell != null ? String(cell) : '';
             tr.appendChild(td);
         });
         tbody.appendChild(tr);
-    }
+    });
 
     // Attach sort handlers on header
     if (thead) {
@@ -1561,7 +1855,7 @@ async function autoSelectBestFitStandard(file) {
             const std = state.comparisonStandards.find(s => s.name === res.best_standard);
             if (std && (!state.selectedStandard || state.selectedStandard.name !== std.name)) {
                 state.selectedStandard = std;
-                renderAnalysisStandards();
+                renderComparisonStandards();   // show it selected, as a manual pick does
                 updateAnalysisOverlay();
                 maybeAutoRunAnalysis();
             }
@@ -1602,6 +1896,8 @@ function showStandardContextMenu(e, std) {
     if (reprocItem) reprocItem.style.display = 'none';
     const limsItem = document.getElementById('ctx-export-lims');
     if (limsItem) limsItem.style.display = 'none';
+    const copyItem = document.getElementById('ctx-copy-link');
+    if (copyItem) copyItem.style.display = 'none';
 
     // Show rename + remove options
     const renameItem = document.getElementById('ctx-rename-standard');
@@ -1617,7 +1913,7 @@ function showStandardContextMenu(e, std) {
             const newName = prompt(`Rename "${std.name}" to:`, std.name);
             if (!newName || newName === std.name) return;
             try {
-                const password = adminPassword('rename a comparison standard');
+                const password = await adminPassword('rename a comparison standard');
                 if (!password) return;
                 await apiPost('/api/comparison-standard/rename', { old_name: std.name, new_name: newName, password });
                 showNotification(`Renamed to: ${newName}`, 'success');
@@ -1626,6 +1922,7 @@ function showStandardContextMenu(e, std) {
                 }
                 await loadComparisonStandards();
             } catch (err) {
+                adminRefused(err);
                 showNotification('Rename failed: ' + err.message, 'error');
             }
         });
@@ -1640,7 +1937,7 @@ function showStandardContextMenu(e, std) {
             removeContextMenu();
             if (!confirm(`Delete comparison standard "${std.name}"?`)) return;
             try {
-                const password = adminPassword('delete a comparison standard');
+                const password = await adminPassword('delete a comparison standard');
                 if (!password) return;
                 await api('DELETE', `/api/comparison-standard/${encodeURIComponent(std.name)}`, { password });
                 showNotification(`Deleted standard: ${std.name}`, 'success');
@@ -1649,6 +1946,7 @@ function showStandardContextMenu(e, std) {
                 }
                 await loadComparisonStandards();
             } catch (err) {
+                adminRefused(err);
                 showNotification('Failed to delete standard: ' + err.message, 'error');
             }
         });
@@ -1783,8 +2081,8 @@ function hslToHex(h, s, l) {
 }
 
 async function saveAnalysisDefaults() {
-    const pw = prompt('Enter admin password to save current settings as defaults:');
-    if (pw === null) return;  // cancelled
+    const pw = await adminPassword('save these settings as the defaults');
+    if (!pw) return;  // cancelled
     readAnalysisParams();
     const body = {
         password: pw,
@@ -1797,6 +2095,7 @@ async function saveAnalysisDefaults() {
         await apiPost('/api/save-analysis-defaults', body);
         showNotification('Defaults saved — will persist across restarts', 'success');
     } catch (e) {
+        adminRefused(e);
         showNotification(e.message || 'Failed to save defaults', 'error');
     }
 }
@@ -3060,6 +3359,8 @@ function switchTab(tabIndex) {
 
     // Re-render file lists to sync selection highlighting in newly visible tab
     renderAllFileLists();
+    // live changes arrived while the table was hidden
+    if (tabIndex === DISTILL_DATA_TAB && _tableStale) loadTableData({ bg: true });
 
     // Tab-specific actions when switching with a selected sample
     if (state.selectedFile) {
@@ -3368,13 +3669,14 @@ function renderSettingsStandards() {
         li.querySelector('.range-delete').addEventListener('click', async () => {
             if (!confirm(`Remove standard "${std.name}"?`)) return;
             try {
-                const password = adminPassword('delete a comparison standard');
+                const password = await adminPassword('delete a comparison standard');
                 if (!password) return;
                 await api('DELETE', '/api/comparison-standard/' + encodeURIComponent(std.name), { password });
                 await loadComparisonStandards();
                 renderSettingsStandards();
                 showNotification(`Removed: ${std.name}`, 'success');
             } catch (err) {
+                adminRefused(err);
                 showNotification('Failed: ' + err.message, 'error');
             }
         });
@@ -3418,7 +3720,7 @@ async function saveSettings() {
     const bfChanged = Object.entries(bf).some(
         ([k, v]) => String(v) !== String(state.settings[k] == null ? '' : state.settings[k]));
     if (bfChanged) {
-        const password = adminPassword('change the best-fit / deviation-bullet settings');
+        const password = await adminPassword('change the best-fit / deviation-bullet settings');
         if (!password) { showNotification('Best-fit / deviation-bullet settings not saved (no admin password)', 'info'); }
         else { Object.assign(body, bf); body.password = password; }
     }
@@ -3431,6 +3733,7 @@ async function saveSettings() {
         await refreshAll();
         showNotification('Data refreshed with new settings', 'success');
     } catch (e) {
+        adminRefused(e);
         showNotification('Failed to save settings: ' + e.message, 'error');
     }
 }
@@ -3609,9 +3912,10 @@ function toggleNotifPanel(forceOpen) {
     if (show) loadNotifications();
 }
 
-async function loadNotifications() {
+async function loadNotifications(opts) {
     try {
-        const notes = await apiGet('/api/notifications');
+        const bg = !!(opts && opts.bg);
+        const notes = await (bg ? apiGetBg('/api/notifications') : apiGet('/api/notifications'));
         renderNotifications(Array.isArray(notes) ? notes : []);
     } catch (_) { /* tray is best-effort */ }
 }
@@ -3716,15 +4020,40 @@ function _showReprocessToast(count, pending) {
     toast.querySelector('#reprocess-toast-close').addEventListener('click', () => toast.remove());
 }
 
-/** Poll the reprocess status of *sampleIds* and update the persistent toast. */
+/** Follow the reprocess of *sampleIds* in the persistent toast: its status
+    is asked once now and again whenever GCLive reports one of the samples
+    changed (the Worker publishes each one it processes), not on a timer. */
 function _pollReprocessStatus(sampleIds) {
     const ids = (sampleIds || []).join(',');
-    const _timer = setInterval(async () => {
+    const wanted = new Set((sampleIds || []).map(Number));
+    let unsubscribe = () => {};
+    let _timer = null;
+    let busy = false, again = false, stopped = false;
+    const stop = () => { stopped = true; unsubscribe(); if (_timer) clearInterval(_timer); };
+    const check = async () => {
+        if (stopped) return;
+        if (busy) { again = true; return; }
+        busy = true;
+        try { await checkOnce(); } finally {
+            busy = false;
+            if (again) { again = false; check(); }
+        }
+    };
+    if (typeof GCLive !== 'undefined') {
+        unsubscribe = GCLive.subscribe(u => {
+            if (u.reset || (u.samples || []).some(id => wanted.has(Number(id)))) check();
+        });
+    } else {
+        _timer = setInterval(check, 1500);         // live.js missing: the old poll
+    }
+    check();
+
+    async function checkOnce() {
         const toast = document.getElementById('reprocess-toast');
-        if (!toast) { clearInterval(_timer); return; }
+        if (!toast) { stop(); return; }
 
         try {
-            const st = await apiGet(`/api/reprocess/status?sample_ids=${encodeURIComponent(ids)}`);
+            const st = await apiGetBg(`/api/reprocess/status?sample_ids=${encodeURIComponent(ids)}`);
             const titleEl = toast.querySelector('#reprocess-toast-title');
             const barEl = toast.querySelector('#reprocess-toast-bar');
             const detailEl = toast.querySelector('#reprocess-toast-detail');
@@ -3756,14 +4085,15 @@ function _pollReprocessStatus(sampleIds) {
                 if (closeBtn) closeBtn.style.display = '';
                 toast.style.borderLeftColor = accent;
 
-                clearInterval(_timer);
-                refreshAll();
+                stop();
+                // the rows themselves arrived through GCLive; the table follows
+                _tableChanged();
 
                 // Auto-dismiss after 8 seconds
                 setTimeout(() => { if (toast.parentNode) toast.remove(); }, 8000);
             }
         } catch (_) { /* ignore */ }
-    }, 1500);
+    }
 }
 
 /* ===================================================================
@@ -3805,7 +4135,9 @@ async function _fetchHealthz(timeoutMs) {
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     try {
         const resp = await fetch('/healthz', { method: 'GET', cache: 'no-store', signal: ctl.signal });
-        return resp.ok ? await resp.json() : null;
+        if (!resp.ok) return null;
+        const j = (await GCSession.readJson(resp)).body;
+        return (j && j.status) ? j : null;     // a page instead of /healthz's JSON: not up
     } finally {
         clearTimeout(timer);
     }
@@ -3813,7 +4145,18 @@ async function _fetchHealthz(timeoutMs) {
 
 async function restartServer() {
     await refreshRestartLabel();
-    if (!confirm(restartConfirmText(_restartDecision))) {
+    // Background work (an import, a purge, a diagnostics build, a report ZIP,
+    // a QBench upload, running jobs): name it; a purge cannot be overridden.
+    const busyPrompt = restartBusyPrompt(_restartDecision);
+    let force = false;
+    if (busyPrompt && !busyPrompt.canForce) {
+        alert(busyPrompt.text);
+        return;
+    }
+    if (busyPrompt) {
+        if (!confirm(busyPrompt.text)) return;
+        force = true;
+    } else if (!confirm(restartConfirmText(_restartDecision))) {
         return;
     }
     let oldVersion = null;
@@ -3822,7 +4165,7 @@ async function restartServer() {
         oldVersion = h ? h.version : null;
     } catch (_) { /* not needed to restart */ }
     try {
-        const res = await apiPost('/api/restart', {});
+        const res = await apiPost('/api/restart', force ? { force: true } : {});
         const installing = res && res.mode === 'switch' && res.tag;
         showNotification(installing
             ? `Restarting and installing ${res.tag}… this page will reconnect`
@@ -3965,6 +4308,17 @@ async function exportAnalysisReport() {
    22. HELP MODAL
    =================================================================== */
 
+function openFromQuery() {
+    const params = new URLSearchParams(window.location.search);
+    const what = params.get('open');
+    if (!what) return;
+    params.delete('open');
+    const rest = params.toString();
+    window.history.replaceState(null, '', window.location.pathname + (rest ? '?' + rest : '') + window.location.hash);
+    if (what === 'settings') openSettingsModal();
+    else if (what === 'help') openHelpModal();
+}
+
 function openHelpModal() {
     const modal = document.getElementById('modal-help');
     if (modal) openModal(modal);
@@ -4021,7 +4375,6 @@ function setupEventListeners() {
         'btn-settings': openSettingsModal,
         'btn-export': exportPDF,
         'btn-comparison-export': exportComparison,
-        'btn-refresh': () => refreshAll(),
         'btn-reprocess': openReprocessModal,
         'btn-help': openHelpModal,
         'btn-restart-server': restartServer,
@@ -4147,11 +4500,6 @@ function setupEventListeners() {
 
     // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
-        // Ctrl+R — Refresh
-        if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
-            e.preventDefault();
-            refreshAll();
-        }
         // Ctrl+S — Settings
         if ((e.ctrlKey || e.metaKey) && e.key === 's') {
             e.preventDefault();
@@ -4179,6 +4527,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Set up event listeners
     setupEventListeners();
+    initSampleSort();               // v4.0 lane E: Newest run / Lab ID
     showPendingRestartNotice();
 
     // Populate analysis parameter inputs with defaults
@@ -4197,6 +4546,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     // instruments once they are loaded).
     state.listInstrument = restoreInstrumentFilter(readSavedInstrumentFilter(), []);
 
+    // Live updates first: take the cursor, then load, so nothing that
+    // changes during the load is missed (the first answer is a reset, which
+    // the load below covers).
+    await startLive();
+
     // Load all data in parallel
     try {
         await Promise.all([
@@ -4213,11 +4567,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         showNotification('Some data failed to load on startup', 'error');
     }
 
+    // Sendable links (/lab/<id>, /samples/<id>[/compare|/data]): select the
+    // linked sample and tab once the list is loaded (static/js/deeplink.js).
+    if (typeof DeepLink !== 'undefined') DeepLink.start();
+
     showNotification('GC Viewer ready', 'success');
 
-    // Load persistent system notifications and poll for new ones.
+    // v4.0: the new pages' user menu links here with ?open=settings|help
+    // (after the settings have loaded, so the Settings form is filled).
+    openFromQuery();
+
+    // Load persistent system notifications (GCLive reports new ones).
     loadNotifications();
-    setInterval(loadNotifications, 30000);
 
     // Reconnect to any active upload (e.g. page was refreshed during upload)
     try {

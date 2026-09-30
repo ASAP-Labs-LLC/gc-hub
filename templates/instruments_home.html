@@ -1,0 +1,29 @@
+{% extends "_layout.html" %}
+{% block title %}Instruments{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/gc_pages.css') }}?v=2">{% endblock %}
+{% block topbar %}
+  <h1>Instruments</h1>
+  <span class="spacer"></span>
+  <a class="btn btn-ghost btn-sm" href="/instruments/classic" title="The previous Instruments page (kept for this release)">Classic page</a>
+  <a class="btn btn-primary" href="/setup?new=1" data-testid="add-gc"><span class="ico ico-plus" aria-hidden="true"></span>Add a GC</a>
+{% endblock %}
+{% block content %}
+<main class="content" id="main" data-testid="instruments-page">
+  <div class="inst-grid" id="inst-grid" data-testid="instrument-grid" aria-busy="true">
+    <a class="add-card" href="/setup?new=1" id="add-card" data-testid="add-card">
+      <span><span class="plus"><span class="ico ico-plus" aria-hidden="true"></span></span>
+        <b>Add a GC</b><span class="caption">The setup guide walks you through it</span></span>
+    </a>
+  </div>
+
+  <section class="activity" aria-labelledby="activity-title">
+    <h2 id="activity-title">Activity <span class="live"><span class="glyph final" aria-hidden="true"></span><span id="activity-live">live</span></span></h2>
+    <ul class="feed" id="feed" data-testid="activity-feed"></ul>
+    <p class="caption" id="feed-empty" hidden>Nothing yet. Installer downloads, calibrations, correction factors and new runs show up here as they happen.</p>
+  </section>
+</main>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/instruments_logic.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/instruments_home.js') }}?v=4"></script>
+{% endblock %}

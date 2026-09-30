@@ -26,6 +26,7 @@ class FakeHub:
                        "queue": {"jobs_due": 0, "jobs_queued": 0}, "staged_update": None}
         self.restart_answer = (200, {"mode": "restart", "tag": None, "pid": 1})
         self.busy = []              # Stop answers 409 {busy} unless force
+        self.blocked = []           # ... and always while these are set (a purge)
         self.throttled = False      # admin_auth's backoff: 403 with another message
         hub = self
 
@@ -63,6 +64,10 @@ class FakeHub:
                 if self.path == "/api/admin/hub/resume-processing":
                     return self._send(202, {"processing_paused": False})
                 if self.path == "/api/admin/hub/stop":
+                    if hub.blocked:
+                        return self._send(409, {"error": "The hub cannot be stopped now: "
+                                                         + "; ".join(hub.blocked),
+                                                "busy": hub.blocked, "blocked": hub.blocked})
                     if hub.busy and body.get("force") is not True:
                         return self._send(409, {"error": "busy", "busy": hub.busy})
                     return self._send(202, {"stopping": True, "marker": "paused"})
@@ -258,6 +263,56 @@ def test_restart_declined_or_refused(fake):
     fake.restart_answer = (409, {"error": "The server just restarted, try again in 200 s"})
     assert ctl.restart(view) is False
     assert ui.log[-1][0] == "error" and "200 s" in ui.log[-1][2]
+
+
+def test_restart_while_busy_names_the_work_and_offers_restart_anyway(fake):
+    ui = ScriptedUI()
+    ctl = _ctl(fake, ui)
+    view = logic.parse_status(fake.status, marker_present=False)
+    answers = [(409, {"error": "busy", "busy": ["an admin job (import-history) is running"],
+                      "blocked": []}),
+               (200, {"mode": "restart", "tag": None, "pid": 1})]
+    fake.restart_answer = answers[0]
+    orig = fake.posts
+
+    def switch_answer(*_a):
+        fake.restart_answer = answers[1]
+    ui_confirm = ui.confirm
+
+    def confirm(title, text):
+        if "Restart anyway" in text:
+            switch_answer()
+        return ui_confirm(title, text)
+    ui.confirm = confirm
+    assert ctl.restart(view) is True
+    confirms = [e for e in ui.log if e[0] == "confirm"]
+    assert len(confirms) == 2 and "import-history" in confirms[1][2]
+    sent = [r[2] for r in orig("/api/restart")]
+    assert sent == [{}, {"force": True}]
+
+
+def test_restart_during_a_purge_is_refused_without_an_override(fake):
+    ui = ScriptedUI()
+    ctl = _ctl(fake, ui)
+    view = logic.parse_status(fake.status, marker_present=False)
+    blocked = ["a purge of gc1 is running (it cannot be interrupted; wait for it to finish)"]
+    fake.restart_answer = (409, {"error": "Restart is not possible now", "busy": blocked,
+                                 "blocked": blocked})
+    assert ctl.restart(view) is False
+    assert [e[0] for e in ui.log] == ["confirm", "error"]
+    assert "purge" in ui.log[-1][2]
+    assert [r[2] for r in fake.posts("/api/restart")] == [{}]
+
+
+def test_stop_during_a_purge_is_refused_without_an_override(fake):
+    blocked = ["a purge of gc1 is running (it cannot be interrupted; wait for it to finish)"]
+    fake.busy = blocked
+    fake.blocked = blocked
+    ui = ScriptedUI(passwords=[PW])
+    ctl = _ctl(fake, ui)
+    assert ctl.stop() is False
+    assert "purge" in ui.log[-1][2] and ui.log[-1][0] == "error"
+    assert all(r[2].get("force") is None for r in fake.posts("/api/admin/hub/stop"))
 
 
 def test_stop_confirms_explains_start_and_sends_the_password(fake):

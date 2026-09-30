@@ -26,9 +26,8 @@
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(Object.assign({ next }, body)),
             });
-            let j = {};
-            try { j = await r.json(); } catch (_) { j = {}; }
-            if (r.ok) {
+            const j = (await window.GCSession.readJson(r)).body || {};
+            if (r.ok && !j.error) {
                 say('Signed in as ' + (j.name || '') + '.', 'ok');
                 window.location.assign(window.GCSession.safeNext(j.next || next));
                 return;

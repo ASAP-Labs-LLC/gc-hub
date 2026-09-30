@@ -121,11 +121,7 @@
     async function checkSizes() {
         say('Checking sizes…');
         try {
-            const r = await fetch('/api/admin/diagnostics/estimate', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
-                body: JSON.stringify({ password: $('pw').value }) });
-            const j = await r.json().catch(() => ({}));
-            if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+            const j = await post('/api/admin/diagnostics/estimate');
             estimateRows = j.options || [];
             for (const row of estimateRows) {
                 const td = document.querySelector(`#diag-options tr[data-key="${row.key}"] .diag-size`);
@@ -139,13 +135,16 @@
         refreshTotals();
     }
 
+    // v4.0 lane E: through the admin page's queue, with the unlocked password
+    // (hub_admin.js: one password check at a time); the old field otherwise.
     async function post(path, body) {
+        if (window.GCAdminCall) return window.GCAdminCall(path, body);
         const r = await fetch(path, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
             body: JSON.stringify(Object.assign({ password: $('pw').value }, body || {})),
         });
-        const j = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+        const j = (await window.GCSession.readJson(r)).body || {};
+        if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
         return j;
     }
 
@@ -196,6 +195,7 @@
 
     function init() {
         if (!$('diag-panel')) return;
+        window.Diagnostics.checkSizes = checkSizes;     // hub_admin.js runs it on unlock
         $('btn-diag-estimate').addEventListener('click', checkSizes);
         $('btn-diag-download').addEventListener('click', download);
         document.querySelectorAll('#diag-options input[type=checkbox]')

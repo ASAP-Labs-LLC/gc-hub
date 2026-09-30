@@ -175,3 +175,21 @@ def test_retry_rejected_requeues_and_sends(tmp_path, hub, env):
     assert lg.requeue_rejected() == 1
     assert s.send_next() == "sent"
     assert lg.counts() == {"queued": 0, "sent": 1, "rejected": 0}
+
+
+def test_a_purge_503_backs_off_and_resends_the_same_file(tmp_path, hub, clock, env):
+    """v3.1: while an admin purges the instrument the hub answers ingest 503
+    "purge in progress; retry". That is never a verdict on the file: the agent
+    backs off (5 s doubling), keeps it queued and sends it again afterwards."""
+    lg, s = env
+    p = _queue(tmp_path, lg, "a.CDF", b"AAA", 1000)
+    body = {"error": "GC-1: purge in progress; retry in a minute"}
+    for expected in (5, 10, 20):
+        hub.ingest_script.append((503, body))
+        assert s.send_next() == "backoff"
+        assert s.backoff_delay == expected and "purge in progress" in s.last_error
+        assert lg.counts()["queued"] == 1 and lg.rejected() == []
+        clock.advance(s.backoff_delay)
+    assert s.send_next() == "sent"                  # the purge is over: 201
+    assert lg.last_sent().path == p and s.status() is None
+    assert len(hub.by_path("/api/ingest")) == 4     # the same file, four times

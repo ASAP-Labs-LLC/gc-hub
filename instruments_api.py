@@ -10,13 +10,19 @@ are ``{error, ...}`` with 400/404/409 (``instrument_admin.AdminError``).
 
 Routes::
 
-    GET  /instruments                                        the page
+    GET  /instruments                                        the page (v4.0 design)
+    GET  /instruments/classic                                the 2A2 page (this release only)
+    GET  /instruments/<id>                                   one instrument (v4.0 design)
+    GET  /setup[?instrument=|new=1]                          the setup guide (v4.0)
+    GET  /api/instruments/activity[?limit=]                  the Activity feed (v4.0)
+    GET  /api/instruments/<id>/setup                         the eight setup steps (v4.0)
     GET  /api/instruments                                    every instrument + summary
     GET  /api/instruments/<id>                               one, with corrections/methods/export
     POST /api/admin/instruments                              {id, name, ...} create (201)
     POST /api/admin/instruments/<id>                         {name|enabled|method|live_since|lem_machine_uid}
     POST /api/admin/instruments/<id>/export-path             {path}
     POST /api/admin/instruments/<id>/export-adopt            {}
+    POST /api/admin/instruments/<id>/export-hub-only         {} keep the hub-only file (v4.0)
     GET  /api/instruments/<id>/calibration[?sensitivity=]    the Calibration page payload
     GET  /api/instruments/<id>/calibration-candidates[?q=]   the instrument's own samples
     POST /api/admin/instruments/<id>/calibration-cdf         {sample_id | path}
@@ -62,9 +68,11 @@ from flask import Blueprint, jsonify, render_template, request
 
 import admin_auth
 import ingest_api
+import instrument_activity
 import instrument_admin as ia
 import lem_machines
 import paths
+import setup_state
 import standards
 import store
 import version
@@ -151,7 +159,32 @@ def _counts(db) -> dict:
             "GROUP BY instrument_id")}
         corr = {r["instrument_id"]: r["n"] for r in conn.execute(
             "SELECT instrument_id, COUNT(*) AS n FROM instrument_corrections GROUP BY instrument_id")}
-    return {"status": out, "backfill": backfill, "conflicts": conflicts, "corrections": corr}
+        today = {r["instrument_id"]: r["n"] for r in conn.execute(
+            "SELECT instrument_id, COUNT(*) AS n FROM samples WHERE received_at >= ? "
+            "AND backfill=0 GROUP BY instrument_id", (_local_midnight_utc(),))}
+        pending = {r["instrument_id"]: r["n"] for r in conn.execute(
+            "SELECT instrument_id, COUNT(*) AS n FROM export_rows WHERE hub_appended_at IS NULL "
+            "GROUP BY instrument_id")}
+    return {"status": out, "backfill": backfill, "conflicts": conflicts, "corrections": corr,
+            "today": today, "export_pending": pending}
+
+
+# "Held" on the Instruments cards: samples waiting for something an admin fixes.
+HELD_STATUSES = ("awaiting_calibration", "pending_corrections", "other_method", "review_method")
+
+
+def _hub_local_now() -> str:
+    """The hub's local clock in live_since's form, for "Go live now"."""
+    from datetime import datetime
+    return store.local_dt(datetime.now().replace(microsecond=0))
+
+
+def _local_midnight_utc() -> str:
+    """Today's local midnight, as the store's UTC timestamp form (``received_at``)."""
+    from datetime import datetime, timezone
+    now = datetime.now().astimezone()
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
+        timezone.utc).isoformat(timespec="microseconds")
 
 
 def _summary(row: dict, conf: dict, db, counts: dict, agents: dict) -> dict:
@@ -167,12 +200,49 @@ def _summary(row: dict, conf: dict, db, counts: dict, agents: dict) -> dict:
     out["open_conflicts"] = counts["conflicts"].get(iid, 0)
     out["corrections_set"] = counts["corrections"].get(iid, 0) > 0
     out["agent"] = agents.get(iid)
+    # v4.0: the cards' numbers and "Step N of 8" / "Ready"
+    out["today"] = counts["today"].get(iid, 0)
+    out["held"] = sum(out["counts"].get(s, 0) for s in HELD_STATUSES)
+    out["export_pending"] = counts["export_pending"].get(iid, 0)
+    try:
+        out["setup"] = setup_state.SUMMARIES.summary(row, conf, db=db, data_dir=_data())
+    except Exception:  # noqa: BLE001 - one bad row must not blank the page
+        log.exception("setup state for %s", iid)
+        out["setup"] = None
     return out
+
+
+# ── pages (v4.0: the new design; the 2A2 page stays at /instruments/classic) ──
+
+def _page(template: str, **extra):
+    return render_template(template, app_version=version.APP_VERSION, **extra)
 
 
 @bp.route("/instruments", methods=["GET"])
 def instruments_page():
+    return _page("instruments_home.html", nav="instruments")
+
+
+@bp.route("/instruments/classic", methods=["GET"])
+def instruments_classic_page():
     return render_template("instruments.html", app_version=version.APP_VERSION)
+
+
+@bp.route("/instruments/<iid>", methods=["GET"])
+def instrument_detail_page(iid):
+    if store.instruments.get(iid, db=_db()) is None:
+        return _page("instrument_missing.html", nav="instruments", instrument_id=iid), 404
+    if iid in ia.UNREACHABLE_IDS:
+        # /api/instruments/<iid> is shadowed by a hub route for this id (made
+        # before the id was reserved): the classic page can still manage it
+        from flask import redirect
+        return redirect(f"/instruments/classic?instrument={iid}")
+    return _page("instrument_detail.html", nav="instruments", instrument_id=iid)
+
+
+@bp.route("/setup", methods=["GET"])
+def setup_page():
+    return _page("setup_guide.html", nav="setup")
 
 
 @bp.route("/api/instruments", methods=["GET"])
@@ -189,7 +259,18 @@ def api_instruments():
         "hub_url_effective": ingest_api.effective_hub_url(db=db),
         "agent_commands": list(ingest_api.AGENT_COMMANDS),
         "skew_warn_seconds": ia.SKEW_WARN_SECONDS,
+        "hub_local_now": _hub_local_now(),
     })
+
+
+@bp.route("/api/instruments/activity", methods=["GET"])
+def api_activity():
+    """The Activity feed: ``{entries: [...]}``, newest first (``instrument_activity``)."""
+    try:
+        limit = instrument_activity.clamp_limit(request.args.get("limit"))
+    except ValueError:
+        return _err("limit must be an integer")
+    return jsonify({"entries": instrument_activity.feed(limit, db=_db())})
 
 
 def _export_status(iid: str) -> dict:
@@ -215,7 +296,18 @@ def api_instrument(iid):
         "methods": ia.methods_view(iid, db=db),
         "export": _export_status(iid),
         "live_since_warnings": ia.live_since_warnings(iid, db=db)[1:],
+        "hub_local_now": _hub_local_now(),
     })
+
+
+@bp.route("/api/instruments/<iid>/setup", methods=["GET"])
+def api_setup(iid):
+    """The setup guide's eight steps for one instrument (``setup_state``)."""
+    ia.get(iid, db=_db())
+    ex = _export_status(iid)
+    export = ex if "path" in ex else None
+    return jsonify(setup_state.for_instrument(iid, _conf(), db=_db(), data_dir=_data(),
+                                              export=export))
 
 
 # ── create / update / export ────────────────────────────────────────────────
@@ -229,7 +321,7 @@ def api_create_instrument():
     body, err = _admin()
     if err:
         return err
-    row = ia.create(_fields(body), db=_db())
+    row = ia.create(_fields(body), db=_db(), by=_by())
     return jsonify({"instrument": row}), 201
 
 
@@ -238,7 +330,7 @@ def api_update_instrument(iid):
     body, err = _admin()
     if err:
         return err
-    row, warnings = ia.update(iid, _fields(body), db=_db())
+    row, warnings = ia.update(iid, _fields(body), db=_db(), by=_by())
     return jsonify({"instrument": row, "warnings": warnings})
 
 
@@ -247,7 +339,16 @@ def api_export_path(iid):
     body, err = _admin()
     if err:
         return err
-    return jsonify({"export": ia.set_export_path(iid, body.get("path"), _get_exporter())})
+    return jsonify({"export": ia.set_export_path(iid, body.get("path"), _get_exporter(), by=_by())})
+
+
+@bp.route("/api/admin/instruments/<iid>/export-hub-only", methods=["POST"])
+def api_export_hub_only(iid):
+    """v4.0: keep the hub's own results file on purpose (LEM won't see it)."""
+    _body, err = _admin()
+    if err:
+        return err
+    return jsonify({"export": ia.keep_hub_only_export(iid, _get_exporter(), by=_by())})
 
 
 @bp.route("/api/admin/instruments/<iid>/export-adopt", methods=["POST"])
@@ -294,7 +395,7 @@ def api_calibration_cdf(iid):
     if err:
         return err
     st = ia.set_calibration_cdf(iid, _conf(), sample_id=body.get("sample_id"),
-                                path=body.get("path"), db=_db(), data_dir=_data())
+                                path=body.get("path"), db=_db(), data_dir=_data(), by=_by())
     return jsonify({"calibration": st})
 
 
@@ -304,7 +405,7 @@ def api_calibration_save(iid):
     if err:
         return err
     return jsonify(ia.save_calibration(iid, body.get("assignments"), body.get("sensitivity"),
-                                       _conf(), db=_db(), data_dir=_data()))
+                                       _conf(), db=_db(), data_dir=_data(), by=_by()))
 
 
 # ── corrections ─────────────────────────────────────────────────────────────
@@ -347,7 +448,7 @@ def api_methods_set(iid):
     if err:
         return err
     return jsonify(ia.set_method_mapping(iid, body.get("method_name"), body.get("hub_method"),
-                                         db=_db()))
+                                         db=_db(), by=_by()))
 
 
 @bp.route("/api/admin/instruments/<iid>/review-method", methods=["POST"])

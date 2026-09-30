@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import live
 import paths
 
 LOGGER = logging.getLogger(__name__)
@@ -65,7 +66,10 @@ class NotificationStore:
 
     # ── public API ───────────────────────────────────────────────────
     def add(self, level: str, message: str) -> dict:
-        """Append a notification (stored newest-first) and persist it."""
+        """Append a notification (stored newest-first) and persist it. An
+        identical one (same level and text) still in the tray is returned
+        instead of added again (v4.0 lane E2 review: e.g. a start-up warning
+        repeated on every boot)."""
         entry = {
             "id": uuid.uuid4().hex,
             "ts": datetime.now().isoformat(timespec="seconds"),
@@ -73,9 +77,18 @@ class NotificationStore:
             "message": str(message),
         }
         with self._lock:
+            for item in self._items:
+                if item.get("level") == entry["level"] and item.get("message") == entry["message"]:
+                    return dict(item)
             self._items.insert(0, entry)
             self._save()
+        live.publish("notification")
         return entry
+
+    def count(self) -> int:
+        """How many notifications the tray holds (the badge; in memory)."""
+        with self._lock:
+            return len(self._items)
 
     def list_all(self) -> list[dict]:
         with self._lock:
@@ -89,7 +102,9 @@ class NotificationStore:
             removed = len(self._items) != before
             if removed:
                 self._save()
-            return removed
+        if removed:
+            live.publish("notification")
+        return removed
 
     def dismiss_all(self) -> int:
         """Clear all notifications. Returns how many were removed."""
@@ -98,7 +113,9 @@ class NotificationStore:
             if count:
                 self._items = []
                 self._save()
-            return count
+        if count:
+            live.publish("notification")
+        return count
 
 
 # Module-level default instance used by the app.

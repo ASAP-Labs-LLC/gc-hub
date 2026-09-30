@@ -1,366 +1,64 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Calibration — Peak Assignment</title>
-  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+{% extends "_layout.html" %}
+{#- v4.0 lane E2: Calibration inside the shell (sidebar, light tokens, the
+    running-now footer), under Instruments. Saving asks for the admin password
+    through the page's one 15-minute unlock (admin_unlock.js, the shell's
+    dialog); there is no password box here. Page code: static/js/calibration.js. -#}
+{% block title %}Calibration{% endblock %}
+{% block head %}
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=2">
-  <script src="{{ url_for('static', filename='js/session.js') }}?v=1"></script>
-  <style>
-    :root{
-      --bg:#0d1117; --panel:#161b22; --line:#30363d; --line2:#21262d;
-      --txt:#e6edf3; --muted:#7d8590; --accent:#388bfd; --green:#3fb950;
-      --grey:#6e7681; --warn:#d29922; --danger:#f85149;
-    }
-    *{box-sizing:border-box}
-    html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);
-      font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
-    a{color:var(--accent);text-decoration:none}
-    a:hover{text-decoration:underline}
-    .topbar{display:flex;align-items:center;gap:14px;padding:10px 16px;
-      background:var(--panel);border-bottom:1px solid var(--line)}
-    .topbar h1{font-size:15px;margin:0;font-weight:600}
-    .topbar .cdf{color:var(--muted);font-size:12px}
-    .spacer{flex:1}
-    .btn{background:var(--line2);border:1px solid var(--line);color:var(--txt);
-      border-radius:6px;padding:6px 13px;font-size:12px;cursor:pointer;font-family:inherit}
-    .btn:hover{border-color:var(--accent)}
-    .btn.primary{background:var(--green);border-color:var(--green);color:#0d1117;font-weight:600}
-    .btn.primary:hover{filter:brightness(1.08)}
-    .sens{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
-    .sens input[type=range]{width:130px;accent-color:var(--accent)}
-    .sens #sens-val{min-width:20px;text-align:right;color:var(--txt);font-variant-numeric:tabular-nums}
-    .status{font-size:12px;color:var(--muted)}
-    .status.ok{color:var(--green)} .status.err{color:var(--danger)}
-    .wrap{display:grid;grid-template-columns:1fr 420px;gap:12px;padding:12px;
-      height:calc(100% - 53px)}
-    @media(max-width:980px){.wrap{grid-template-columns:1fr;height:auto}}
-    .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-      padding:10px;display:flex;flex-direction:column;min-height:0}
-    #chart{flex:1;min-height:360px}
-    .tablehead{display:flex;align-items:center;gap:10px;margin-bottom:8px}
-    .tablehead h2{font-size:13px;margin:0;font-weight:600}
-    .pill{background:var(--line2);border:1px solid var(--line);border-radius:20px;
-      padding:2px 10px;color:var(--muted);font-size:11px}
-    .tablescroll{overflow:auto;flex:1;min-height:0;border:1px solid var(--line2);border-radius:6px}
-    table{width:100%;border-collapse:collapse;font-size:12px}
-    thead th{position:sticky;top:0;background:var(--panel);color:var(--muted);
-      text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);
-      font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px}
-    tbody td{padding:5px 9px;border-bottom:1px solid var(--line2)}
-    tbody tr.assigned{background:rgba(63,185,80,.07)}
-    tbody tr.ignored{opacity:.55}
-    tbody tr.sel{outline:1px solid var(--accent);outline-offset:-1px}
-    tbody tr:hover{background:rgba(56,139,253,.08);cursor:pointer}
-    select{background:var(--bg);color:var(--txt);border:1px solid var(--line);
-      border-radius:5px;padding:3px 6px;font-size:12px;font-family:inherit;width:100%}
-    .bp{color:var(--muted);font-variant-numeric:tabular-nums}
-    .legend{display:flex;gap:14px;margin-top:8px;font-size:11px;color:var(--muted);flex-wrap:wrap}
-    .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px;vertical-align:middle}
-    .hint{font-size:11px;color:var(--muted);margin:8px 2px 0}
-    .empty{padding:40px;text-align:center;color:var(--muted)}
-  </style>
-</head>
-<body>
-  <div class="topbar">
-    <h1>Calibration — Peak Assignment</h1>
-    <label class="sens" title="Which instrument's calibration to edit">
-      Instrument
-      <select id="inst" style="width:auto"></select>
-    </label>
-    <span class="cdf" id="cdf-name">loading…</span>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/calibration.css') }}?v=1">
+{% endblock %}
+{% block topbar %}
+  <nav class="crumbs" aria-label="Breadcrumb">
+    <a href="/instruments">Instruments</a><span class="sep ico ico-chev" aria-hidden="true"></span>
+    <a id="crumb-inst" href="/instruments">…</a><span class="sep ico ico-chev" aria-hidden="true"></span>
+    <b>Calibration</b>
+  </nav>
+  <span class="spacer"></span>
+  <button type="button" class="btn btn-primary" id="btn-save" data-testid="cal-save">Save calibration</button>
+{% endblock %}
+{% block content %}
+<main class="cal" id="cal-page" data-testid="calibration-page">
+  <div class="cal-tools">
+    <label class="cal-field">Instrument <select id="inst" data-testid="cal-instrument"></select></label>
+    <span class="cal-cdf caption" id="cdf-name">Loading…</span>
+    <span class="cal-status" id="status" role="status" aria-live="polite"></span>
     <span class="spacer"></span>
-    <label class="sens" title="Higher = detect more (smaller) peaks">
-      Sensitivity
+    <label class="cal-field" title="Higher finds more (smaller) peaks">Sensitivity
       <input type="range" id="sens" min="0" max="100" step="1" value="50">
-      <span id="sens-val">50</span>
-    </label>
-    <span class="status" id="status"></span>
-    <button class="btn" id="btn-reload">Reload peaks</button>
-    <label class="sens" title="Saving a calibration needs the admin password">
-      Admin password
-      <input type="password" id="admin-pw" autocomplete="off" style="width:120px;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:5px;padding:3px 6px">
-    </label>
-    <button class="btn primary" id="btn-save">Save calibration</button>
-    <a class="btn" id="btn-instruments" href="/instruments">Instruments</a>
-    <a class="btn" href="/">← Back to app</a>
+      <span id="sens-val" class="num">50</span></label>
+    <button type="button" class="btn btn-sm" id="btn-reload">Reload peaks</button>
   </div>
 
-  <div class="wrap">
-    <div class="panel">
+  <div class="cal-grid">
+    <section class="card cal-chart" aria-label="Chromatogram">
       <div id="chart"></div>
-      <div class="legend">
-        <span><span class="dot" style="background:var(--green)"></span>assigned</span>
-        <span><span class="dot" style="background:var(--accent)"></span>unassigned</span>
-        <span><span class="dot" style="background:var(--grey)"></span>ignored (extra hydrocarbon)</span>
+      <div class="cal-legend" aria-hidden="true">
+        <span><span class="dot assigned"></span>Assigned</span>
+        <span><span class="dot unassigned"></span>Unassigned</span>
+        <span><span class="dot ignored"></span>Ignored (extra hydrocarbon)</span>
       </div>
-    </div>
+    </section>
 
-    <div class="panel">
-      <div class="tablehead">
-        <h2>Detected peaks</h2>
+    <section class="card cal-peaks" aria-labelledby="peaks-title">
+      <div class="cal-peaks-head">
+        <h2 id="peaks-title">Detected peaks</h2>
         <span class="pill" id="peak-count">0 peaks</span>
         <span class="pill" id="assigned-count">0 assigned</span>
       </div>
-      <div class="tablescroll">
-        <table>
+      <div class="cal-scroll">
+        <table class="tbl">
           <thead><tr><th>#</th><th>RT (min)</th><th>Intensity</th><th>Assign</th><th>BP °C</th></tr></thead>
           <tbody id="rows"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
-      <p class="hint">Pick a carbon number for each true n-alkane peak; mark extra
-        hydrocarbons as <b>Ignore</b>. Unassigned/ignored peaks are excluded from the
-        calibration curve. Click a row to highlight its peak.</p>
-    </div>
+      <p class="caption cal-hint">Pick a carbon number for each true n-alkane peak and mark extra
+        hydrocarbons <b>Ignore</b>. Unassigned and ignored peaks stay out of the curve. Click a row
+        to find its peak.</p>
+    </section>
   </div>
-
-<script>
-const RT_TOL = 0.02;            // min — match saved assignment to a detected peak
-let DATA = null;                // server payload
-let STATE = [];                 // per-peak: {rt, intensity, choice:""|"ignore"|carbonNum}
-let selectedIdx = -1;
-// Which instrument's calibration this page edits (2A2): ?instrument=<id>, default gc1.
-const INSTRUMENT = new URLSearchParams(location.search).get("instrument") || "gc1";
-const CAL_API = "/api/instruments/" + encodeURIComponent(INSTRUMENT) + "/calibration";
-
-const $ = (id) => document.getElementById(id);
-
-async function loadInstruments(){
-  const sel = $("inst");
-  try{
-    const r = await fetch("/api/instruments");
-    const j = await r.json();
-    for(const inst of (j.instruments || [])){
-      const o = document.createElement("option");
-      o.value = inst.id;
-      o.textContent = inst.name + " (" + inst.id + ")";
-      sel.appendChild(o);
-    }
-  }catch(e){ /* the selector stays empty; the page still edits INSTRUMENT */ }
-  if(![...sel.options].some(o => o.value === INSTRUMENT)){
-    const o = document.createElement("option");
-    o.value = INSTRUMENT; o.textContent = INSTRUMENT; sel.appendChild(o);
-  }
-  sel.value = INSTRUMENT;
-  sel.addEventListener("change", () => {
-    location.search = "?instrument=" + encodeURIComponent(sel.value);
-  });
-  $("btn-instruments").href = "/instruments?instrument=" + encodeURIComponent(INSTRUMENT);
-}
-
-function messageRow(text, extra){
-  // Server text is shown with textContent, never as HTML.
-  const tr = document.createElement("tr");
-  const td = document.createElement("td");
-  td.colSpan = 5; td.className = "empty";
-  td.textContent = text;
-  if(extra){ td.appendChild(document.createElement("br")); td.appendChild(document.createTextNode(extra)); }
-  tr.appendChild(td);
-  $("rows").replaceChildren(tr);
-}
-function setStatus(msg, cls){ const s=$("status"); s.textContent=msg||""; s.className="status"+(cls?" "+cls:""); }
-
-async function load(sensitivity, preserveChoices){
-  // Carry forward in-progress (unsaved) choices across a re-detect.
-  const prior = preserveChoices
-    ? STATE.filter(s => s.choice !== "").map(s => ({rt:s.rt, choice:s.choice}))
-    : null;
-  setStatus("Detecting peaks…");
-  try{
-    const url = CAL_API +
-      (sensitivity != null ? ("?sensitivity=" + sensitivity) : "");
-    const r = await fetch(url);
-    const j = await r.json();
-    if(!r.ok){ throw new Error(j.error || ("HTTP "+r.status)); }
-    DATA = j;
-    $("cdf-name").textContent = (j.instrument_name ? j.instrument_name + " — " : "") + (j.cdf_name || "") +
-      (j.usable ? "" : " (not usable yet: " + (j.problem || "assign the peaks") + ")");
-    if(sensitivity == null && j.sensitivity != null){
-      $("sens").value = j.sensitivity;
-      $("sens-val").textContent = Math.round(j.sensitivity);
-    }
-    initState(prior);
-    renderTable();
-    drawChart();
-    setStatus("");
-  }catch(e){
-    setStatus(e.message, "err");
-    messageRow(e.message, "Choose this instrument's calibration CDF on the Instruments page first.");
-  }
-}
-
-function initState(prior){
-  // prior: in-progress choices to carry over; otherwise use saved assignments.
-  const priorList = prior != null
-    ? prior
-    : (DATA.assignments || []).map(a => ({
-        rt: a.rt,
-        choice: a.ignore ? "ignore" : (a.carbon != null ? String(a.carbon) : ""),
-      }));
-  STATE = (DATA.peaks||[]).map(p => {
-    let best=null, bestd=RT_TOL;
-    for(const a of priorList){
-      const d = Math.abs(a.rt - p.rt);
-      if(d <= bestd){ bestd=d; best=a; }
-    }
-    return {rt:p.rt, intensity:p.intensity, choice: best ? best.choice : ""};
-  });
-}
-
-function bpFor(choice){
-  if(choice==="" || choice==="ignore") return null;
-  const c = (DATA.compounds||[]).find(x => String(x.carbon)===String(choice));
-  return c ? c.bp : null;
-}
-
-function optionsHtml(choice){
-  let h = `<option value=""${choice===""?" selected":""}>— Unassigned —</option>`;
-  h += `<option value="ignore"${choice==="ignore"?" selected":""}>Ignore (extra)</option>`;
-  for(const c of (DATA.compounds||[])){
-    const v = String(c.carbon);
-    h += `<option value="${v}"${choice===v?" selected":""}>C${c.carbon} — ${c.bp}°C</option>`;
-  }
-  return h;
-}
-
-function renderTable(){
-  const tb = $("rows");
-  if(!STATE.length){ tb.innerHTML = `<tr><td colspan="5" class="empty">No peaks detected.</td></tr>`; return; }
-  tb.innerHTML = "";
-  STATE.forEach((s, i) => {
-    const tr = document.createElement("tr");
-    tr.dataset.idx = i;
-    tr.className = rowClass(s.choice) + (i===selectedIdx?" sel":"");
-    tr.innerHTML =
-      `<td>${i+1}</td>`+
-      `<td>${s.rt.toFixed(3)}</td>`+
-      `<td class="bp">${Math.round(s.intensity).toLocaleString()}</td>`+
-      `<td><select data-idx="${i}">${optionsHtml(s.choice)}</select></td>`+
-      `<td class="bp">${bpFor(s.choice)??"—"}</td>`;
-    tr.addEventListener("click", (ev)=>{ if(ev.target.tagName!=="SELECT"){ selectPeak(i); } });
-    tb.appendChild(tr);
-  });
-  tb.querySelectorAll("select").forEach(sel=>{
-    sel.addEventListener("change", e=>{
-      const i = +e.target.dataset.idx;
-      STATE[i].choice = e.target.value;
-      renderTable(); drawChart(); selectedIdx=i; highlightRow();
-    });
-  });
-  updateCounts();
-}
-
-function rowClass(choice){
-  if(choice==="ignore") return "ignored";
-  if(choice!=="") return "assigned";
-  return "";
-}
-
-function updateCounts(){
-  $("peak-count").textContent = STATE.length + " peaks";
-  const a = STATE.filter(s=>s.choice!=="" && s.choice!=="ignore").length;
-  $("assigned-count").textContent = a + " assigned";
-}
-
-function colorFor(choice){
-  if(choice==="ignore") return "#6e7681";
-  if(choice!=="") return "#3fb950";
-  return "#388bfd";
-}
-
-function drawChart(){
-  if(!DATA || !DATA.trace) return;
-  const trace = {
-    x: DATA.trace.x, y: DATA.trace.y, type:"scatter", mode:"lines",
-    line:{color:"#388bfd", width:1}, name:"chromatogram", hoverinfo:"x+y"
-  };
-  const markers = {
-    x: STATE.map(s=>s.rt), y: STATE.map(s=>s.intensity),
-    type:"scatter", mode:"markers+text",
-    marker:{size:9, color:STATE.map(s=>colorFor(s.choice)),
-            line:{width:1, color:"#0d1117"}},
-    text: STATE.map(s=> s.choice==="ignore" ? "ign"
-        : (s.choice!=="" ? "C"+s.choice : "")),
-    textposition:"top center", textfont:{size:10, color:"#e6edf3"},
-    name:"peaks", hovertemplate:"RT %{x:.3f} min<extra></extra>"
-  };
-  const shapes = (selectedIdx>=0 && STATE[selectedIdx]) ? [{
-    type:"line", x0:STATE[selectedIdx].rt, x1:STATE[selectedIdx].rt,
-    yref:"paper", y0:0, y1:1, line:{color:"#d29922", width:1, dash:"dot"}
-  }] : [];
-  const layout = {
-    paper_bgcolor:"#161b22", plot_bgcolor:"#161b22",
-    font:{color:"#7d8590", size:11}, margin:{l:55,r:12,t:10,b:40}, showlegend:false,
-    xaxis:{title:"Retention time (min)", gridcolor:"#21262d", zeroline:false},
-    yaxis:{title:"Intensity", gridcolor:"#21262d", zeroline:false},
-    shapes
-  };
-  Plotly.react("chart", [trace, markers], layout, {responsive:true, displayModeBar:false});
-  $("chart").on("plotly_click", (ev)=>{
-    if(!ev.points || !ev.points.length) return;
-    const px = ev.points[0].x;
-    let bi=-1, bd=1e9;
-    STATE.forEach((s,i)=>{ const d=Math.abs(s.rt-px); if(d<bd){bd=d;bi=i;} });
-    if(bi>=0) selectPeak(bi);
-  });
-}
-
-function selectPeak(i){ selectedIdx=i; highlightRow(); drawChart();
-  const row = document.querySelector(`tr[data-idx="${i}"]`);
-  if(row) row.scrollIntoView({block:"nearest"});
-}
-function highlightRow(){
-  document.querySelectorAll("#rows tr").forEach(tr=>{
-    tr.classList.toggle("sel", +tr.dataset.idx===selectedIdx);
-  });
-}
-
-async function save(){
-  const assignments = STATE.map(s=>{
-    if(s.choice==="ignore") return {rt:s.rt, ignore:true};
-    if(s.choice!=="") return {rt:s.rt, carbon:parseInt(s.choice,10)};
-    return {rt:s.rt};   // unassigned — backend omits it
-  });
-  setStatus("Saving…");
-  try{
-    const password = $("admin-pw").value;
-    if(!password){ setStatus("Enter the admin password to save.", "err"); return; }
-    const r = await fetch("/api/admin/instruments/" + encodeURIComponent(INSTRUMENT) + "/calibration", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({assignments, sensitivity: +$("sens").value, password})
-    });
-    const j = await r.json();
-    if(!r.ok){ throw new Error(j.error || ("HTTP "+r.status)); }
-    if(j.anchors < 4){
-      setStatus(`Saved, but only ${j.anchors} carbon(s) assigned — assign at least 4 `+
-                `(ideally the full ladder) for accurate distillation numbers.`, "err");
-    }else{
-      setStatus(`Saved — ${j.anchors} calibration anchors active` +
-                (j.queued ? `; ${j.queued} waiting sample(s) queued` : ""), "ok");
-    }
-  }catch(e){ setStatus(e.message, "err"); }
-}
-
-$("btn-save").addEventListener("click", save);
-$("btn-reload").addEventListener("click", ()=> load(+$("sens").value, true));
-
-// Sensitivity slider: live label, debounced re-detect that keeps your choices.
-let sensTimer = null;
-$("sens").addEventListener("input", e=>{
-  $("sens-val").textContent = e.target.value;
-  clearTimeout(sensTimer);
-  sensTimer = setTimeout(()=> load(+e.target.value, true), 250);
-});
-
-loadInstruments();
-load();
-</script>
-
-<!-- Which build is running, bottom-right. Same string /healthz reports. -->
-<div id="app-version" aria-hidden="true">{{ app_version }}</div>
-{% include "_signed_in.html" %}
-
-</body>
-</html>
+</main>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/calibration.js') }}?v=1"></script>
+{% endblock %}

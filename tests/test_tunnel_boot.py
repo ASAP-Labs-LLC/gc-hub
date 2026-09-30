@@ -53,6 +53,7 @@ def call(port, method, path, body=None, *, cookie=None, headers=None, tunnel=Tru
     if cookie:
         h["Cookie"] = cookie
     h.update(headers or {})
+    h = {k: v for k, v in h.items() if v is not None}     # headers={name: None} drops one
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
     try:
         c.request(method, path, body=json.dumps(body).encode() if body is not None else None,
@@ -209,6 +210,12 @@ def test_what_the_tunnel_never_allows(hub):
     code, _, _ = call(port, "POST", "/api/reprocess", {"sample_ids": [1]}, cookie=cookie,
                       headers={"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"})
     assert code == 403
+    # no scheme header from the proxy: sign-in says to use https, not "cross-site"
+    no_scheme = {"X-Forwarded-Proto": None}
+    code, _, body = call(port, "POST", "/api/login", {"username": "jane doe",
+                                                      "password": "labpass-2"},
+                         headers=no_scheme)
+    assert code == 403 and body["error"] == "Sign in over https: open https://gc.asaplabs.net"
     # a spoofed CF-Connecting-IP from a LAN host is ignored: covered in process
     # (test_netctx); here, a forged sign-in cookie is just signed out
     code, _, _ = call(port, "GET", "/api/files", cookie="__Host-gc_session=forged")

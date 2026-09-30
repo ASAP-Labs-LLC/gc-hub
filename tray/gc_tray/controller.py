@@ -38,12 +38,20 @@ STOP_TEXT = ("Stop the GC hub?\n\nNothing is received, processed or served until
              "upload, a processing job, an export), you are told what and asked whether "
              "to stop anyway (force).")
 BUSY_TEXT = ("The hub is busy:\n\n{items}\n\nStopping now cuts that short. Stop anyway?")
+RESTART_BUSY_TEXT = ("The hub is busy:\n\n{items}\n\nRestarting now cuts that short. "
+                     "Restart anyway?")
+BLOCKED_TEXT = ("The hub cannot be {what} now:\n\n{items}\n\nThis cannot be overridden; "
+                "try again when it has finished.")
 START_DONE = ("Start requested: the updater starts the hub within about 20 s "
               "(the icon turns green when it answers).")
 START_UNSURE = ("Start requested. The hub was not stopped from here (no paused marker "
                 "was seen), so it should start within ~20 s if the updater is running; "
                 "if not, check the updater (C:\\ASAPApps\\updater\\updater.log and its "
                 "scheduled task).")
+
+
+def _items(reasons) -> str:
+    return "\n".join(f"- {r}" for r in reasons)
 
 
 def _current_user() -> str:
@@ -122,8 +130,23 @@ class Controller:
         if not self.ui.confirm(TITLE, text):
             return False
         code, body = self.client.post(RESTART, {})
+        if code == 409 and body.get("blocked"):
+            self.ui.error(TITLE, BLOCKED_TEXT.format(what="restarted",
+                                                     items=_items(body["blocked"])))
+            return False
+        if code == 409 and body.get("busy"):
+            busy = [str(b) for b in body["busy"]]
+            if not self.ui.confirm(TITLE, RESTART_BUSY_TEXT.format(items=_items(busy))):
+                return False
+            code, body = self.client.post(RESTART, {"force": True})
+            if code == 200:
+                log.warning("hub restarted from the tray (forced while: %s)", "; ".join(busy))
         if code != 200:
-            self.ui.error(TITLE, body.get("error") or f"HTTP {code}")
+            if code == 409 and body.get("blocked"):
+                self.ui.error(TITLE, BLOCKED_TEXT.format(what="restarted",
+                                                         items=_items(body["blocked"])))
+            else:
+                self.ui.error(TITLE, body.get("error") or f"HTTP {code}")
             return False
         return True
 
@@ -132,6 +155,10 @@ class Controller:
             return False
         code, body = self._admin_post(STOP, quiet=(409,))
         if body is None:
+            return False
+        if code == 409 and body.get("blocked"):
+            self.ui.error(TITLE, BLOCKED_TEXT.format(what="stopped",
+                                                     items=_items(body["blocked"])))
             return False
         if code == 409:
             busy = [str(b) for b in body.get("busy") or []] or [body.get("error") or "busy"]

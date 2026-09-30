@@ -836,6 +836,102 @@ Start hub either way, and then only says the hub *should* start within
 ~20 s if the updater is running (if it stays red, check the updater's
 scheduled task and `updater.log`).
 
+## Restore after a purge
+
+**Hub admin > Purge instrument data** (v4.0) removes one instrument's samples
+(all, or only its backfill samples) and everything that belongs to them. It
+never deletes a file: before it touches anything it copies the whole database
+to `data\backups\pre-purge-<instrument>-<UTC time>.db` (the nightly pruning
+only removes `gc-<date>.db`, so this copy stays until you delete it), and it
+moves the purged samples' CDFs to `data\purged\<instrument>-<UTC time>\`,
+keeping their layout under the data folder (`cdf\gc1\2026\09\…`), with a
+`manifest.json` listing every file moved and kept. The purge's notification
+names both.
+
+**While it runs** that instrument's processing pauses and its agent's uploads
+are answered "purge in progress; retry" (the agent resends them afterwards);
+the other instruments carry on. Operator actions on the purged instrument's
+samples (reprocess, Export to LIMS, reports, QBench uploads) are not paused:
+they may act on samples that are about to be removed, so leave that instrument
+alone until the purge has finished. The hub cannot be restarted or stopped
+during a purge, not even with "anyway" (below, *Restart and background work*).
+
+**If the hub stops in the middle** (a power cut, a crash), nothing is left
+half done: the purge keeps a journal (`manifest.json` in its purged folder).
+At the next start, a purge that had not yet changed the database is abandoned
+(its unused backup deleted); one that had is finished (the remaining files
+moved, the results file's record updated). A notification says which.
+
+**To undo a purge**, restore the backup. **This rolls back every instrument,
+not only the purged one, to the moment of the backup**: runs any GC received
+after it (GC-2's too) disappear from the hub, although their CDFs stay on disk
+under `data\cdf\`, and the agents do not send them again. Do it soon after the
+purge, or not at all. Afterwards, load any runs received since the backup
+again with **Hub admin > Load CDFs from a folder** (from the GC PC's data
+folder, copied to the server).
+
+1. **Check the purge has finished**: `manifest.json` in
+   `data\purged\<instrument>-<time>\` must say `"state": "done"` (or
+   `"abandoned"`: then nothing was removed and there is nothing to restore).
+   If it says `pending` or `committed`, the hub stopped in the middle: start
+   it once and let it finish (a notification says "finished after a
+   restart"), then continue. Restoring over a half-finished purge would leave
+   its files split between `cdf\` and the purged folder.
+2. **Stop the hub**: hub tray > *Stop hub* (or `updater.py pause --app gc
+   --config C:\ASAPApps\updater\config.json`, then stop the process). Check
+   `http://localhost:5560/healthz` no longer answers.
+3. **Keep the current database** aside: move `data\gc.db`, and
+   `data\gc.db-wal` and `data\gc.db-shm` if they are there, into a new folder
+   `data\backups\after-purge-<time>\`. None of the three may stay next to the
+   restored file: SQLite would apply a leftover `-wal` to it.
+4. **Copy the backup over the database**: copy
+   `data\backups\pre-purge-<instrument>-<time>.db` to `data\gc.db`.
+5. **Move the files back**: move the `cdf` folder inside
+   `data\purged\<instrument>-<time>\` into `data\`, merging with the existing
+   `data\cdf` (no file there has the same name: the purge only moved files
+   whose rows it deleted). Leave `manifest.json` behind.
+6. **Start the hub**: tray > *Start hub* (or `updater.py resume --app gc
+   --config C:\ASAPApps\updater\config.json`).
+7. **Check every instrument's results file** on **Hub admin > Exports**, not
+   only the purged one's: any instrument that appended rows after the backup
+   (GC-2 included) now shows *refused: ledger-mismatch*, because the restored
+   database does not know those rows. For each one, open its CSV, check that
+   its last rows are not duplicated, then **Adopt** it. If *New results file*
+   was used during the purge, the purged instrument points at its old file
+   again (the backup's setting); change it with *New path* if needed.
+
+The results CSVs themselves were never edited by the purge: rows appended
+before it are still in the file, and runs sent again after it are appended
+again.
+
+## Restart and background work
+
+A restart (Settings > *Restart* or *Restart & install*, the tray's *Restart*)
+and the tray's *Stop* first check for background work: a folder load, a
+history import or its dry run, a purge, a diagnostics bundle being built or
+waiting to be downloaded, a report ZIP, a QBench upload, and processing jobs
+running. If there is any, the hub answers "busy" and names it; *Restart
+anyway* / *Stop anyway* interrupts it. **A purge can never be interrupted**:
+restart and stop are refused until it has finished. While any of that work
+runs, `/healthz` reports `idle_seconds: 0`, so the updater never installs an
+update in the middle of an import.
+
+These checks are the hub's own: **the updater's command line does not ask**.
+`updater.py pause`, `stop` or a `switch` run by hand (and Windows shutting
+down, or a power cut) end the process whatever it is doing. Nothing is lost
+that way either: a purge is finished or abandoned from its journal at the next
+start, and an interrupted history import is marked and resumes (below). Admin
+jobs cannot start until the hub has done that at start-up ("the hub is still
+starting; try again shortly"), nor while a restart is under way.
+
+A history import interrupted anyway (a forced restart, a power cut) loses
+nothing: each batch is saved as a whole, and the next start marks the run
+*interrupted* and raises a notification ("History import for GC-2 was
+interrupted by a restart after N of M; press Start to resume, nothing was
+lost"). Press *Start real import* again with the same folder and CSV: it
+resumes, and the result is the same as an uninterrupted import. A folder load
+is resumable the same way (already-loaded files are duplicates).
+
 ## After setup
 
 - Everyday releases: [`RELEASING.md`](RELEASING.md).

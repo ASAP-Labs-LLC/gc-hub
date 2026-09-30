@@ -90,6 +90,7 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/api/settings` | GET, POST | unchanged | session | GET shows the gc1 row's `calibration_cdf` and the fixed standards/export folders; POST (JSON only) changes only `settings.OPERATOR_KEYS`, and `settings.ADMIN_KEYS` with the admin `password` (403 without); any other changed key → 400 (T5 review C1) |
 | `/api/save-analysis-defaults` | POST | unchanged | session | |
 | `/api/notifications` | GET | unchanged | session | |
+| `/api/live` | GET | new | session | v3.1 live updates (`live.py`, `static/js/live.js`): `?since=<boot_id>:<seq>` → `{cursor, reset, samples, instruments, agents, notifications_unread, hub: {state, staged_update}}`, answered from memory (the event ring, `hub_control`'s cache, the notification store); never SQLite; not activity |
 | `/api/notifications/<notif_id>/dismiss` | POST | unchanged | session | |
 | `/api/notifications/dismiss-all` | POST | unchanged | session | |
 | `/api/restart` | POST | unchanged | local | |
@@ -125,6 +126,10 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/api/admin/import-history/dry-run` | POST | new | session | T5 `hub_admin`: `{password, instrument, processed_dir, results_csv?, aliases?, batch_size?}` → 202 `{job}` at once (v3.0.1; kind `import-history-dry-run` on the same `AdminJobs` runner, one job at a time, stoppable; the finished job carries `result: {summary}`; 2D `jobs.import_history`, `dry_run=True`; nothing written); 400 bad folder/CSV/aliases, 404 unknown instrument (answered before the job), 409 a job is running |
 | `/api/admin/import-history/start` | POST | new | session | T5 `hub_admin`: `{password, instrument, processed_dir, results_csv?, aliases?, batch_size?, confirm: true}` → 202 `{job}` (kind `import-history`, the same `AdminJobs` runner as load-folder); 400 missing/false `confirm` or bad folder/CSV/aliases, 404 unknown instrument, 409 a job is running |
 | `/api/admin/import-history/last-run` | POST | new | session | T5 `hub_admin`: `{password, instrument}` → `{last_run}` (`jobs.import_history.last_run`; defaults the admin page's form) |
+| `/api/admin/purge/preview` | POST | new | session | v3.1 `hub_admin`: `{password, instrument, scope: all\|backfill}` → 200 `{preview}` (`purge.preview`: counts per table, CDFs to move/kept and why, samples already appended, the confirmation text; read-only); 400 bad scope, 404 unknown instrument |
+| `/api/purge/status` | GET | new | session | v3.1 `hub_admin`: `{job, journal}` reduced by `purge.public_job`/`public_summary` (state, phase, counts, times, the starter's name; never a path, lab ID, address or warning text): the running or last purge job and the newest journal, so the admin page shows a running purge on load |
+| `/api/admin/purge/status` | POST | new | session | v3.1 `hub_admin`: `{password}` → `{job, journal}` in full (backup and purged folder, warnings, files not moved, kept samples/files) |
+| `/api/admin/purge/start` | POST | new | session | v3.1 `hub_admin`: `{password, instrument, scope, confirm_text: "PURGE <name>", new_results_path?}` → 202 `{job}` (kind `purge` on `AdminJobs`; `purge.run`: pause the instrument, `VACUUM INTO backups/pre-purge-…`, one delete transaction, CDFs moved to `purged/`); 400 wrong confirmation/scope/path, 404 unknown instrument, 409 another admin job or a path in use |
 | `/api/admin/exports` | POST | new | session | T5 `hub_admin`: `{password}` → `{instruments:[HubExporter.status]}`; 503 until the exporter runs |
 | `/api/admin/exports/<instrument_id>/adopt` | POST | new | session | T5 `hub_admin`: adopt the export file; 409 `{error, reason}` on a refusal, 404 unknown instrument |
 | `/api/admin/exports/<instrument_id>/new-path` | POST | new | session | T5 `hub_admin`: `{password, path}` (absolute `.csv` in an existing folder) |
@@ -138,13 +143,19 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/api/samples/<int:sample_id>/comments/<int:comment_id>/delete` | POST | new | session | phase 4 `comments_api`: `{initials}` → `{comment}`; soft delete recording `deleted_by_initials`/`deleted_by_ip`; 404 not this sample's comment, 409 already deleted |
 | `/api/comment-presets` | GET | new | session | phase 4 `comments_api`: → `{presets:[{id, text, sort}]}` (active, in order) |
 | `/api/admin/comment-presets` | POST | new | session | phase 4 `comments_api` (admin password): `{password, action: list\|create\|update\|reorder\|deactivate\|activate, text?, id?, ids?}` → `{presets, preset?}` (create 201; ≤ 200 chars, ≤ 50 active; reorder names every preset once) |
-| `/instruments` | GET | new | session | 2A2 `instruments_api` blueprint: the Instruments page |
+| `/instruments` | GET | new | session | 2A2 `instruments_api` blueprint: the Instruments page; v3.1: the new design (card grid, Add a GC, Activity feed; `templates/instruments_home.html`) |
+| `/instruments/classic` | GET | new | session | v3.1 `instruments_api`: the 2A2 page (`templates/instruments.html`), kept for this release |
+| `/instruments/<iid>` | GET | new | session | v3.1 `instruments_api`: one instrument in the new design (setup checklist, Agent, Calibration, Correction factors, Results file, Methods, Backfill, Conflicts) over the same `/api/` routes; 404 for an unknown id |
+| `/setup` | GET | new | session | v3.1 `instruments_api`: the GC setup guide (`?instrument=<id>`, `?new=1` starts at step 1) |
+| `/api/instruments/activity` | GET | new | session | v3.1 `instruments_api`: the Activity feed, `?limit=` (default 30, 1–200; 400 if not a number) → `{entries:[{key, kind, at, instrument_id, instrument_name, by, sample_id, lab_id, injection_dt, detail}]}` newest first (`instrument_activity.feed`: `instrument_events` + samples received, corrections saved, reports, results CSV writes, agent check-ins) |
+| `/api/instruments/<iid>/setup` | GET | new | session | v3.1 `instruments_api`: the setup guide's steps → `{instrument_id, steps:[{key, n, title, status: done\|current\|waiting\|blocked, detail, blocker, action, done_by, done_at}], summary:{total, done, step, ready}}` (`setup_state`); 404 unknown id |
 | `/api/instruments` | GET | new | session | 2A2 `instruments_api` blueprint: every instrument + summary (open read) |
 | `/api/instruments/<iid>` | GET | new | session | 2A2 `instruments_api` blueprint: one instrument with corrections/methods/export (open read) |
 | `/api/admin/instruments` | POST | new | session | 2A2 `instruments_api` blueprint: admin: create |
 | `/api/admin/instruments/<iid>` | POST | new | session | 2A2 `instruments_api` blueprint: admin: edit name/enabled/method/live_since/lem_machine_uid |
 | `/api/lem/machines` | GET | new | session | D10 `instruments_api` blueprint: LEM's machine list for the LEM machine dropdown, fetched server-side by `lem_machines` (60 s cache, stale on failure; read-only, never writes to LEM) |
 | `/api/admin/instruments/<iid>/export-path` | POST | new | session | 2A2 `instruments_api` blueprint: admin: HubExporter.new_path |
+| `/api/admin/instruments/<iid>/export-hub-only` | POST | new | session | v3.1 `instruments_api`: admin: record the explicit choice to keep the hub's own results file (`results/<id>_results.csv`, which LEM does not read) as an `export_hub_only` instrument event; 409 when an export path is set (the setup guide's step 7 needs a path or this choice) |
 | `/api/admin/instruments/<iid>/export-adopt` | POST | new | session | 2A2 `instruments_api` blueprint: admin: HubExporter.adopt |
 | `/api/instruments/<iid>/calibration` | GET | new | session | 2A2 `instruments_api` blueprint: the Calibration page payload for the instrument |
 | `/api/instruments/<iid>/calibration-candidates` | GET | new | session | 2A2 `instruments_api` blueprint: the instrument's own samples (open read) |
@@ -170,12 +181,17 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/healthz` | GET | unchanged | open | |
 | `/` | GET | unchanged | session | |
 | `/calibration` | GET | unchanged | session | |
+| `/lab/<lab_id>` | GET | new | session | v3.1 `sample_links` (sendable links): the classic page with the lab ID's newest run selected (latest `injection_dt`, final runs first, any instrument; exact then case-insensitive match; decoded once); other runs listed on the page; 404 friendly "No GC result for lab ID … yet" page |
+| `/samples/<int:sample_id>` | GET | new | session | v3.1 `sample_links`: the classic page, that run selected, Dashboard tab; 404 friendly page |
+| `/samples/<int:sample_id>/compare` | GET | new | session | v3.1 `sample_links`: as above, Analysis tab; `?standard=<name>` picks the comparison standard |
+| `/samples/<int:sample_id>/data` | GET | new | session | v3.1 `sample_links`: as above, Distillation Data tab |
+| `/api/lab/<lab_id>` | GET | new | session | v3.1 `sample_links`: → `{lab_id, sample_id, runs:[{sample_id, lab_id, instrument, instrument_name, injection_dt, status}]}` (newest first); 404 `{error, lab_id}` |
 | `/login` | GET | new | open | the sign-in page (`web_auth`): card, LabLink username/password, and on the LAN the admin-password break-glass; `?next=` (sanitised) where to go after; a signed-in visitor is redirected there |
 | `/api/login` | POST | new | open | `{username, password, next?}` → LabCore `POST /api/login`; 200 `{ok, name, method: "password", next}` + the session cookie; 401 wrong, 429 throttled, 503 `{labcore_unavailable}`; through Cloudflare https only |
 | `/api/login/card` | POST | new | open | `{code, next?}` (the card code as both LabCore fields) → as `/api/login`, method `card`; the code is never logged |
 | `/api/login/admin` | POST | new | open | `{password, next?}` → the break-glass session `Admin (break-glass)`, method `admin`; 403 through Cloudflare; `admin_auth.check` and its throttle |
 | `/api/logout` | POST | new | open | revokes the session, clears the cookies → `{ok: true}` |
-| `/api/session` | GET | new | session | → `{name, method}` of the signed-in person (the gate's 401 otherwise); the SSE stream's check |
+| `/api/session` | GET | new | session | → `{name, method, link_url}` of the signed-in person (`link_url` = `admin_auth.sendable_hub_url()`, the base of a copied sample link: the hub URL unless it is LAN-only, then https://gc.asaplabs.net) (the gate's 401 otherwise); the SSE stream's check |
 | `/api/admin/sessions` | POST | new | session | admin password; `{action: list\|revoke\|revoke-name, id?, name?}` → `{sessions: [{id, name, method, ip, created_at, last_seen, user_agent}]}` (never a token hash) |
 <!-- route-fates:end -->
 

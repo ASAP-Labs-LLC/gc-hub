@@ -111,6 +111,8 @@ SPEC_COLUMNS = {
     # schema v3 (sign-in): browser sessions
     "web_sessions": {"id", "token_hash", "name", "method", "created_at", "last_seen",
                      "expires_at", "ip", "user_agent", "revoked_at"},
+    # schema v4 (v3.1, the setup guide)
+    "instrument_events": {"id", "instrument_id", "kind", "by", "at", "detail"},
 }
 
 
@@ -516,6 +518,20 @@ def test_search_method_and_backfill_filters(gc1):
     assert [r["id"] for r in store.samples.search(backfill=True, db=gc1)] == [b]
     assert {r["id"] for r in store.samples.search(backfill=False, db=gc1)} == {a, c}
     assert store.samples.count(backfill=False, method_name="", db=gc1) == 1
+
+
+def test_search_ids_filter(gc1):
+    """v3.1 live updates: ``/api/files?ids=`` fetches only the changed rows."""
+    a = _sample(gc1, lab_id="A", dt="2026-09-01 10:00:00")
+    b = _sample(gc1, lab_id="B", dt="2026-09-02 10:00:00")
+    _sample(gc1, lab_id="C", dt="2026-09-03 10:00:00")
+    store.samples.set_status(a, "final", db=gc1)
+    assert [r["id"] for r in store.samples.search(ids=[a, b], db=gc1)] == [b, a]
+    assert store.samples.count(ids=[a, b], db=gc1) == 2
+    assert [r["id"] for r in store.samples.search(ids=[a, b], status="final", db=gc1)] == [a]
+    assert store.samples.search(ids=[999999], db=gc1) == []
+    assert store.samples.search(ids=[], db=gc1) == []          # an empty list matches nothing
+    assert store.samples.count(ids=[], db=gc1) == 0
 
 
 # ── revisions ───────────────────────────────────────────────────────────────

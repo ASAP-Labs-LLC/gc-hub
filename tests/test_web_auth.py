@@ -38,6 +38,7 @@ LAN = {"REMOTE_ADDR": "10.0.0.25"}
 LOCAL = {"REMOTE_ADDR": "127.0.0.1"}
 JSON = {"Content-Type": "application/json"}
 ADMIN_PW = "break-glass-pw"
+HTTPS_MESSAGE = "Sign in over https: open https://gc.asaplabs.net"
 
 
 def tunnel(ip="203.0.113.9", proto="https", **extra):
@@ -58,8 +59,10 @@ def make_app():
     def _cross_site():
         from flask import request
         if request.method in ("POST", "PUT", "PATCH", "DELETE") \
-                and request.path.startswith("/api/") and netctx.is_cross_site():
-            return jsonify({"error": "Cross-site request refused"}), 403
+                and request.path.startswith("/api/"):
+            refusal = netctx.cross_site_refusal()      # app._refuse_cross_site_writes
+            if refusal:
+                return jsonify({"error": refusal}), 403
         return None
 
     app.before_request(web_auth.gate)
@@ -227,7 +230,8 @@ def test_password_sign_in_over_the_lan(env):
     assert ck and "HttpOnly" in ck and "SameSite=Lax" in ck and "Path=/" in ck
     assert "Secure" not in ck and f"Max-Age={14 * 86400}" in ck
     assert cookie_of(r, "__Host-gc_session") is None
-    assert get(c, "/api/session").get_json() == {"name": "Ryan C", "method": "password"}
+    assert get(c, "/api/session").get_json() == {"name": "Ryan C", "method": "password",
+                                                 "link_url": "https://gc.asaplabs.net"}
     assert get(c, "/instruments").status_code == 200
     assert get(c, "/api/thing").get_json() == {"who": "Ryan C (10.0.0.25)"}
     row = store.web_sessions.list_active(db=env["db"])[0]
@@ -664,7 +668,55 @@ def test_no_redirect_loop_when_the_proxy_names_no_scheme(env):
     r = post(c, "/api/login", {"username": "ryan c", "password": "labpass-1"}, environ=LOCAL,
              headers=h)
     assert r.status_code == 403 and env["stub"].requests == []
+    assert r.get_json()["error"] == HTTPS_MESSAGE
+    # what a browser sends: its Origin is https, which the hub (taking the
+    # request for http) would otherwise call cross-site
+    for path in ("/api/login", "/api/login/card"):
+        r = post(c, path, {"username": "ryan c", "password": "labpass-1", "code": "CARD-1"},
+                 environ=LOCAL, headers=dict(h, Origin="https://gc.asaplabs.net",
+                                             **{"Sec-Fetch-Site": "same-origin"}))
+        assert r.status_code == 403 and r.get_json()["error"] == HTTPS_MESSAGE, path
+    assert env["stub"].requests == []
     ok = dict(h, **{"CF-Visitor": '{"scheme":"https"}'})
     r = post(c, "/api/login", {"username": "ryan c", "password": "labpass-1"}, environ=LOCAL,
              headers=ok)
     assert r.status_code == 200 and cookie_of(r, "__Host-gc_session")
+
+
+# ── v3.1 live updates: a tab's background GETs never touch the session ──
+
+def test_a_background_get_does_not_touch_last_seen(env):
+    c = env["client"]
+    login(c)
+    web_auth._seen.clear()
+    web_auth._pending.clear()
+    assert get(c, "/api/thing", headers={web_auth.BACKGROUND_HEADER: "1"}).status_code == 200
+    assert web_auth._pending == {}
+    assert get(c, "/api/thing").status_code == 200           # the same GET, not background
+    assert len(web_auth._pending) == 1
+
+
+def test_a_post_with_the_header_still_refreshes_the_session(env):
+    c = env["client"]
+    login(c)
+    web_auth._seen.clear()
+    web_auth._pending.clear()
+    r = post(c, "/api/thing", {}, headers={web_auth.BACKGROUND_HEADER: "1"})
+    assert r.status_code == 200
+    assert len(web_auth._pending) == 1                      # a POST always counts
+
+
+def test_is_background_request():
+    app = Flask("bg")
+    h = web_auth.BACKGROUND_HEADER
+    with app.test_request_context("/api/files", headers={h: "1"}):
+        assert web_auth.is_background_request() is True
+    with app.test_request_context("/api/files", method="HEAD", headers={h: "1"}):
+        assert web_auth.is_background_request() is True
+    with app.test_request_context("/api/files", headers={h: "0"}):
+        assert web_auth.is_background_request() is False
+    with app.test_request_context("/api/files"):
+        assert web_auth.is_background_request() is False
+    for m in ("POST", "PUT", "PATCH", "DELETE"):
+        with app.test_request_context("/api/x", method=m, headers={h: "1"}):
+            assert web_auth.is_background_request() is False

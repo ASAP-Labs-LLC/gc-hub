@@ -346,7 +346,11 @@ def test_short_secrets_are_counted_not_redacted(seeded):
     out, manifest = seeded.build()
     assert manifest["secrets"]["too_short_to_redact"] >= 1
     summary = _members(out)["summary.txt"].decode()
-    assert "too short to redact" in summary and "ab1" not in summary
+    assert "too short to redact" in summary
+    # the value itself is never shown (a hex digest in the summary may contain
+    # "ab1" by chance: only a standalone "ab1" is the secret)
+    import re
+    assert re.search(r"(?<![0-9A-Za-z])ab1(?![0-9A-Za-z])", summary) is None
 
 
 def test_hash_fragments_do_not_corrupt_data(seeded, tmp_path):

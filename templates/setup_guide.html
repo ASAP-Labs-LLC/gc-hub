@@ -1,0 +1,25 @@
+{% extends "_layout.html" %}
+{% block title %}Setup guide{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/gc_pages.css') }}?v=2">{% endblock %}
+{% block topbar %}
+  <h1>Setup guide</h1>
+  <span class="spacer"></span>
+  <label class="picker">Setting up
+    <select id="picker" data-testid="instrument-picker" aria-label="Instrument to set up"></select></label>
+{% endblock %}
+{% block content %}
+<main class="content narrow" id="main" data-testid="setup-page">
+  <header class="guide-head">
+    <h1 id="guide-title">Add a new GC</h1>
+    <p id="guide-sub">Eight steps. You can stop at any point: the hub remembers where you got to.</p>
+    <div class="guide-progress"><div class="progress" aria-hidden="true"><span id="guide-bar" style="width:0"></span></div>
+      <span id="guide-step" data-testid="guide-step"></span></div>
+  </header>
+  <ol class="steps" id="steps" data-testid="setup-steps" aria-label="Setup steps" style="list-style:none;margin:0;padding:0"></ol>
+</main>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/instruments_logic.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/instrument_actions.js') }}?v=3"></script>
+<script src="{{ url_for('static', filename='js/setup_guide.js') }}?v=4"></script>
+{% endblock %}

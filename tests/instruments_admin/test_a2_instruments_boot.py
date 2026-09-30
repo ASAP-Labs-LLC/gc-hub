@@ -87,7 +87,7 @@ def test_instruments_blueprint(tmp_path):
         c = Client(port, pw)
 
         # ── the page
-        html = get_text(port, "/instruments", timeout=10)
+        html = get_text(port, "/instruments/classic", timeout=10)   # v3.1: the 2A2 page moved
         assert "instruments.js" in html and "instruments_logic.js" in html
 
         # ── list and detail

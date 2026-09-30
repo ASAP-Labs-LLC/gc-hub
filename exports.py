@@ -28,6 +28,7 @@ Public API
         .adopt(instrument, *, by=None) -> dict       # admin: accept the file as it is now
         .new_path(instrument, path) -> Path          # admin: switch the export to another file
         .write_fresh(instrument, path, *, by=None) -> int   # admin: new file of gated current revisions
+        .after_purge(instrument) -> {path, relinked}   # purge.py: unlink a purged ledger row
         .tick() -> {instrument: {...}}       # one background pass over every instrument
         .start(interval=FLUSH_INTERVAL_SECONDS) / .stop() / .is_alive()
         .wake()                              # flush now (a row just became pending)
@@ -237,6 +238,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Optional, Union
 
 import distill
+import live
 import paths
 import store
 
@@ -613,6 +615,15 @@ class _Verified:
 _TRANSIENT = (OSError, sqlite3.OperationalError)
 
 
+def _publish_appended(instrument: str, rows) -> None:
+    """Live update (v4.0): these ledger rows are in the results CSV now."""
+    try:
+        live.publish_samples([r["sample_id"] for r in rows])
+    except Exception:  # noqa: BLE001 - never into the exporter
+        pass
+    live.publish("instrument", {"instrument_id": instrument})
+
+
 class HubExporter:
     def __init__(self, db: store.Db = None, *, data_dir: Optional[PathLike] = None,
                  notifier: Optional[Callable[[str, str], Any]] = None,
@@ -964,6 +975,7 @@ class HubExporter:
             todo = [r for r in todo if r["line"].encode("utf-8") not in there]
         if done:  # in the file per the sidecar, not yet marked (a crash in between)
             store.export_rows.mark_hub_appended(done, db=self.db)
+            _publish_appended(instrument, [r for r in rows if r["seq"] in set(done)])
         pieces = [r["line"].encode("utf-8") for r in todo]
         if pieces and rec == 0:
             pieces.insert(0, header_line().encode("utf-8"))
@@ -1016,6 +1028,7 @@ class HubExporter:
             new_size, hasher, tail,
             st2.st_mtime_ns if (st2 and st2.st_size == new_size) else None)
         store.export_rows.mark_hub_appended([r["seq"] for r in todo], db=self.db)
+        _publish_appended(instrument, todo)
         return FlushResult(len(todo), 0, None, path)
 
     def _already_after_last(self, instrument: str, path: Path, side: dict) -> set:
@@ -1171,18 +1184,54 @@ class HubExporter:
             raise ExportRefused("header-mismatch", path, "the first line is not the 31-column "
                                 f"results header (got {first[:120]!r})")
 
-    def new_path(self, instrument: str, path: PathLike) -> Path:
+    def new_path(self, instrument: str, path: PathLike, *,
+                 event_by: Optional[str] = None) -> Path:
         """Switch this instrument's export to *path* (an existing file there
-        must then be adopted before the hub appends to it). Refuses ``in-use``."""
+        must then be adopted before the hub appends to it). Refuses ``in-use``.
+        With ``event_by`` (v4.0) the ``export_path`` instrument event is written
+        in the same transaction as the path."""
         with _instrument_lock(instrument):
             path = Path(path)
             self._check_free(instrument, path)
-            store.instruments.upsert({"id": instrument, "export_path": str(path)}, db=self.db)
+            with store.connection(self.db) as conn, store.write_txn(conn):
+                store.instruments.upsert({"id": instrument, "export_path": str(path)}, db=conn)
+                if event_by is not None:
+                    store.instrument_events.add(conn, instrument, "export_path", by=event_by,
+                                                detail={"path": str(path)})
             self._clear_refusal(instrument)
             if _stat(path) is not None and not sidecar_path(path).exists():
                 self._adopt_next[instrument] = path      # "New path, then Adopt"
             LOGGER.info("exports: %s now exports to %s", instrument, path)
             return path
+
+    def after_purge(self, instrument: str) -> dict:
+        """After ``purge.py`` deleted this instrument's ledger rows: when the
+        sidecar's ``seq`` names a row that is gone, drop the line link
+        (``last_line_sha256``/``last_line_end``) and keep everything else.
+
+        Without this the next flush would refuse ``ledger-mismatch`` (the
+        restore-from-backup check). ``seq``, size and hash stay, so the file is
+        still verified as the hub left it, and new rows (``export_rows.seq`` is
+        AUTOINCREMENT: never reused) append after it; the next append links
+        the sidecar to a ledger row again. The file itself is never touched.
+        Returns ``{path, relinked}``; refuses ``busy`` like the other admin
+        calls. The caller holds the instrument across its delete and this call
+        (``_instrument_lock``) so no flush sees the gap in between.
+        """
+        with _instrument_lock(instrument):
+            path = self.export_path(instrument)
+            with _admin_lock(path):
+                side = _read_sidecar(path)
+                if (side is None or side.get("instrument") != instrument
+                        or not side.get("last_line_sha256")
+                        or self._ledger_line(instrument, side["seq"]) is not None):
+                    return {"path": str(path), "relinked": False}
+                side = dict(side, last_line_sha256=None, last_line_end=None,
+                            updated_at=store.now_iso(), purged_at=store.now_iso())
+                _write_sidecar(path, side)
+            LOGGER.warning("exports: %s sidecar of %s unlinked from purged ledger row %d",
+                           instrument, path, side["seq"])
+            return {"path": str(path), "relinked": True}
 
     def _fresh_lines(self, instrument: str) -> tuple:
         """(lines, max ledger seq) for every gated sample's current revision,
@@ -1249,6 +1298,7 @@ class HubExporter:
             covered = [r["seq"] for r in store.export_rows.pending_hub_appends(instrument, db=self.db)
                        if r["seq"] <= max_seq]
             store.export_rows.mark_hub_appended(covered, db=self.db)
+            live.publish("instrument", {"instrument_id": instrument})
             LOGGER.info("exports: %s wrote a fresh file %s (%d rows, seq %d) by %s",
                         instrument, path, len(lines), max_seq, by)
             return len(lines)

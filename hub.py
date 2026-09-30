@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import logging
 import threading
 import time
@@ -420,8 +421,13 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
         store.migrate(db)
         if paused is None:
             paused = processing_paused(db) is not None
+        # A purge the process died in is finished (or abandoned) before the
+        # exporter can flush (its sidecar must be unlinked first), and an
+        # interrupted import is marked: once per process and data folder, and
+        # admin jobs are refused until it has run (hub_admin.job_refusal).
+        run_startup_recovery(db, data, notifier)
         instruments.bootstrap_gc1(app_conf, db=db)
-        exporter = exports.HubExporter(db, data_dir=data, notifier=notifier)
+        exporter =exports.HubExporter(db, data_dir=data, notifier=notifier)
 
         def final_hook(sample_id: int) -> None:
             exporter.wake()
@@ -456,6 +462,12 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
     # The seed reads the corrections file (often on the share, which can
     # stall), so it runs outside the lock; the Worker is already up and gc1's
     # samples simply wait until it succeeds (the seed queues them).
+    try:
+        import instrument_admin
+        for msg in instrument_admin.reserved_id_warnings(db=db):
+            _notify(notifier, "warning", msg)
+    except Exception:  # noqa: BLE001 - a warning must never stop the hub
+        log.exception("hub: reserved-id check failed")
     seeded_at = datetime.now()
     try:
         seed_gc1_corrections(app_conf, db, notifier)
@@ -471,6 +483,105 @@ def start(app_conf: Optional[dict] = None, *, data_dir=None, notifier: Any = _DE
              " with processing PAUSED (resume it from the hub tray or the admin API)"
              if rt.paused else "")
     return rt
+
+
+_recovery_lock = threading.Lock()
+_recovered_dirs: set = set()
+
+
+def _dir_key(data_dir) -> str:
+    return os.path.normcase(str(Path(data_dir).resolve()))
+
+
+def startup_recovered(data_dir) -> bool:
+    """Whether this process has run the start-up recovery for ``data_dir``
+    (``hub_admin`` refuses admin jobs until then)."""
+    with _recovery_lock:
+        return _dir_key(data_dir) in _recovered_dirs
+
+
+def forget_startup_recovery(data_dir) -> None:
+    """Tests only: as if this process had not recovered ``data_dir`` yet."""
+    with _recovery_lock:
+        _recovered_dirs.discard(_dir_key(data_dir))
+
+
+def run_startup_recovery(db, data_dir, notifier: Optional[Notifier]) -> Optional[dict]:
+    """``recover_purges`` + ``mark_interrupted_imports``, once per process and
+    data folder: ``hub.start`` runs again on a retry or after a failed
+    respawn, while jobs may be running, and must never recover them. Returns
+    ``None`` when it had already run."""
+    with _recovery_lock:
+        key = _dir_key(data_dir)
+        if key in _recovered_dirs:
+            return None
+        out = {"purges": recover_purges(db, data_dir, notifier),
+               "imports": mark_interrupted_imports(db, data_dir, notifier)}
+        _recovered_dirs.add(key)
+        _note_recovered_tasks(out)
+        return out
+
+
+def _note_recovered_tasks(recovered: dict) -> None:
+    """v4.0 lane E: what the start-up recovery found shows in the running-now
+    indicator for 30 minutes as an interrupted task (the notification says
+    the rest). Never fails a start."""
+    try:
+        import tasks
+        for s in recovered.get("purges") or []:
+            if isinstance(s, dict) and not s.get("nothing_to_do"):
+                tasks.REGISTRY.note_interrupted("purge", instrument=s.get("instrument"),
+                                                open_url="/admin/hub#purge-panel")
+        for r in recovered.get("imports") or []:
+            by = r["by"] if "by" in r.keys() else None
+            name = by.rsplit(" (", 1)[0] if isinstance(by, str) and by.endswith(")") else by
+            tasks.REGISTRY.note_interrupted("import-history", instrument=r["instrument_id"],
+                                            by=name, open_url="/admin/hub#import-history")
+    except Exception:  # noqa: BLE001
+        log.exception("hub: noting interrupted work as tasks failed")
+
+
+def _live_job_instruments(kinds: tuple) -> set:
+    """Instruments an admin job of ``kinds`` running in this process owns."""
+    try:
+        import hub_admin
+        job = hub_admin.JOBS.current()
+    except Exception:  # noqa: BLE001
+        return set()
+    if job is None or job.get("state") != "running" or job.get("kind") not in kinds:
+        return set()
+    inst = (job.get("params") or {}).get("instrument")
+    return {inst} if inst else {"*"}
+
+
+def recover_purges(db, data_dir, notifier: Optional[Notifier]) -> list:
+    """``purge.recover`` (interrupted purges; v4.0), skipping any purge live in
+    this process (its instrument is paused, or an admin purge job owns it). A
+    failure is logged and notified, never a failed start: the hub still
+    serves, and the next start tries again (every recovery step is idempotent)."""
+    try:
+        import purge
+        return purge.recover(db=db, data_dir=data_dir, notifier=notifier,
+                             skip_instruments=_live_job_instruments(("purge",)))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("hub: recovering an interrupted purge failed")
+        _notify(notifier, "error", f"An interrupted purge could not be finished at start-up "
+                                   f"({exc}); it is retried at the next start. See app.log and "
+                                   f"the purged folder's manifest.json.")
+        return []
+
+
+def mark_interrupted_imports(db, data_dir, notifier: Optional[Notifier]) -> list:
+    """``jobs.import_history.mark_interrupted``: a history import the process
+    died in is marked interrupted and announced (never a failed start)."""
+    try:
+        from jobs import import_history
+        return import_history.mark_interrupted(
+            db=db, data_dir=data_dir, notifier=notifier,
+            skip_instruments=_live_job_instruments(("import-history",)))
+    except Exception:  # noqa: BLE001
+        log.exception("hub: marking interrupted history imports failed")
+        return []
 
 
 # ── Processing paused (persisted) ─────────────────────────────────────────

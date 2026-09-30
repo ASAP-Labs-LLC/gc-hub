@@ -109,6 +109,7 @@ try:
     import fuel_fit
 except Exception:  # pragma: no cover - scipy.optimize missing
     fuel_fit = None
+import live
 import notifications as notifications_mod
 import reprocess_query
 import hub
@@ -192,9 +193,12 @@ except Exception:  # noqa: BLE001 - never stop the app starting
 # N PDFs in the request outlasted Cloudflare's 100 s). Leftovers of a previous
 # process are garbage too.
 import download_jobs  # noqa: E402
+import tasks  # noqa: E402  (v4.0 lane E: the running-now feed in /api/live)
 
 REPORT_ZIP_TMP = "report-zips-tmp"
-REPORT_ZIPS = download_jobs.DownloadJobs(lambda: paths.require_data_dir() / REPORT_ZIP_TMP)
+REPORT_ZIPS = download_jobs.DownloadJobs(
+    lambda: paths.require_data_dir() / REPORT_ZIP_TMP, tasks=tasks.REGISTRY,
+    download_url=lambda jid: f"/api/export-analysis-reports-zip/{jid}/download")
 try:
     REPORT_ZIPS.cleanup()
 except Exception:  # noqa: BLE001 - never stop the app starting
@@ -224,6 +228,7 @@ import comments_api  # noqa: E402  (phase 4: sample comments, presets)
 app.register_blueprint(comments_api.bp)
 import hub_control  # noqa: E402  (hub tray: status, pause/resume processing, stop)
 app.register_blueprint(hub_control.bp)
+import sample_links; app.register_blueprint(sample_links.bp)  # noqa: E402,E702 (v4.0 sendable links)
 import web_auth  # noqa: E402  (sign-in: LabLink sessions, the session gate)
 app.register_blueprint(web_auth.bp)
 # Order matters (before_request runs in registration order): the https
@@ -232,6 +237,8 @@ app.register_blueprint(web_auth.bp)
 app.before_request(web_auth.require_https)
 app.after_request(web_auth.add_security_headers)
 app.context_processor(web_auth.template_context)
+import api_errors  # noqa: E402  (v4.0.0: every /api/ failure answers JSON {error, status, ref})
+api_errors.install(app)
 
 # ---------------------------------------------------------------------------
 # Global state
@@ -260,6 +267,38 @@ _creds_needed = threading.Event()   # set by upload thread when it needs creds
 _creds_ready  = threading.Event()   # set by API when user submits new creds
 _creds_lock   = threading.Lock()
 _creds_new: dict = {}               # {"username": ..., "password": ...}
+
+# ── v4.0 lane E: the upload as a task in tasks.REGISTRY (the running-now feed) ──
+_upload_task_id: Optional[str] = None
+_UPLOAD_ENDED = ("ok", "failed", "error", "skipped")
+
+
+def _upload_counts() -> tuple:
+    """``(finished, total, ok, failed)`` of the upload queue's items."""
+    with _upload_items_lock:
+        statuses = [s.get("status") for s in _upload_item_status]
+    return (sum(1 for s in statuses if s in _UPLOAD_ENDED), len(statuses),
+            statuses.count("ok"), sum(1 for s in statuses if s in ("failed", "error")))
+
+
+def _upload_task_progress() -> None:
+    if _upload_task_id is not None:
+        done, total, ok, failed = _upload_counts()
+        tasks.REGISTRY.update(_upload_task_id, done=done, total=total,
+                              text=f"{ok} of {total} uploaded" + (f" · {failed} failed"
+                                                                  if failed else ""))
+
+
+def _upload_task_end() -> None:
+    """The upload thread ended (done, cancelled or crashed): end its task."""
+    if _upload_task_id is None:
+        return
+    done, total, ok, failed = _upload_counts()
+    state = "stopped" if _upload_stop.is_set() else ("failed" if failed else "done")
+    tasks.REGISTRY.finish(_upload_task_id, state, done=done, total=total,
+                          text=f"{ok} of {total} uploaded" + (f" · {failed} failed"
+                                                              if failed else ""),
+                          counts={"ok": ok, "failed": failed})
 
 # ── Activity tracking & auto-restart ─────────────────────────────────
 _last_activity: float = time.time()
@@ -706,6 +745,7 @@ def _record_qbench_upload(sample_id, revision: Optional[int], db) -> None:
     try:
         store.samples.update(int(sample_id), qbench_revision=revision,
                              qbench_uploaded_at=store.now_iso(), db=db)
+        live.publish("sample", {"sample_id": sample_id})
     except Exception:
         LOGGER.exception("Could not record the QBench upload of sample %s", sample_id)
 
@@ -742,12 +782,15 @@ def _refuse_cross_site_writes():
     """Refuse state-changing /api/ requests that a browser marks as coming
     from another site. Registered before the session gate and activity
     tracking, so a refused request does not count as use."""
-    if request.method in _STATE_CHANGING_METHODS and request.path.startswith("/api/") \
-            and netctx.is_cross_site():
-        LOGGER.warning("Refused cross-site %s %s from %s (Origin %r, Sec-Fetch-Site %r)",
+    if request.method not in _STATE_CHANGING_METHODS or not request.path.startswith("/api/"):
+        return None
+    refusal = netctx.cross_site_refusal()
+    if refusal:
+        LOGGER.warning("Refused cross-site %s %s from %s (Origin %r, Sec-Fetch-Site %r): %s",
                        request.method, request.path, netctx.client_ip(),
-                       request.headers.get("Origin"), request.headers.get("Sec-Fetch-Site"))
-        return jsonify({"error": "Cross-site request refused"}), 403
+                       request.headers.get("Origin"), request.headers.get("Sec-Fetch-Site"),
+                       refusal)
+        return jsonify({"error": refusal}), 403
     return None
 
 
@@ -788,12 +831,14 @@ def _admin_json_body():
 # them as activity would keep the idle timer from ever advancing: the updater
 # polls /healthz continuously, static assets load on every page view, and
 # these are the endpoints app.js hits on its own timers for the life of an
-# open tab (not from a click): /api/notifications every 30s
-# (setInterval(loadNotifications, 30000)); /healthz every 2s while waiting
+# open tab (not from a click): /api/live every 3 s (30 s hidden; live.js, v4.0),
+# /api/notifications when the live count changes (every 30 s in tabs still
+# running an older app.js); /healthz every 2s while waiting
 # for a restart (_waitForServerAndReload; /api/server-status, which it used
 # to poll, stays excluded for tabs still running an older app.js);
-# /api/reprocess/status every 2s while a reprocess runs
-# (_pollReprocessStatus); /api/qbench-upload-status once on load to
+# /api/reprocess/status while a reprocess runs (_pollReprocessStatus: when
+# GCLive reports one of its samples, every 1.5 s in older tabs);
+# /api/qbench-upload-status once on load to
 # reconnect to an in-progress upload. Excluding /static/ covers page assets;
 # excluding paths ending in /stream covers the SSE routes' *reconnects* —
 # before_request fires once per connection attempt, not per keep-alive byte
@@ -805,6 +850,8 @@ _NON_ACTIVITY_PATHS = {
     "/api/server-status",
     "/api/reprocess/status",
     "/api/qbench-upload-status",
+    # v4.0 live updates: every open tab polls it every 3 s (30 s hidden)
+    "/api/live",
     # 2B1: GC-PC agents are machines, never users (ingest_api)
     "/api/ingest", "/api/agent/heartbeat", "/api/agent/results",
     "/api/agent/package", "/api/agent/package.zip",
@@ -823,6 +870,10 @@ def _track_activity():
     global _last_activity
     path = request.path
     if path in _NON_ACTIVITY_PATHS or path.startswith("/static/") or path.endswith("/stream"):
+        return
+    if web_auth.is_background_request():
+        # v4.0 live: a GET/HEAD an open tab made on its own (X-GC-Background: 1,
+        # GCLive.bgFetch). Never a POST or other write: those stay activity.
         return
     session = web_auth.current_user()
     if session is None:
@@ -864,6 +915,12 @@ def _is_server_idle() -> bool:
         return False
     # Block while a report ZIP is built, waits to be fetched or streams
     if REPORT_ZIPS.busy():
+        return False
+    # Block while background work runs: the one list the restart button, the
+    # tray's Stop and /healthz's idle signal use too (hub_control.busy_reasons:
+    # a QBench upload, a report ZIP, an admin job, a diagnostics bundle,
+    # running Worker jobs)
+    if hub_control.busy_reasons(export_pass=False):
         return False
     # Block while the Worker has due jobs (a retry scheduled later doesn't count)
     data = paths.data_dir()
@@ -1634,7 +1691,9 @@ def api_save_analysis_defaults():
 def api_files():
     """The sample list: a store query, newest injection first, with paging and
     filters (``instrument``, ``status`` and ``method`` take comma lists; ``q``,
-    ``date_from``, ``date_to``, ``backfill``, ``limit``, ``offset``). Flags and
+    ``date_from``, ``date_to``, ``backfill``, ``limit``, ``offset``; ``ids``, a
+    comma list of at most ``FILES_MAX_IDS`` sample ids, for the live client's
+    changed rows). Flags and
     best-fit come from ``sample_cache`` (and the current revision's recorded
     best-fit); this route never reads a CDF. Stale cache rows are refreshed
     in the background and counted in ``cache_pending``."""
@@ -1646,7 +1705,14 @@ def api_files():
     except ValueError:
         return _error("limit and offset must be integers")
     backfill = args.get("backfill")
+    ids = None
+    if args.get("ids") is not None:
+        raw_ids = _list_arg(args.get("ids")) or []
+        if len(raw_ids) > FILES_MAX_IDS or not all(i.isascii() and i.isdigit() and len(i) <= 18 for i in raw_ids):
+            return _error(f"ids must be a comma list of at most {FILES_MAX_IDS} sample ids")
+        ids = [int(i) for i in raw_ids]
     filters = {
+        "ids": ids,
         "q": (args.get("q") or "").strip() or None,
         "instrument": _list_arg(args.get("instrument")),
         "date_from": args.get("date_from") or None,
@@ -1687,6 +1753,7 @@ def api_files():
 
 FILES_DEFAULT_LIMIT = 500
 FILES_MAX_LIMIT = 5000
+FILES_MAX_IDS = 1000
 
 
 def _list_arg(raw: Optional[str]) -> Optional[list]:
@@ -1730,6 +1797,9 @@ def _sample_entry(s: dict, cache: Optional[dict], recorded, fps: dict, run_no: i
         "name": name,
         "display_name": name if run_no <= 1 else f"{name} ({run_no})",
         "injection_dt": s["injection_dt"],
+        # v4.0 lane E: 'mtime' = the CDF had no injection time (the list's
+        # "No injection time" group)
+        "injection_dt_source": s.get("injection_dt_source"),
         "status": s["status"],
         "error": s["error"],
         "review_note": s.get("review_note"),
@@ -2225,6 +2295,9 @@ def api_reprocess():
     if queued:
         LOGGER.info("Reprocess of %d sample(s) requested by %s: %s", len(queued), _who(),
                     ", ".join(str(i) for i in queued[:50]))
+        # v4.0 lane E: the batch is a task; its jobs are counted off the request path
+        tid = tasks.REGISTRY.begin("reprocess", by=web_auth.current_name(), total=len(job_ids))
+        tasks.REGISTRY.watch(tid, tasks.jobs_probe(job_ids, db))
     return jsonify({"status": "queued", "count": len(queued), "sample_ids": queued,
                     "job_ids": job_ids, "refused": refused})
 
@@ -2277,6 +2350,29 @@ def api_reprocess_preview():
         return _error(str(exc))
 
 
+# ── Live updates (v4.0; live.py, static/js/live.js) ──────────────────
+@app.route("/api/live", methods=["GET"])
+def api_live():
+    """What changed since ``?since=<boot_id>:<seq>``: ``{cursor, reset,
+    samples, instruments, agents, notifications_unread, hub}``. Answered from
+    memory only (the event ring, ``hub_control``'s refresher cache, the
+    in-memory notification store): never SQLite, and not activity
+    (``_NON_ACTIVITY_PATHS``), so an open tab neither blocks the idle
+    restart/deploy nor keeps its session alive."""
+    resp = jsonify(live.poll(request.args.get("since"), agents=hub_control.live_agents,
+                             hub=hub_control.live_hub, unread=live.notifications_unread,
+                             tasks=_live_tasks))
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _live_tasks() -> list:
+    """v4.0 lane E: the running-now feed for the signed-in viewer (memory
+    only; a download link only for its owner), titled with the GCs' names."""
+    names = {a["instrument_id"]: a.get("name") for a in hub_control.live_agents()}
+    return tasks.REGISTRY.snapshot(web_auth.current_name(), names=names)
+
+
 # ── Persistent system-notification tray ──────────────────────────────
 @app.route("/api/notifications", methods=["GET"])
 def api_notifications():
@@ -2305,9 +2401,24 @@ def api_restart():
     has a newer healthy one. ``{"dry_run": true}`` only reports what a
     restart would do (the UI labels its button with it).
 
-    Returns ``{"mode": "switch"|"restart", "tag": <tag or null>, "pid"}``;
-    the browser polls /healthz until ``pid`` changes."""
+    Returns ``{"mode": "switch"|"restart", "tag": <tag or null>, "pid",
+    "busy": [...], "blocked": [...]}``; the browser polls /healthz until
+    ``pid`` changes. While background work runs (``hub_control.busy_reasons``:
+    an admin job, a diagnostics build, a report ZIP, a QBench upload, running
+    Worker jobs, an export append) it answers 409 ``{error, busy, blocked}``
+    unless ``force: true``; a purge (``blocked``) is refused even with it."""
     body = request.get_json(silent=True) or {}
+    blocked = hub_control.blocking_reasons()
+    busy = hub_control.busy_reasons(export_pass=False)
+    if not body.get("dry_run"):
+        if blocked:
+            return jsonify({"error": "Restart is not possible now: " + "; ".join(blocked) + ".",
+                            "busy": busy, "blocked": blocked}), 409
+        if busy and body.get("force") is not True:
+            return jsonify({"error": "The hub is busy: " + "; ".join(busy) + ". Restart anyway "
+                                     "(force), or wait.", "busy": busy, "blocked": []}), 409
+        if busy:
+            LOGGER.warning("Restart forced by %s while: %s", _who(), "; ".join(busy))
     if body.get("dry_run"):
         with _restart_lock:
             if _restart_claimed:
@@ -2322,7 +2433,8 @@ def api_restart():
             # 15 minutes; a process that just came up doesn't need another.
             return jsonify({"error": f"The server just restarted, try again in {wait} s"}), 409
         mode, tag = request_restart(_who())
-    return jsonify({"mode": mode, "tag": tag, "pid": os.getpid()})
+    return jsonify({"mode": mode, "tag": tag, "pid": os.getpid(), "busy": busy,
+                    "blocked": blocked})
 
 
 @app.route("/api/server-status", methods=["GET"])
@@ -3082,7 +3194,7 @@ def api_qbench_upload():
         if not password:
             password = auto_p
 
-    global _upload_thread
+    global _upload_thread, _upload_task_id
 
     # ── If the upload thread is already running, APPEND items ─────────
     if _upload_thread and _upload_thread.is_alive():
@@ -3096,6 +3208,7 @@ def api_qbench_upload():
                     "status": "waiting", "step": 0, "steps": 1, "msg": "Waiting",
                 })
         _upload_new_items.set()  # wake the thread
+        _upload_task_progress()  # v4.0 lane E: the task's total grows
         # Tell all SSE clients about the new items
         with _upload_items_lock:
             total = len(_upload_items)
@@ -3166,6 +3279,7 @@ def api_qbench_upload():
             with _upload_items_lock:
                 if idx < len(_upload_item_status):
                     _upload_item_status[idx] = evt
+            _upload_task_progress()     # v4.0 lane E
             print(f"[UPLOAD] [{idx+1}/{total}] {lab_id}: {status} — {msg}", flush=True)
             try:
                 _publish_json(_upload_subscribers, _upload_sub_lock, evt)
@@ -3438,7 +3552,17 @@ def api_qbench_upload():
         except Exception:
             pass
 
-    _upload_thread = threading.Thread(target=_do_upload, daemon=True)
+    def _run_upload():
+        try:
+            _do_upload()
+        finally:
+            _upload_task_end()          # v4.0 lane E
+
+    _upload_thread = threading.Thread(target=_run_upload, daemon=True)
+    # v4.0 lane E: the upload is a task (alive: not started yet, or running)
+    _upload_task_id = tasks.REGISTRY.begin(
+        "qbench-upload", by=web_auth.current_name(), total=len(new_queue),
+        alive=lambda t=_upload_thread: t.ident is None or t.is_alive())
     _upload_thread.start()
     return jsonify({"status": "started", "count": len(new_queue)})
 
@@ -3493,6 +3617,7 @@ def api_qbench_skip_item():
         with _upload_items_lock:
             if idx < len(_upload_item_status):
                 _upload_item_status[idx] = evt
+        _upload_task_progress()         # v4.0 lane E
         _publish_json(_upload_subscribers, _upload_sub_lock, evt)
     return jsonify({"status": "ok"})
 
@@ -3630,6 +3755,14 @@ def healthz():
         # Through Cloudflare (gc.asaplabs.net): no session count, idle time or
         # hub internals for the internet. The updater polls localhost.
         return jsonify({"status": "ok", "version": version.APP_VERSION, "pid": os.getpid()})
+    try:
+        # The updater's auto-switch waits for idle_seconds >= its minimum: any
+        # background work (an import, a purge, a diagnostics build, a report
+        # ZIP, a QBench upload, running jobs) is "not idle" (the cache: no SQLite).
+        if hub_control.busy_reasons(cached=True, export_pass=False):
+            idle = 0.0
+    except Exception:
+        LOGGER.exception("healthz: busy check failed (non-fatal)")
     body = {"status": "ok", "version": version.APP_VERSION, "pid": os.getpid(),
             "active_sessions": active, "idle_seconds": round(idle, 1)}
     try:   # extra, never part of the contract: the hub tray's numbers
@@ -3655,7 +3788,7 @@ def index():
 def calibration_page():
     from flask import render_template
     try:
-        return render_template("calibration.html", app_version=version.APP_VERSION)
+        return render_template("calibration.html", app_version=version.APP_VERSION, nav="instruments")
     except Exception:
         return (
             "<h1>Calibration</h1>"
@@ -3751,11 +3884,16 @@ def _stop_busy() -> list:
         return [f"a QBench upload is running ({pending} item(s) queued)"]
     if REPORT_ZIPS.running():
         return ["a report ZIP is being built"]
+    if REPORT_ZIPS.busy():
+        return ["a report ZIP is waiting to be downloaded"]
     return []
 
 
 hub_control.configure(runtime=lambda: _hub_runtime, shutdown=_shutdown_for_stop,
                       started_at=_server_start_time, busy_extra=_stop_busy)
+# No admin job starts once this process has claimed its restart (Restart &
+# install waiting for the updater's answer, the 3 AM restart about to exit).
+hub_admin.set_restart_claimed(lambda: _restart_claimed)
 
 
 def _wake_exports() -> None:

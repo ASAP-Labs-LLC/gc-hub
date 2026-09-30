@@ -21,6 +21,7 @@ import re
 import secrets
 import tempfile
 import threading
+import time
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,7 @@ from flask import Blueprint, Response, jsonify, request
 
 import admin_auth
 import distill
+import live
 import netctx
 import paths
 import pipeline
@@ -57,7 +59,7 @@ def new_token() -> str:
 
 
 def mint_token(instrument_id: str, *, db=None, token: Optional[str] = None,
-               require_no_token: bool = False) -> str:
+               require_no_token: bool = False, by: Optional[str] = None) -> str:
     """Store ``token`` (default: a new one) as ``instrument_id``'s token,
     revoking any previous one. With ``require_no_token``, raise
     ``TokenExists`` instead if the instrument already has one (checked in the
@@ -73,11 +75,14 @@ def mint_token(instrument_id: str, *, db=None, token: Optional[str] = None,
                 raise TokenExists(row.get("token_issued_at") or "")
             store.instruments.upsert({"id": instrument_id, "token_hash": token_hash(token),
                                       "token_issued_at": store.now_iso()}, db=conn)
+            store.instrument_events.add(conn, instrument_id, "installer", by=by,
+                                        detail={"replaced": bool(row.get("token_hash"))})
     log.warning("agent token minted for %s (any previous token is revoked)", instrument_id)
+    live.publish("instrument", {"instrument_id": instrument_id})
     return token
 
 
-def revoke_token(instrument_id: str, *, db=None) -> None:
+def revoke_token(instrument_id: str, *, db=None, by: Optional[str] = None) -> None:
     """Remove the instrument's token: its agent is refused (401) until a new
     installer is downloaded."""
     with store.connection(_db(db)) as conn:
@@ -86,7 +91,9 @@ def revoke_token(instrument_id: str, *, db=None) -> None:
                 raise LookupError(f"unknown instrument {instrument_id!r}")
             store.instruments.upsert({"id": instrument_id, "token_hash": None,
                                       "token_issued_at": None}, db=conn)
+            store.instrument_events.add(conn, instrument_id, "token_revoked", by=by)
     log.warning("agent token revoked for %s", instrument_id)
+    live.publish("instrument", {"instrument_id": instrument_id})
 
 
 def verify_token(token: Any, *, db=None) -> Optional[dict]:
@@ -201,12 +208,15 @@ def _heartbeat_values(body: Any) -> dict:
 
 
 def record_heartbeat(instrument_id: str, values: dict, *, db=None,
-                     take_command: bool = True) -> Optional[str]:
+                     take_command: bool = True, publish: bool = True) -> Optional[str]:
     """Upsert the instrument's ``agents`` row from a heartbeat and take its
     pending command (delivered once: cleared in the same transaction). With
-    ``take_command=False`` (a disabled instrument) the command stays queued."""
+    ``take_command=False`` (a disabled instrument) the command stays queued.
+    Then (unless ``publish=False``) the live agent snapshot is updated and an
+    ``agent`` event published (``hub_control.note_agent``)."""
     cols = ["version", "package_sha256", "state", "queue_size", "rejected_count", "last_file",
             "last_error", "host", "agent_time", "results_seq"]
+    seen = store.now_iso()
     with store.connection(_db(db)) as conn:
         with store.write_txn(conn):
             conn.execute(
@@ -214,17 +224,35 @@ def record_heartbeat(instrument_id: str, values: dict, *, db=None,
                 f"VALUES (?, {', '.join('?' for _ in cols)}, ?) "
                 f"ON CONFLICT(instrument_id) DO UPDATE SET "
                 + ", ".join(f"{c}=excluded.{c}" for c in cols + ["last_seen"]),
-                [instrument_id, *(values.get(c) for c in cols), store.now_iso()])
+                [instrument_id, *(values.get(c) for c in cols), seen])
             row = conn.execute("SELECT pending_command FROM agents WHERE instrument_id=?",
                                (instrument_id,)).fetchone()
             command = row["pending_command"] if row and take_command else None
+            # the display name, so /api/live names a first check-in at once (lane E2 review)
+            inst = conn.execute("SELECT name, enabled FROM instruments WHERE id=?",
+                                (instrument_id,)).fetchone()
             if command is not None:
                 conn.execute("UPDATE agents SET pending_command=NULL WHERE instrument_id=?",
                              (instrument_id,))
+    if publish:
+        _note_live_agent(instrument_id, values, seen,
+                         name=inst["name"] if inst else None,
+                         enabled=bool(inst["enabled"]) if inst and inst["enabled"] is not None else None)
     if command is not None and command not in AGENT_COMMANDS:
         log.warning("dropping unknown pending command %r for %s", command, instrument_id)
         return None
     return command
+
+
+def _note_live_agent(instrument_id: str, values: dict, seen: str, *, name=None,
+                     enabled=None) -> None:
+    """The live agent snapshot and ``agent`` event (never breaks a heartbeat)."""
+    try:
+        import hub_control
+        hub_control.note_agent(instrument_id, values, seen, name=name, enabled=enabled)
+    except Exception:  # noqa: BLE001
+        log.exception("heartbeat: live update failed")
+        live.publish("agent", {"instrument_id": instrument_id})
 
 
 def set_agent_command(instrument_id: str, command: str, *, db=None) -> None:
@@ -238,6 +266,7 @@ def set_agent_command(instrument_id: str, command: str, *, db=None) -> None:
             conn.execute("INSERT INTO agents(instrument_id, pending_command) VALUES (?, ?) "
                          "ON CONFLICT(instrument_id) DO UPDATE SET "
                          "pending_command=excluded.pending_command", (instrument_id, command))
+    live.publish("agent", {"instrument_id": instrument_id})
 
 
 def clock_skew_seconds(agent_time: Optional[str], last_seen: Optional[str]) -> Optional[float]:
@@ -257,9 +286,12 @@ def clock_skew_seconds(agent_time: Optional[str], last_seen: Optional[str]) -> O
     return (agent - hub_local).total_seconds()
 
 
-def agents_status(*, db=None) -> list:
+def agents_status(*, db=None, now: Optional[float] = None) -> list:
     """Every instrument with its agent row (``None`` fields if it never
-    reported), ``clock_skew_seconds`` and the token's issue date."""
+    reported), ``clock_skew_seconds``, the token's issue date, and ``live`` /
+    ``last_seen_age_s`` by the one liveness rule (``live.agent_liveness``, on
+    the hub's clock; v4.0 lane E)."""
+    t = time.time() if now is None else now
     with store.connection(_db(db)) as conn:
         rows = conn.execute(
             "SELECT i.id AS instrument_id, i.name AS instrument_name, i.enabled, "
@@ -271,6 +303,7 @@ def agents_status(*, db=None) -> list:
     for r in rows:
         d = dict(r)
         d["clock_skew_seconds"] = clock_skew_seconds(d["agent_time"], d["last_seen"])
+        d["live"], d["last_seen_age_s"] = live.agent_liveness(d["last_seen"], t)
         out.append(d)
     return out
 
@@ -404,6 +437,10 @@ def api_ingest():
                               data_dir=paths.data_dir(), db=_db(None), notifier=_notifier())
     except pipeline.UnknownInstrument as exc:
         return _err(str(exc), 401)
+    except pipeline.InstrumentPaused as exc:       # an admin purge of it is running (v4.0)
+        resp, code = _err(str(exc), 503)
+        resp.headers["Retry-After"] = "60"           # the agent backs off 5 s doubling to 300 s
+        return resp, code
     except pipeline.InstrumentDisabled as exc:     # before SubmitRejected (its base class)
         return _err(str(exc), 403)
     except pipeline.SubmitRejected as exc:
@@ -664,7 +701,7 @@ def api_admin_installer(instrument_id):
     token = new_token()                     # the zip is built before the hash is stored
     data = installer_zip(hub_url, token, pkg, hub_version(), lan_url(hub_url))
     try:
-        mint_token(instrument_id, token=token, require_no_token=not confirmed)
+        mint_token(instrument_id, token=token, require_no_token=not confirmed, by=_actor())
     except TokenExists:                     # minted by someone else meanwhile
         return needs_confirm
     except LookupError:
@@ -683,7 +720,7 @@ def api_admin_revoke_token(instrument_id):
     if err:
         return err
     try:
-        revoke_token(instrument_id)
+        revoke_token(instrument_id, by=_actor())
     except LookupError as exc:
         return _err(str(exc), 404)
     log.warning("agent token of %s revoked by %s", instrument_id, _actor())

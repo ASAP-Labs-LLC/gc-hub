@@ -20,8 +20,8 @@
   font-size: 10px;
   letter-spacing: 0.04em;
   font-variant-numeric: tabular-nums;
-  color: var(--text-muted, var(--muted, #7d8590));
-  opacity: 0.55;
+  /* v4.0: full opacity, so the badge reaches 4.5:1 (it stays small and muted) */
+  color: var(--badge-fg, var(--text-muted, var(--muted, #7d8590)));
 }
 
 /* ── Signed in as <name> · Sign out ──────────────────────────────────
@@ -33,8 +33,7 @@
   right: 64px;
   z-index: 60;
   font-size: 11px;
-  color: var(--text-muted, var(--muted, #7d8590));
-  opacity: 0.8;
+  color: var(--badge-fg, var(--text-muted, var(--muted, #7d8590)));
 }
 #signed-in #signed-in-name { color: var(--text, var(--txt, #e6edf3)); }
 #signed-in #sign-out {

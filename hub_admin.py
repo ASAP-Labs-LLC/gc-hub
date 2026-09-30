@@ -51,6 +51,26 @@ sample is backfill and is never exported automatically, D11)::
          carries a warning (rows are matched to stored revisions by CSV path and
          line number).
 
+Purge instrument data (v4.0, ``purge.py``; the page's *Purge instrument data*
+panel)::
+
+    POST /api/admin/purge/preview   {password, instrument, scope: all|backfill}
+         → 200 {preview} (read-only); 400 bad scope; 404 unknown instrument
+    POST /api/admin/purge/start     {password, instrument, scope,
+                                     confirm_text: purge.confirmation_text(...),
+                                     new_results_path?}
+         → 202 {job} (kind ``purge``, the same ``AdminJobs`` runner: one job at a
+           time); 400 wrong confirmation, scope or path; 404 unknown instrument;
+           409 another admin job is running, or the path is another
+           instrument's results file. Progress and the summary come through
+           ``/api/admin/jobs/status``.
+    GET  /api/purge/status          (session, no password) → {job, journal}: the
+         running or last purge job and the newest purge journal, reduced to
+         state, phase, counts, times and a name, so the admin page shows a
+         purge in progress as soon as it opens
+    POST /api/admin/purge/status    {password} → the same in full (paths,
+         warnings, files not moved, kept samples and files)
+
 Exports (need the running ``exports.HubExporter``: ``set_exporter`` is
 called by ``hub.start``; 503 until then)::
 
@@ -105,6 +125,7 @@ import exports
 import web_auth
 import paths
 import store
+import tasks
 
 log = logging.getLogger("hub_admin")
 
@@ -133,14 +154,109 @@ class JobStopped(RuntimeError):
     re-raise it with the summary so far attached."""
 
 
+class JobRefused(RuntimeError):
+    """``AdminJobs.start`` refused before starting anything (``status``: the
+    HTTP status the route answers)."""
+
+    def __init__(self, message: str, status: int = 409):
+        super().__init__(message)
+        self.status = status
+
+
+def _no_restart_claimed() -> bool:
+    return False
+
+
+_restart_claimed: Callable[[], bool] = _no_restart_claimed
+
+
+def set_restart_claimed(fn: Callable[[], bool]) -> None:
+    """``app.py``: whether this process has claimed its restart (Restart &
+    install waiting for the updater, the 3 AM restart about to exit)."""
+    global _restart_claimed
+    _restart_claimed = fn
+
+
+def job_refusal(kind: str, *, startup: bool = True) -> Optional[JobRefused]:
+    """Why no admin job may start now, or None: the hub has not finished its
+    start-up recovery for this data folder (503: it must never recover a job
+    it just started), or a restart is under way (409: the job would be cut
+    short)."""
+    data = paths.data_dir()
+    if startup and data is not None:
+        import hub
+        if not hub.startup_recovered(data):
+            return JobRefused("The hub is still starting; try again shortly.", 503)
+    try:
+        claimed = bool(_restart_claimed())
+    except Exception:  # noqa: BLE001
+        claimed = False
+    if claimed:
+        return JobRefused("A restart is under way; start this again once the hub is back.", 409)
+    return None
+#: v4.0 lane E: where each admin job's panel is on /admin/hub (the task
+#: feed's "Open").
+OPEN_URLS = {"load-folder": "/admin/hub#load-folder",
+             "import-history": "/admin/hub#import-history",
+             "import-history-dry-run": "/admin/hub#import-history",
+             "purge": "/admin/hub#purge-panel",
+             "diagnostics-bundle": "/admin/hub#diagnostics"}
+
+
 class AdminJobs:
     """One admin job at a time, run on a daemon thread, its progress kept in
-    memory for polling."""
+    memory for polling. Each job is also a task in ``tasks`` (default
+    ``tasks.REGISTRY``; v4.0 lane E): its kind, instrument, who started it and
+    its progress in words, never its parameters, summary or error."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, tasks=None) -> None:
         self._lock = threading.Lock()
         self._ids = itertools.count(1)
         self._job: Optional[dict] = None
+        # kind -> JobRefused | None, checked before a job starts (job_refusal)
+        self.refuse: Optional[Callable[[str], Optional[JobRefused]]] = None
+        self._tasks = tasks
+        self._task_ids: dict = {}          # job id -> task id
+
+    # ── the task feed (v4.0 lane E; the registry never raises into the job) ──
+    def _registry(self):
+        return self._tasks if self._tasks is not None else tasks.REGISTRY
+
+    @staticmethod
+    def _open_url(kind: str) -> str:
+        return OPEN_URLS.get(kind, "/admin/hub")
+
+    def _task_begin(self, job: dict) -> None:
+        try:
+            by = web_auth.current_name()
+        except Exception:  # noqa: BLE001 - outside a request
+            by = None
+        params = job.get("params") or {}
+        self._task_ids[job["id"]] = self._registry().begin(
+            job["kind"], by=by, instrument=params.get("instrument"),
+            open_url=self._open_url(job["kind"]))
+
+    def _task_progress(self, job: dict, event: dict) -> None:
+        tid = self._task_ids.get(job["id"])
+        if tid is not None:
+            self._registry().update(tid, done=event.get("done"), total=event.get("total"),
+                                    text=tasks.phase_text(event))
+
+    @staticmethod
+    def _task_counts(job: dict) -> dict:
+        """The few numbers the outcome line names (never paths or text)."""
+        s = job.get("summary") if isinstance(job.get("summary"), dict) else {}
+        c = s.get("counts") if isinstance(s.get("counts"), dict) else {}
+        out = {"done": (job.get("progress") or {}).get("done"),
+               "classified": c.get("cdfs_read"), "imported": c.get("imported"),
+               "created": s.get("created"), "duplicate": s.get("duplicate"),
+               "bytes": s.get("size"), "samples": c.get("samples", s.get("samples"))}
+        return {k: v for k, v in out.items() if isinstance(v, int) and not isinstance(v, bool)}
+
+    def _task_finish(self, job: dict) -> None:
+        tid = self._task_ids.pop(job["id"], None)
+        if tid is not None:
+            self._registry().finish(tid, job["state"], counts=self._task_counts(job))
 
     def current(self) -> Optional[dict]:
         with self._lock:
@@ -148,7 +264,12 @@ class AdminJobs:
 
     def start(self, kind: str, fn: Callable[..., dict], params: dict) -> dict:
         """Run ``fn(progress=callback)`` in the background. ``RuntimeError``
-        if a job is running."""
+        if a job is running; ``JobRefused`` (a subclass) when ``refuse`` says
+        no job may start now."""
+        if self.refuse is not None:
+            refused = self.refuse(kind)
+            if refused is not None:
+                raise refused
         with self._lock:
             if self._job is not None and self._job["state"] == "running":
                 raise RuntimeError(f"a {self._job['kind']} job is already running")
@@ -157,6 +278,7 @@ class AdminJobs:
                    "recent": [], "summary": None, "result": None, "error": None,
                    "stop_requested": False}
             self._job = job
+            self._task_begin(job)
         threading.Thread(target=self._run, args=(job, fn), daemon=True,
                          name=f"admin-{kind}").start()
         return _copy(job)
@@ -183,6 +305,7 @@ class AdminJobs:
                 job["recent"] = (job["recent"] + [{k: event.get(k) for k in
                                                    ("file", "outcome", "sample_id", "message")}
                                                   ])[-RECENT_FILES:]
+            self._task_progress(job, event)
 
     def _run(self, job: dict, fn: Callable[..., dict]) -> None:
         try:
@@ -200,6 +323,7 @@ class AdminJobs:
         with self._lock:
             job.update(state=state, error=error, summary=summary, finished_at=_now(),
                        result=None if summary is None else {"summary": summary})
+            self._task_finish(job)
 
 
 def _copy(job: Optional[dict]) -> Optional[dict]:
@@ -213,6 +337,7 @@ def _copy(job: Optional[dict]) -> Optional[dict]:
 
 
 JOBS = AdminJobs()
+JOBS.refuse = job_refusal
 
 
 def _err(message: str, status: int, **extra):
@@ -263,7 +388,7 @@ def api_admin_load_folder():
         job = JOBS.start("load-folder", run, {"instrument": inst, "folder": str(folder),
                                               "backfill": backfill, "by": _who()})
     except RuntimeError as exc:
-        return _err(str(exc), 409, job=JOBS.current())
+        return _err(str(exc), getattr(exc, "status", 409), job=JOBS.current())
     log.info("admin: load-folder %s from %s (backfill %s) started by %s", inst, folder,
              backfill, _who())
     return jsonify({"job": job}), 202
@@ -348,7 +473,7 @@ def api_admin_import_history_dry_run():
             "results_csv": str(results_csv) if results_csv else None, "aliases": aliases,
             "batch_size": batch_size, "by": _who()})
     except RuntimeError as exc:
-        return _err(str(exc), 409, job=JOBS.current())
+        return _err(str(exc), getattr(exc, "status", 409), job=JOBS.current())
     log.info("admin: import-history dry run %s from %s (csv %s) started by %s", inst,
              processed_dir, results_csv, _who())
     return jsonify({"job": job}), 202
@@ -383,7 +508,7 @@ def api_admin_import_history_start():
             "results_csv": str(results_csv) if results_csv else None, "aliases": aliases,
             "batch_size": batch_size, "by": _who()})
     except RuntimeError as exc:
-        return _err(str(exc), 409, job=JOBS.current())
+        return _err(str(exc), getattr(exc, "status", 409), job=JOBS.current())
     log.info("admin: import-history %s from %s (csv %s) started by %s", inst, processed_dir,
              results_csv, _who())
     return jsonify({"job": job}), 202
@@ -402,6 +527,114 @@ def api_admin_import_history_last_run():
         return _err(f"Unknown instrument {inst!r}", 404)
     from jobs.import_history import last_run
     return jsonify({"last_run": last_run(inst, db=_db())})
+
+
+# ── purge instrument data (v4.0) ────────────────────────────────────────────
+
+def _purge_params(body: dict):
+    """``(instrument, scope)`` as sent (``purge`` validates them)."""
+    return str(body.get("instrument") or "").strip(), body.get("scope")
+
+
+@bp.route("/api/admin/purge/preview", methods=["POST"])
+def api_admin_purge_preview():
+    """What a purge of one instrument would remove and keep (``purge.preview``;
+    read-only)."""
+    body, err = _admin()
+    if err:
+        return err
+    import purge
+    inst, scope = _purge_params(body)
+    with _exporter_lock:
+        exp = _exporter
+    try:
+        pv = purge.preview(inst, scope, db=_db(), data_dir=paths.require_data_dir(),
+                           exporter=exp)
+    except purge.PurgeRefused as exc:
+        return _err(str(exc), exc.status)
+    return jsonify({"preview": pv})
+
+
+def _purge_status() -> tuple:
+    import purge
+    job = JOBS.current()
+    if job is not None and job.get("kind") != "purge":
+        job = None
+    if job is not None:
+        job.pop("stop_requested", None)
+    try:
+        journal = purge.latest_journal(paths.require_data_dir())
+    except Exception:  # noqa: BLE001 - informational
+        log.exception("purge status: could not read the journals")
+        journal = None
+    return job, journal
+
+
+@bp.route("/api/purge/status", methods=["GET"])
+def api_purge_status():
+    """The running or last purge for any signed-in user (no password), so the
+    admin page shows it as soon as it opens: ``{job, journal}`` reduced to
+    state, phase, counts, times and the name of who started it
+    (``purge.public_job``/``public_summary``). Paths, kept files, lab IDs,
+    addresses and warning texts are only in ``POST /api/admin/purge/status``."""
+    import purge
+    job, journal = _purge_status()
+    return jsonify({"job": purge.public_job(job), "journal": purge.public_summary(journal)})
+
+
+@bp.route("/api/admin/purge/status", methods=["POST"])
+def api_admin_purge_status():
+    """``{job, journal}`` in full (admin password): the backup and purged
+    folder, warnings, files not moved, kept samples and files."""
+    _body, err = _admin()
+    if err:
+        return err
+    job, journal = _purge_status()
+    return jsonify({"job": job, "journal": journal})
+
+
+@bp.route("/api/admin/purge/start", methods=["POST"])
+def api_admin_purge_start():
+    """Start the purge as an admin job (kind ``purge``; one admin job at a time).
+    The confirmation, scope, instrument and ``new_results_path`` are checked
+    here first (400/404/409) and again by ``purge.run``."""
+    body, err = _admin()
+    if err:
+        return err
+    import purge
+    inst, scope = _purge_params(body)
+    confirm = body.get("confirm_text")
+    raw_path = body.get("new_results_path")
+    data_dir = paths.require_data_dir()
+    with _exporter_lock:
+        exp = _exporter
+    try:
+        row = purge._instrument(inst, _db())
+        purge._check_scope(scope)
+        if confirm != purge.confirmation_text(row, db=_db()):
+            return _err(f'Type "{purge.confirmation_text(row, db=_db())}" exactly to confirm the purge', 400)
+        if raw_path not in (None, ""):
+            purge.check_new_results_path(raw_path, row["id"], db=_db(), data_dir=data_dir,
+                                         exporter=exp)
+    except purge.PurgeRefused as exc:
+        return _err(str(exc), exc.status)
+    by = _who()
+    import hub
+    runtime = hub.running()
+    notifier = runtime.notifier if runtime is not None else hub.default_notifier()
+
+    def run(progress):
+        return purge.run(row["id"], scope, confirm_text=confirm, by=by, db=_db(),
+                         data_dir=data_dir, exporter=exp, notifier=notifier,
+                         new_results_path=raw_path, progress=progress)
+
+    try:
+        job = JOBS.start("purge", run, {"instrument": row["id"], "scope": scope,
+                                        "new_results_path": raw_path or None, "by": by})
+    except RuntimeError as exc:
+        return _err(str(exc), getattr(exc, "status", 409), job=JOBS.current())
+    log.warning("admin: purge of %s (%s) started by %s", row["id"], scope, by)
+    return jsonify({"job": job}), 202
 
 
 # ── exports ─────────────────────────────────────────────────────────────────
@@ -546,6 +779,7 @@ def _bundle_name() -> str:
 #: ``diagnostics.exclusive``), independent of the import/load jobs so a long
 #: history import never blocks a bundle.
 DIAG_JOBS = AdminJobs()
+DIAG_JOBS.refuse = lambda kind: job_refusal(kind, startup=False)
 
 
 @bp.route("/api/admin/diagnostics/bundle", methods=["POST"])
@@ -589,7 +823,7 @@ def api_admin_diagnostics_bundle():
         job = DIAG_JOBS.start("diagnostics-bundle", run, {"options": options, "by": who})
     except RuntimeError as exc:
         hold.__exit__(None, None, None)
-        return _err(str(exc), 409, job=DIAG_JOBS.current())
+        return _err(str(exc), getattr(exc, "status", 409), job=DIAG_JOBS.current())
     log.info("admin: diagnostics bundle %s (options %s) started by %s", name, options, who)
     return _no_store(jsonify({"job": job})), 202
 
@@ -713,6 +947,6 @@ def admin_hub_page():
         configured = None
     diag_options = [{"key": k, "label": diagnostics.LABELS[k], "default": diagnostics.OPTIONS[k]}
                     for k in diagnostics.OPTION_KEYS]
-    return render_template("hub_admin.html", app_version=version.APP_VERSION,
+    return render_template("hub_admin.html", app_version=version.APP_VERSION, nav="admin",
                            diag_options=diag_options, hub_url=configured or "",
                            hub_url_effective=configured or admin_auth.DEFAULT_HUB_URL)

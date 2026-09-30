@@ -14,6 +14,9 @@
     // dropped instead of being drawn into the wrong instrument's page.
     let GENERATION = 0;
     const stale = (gen) => gen !== GENERATION;
+    let AGENT_CARD = null;          // the selected instrument's Agent card (redrawn live)
+    // what the Agent card shows of the instrument row (all a live redraw updates)
+    const AGENT_FIELDS = ['agent', 'has_token', 'token_issued_at'];
 
     // ── DOM helpers (text only) ────────────────────────────────────────────
     function h(tag, props, ...children) {
@@ -42,33 +45,41 @@
     }
 
     // ── HTTP ───────────────────────────────────────────────────────────────
-    async function getJSON(path) {
-        const r = await fetch(path, { headers: { Accept: 'application/json' } });
-        let body = null;
-        try { body = await r.json(); } catch (_e) { body = null; }
+    async function getJSON(path, opts) {
+        const init = { headers: { Accept: 'application/json' } };
+        // bg: the page asked on its own (a live update), marked so it isn't activity
+        const r = (opts && opts.bg && window.GCLive) ? await GCLive.bgFetch(path, init)
+                                                     : await fetch(path, init);
+        const body = (await window.GCSession.readJson(r)).body;
         return { status: r.status, body };
     }
 
-    function password() {
-        const pw = $('admin-pw').value;
-        if (!pw) { flash('Enter the admin password (top right) first.', 'err'); return null; }
-        return pw;
-    }
-
+    // v4.0 lane E2: the page's one 15-minute unlock (admin_unlock.js), asked
+    // for in its masked dialog; no password box of its own.
     async function adminPost(path, payload, opts) {
-        const pw = password();
-        if (pw === null) return null;
-        const r = await fetch(path, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(Object.assign({}, payload || {}, { password: pw })),
-        });
-        if (opts && opts.raw) return r;
-        let body = null;
-        try { body = await r.json(); } catch (_e) { body = null; }
-        if (r.status >= 400 && !(opts && opts.quiet)) {
-            flash((body && body.error) || ('HTTP ' + r.status), 'err');
+        const U = window.GCAdminUnlock;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const pw = await U.ask('change this instrument');
+            if (!pw) { flash('Not changed: the admin password is needed.', 'err'); return null; }
+            const r = await fetch(path, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(Object.assign({}, payload || {}, { password: pw })),
+            });
+            if (r.status === 403) {
+                const b = (await window.GCSession.readJson(r.clone())).body;
+                U.refused({ status: 403 });
+                if (attempt === 0 && b && /incorrect password/i.test(b.error || '')) continue;
+            } else if (r.status < 400) {
+                U.accepted(pw);
+            }
+            if (opts && opts.raw) return r;
+            const body = (await window.GCSession.readJson(r)).body;
+            if (r.status >= 400 && !(opts && opts.quiet)) {
+                flash((body && body.error) || ('HTTP ' + r.status), 'err');
+            }
+            return { status: r.status, body };
         }
-        return { status: r.status, body };
+        return null;
     }
 
     const enc = encodeURIComponent;
@@ -78,6 +89,7 @@
         const { status, body } = await getJSON('/api/instruments');
         if (status !== 200) { flash((body && body.error) || 'Could not load instruments', 'err'); return; }
         STATE.list = body.instruments || [];
+        STATE.list.forEach(i => stampRead(i.agent));
         STATE.hubUrl = body.hub_url || null;
         STATE.commands = body.agent_commands || [];
         STATE.hubMethods = body.hub_methods || [];
@@ -124,6 +136,7 @@
         if (stale(gen)) return;
         if (status !== 200) { flash((body && body.error) || 'Could not load ' + id, 'err'); return; }
         STATE.detail = body;
+        if (body && body.instrument) stampRead(body.instrument.agent);
         renderDetail();
     }
 
@@ -131,8 +144,9 @@
     function renderDetail() {
         const d = STATE.detail;
         const main = $('detail');
+        AGENT_CARD = agentCard(d);
         main.replaceChildren(
-            settingsCard(d), agentCard(d), exportCard(d), calibrationCard(d), correctionsCard(d),
+            settingsCard(d), AGENT_CARD, exportCard(d), calibrationCard(d), correctionsCard(d),
             methodsCard(d), backfillCard(d), conflictsCard(d), standardsCard(d));
         loadBackfill();
         loadConflicts();
@@ -262,7 +276,9 @@
             ['Token', inst.has_token ? 'issued ' + txt(inst.token_issued_at) : 'none'],
         ];
         const table = h('table', {}, h('tbody', {}, ...rows.map(([k, v]) =>
-            h('tr', {}, h('th', { text: k }), h('td', { className: k === 'Last file' || k === 'Last error' ? 'mono' : '', text: txt(v) })))));
+            h('tr', {}, h('th', { text: k }), h('td', { className: k === 'Last file' || k === 'Last error' ? 'mono' : '',
+                                                         'data-live': k === 'Last seen' ? 'last-seen' : null,
+                                                         text: k === 'Last seen' ? lastSeenText(a) : txt(v) })))));
         const cmds = STATE.commands.filter(c => c !== 'adopt-mirror').map(c =>
             h('button', { className: 'btn', text: c, onclick: () => command(inst.id, c) }));
         return card(['Agent', h('span', { className: 'badge ' + (health.level === 'ok' ? 'ok' : 'warn'), text: health.text })],
@@ -292,7 +308,7 @@
             { confirm_revoke: !!confirmRevoke }, { raw: true });
         if (!r) return;
         let body = null;
-        if (r.status !== 200) { try { body = await r.json(); } catch (_e) { body = null; } }
+        if (r.status !== 200) { body = (await window.GCSession.readJson(r)).body; }
         const out = L.installerOutcome(r.status, body);
         if (out.kind === 'download') {
             const blob = await r.blob();
@@ -626,6 +642,74 @@
     });
 
     $('btn-refresh').addEventListener('click', () => { lemMachines(true); buildAddLem(); loadList(true); });
+
+    // ── live agent status (v4.0, static/js/live.js) ────────────────────────
+    // A heartbeat updates the list's dot and the selected instrument's Agent
+    // card without a reload (only that card is redrawn, so a form being
+    // filled in elsewhere on the page is left alone); "Last seen" ticks on
+    // the client from the hub's age (v4.0 lane E: the hub decides live, on
+    // its own clock; the browser's clock is never compared with last_seen).
+    // Lane B's new Instruments page replaces this one.
+    function stampRead(agent) {
+        if (agent && typeof agent === 'object') agent._readAt = Date.now();
+        return agent;
+    }
+
+    function lastSeenText(a) {
+        const v = a && a.last_seen;
+        if (v === null || v === undefined || v === '') return '—';
+        const now = Date.now();
+        const age = L.lastSeenAge(a, a._readAt || now, now);
+        return (age !== null && window.GCLive)
+            ? String(v) + ' (' + GCLive.agoText(now - age * 1000, now) + ')' : String(v);
+    }
+
+    async function redrawAgentCard() {
+        const id = STATE.selected;
+        const gen = GENERATION;
+        // a background GET (never activity); only the agent's part of the
+        // state changes, so the other cards stay consistent with what they show
+        const { status, body } = await getJSON('/api/instruments/' + enc(id), { bg: true });
+        if (stale(gen) || status !== 200 || !STATE.detail || !body || !body.instrument) return;
+        const inst = STATE.detail.instrument;
+        for (const k of AGENT_FIELDS) inst[k] = body.instrument[k];
+        stampRead(inst.agent);
+        const fresh = agentCard(STATE.detail);
+        if (AGENT_CARD && AGENT_CARD.parentNode) AGENT_CARD.replaceWith(fresh);
+        AGENT_CARD = fresh;
+    }
+
+    function onLive(u) {
+        let selectedChanged = false;
+        for (const a of u.agents || []) {
+            const inst = STATE.list.find(i => i.id === a.instrument_id);
+            if (!inst) continue;
+            const old = inst.agent || {};
+            const same = old.last_seen === a.last_seen && old.version === a.version
+                && old.host === a.host && old.state === a.status && old.live === a.live;
+            inst.agent = stampRead(Object.assign({}, old, {
+                last_seen: a.last_seen, version: a.version, host: a.host, state: a.status,
+                live: a.live, last_seen_age_s: a.last_seen_age_s }));
+            if (same) continue;
+            if (a.instrument_id === STATE.selected) selectedChanged = true;
+        }
+        renderList();
+        if (selectedChanged && STATE.detail) redrawAgentCard();
+    }
+
+    function tick() {
+        const cell = AGENT_CARD && AGENT_CARD.querySelector('[data-live="last-seen"]');
+        const a = STATE.detail && STATE.detail.instrument && STATE.detail.instrument.agent;
+        if (cell && a) cell.textContent = lastSeenText(a);
+    }
+
+    if (window.GCLive) {
+        GCLive.subscribe(onLive);
+        GCLive.start();
+        setInterval(tick, 1000);
+        // (v4.0 lane E: no client-side stale timer; the hub's `live` flips in
+        // an /api/live update)
+    }
 
     loadList(false);
 })();

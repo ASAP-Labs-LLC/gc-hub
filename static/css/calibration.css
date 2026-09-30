@@ -1,0 +1,54 @@
+/* calibration.css (v4.0 lane E2): the peak-assignment page inside the shell,
+   on tokens.css + shell.css. The chart and the peak list fill the window
+   below the top bar; the bottom keeps room for the version badge. Colours are
+   tokens only (tests/test_ui_contrast.py). */
+
+.cal {
+    display: flex; flex-direction: column; gap: var(--s3);
+    padding: var(--s4) var(--s6) calc(var(--badge-room) + var(--s2));
+    height: calc(100vh - var(--topbar-h)); min-height: 520px; min-width: 0;
+}
+.cal-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s4); }
+.cal-tools .spacer { flex: 1; }
+.cal-field { display: inline-flex; align-items: center; gap: var(--s2); font-size: var(--fs-sm); color: var(--text-muted); }
+.cal-field select { color: var(--text); }
+.cal-field input[type="range"] { width: 140px; accent-color: var(--ink); }
+.cal-field .num { min-width: 22px; text-align: right; color: var(--text); }
+.cal-cdf { min-width: 0; overflow-wrap: anywhere; }
+.cal-status { font-size: var(--fs-sm); color: var(--text-muted); min-width: 0; overflow-wrap: anywhere; }
+.cal-status.ok { color: var(--pill-final-fg); }
+.cal-status.err { color: var(--st-error); }
+
+.cal-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 460px; gap: var(--s4); }
+.cal-chart, .cal-peaks { display: flex; flex-direction: column; min-height: 0; padding: var(--s3); }
+#chart { flex: 1; min-height: 300px; }
+.cal-legend { display: flex; flex-wrap: wrap; gap: var(--s4); padding: var(--s2) var(--s2) 0; font-size: var(--fs-xs); color: var(--text-muted); }
+.cal-legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+.cal-legend .dot.assigned { background: var(--st-final); }
+.cal-legend .dot.unassigned { background: var(--chart-ink); }
+.cal-legend .dot.ignored { background: var(--text-muted); }
+
+.cal-peaks-head { display: flex; align-items: center; gap: var(--s2); padding: 0 var(--s1) var(--s3); }
+.cal-peaks-head h2 { font-size: var(--fs-md); flex: 1; }
+.cal-scroll { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--border-light); border-radius: var(--radius-md); }
+.cal-scroll .tbl th { white-space: nowrap; position: sticky; top: 0; background: var(--bg-card); z-index: 1; }
+.cal-scroll .tbl th, .cal-scroll .tbl td { padding-left: 10px; padding-right: 10px; }
+.cal-scroll .tbl td { padding-top: 6px; padding-bottom: 6px; white-space: nowrap; }
+.cal-scroll .tbl td.num { font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.cal-scroll .tbl select { height: 30px; width: 100%; min-width: 150px; font-size: var(--fs-sm); }
+.cal-scroll tbody tr { cursor: pointer; }
+.cal-scroll tbody tr:hover { background: var(--bg-hover); }
+.cal-scroll tbody tr.assigned td:first-child { box-shadow: inset 3px 0 0 var(--st-final); }
+/* ignored peaks: muted and italic (not faded: faded text fails AA) */
+.cal-scroll tbody tr.ignored td { color: var(--text-muted); font-style: italic; }
+.cal-scroll tbody tr.sel { background: var(--bg-active); }
+.cal-scroll tbody tr.sel td, .cal-scroll tbody tr.sel td.num { color: var(--text); }
+.cal-scroll td.empty { padding: var(--s6); text-align: center; color: var(--text-muted); }
+.cal-hint { margin: var(--s3) var(--s1) 0; }
+
+@media (max-width: 1100px) {
+    .cal { height: auto; }
+    .cal-grid { grid-template-columns: minmax(0, 1fr); }
+    #chart { min-height: 360px; }
+    .cal-scroll { max-height: 420px; }
+}

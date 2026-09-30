@@ -96,6 +96,24 @@ def test_files_filters_and_paging(hub_app):
     assert get(port, "/api/files?limit=x")[0] == 400
 
 
+def test_files_ids_filter(hub_app):
+    """v3.1 live updates: the client fetches only the changed rows."""
+    port, hub, _ = hub_app
+    want = sorted([hub.ids["final"], hub.ids["held"]])
+    code, body = get(port, f"/api/files?ids={want[0]},{want[1]}")
+    assert code == 200
+    assert sorted(s["sample_id"] for s in body["samples"]) == want and body["total"] == 2
+    # with the list's own filters: a changed row that no longer matches is absent
+    _, body = get(port, f"/api/files?ids={want[0]},{want[1]}&status=final")
+    assert [s["sample_id"] for s in body["samples"]] == [hub.ids["final"]]
+    _, body = get(port, f"/api/files?ids={UNKNOWN}")
+    assert body["samples"] == [] and body["total"] == 0
+    assert get(port, "/api/files?ids=1,x")[0] == 400
+    for odd in ("%C2%B2", "%EF%BC%91", "-1", "1e3"):      # superscript 2, fullwidth 1: never a 500
+        assert get(port, "/api/files?ids=" + odd)[0] == 400, odd
+    assert get(port, "/api/files?ids=" + ",".join(str(i) for i in range(1, 1002)))[0] == 400
+
+
 def test_files_never_reads_a_cdf(hub_app):
     port, hub, _ = hub_app
     cdf = hub.data / "cdf"
