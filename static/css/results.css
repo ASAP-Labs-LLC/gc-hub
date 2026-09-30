@@ -1,0 +1,84 @@
+/* results.css (v5.0 lane R): the /results page on tokens.css + shell.css.
+   Numbers right-aligned in tabular figures, °C once in each group header, a
+   status glyph per row, the lab ID column sticky when All points scrolls
+   sideways (inside the table, never the page). Colours are tokens only
+   (tests/test_ui_contrast.py). */
+
+.content-wide { max-width: none; }
+
+/* ── filters ─────────────────────────────────────────────────────────── */
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s3); margin-bottom: var(--s5); }
+.filters .spacer { flex: 1; }
+.filters .search { position: relative; display: inline-flex; align-items: center; }
+.filters .search .ico { position: absolute; left: 12px; color: var(--text-muted); pointer-events: none; }
+.gc .filters .search input { width: 220px; padding-left: 36px; border-radius: var(--radius-pill); }
+.gc .filters select { border-radius: var(--radius-pill); height: 34px; }
+
+/* ── the overlay chart ───────────────────────────────────────────────── */
+.overlay { padding: var(--s4) var(--s5) var(--s3); margin-bottom: var(--s5); }
+.overlay-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s3); margin-bottom: var(--s2); }
+.overlay-bar h2 { font-size: var(--fs-md); }
+.overlay-bar .spacer { flex: 1; }
+.picked { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--s2); }
+.pick { display: inline-flex; align-items: center; gap: var(--s2); height: 30px; padding: 0 var(--s1) 0 var(--s3); border: 1px solid var(--border-light); border-radius: var(--radius-pill); font-size: var(--fs-sm); color: var(--text); }
+.pick .icon-btn { width: 24px; height: 24px; }
+.swatch { width: 22px; height: 0; border-top: 2px solid var(--chart-ink); flex: none; }
+.swatch.shade-ref { border-top-color: var(--chart-ref); }
+.swatch.dash-dash, .swatch.dash-longdash { border-top-style: dashed; }
+.swatch.dash-dot { border-top-style: dotted; }
+.swatch.dash-dashdot, .swatch.dash-longdashdot { border-top-style: dashed; border-top-width: 3px; }
+.chart { width: 100%; min-height: 300px; }
+
+/* ── the table ───────────────────────────────────────────────────────── */
+.table-card { overflow: hidden; }
+.table-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2) var(--s3); padding: var(--s4) var(--s5) var(--s3); border-bottom: 1px solid var(--border-light); }
+.table-head h2 { font-size: var(--fs-md); }
+.table-head .spacer { flex: 1; }
+.tablewrap { overflow-x: auto; }
+.tbl.results { font-size: var(--fs-sm); white-space: nowrap; }
+.tbl.results th, .tbl.results td { padding: 9px 8px; }
+.tbl.results thead th { background: var(--bg-card); color: var(--text-muted); }
+.tbl.results tr.groups th { color: var(--text); font-weight: 600; font-size: var(--fs-xs); padding-top: 10px; padding-bottom: 6px; }
+.tbl.results th.grp { text-align: left; border-left: 1px solid var(--border-light); }
+.tbl.results .first { border-left: 1px solid var(--border-light); }
+.tbl.results th.num, .tbl.results td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl.results td.num { color: var(--text); }
+.tbl.results td.none { color: var(--text-muted); }
+.th-sort { border: 0; background: none; padding: 0; font: inherit; color: var(--text-muted); cursor: pointer; white-space: nowrap; }
+.th-sort:hover { color: var(--text); }
+th.num .th-sort { width: 100%; text-align: right; }
+.th-sort .arrow { font-size: 10px; }
+.tbl.results .c-sel { width: 36px; padding-right: 0; }
+.tbl.results .c-sel input { width: 16px; height: 16px; margin: 0; accent-color: var(--ink); vertical-align: middle; }
+.tbl.results .c-st { width: 24px; padding-left: 6px; padding-right: 4px; }
+.tbl.results td.c-lab { font-weight: 600; }
+.tbl.results td.c-lab .lab { color: var(--text); text-decoration: none; }
+.tbl.results td.c-lab .lab:hover { text-decoration: underline; text-underline-offset: 2px; }
+.tag { display: inline-block; margin-left: var(--s2); padding: 0 8px; border-radius: var(--radius-pill); background: var(--bg-sunken); color: var(--text-muted-sunken); font-size: 11px; font-weight: 550; line-height: 18px; vertical-align: 1px; }
+.tag.flag { max-width: 110px; overflow: hidden; text-overflow: ellipsis; vertical-align: -4px; }
+.gc-tag, .tbl.results .gc { display: inline-block; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: var(--fs-xs); line-height: 20px; color: var(--text-muted); font-weight: 550; }
+.tbl.results td.c-inj { color: var(--text-muted); }
+.tbl.results td.tailc { color: var(--text); max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+.tbl.results td.why { color: var(--text-muted); }
+.tbl.results tr.is-picked td:first-child { box-shadow: inset 3px 0 0 var(--ink); }
+.tbl.results tr.no-result td.c-lab .lab, .tbl.results tr.backfill td.c-lab .lab { font-weight: 550; }
+.tbl.results tbody tr:last-child td { border-bottom: 0; }
+
+/* All points scrolls inside the card: the first columns stay put */
+.tbl.results.all-points .c-sel, .tbl.results.all-points .c-st, .tbl.results.all-points .c-lab {
+    position: sticky; z-index: 1; background: var(--bg-card);
+}
+.tbl.results.all-points .c-sel { left: 0; }
+.tbl.results.all-points .c-st { left: 36px; }
+.tbl.results.all-points .c-lab { left: 60px; box-shadow: inset -1px 0 0 var(--border-light); }
+.tbl.results.all-points tr.groups th.lead { position: sticky; left: 0; z-index: 1; }
+
+.table-card .empty-note { margin: var(--s4) var(--s5); }
+.more-row { display: flex; justify-content: center; padding: var(--s3); }
+.more-row:has(> [hidden]) { display: none; }
+
+.ico-search { --m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='6.5'/%3E%3Cpath d='m16 16 4 4'/%3E%3C/svg%3E"); }
+
+@media (max-width: 1100px) {
+    .gc .filters .search input { width: 180px; }
+}

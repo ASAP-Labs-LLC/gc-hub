@@ -185,6 +185,9 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/samples/<int:sample_id>` | GET | new | session | v3.1 `sample_links`: the classic page, that run selected, Dashboard tab; 404 friendly page |
 | `/samples/<int:sample_id>/compare` | GET | new | session | v3.1 `sample_links`: as above, Analysis tab; `?standard=<name>` picks the comparison standard |
 | `/samples/<int:sample_id>/data` | GET | new | session | v3.1 `sample_links`: as above, Distillation Data tab |
+| `/results` | GET | new | session | v5.0 lane R `results_pages`: every sample's results (grouped D2887/D86 headers from `/api/table` `columns`, key or all points, filters in the query, CSV, curve overlay); reads the existing `/api/` routes only |
+| `/settings` | GET | new | session | v5.0 lane R `results_pages`: the settings page (this browser, sample flags, admin tuning behind the unlock, standards, QBench, LEM address, server paths read-only) over `/api/settings` and the existing standards/QBench routes |
+| `/help` | GET | new | session | v5.0 lane R `results_pages`: a short plain-language help page |
 | `/api/lab/<lab_id>` | GET | new | session | v3.1 `sample_links`: → `{lab_id, sample_id, runs:[{sample_id, lab_id, instrument, instrument_name, injection_dt, status}]}` (newest first); 404 `{error, lab_id}` |
 | `/login` | GET | new | open | the sign-in page (`web_auth`): card, LabLink username/password, and on the LAN the admin-password break-glass; `?next=` (sanitised) where to go after; a signed-in visitor is redirected there |
 | `/api/login` | POST | new | open | `{username, password, next?}` → LabCore `POST /api/login`; 200 `{ok, name, method: "password", next}` + the session cookie; 401 wrong, 429 throttled, 503 `{labcore_unavailable}`; through Cloudflare https only |

@@ -13,11 +13,12 @@
   <script src="{{ url_for('static', filename='js/ui_logic.js') }}?v=5"></script>
   {#- v4.0 lane E2: the one admin unlock (a 15-minute closure); shell.js's gate is a view of it -#}
   <script src="{{ url_for('static', filename='js/admin_unlock.js') }}?v=3"></script>
-  <script src="{{ url_for('static', filename='js/shell.js') }}?v=5"></script>
+  <script src="{{ url_for('static', filename='js/shell.js') }}?v=7"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v=2">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/shell.css') }}?v=3">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=3">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/status_shell.css') }}?v=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/notifications.css') }}?v=1">
   {% block head %}{% endblock %}
 </head>
 <body class="gc" data-nav="{{ nav or '' }}">
@@ -61,6 +62,7 @@
   <script src="{{ url_for('static', filename='js/live.js') }}?v=5"></script>
   <script src="{{ url_for('static', filename='js/live_adapter.js') }}?v=2"></script>
   <script src="{{ url_for('static', filename='js/running_now.js') }}?v=5"></script>
+  <script src="{{ url_for('static', filename='js/notifications_panel.js') }}?v=1"></script>
   {% block scripts %}{% endblock %}
 
   <!-- Which build is running, bottom-right. Same string /healthz reports. -->

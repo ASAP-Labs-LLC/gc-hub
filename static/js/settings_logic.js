@@ -112,7 +112,7 @@
         const f = field(key);
         const v = settings ? settings[key] : undefined;
         if (v === undefined || v === null) return f ? f.def : '';
-        return String(v);
+        return f && f.kind === 'bool' ? String(v).trim().toLowerCase() : String(v);
     }
 
     /** {operator, admin, errors}: the changed keys by who may change them.

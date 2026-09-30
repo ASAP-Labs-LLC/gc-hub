@@ -1,0 +1,19 @@
+/* controls.css (v5.0 lane R): small controls the Results and Settings pages
+   share: filter chips, the on/off switch, a larger segmented control.
+   Colours are tokens only (tests/test_ui_contrast.py). */
+
+.gc .seg-lg button { font-size: var(--fs-sm); padding: 5px 14px; }
+.chips { display: inline-flex; flex-wrap: wrap; gap: var(--s2); }
+.chip {
+    height: 34px; padding: 0 var(--s4); border-radius: var(--radius-pill); border: 1px solid var(--border);
+    background: var(--bg-card); color: var(--text); font: inherit; font-size: var(--fs-sm); font-weight: 550; cursor: pointer; white-space: nowrap;
+}
+.chip:hover { border-color: var(--border-strong); }
+.chip[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--ink-fg); }
+.switch { display: inline-flex; align-items: center; gap: var(--s2); font-size: var(--fs-sm); color: var(--text); cursor: pointer; position: relative; }
+.switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.switch .track { width: 36px; height: 20px; border-radius: var(--radius-pill); background: var(--border-strong); position: relative; transition: background var(--t-fast) var(--ease-std); flex: none; }
+.switch .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--bg-card); transition: transform var(--t-fast) var(--ease-std); }
+.switch input:checked + .track { background: var(--ink); }
+.switch input:checked + .track::after { transform: translateX(16px); }
+.switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
