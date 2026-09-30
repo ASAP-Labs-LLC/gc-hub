@@ -67,6 +67,10 @@ def test_tasks_in_the_live_feed(tmp_path):
         assert "SECRET-FOLDER" not in feed and "127.0.0.1" not in feed
         assert all(x["download_url"] is None for x in _tasks(port, other))
 
+        # the sample list's rows say where their injection time came from
+        code, files = get(port, f"/api/files?ids={final}")
+        assert files["samples"][0]["injection_dt_source"] == "cdf"
+
         # the hub's queue counts and pause state ride along
         code, live = get(port, "/api/live")
         assert live["hub"]["processing_paused"] is False

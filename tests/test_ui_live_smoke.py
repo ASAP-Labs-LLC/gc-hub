@@ -74,7 +74,7 @@ def _rows(drv):
     """``{sample id: (name, status badge text)}`` of the dashboard list."""
     return {int(k): tuple(v) for k, v in drv.execute_script("""
         const out = {};
-        document.querySelectorAll('#dash-file-list li').forEach(li => {
+        document.querySelectorAll('#dash-file-list li[data-uid]').forEach(li => {
             out[li.dataset.sampleId] = [
                 (li.querySelector('.file-item-name') || {}).textContent || '',
                 (li.querySelector('.status-badge') || {}).textContent || ''];
@@ -87,7 +87,7 @@ def _no_duplicates(drv) -> bool:
     return drv.execute_script("""
         return ['dash-file-list', 'chrom-file-list', 'dcurve-file-list', 'analysis-sample-list']
             .every(id => {
-                const uids = Array.from(document.querySelectorAll('#' + id + ' li'))
+                const uids = Array.from(document.querySelectorAll('#' + id + ' li[data-uid]'))
                     .map(li => li.dataset.uid);
                 return uids.length > 0 && new Set(uids).size === uids.length;
             });""")

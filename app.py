@@ -1796,6 +1796,9 @@ def _sample_entry(s: dict, cache: Optional[dict], recorded, fps: dict, run_no: i
         "name": name,
         "display_name": name if run_no <= 1 else f"{name} ({run_no})",
         "injection_dt": s["injection_dt"],
+        # v4.0 lane E: 'mtime' = the CDF had no injection time (the list's
+        # "No injection time" group)
+        "injection_dt_source": s.get("injection_dt_source"),
         "status": s["status"],
         "error": s["error"],
         "review_note": s.get("review_note"),
