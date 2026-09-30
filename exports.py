@@ -237,6 +237,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Optional, Union
 
 import distill
+import live
 import paths
 import store
 
@@ -613,6 +614,15 @@ class _Verified:
 _TRANSIENT = (OSError, sqlite3.OperationalError)
 
 
+def _publish_appended(instrument: str, rows) -> None:
+    """Live update (v3.1): these ledger rows are in the results CSV now."""
+    try:
+        live.publish_samples([r["sample_id"] for r in rows])
+    except Exception:  # noqa: BLE001 - never into the exporter
+        pass
+    live.publish("instrument", {"instrument_id": instrument})
+
+
 class HubExporter:
     def __init__(self, db: store.Db = None, *, data_dir: Optional[PathLike] = None,
                  notifier: Optional[Callable[[str, str], Any]] = None,
@@ -964,6 +974,7 @@ class HubExporter:
             todo = [r for r in todo if r["line"].encode("utf-8") not in there]
         if done:  # in the file per the sidecar, not yet marked (a crash in between)
             store.export_rows.mark_hub_appended(done, db=self.db)
+            _publish_appended(instrument, [r for r in rows if r["seq"] in set(done)])
         pieces = [r["line"].encode("utf-8") for r in todo]
         if pieces and rec == 0:
             pieces.insert(0, header_line().encode("utf-8"))
@@ -1016,6 +1027,7 @@ class HubExporter:
             new_size, hasher, tail,
             st2.st_mtime_ns if (st2 and st2.st_size == new_size) else None)
         store.export_rows.mark_hub_appended([r["seq"] for r in todo], db=self.db)
+        _publish_appended(instrument, todo)
         return FlushResult(len(todo), 0, None, path)
 
     def _already_after_last(self, instrument: str, path: Path, side: dict) -> set:
@@ -1249,6 +1261,7 @@ class HubExporter:
             covered = [r["seq"] for r in store.export_rows.pending_hub_appends(instrument, db=self.db)
                        if r["seq"] <= max_seq]
             store.export_rows.mark_hub_appended(covered, db=self.db)
+            live.publish("instrument", {"instrument_id": instrument})
             LOGGER.info("exports: %s wrote a fresh file %s (%d rows, seq %d) by %s",
                         instrument, path, len(lines), max_seq, by)
             return len(lines)

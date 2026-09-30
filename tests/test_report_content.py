@@ -75,7 +75,7 @@ def harness():
              str(hub.ids["final"]), str(req), str(out)],
             cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=600)
         assert proc.returncode == 0 and out.exists(), proc.stderr[-4000:] + proc.stdout[-2000:]
-        yield json.loads(out.read_text(encoding="utf-8"))
+        yield dict(json.loads(out.read_text(encoding="utf-8")), sample_id=hub.ids["final"])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -86,6 +86,13 @@ def test_every_path_answered(harness):
     assert r["direct"]["status"] == 200 and r["zip"]["status"] == 200
     assert r["qbench"]["status"] == 200, r["qbench"]
     assert set(harness["pdf_text"]) == {"direct", "zip", "qbench"}
+
+
+def test_a_qbench_upload_publishes_the_sample_live(harness):
+    """v3.1: recording the upload (qbench_uploaded_at) is a live ``sample`` event."""
+    live = harness["live_after_qbench"]
+    assert live["reset"] is False
+    assert harness["sample_id"] in live["samples"]
 
 
 def test_report_content_is_identical_across_the_four_paths(harness):

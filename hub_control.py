@@ -64,6 +64,7 @@ from flask import Blueprint, jsonify, request
 
 import admin_auth
 import hub
+import live
 import netctx
 import paths
 import restart_policy
@@ -246,7 +247,7 @@ _sampler = ProcessSampler(started_at=_hooks.started_at)
 
 def _empty_cache() -> dict:
     return {"flag": None, "queue": dict(EMPTY_QUEUE), "pending": None, "hub_url": None,
-            "at": None}
+            "agents": None, "live_hub": None, "at": None}
 
 
 _cache: dict = _empty_cache()
@@ -282,11 +283,24 @@ def _read_store(db: Path) -> tuple:
             "(SELECT COUNT(*) FROM samples WHERE status='received'), "
             "(SELECT COUNT(*) FROM export_rows WHERE hub_appended_at IS NULL)",
             (stamp,)).fetchone()
+        agents = [_agent_view(dict(zip(("instrument_id", "last_seen", "version", "host",
+                                        "status"), a))) for a in conn.execute(
+            "SELECT i.id, a.last_seen, a.version, a.host, a.state "
+            "FROM instruments i LEFT JOIN agents a ON a.instrument_id=i.id ORDER BY i.id")]
     finally:
         conn.close()
     return (hub.parse_processing_paused(raw[0] if raw else None),
             {"jobs_due": r[0], "jobs_queued": r[1], "jobs_running": r[2],
-             "received_samples": r[3]}, r[4], (url[0] if url else None) or None)
+             "received_samples": r[3]}, r[4], (url[0] if url else None) or None, agents)
+
+
+AGENT_FIELDS = ("instrument_id", "last_seen", "version", "host", "status")
+
+
+def _agent_view(row: dict) -> dict:
+    """One ``/api/live`` agent entry: ``status`` is the agent's reported
+    heartbeat state (``idle``, ``sending``, ...; None = never reported)."""
+    return {k: row.get(k) for k in AGENT_FIELDS}
 
 
 def refresh_cache() -> bool:
@@ -297,17 +311,103 @@ def refresh_cache() -> bool:
     try:
         if db is None or not db.is_file():
             fresh = _empty_cache()
+            fresh["agents"] = []
         else:
-            flag, queue, pending, hub_url = _read_store(db)
-            fresh = {"flag": flag, "queue": queue, "pending": pending, "hub_url": hub_url}
+            flag, queue, pending, hub_url, agents = _read_store(db)
+            fresh = {"flag": flag, "queue": queue, "pending": pending, "hub_url": hub_url,
+                     "agents": agents}
         fresh["at"] = time.monotonic()
     except Exception:  # noqa: BLE001 - locked, mid-migration, ...
         _log_limited("refresh", logging.WARNING,
                      "hub_control: could not read the store for the status", exc_info=True)
+        _refresh_live_hub()
         return False
     with _cache_lock:
+        before = _cache.get("agents")
+        # a heartbeat noted (note_agent) after this read began is newer: keep it
+        newer = {a["instrument_id"]: a for a in before or []}
+        fresh["agents"] = [
+            newer[a["instrument_id"]]
+            if (newer.get(a["instrument_id"]) or {}).get("last_seen") and
+            str(newer[a["instrument_id"]]["last_seen"]) > str(a.get("last_seen") or "")
+            else a for a in fresh["agents"]]
+        fresh.pop("live_hub", None)
         _cache.update(fresh)
+    if before is not None and before != fresh["agents"]:
+        live.publish("agent", {})
+    _refresh_live_hub()
     return True
+
+
+# ── live updates (v3.1): what /api/live reads, from memory only ───────────
+
+def _live_hub_now() -> dict:
+    """``{state, staged_update}`` as ``status_snapshot`` computes them (no SQLite)."""
+    with _cache_lock:
+        flag = _cache.get("flag")
+    try:
+        rt = _hooks.runtime()
+    except Exception:  # noqa: BLE001
+        rt = None
+    try:
+        mode, tag = restart_policy.decide(paths.data_dir(), version.APP_VERSION)
+    except Exception:  # noqa: BLE001
+        mode, tag = "restart", None
+    return {"state": _state(rt), "staged_update": tag if mode == "switch" else None,
+            "processing_paused": flag is not None}
+
+
+def _refresh_live_hub() -> None:
+    """Recompute the hub state for /api/live; publish ``hub`` when it changed."""
+    try:
+        now = _live_hub_now()
+    except Exception:  # noqa: BLE001
+        return
+    with _cache_lock:
+        before = _cache.get("live_hub")
+        _cache["live_hub"] = now
+    if before is not None and before != now:
+        live.publish("hub", {})
+
+
+def live_agents() -> list:
+    """The agent snapshot for /api/live: every instrument's
+    ``{instrument_id, last_seen, version, host, status}`` from the refresher's
+    cache, updated at once by each heartbeat (``note_agent``)."""
+    with _cache_lock:
+        return [dict(a) for a in (_cache.get("agents") or [])]
+
+
+def live_hub() -> dict:
+    """``{state, staged_update}`` for /api/live (cached; computed once if the
+    refresher has not run yet: no SQLite either way)."""
+    with _cache_lock:
+        h = _cache.get("live_hub")
+    if h is None:
+        h = _live_hub_now()
+    return {"state": h.get("state"), "staged_update": h.get("staged_update")}
+
+
+def note_agent(instrument_id: str, values: dict, last_seen: Optional[str]) -> None:
+    """A heartbeat just landed: update that agent in the cache and publish
+    ``agent`` (``ingest_api``). Never raises."""
+    try:
+        entry = _agent_view({"instrument_id": instrument_id, "last_seen": last_seen,
+                             "version": values.get("version"), "host": values.get("host"),
+                             "status": values.get("state")})
+        with _cache_lock:
+            agents = list(_cache.get("agents") or [])
+            for i, a in enumerate(agents):
+                if a.get("instrument_id") == instrument_id:
+                    agents[i] = entry
+                    break
+            else:
+                agents.append(entry)
+                agents.sort(key=lambda a: a.get("instrument_id") or "")
+            _cache["agents"] = agents
+    except Exception:  # noqa: BLE001
+        log.exception("hub_control: note_agent failed")
+    live.publish("agent", {"instrument_id": instrument_id})
 
 
 def start_refresher(interval: float = CACHE_REFRESH_SECONDS) -> None:
@@ -338,6 +438,17 @@ def _alive(fn) -> bool:
         return False
 
 
+def _state(rt) -> str:
+    rt_paused = bool(getattr(rt, "paused", False)) if rt is not None else False
+    if restart_policy.stop_requested():
+        return "stopping"
+    if rt is None:
+        return "starting"
+    if rt_paused:
+        return "processing-paused"
+    return "running"
+
+
 def status_snapshot() -> dict:
     """What ``GET /api/hub/status`` answers (and ``/healthz``'s ``hub`` and
     the diagnostics bundle carry): no SQLite on this path (the cache), no
@@ -353,14 +464,7 @@ def status_snapshot() -> dict:
     except Exception:  # noqa: BLE001
         rt = None
     rt_paused = bool(getattr(rt, "paused", False)) if rt is not None else False
-    if restart_policy.stop_requested():
-        state = "stopping"
-    elif rt is None:
-        state = "starting"
-    elif rt_paused:
-        state = "processing-paused"
-    else:
-        state = "running"
+    state = _state(rt)
     data = paths.data_dir()
     updater_paused = bool(data is not None and (Path(data) / UPDATER_PAUSED_MARKER).exists())
     try:

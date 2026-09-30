@@ -36,6 +36,7 @@ except Exception:
 # page load, alongside other init calls — but it (like the rest) is the app
 # checking on itself, not a person doing something, so it is excluded too.
 POLLING_ENDPOINTS = (
+    "/api/live",                    # v3.1: every open tab, every 3 s (static/js/live.js)
     "/api/notifications",
     "/api/server-status",
     "/api/reprocess/status",

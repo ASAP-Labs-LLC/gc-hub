@@ -166,6 +166,7 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
         pdfs["zip"] = zf.read(zf.namelist()[0])
 
     current["path"] = "qbench"
+    live_cursor = app.live.BUS.cursor()
     r = client.post("/api/qbench-upload", json={"queue": [item]})
     out["responses"]["qbench"] = {"status": r.status_code, "json": r.get_json()}
     deadline = time.time() + 180
@@ -174,6 +175,8 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
         if time.time() > deadline:
             raise SystemExit("QBench upload thread never finished")
         time.sleep(0.25)
+    # v3.1 live updates: the upload record publishes the sample
+    out["live_after_qbench"] = app.live.BUS.since(live_cursor)
 
     import pypdf
     out["pdf_text"] = {

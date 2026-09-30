@@ -226,6 +226,7 @@ import corrections as corrections_mod
 import distill
 import exports
 import instruments
+import live
 import methods
 import paths
 import store
@@ -739,6 +740,22 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
            mtime: Union[None, datetime, str, float] = None, source_name: Optional[str] = None, *,
            conf: Optional[dict] = None, data_dir=None, db: store.Db = None,
            notifier: Optional[Notifier] = None, force_backfill: bool = False) -> SubmitResult:
+    """Receive one CDF for ``instrument_id`` (``_submit``), then publish the
+    live update after the transaction committed: a created (or attached)
+    sample as ``sample``, a conflict as ``instrument``."""
+    res = _submit(instrument_id, cdf, mtime, source_name, conf=conf, data_dir=data_dir, db=db,
+                  notifier=notifier, force_backfill=force_backfill)
+    if res.outcome == "created":
+        live.publish("sample", {"sample_id": res.sample_id})
+    elif res.outcome == "conflict":
+        live.publish("instrument", {"instrument_id": res.instrument_id or instrument_id})
+    return res
+
+
+def _submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.PathLike],
+            mtime: Union[None, datetime, str, float] = None, source_name: Optional[str] = None, *,
+            conf: Optional[dict] = None, data_dir=None, db: store.Db = None,
+            notifier: Optional[Notifier] = None, force_backfill: bool = False) -> SubmitResult:
     """Receive one CDF for ``instrument_id``.
 
     ``cdf`` is the file's bytes or a path (read only, never moved or
@@ -881,6 +898,7 @@ def submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os.
                     os.utime(final, (mtime_ts, mtime_ts))
         log.info("pipeline: received %s %s at %s as sample %s", instrument_id, lab_id,
                  injection_dt, sid)
+        live.publish_samples([x["id"] for x in suspects] + list(flagged))   # review notes
         if suspects:
             _notify(notifier, "warning",
                     f"{inst.get('name') or instrument_id}: sample {sid} ({lab_id}, injected "
@@ -926,11 +944,13 @@ def request_reprocess(sample_id: int, *, by: Optional[str] = None, use_current_b
             rj = _replace_job(conn, sample_id)
             if rj is not None:
                 return rj["id"]
-            return store.jobs.enqueue(PROCESS, {
+            job = store.jobs.enqueue(PROCESS, {
                 "sample_id": sample_id, "reason": "reprocess", "by": by,
                 "use_current_blank": bool(use_current_blank),
                 "use_current_corrections": bool(use_current_corrections),
             }, sample_id=sample_id, db=conn)
+    live.publish("sample", {"sample_id": sample_id})
+    return job
 
 
 def _replace_job(conn, sample_id: int) -> Optional[dict]:
@@ -1098,6 +1118,10 @@ class Worker:
                 store.jobs.fail(job["id"], "worker crash", self.now_fn() + TRANSIENT_RETRY, db=self.db)
             except Exception:  # noqa: BLE001
                 log.exception("pipeline: could not reschedule job %s", job["id"])
+        finally:
+            # live update: whatever the job did to its sample is committed now
+            payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+            live.publish("sample", {"sample_id": payload.get("sample_id", job.get("sample_id"))})
         return True
 
     # one job
@@ -1424,6 +1448,9 @@ class Worker:
                 store.jobs.complete(job["id"], db=conn)
         self._stuck.discard(sample["instrument_id"])
         log.info("pipeline: sample %s final at revision %s", sid, rev)
+        live.publish_samples([sid] + list(flagged))
+        if src is not None:          # the conflict is resolved
+            live.publish("instrument", {"instrument_id": cur["instrument_id"]})
         if self.on_final is not None:
             try:
                 self.on_final(sid)
@@ -1490,6 +1517,7 @@ def export_to_lims(sample_id: int, *, by: Optional[str], db: store.Db = None, da
                                      **{k: cur[k] for k in _COPIED})
             seq = store.export_rows.append_pending(conn, s["instrument_id"], sample_id, rev, line)
     log.info("pipeline: sample %s exported to LIMS by %s (revision %s)", sample_id, by, rev)
+    live.publish("sample", {"sample_id": sample_id})
     return {"revision": rev, "seq": seq}
 
 
@@ -1518,6 +1546,7 @@ def release_backfill(sample_id: int, *, by: Optional[str], db: store.Db = None, 
             seq = store.export_rows.append_pending(conn, s["instrument_id"], sample_id,
                                                    cur["revision"], _line_for(s, cur, format_line))
     log.info("pipeline: backfill sample %s released by %s", sample_id, by)
+    live.publish("sample", {"sample_id": sample_id})
     return seq
 
 
@@ -1561,4 +1590,6 @@ def resolve_conflict_replace(conflict_id: int, *, by: Optional[str], conf: Optio
             }, sample_id=sid, db=conn)
     log.info("pipeline: replace of sample %s from conflict %s requested by %s (job %s)", sid,
              conflict_id, by, job)
+    live.publish("sample", {"sample_id": sid})
+    live.publish("instrument", {"instrument_id": c["instrument_id"]})
     return job

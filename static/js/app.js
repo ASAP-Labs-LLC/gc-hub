@@ -359,34 +359,36 @@ async function loadSettings() {
     }
 }
 
-async function loadFiles() {
+/** Load the sample list. Every change to state.files goes through one
+    queue (_listQueue), so a slow answer can't overwrite a newer one.
+    `bg`: the page asked on its own (a live reset), not the user. */
+function loadFiles(opts) {
+    return _listQueue(() => _loadFilesNow(opts));
+}
+
+async function _loadFilesNow(opts) {
+    const bg = !!(opts && opts.bg);
     try {
         // The sample list is a store query (newest first); the lists filter
         // the loaded page client-side as before.
         const url = filesUrl({ instrument: state.listInstrument }, FILES_PAGE_LIMIT);
-        const res = await apiGet(url);
+        const res = await (bg ? apiGetBg(url) : apiGet(url));
         state.files = res.samples || [];
         state.filesTotal = res.total || state.files.length;
         if (res.instruments && res.instruments.length) state.instruments = res.instruments;
         console.log('[GC Viewer] Loaded', state.files.length, 'of', state.filesTotal, 'samples');
-        renderAllFileLists();
+        _renderListsKeepingScroll();
         // Flags/best-fit still being computed in the background: refetch once.
         if (res.cache_pending > 0 && !state._filesRefetchPending) {
             state._filesRefetchPending = true;
-            setTimeout(async () => {
+            setTimeout(() => {
                 state._filesRefetchPending = false;
-                try {
-                    const retry = await apiGet(filesUrl({ instrument: state.listInstrument },
-                                                        FILES_PAGE_LIMIT));
-                    state.files = retry.samples || [];
-                    state.filesTotal = retry.total || state.files.length;
-                    renderAllFileLists();
-                } catch (_) { /* silent retry */ }
+                loadFiles({ bg: true, quiet: true });
             }, 5000);
         }
     } catch (e) {
         console.error('Failed to load files:', e);
-        showNotification('Failed to load sample list: ' + e.message, 'error');
+        if (!(opts && opts.quiet)) showNotification('Failed to load sample list: ' + e.message, 'error');
     }
 }
 
@@ -451,9 +453,15 @@ async function onInstrumentFilterChange() {
     if (needsServerSearch(q, state.filesTotal, state.files.length)) _serverSearch(q);
 }
 
-async function loadTableData() {
+// The Distillation Data tab's table (tab 2). A live change while another
+// tab is showing only marks it stale; switching to it reloads it.
+const DISTILL_DATA_TAB = 2;
+let _tableStale = false;
+
+async function loadTableData(opts) {
     try {
-        state.tableData = await apiGet('/api/table');
+        _tableStale = false;
+        state.tableData = await ((opts && opts.bg) ? apiGetBg('/api/table') : apiGet('/api/table'));
         renderDistillTable();
     } catch (e) {
         console.error('Failed to load table data:', e);
@@ -471,13 +479,180 @@ async function loadComparisonStandards() {
 }
 
 async function refreshAll() {
-    // The sample list is a live store query: just fetch everything again.
+    // The sample list is a live store query: just fetch everything again
+    // (after a settings change; everyday changes arrive through GCLive).
     await Promise.all([
         loadFiles(),
         loadTableData(),
         loadComparisonStandards(),
     ]);
-    showNotification('Data refreshed', 'success');
+}
+
+/* ===================================================================
+   5b. LIVE UPDATES (static/js/live.js; v3.1)
+   New, changed and finalised samples are fetched by id and merged into
+   the list in place; the notification badge follows the live count; a
+   reset (the hub restarted, or this tab fell too far behind) reloads.
+   =================================================================== */
+
+const _LIVE_LISTS = ['dash-file-list', 'chrom-file-list', 'dcurve-file-list', 'analysis-sample-list'];
+const LIVE_IDS_PER_FETCH = 1000;
+let _liveFirstReset = true;
+let _liveUnread = null;
+let _listChain = Promise.resolve();
+
+/** Run list work one at a time, in order (loads and live merges). */
+function _listQueue(fn) {
+    const next = _listChain.then(fn, fn);
+    _listChain = next.catch(() => {});
+    return next;
+}
+
+/** GET for the page's own follow-ups (never activity; GCLive.bgFetch). */
+async function apiGetBg(url) {
+    const resp = (typeof GCLive !== 'undefined')
+        ? await GCLive.bgFetch(url, { headers: { Accept: 'application/json' } })
+        : await fetch(url, { headers: { 'X-GC-Background': '1' } });
+    const j = (await GCSession.readJson(resp)).body;
+    if (!resp.ok) throw new Error((j && (j.error || j.message)) || `API error ${resp.status}`);
+    // as api(): a web page instead of data comes back as readJson's {error}
+    if (j && typeof j.error === 'string' && j.error.startsWith('The hub answered HTTP ')) throw new Error(j.error);
+    return j;
+}
+
+/** Re-render the lists without losing each one's scroll position. */
+function _renderListsKeepingScroll() {
+    const tops = _LIVE_LISTS.map(id => {
+        const el = document.getElementById(id);
+        return el ? el.scrollTop : 0;
+    });
+    renderAllFileLists();
+    _LIVE_LISTS.forEach((id, i) => {
+        const el = document.getElementById(id);
+        if (el) el.scrollTop = tops[i];
+    });
+}
+
+/** Fetch the changed samples (with the list's filter) and merge them in:
+    queued behind any load or earlier merge, so answers land in order. */
+function applyLiveSamples(ids) {
+    return _listQueue(() => _applyLiveSamplesNow(ids));
+}
+
+async function _applyLiveSamplesNow(ids) {
+    let rows = [];
+    for (let i = 0; i < ids.length; i += LIVE_IDS_PER_FETCH) {
+        const chunk = ids.slice(i, i + LIVE_IDS_PER_FETCH);
+        const res = await apiGetBg(filesUrl({ ids: chunk, instrument: state.listInstrument },
+                                            FILES_PAGE_LIMIT));
+        rows = rows.concat(res.samples || []);
+    }
+    const pageFull = state.filesTotal > state.files.length;
+    const m = mergeChangedRows(state.files, ids, rows, { pageFull });
+    state.files = m.files;
+    if (!pageFull) {
+        state.filesTotal = state.files.length + m.skipped;
+    } else if (m.added || m.removed || m.skipped) {
+        // only part of the list is loaded: ask the server for the count
+        try {
+            const res = await apiGetBg(filesUrl({ instrument: state.listInstrument }, 1));
+            state.filesTotal = Math.max(res.total || 0, state.files.length);
+        } catch (_) {
+            state.filesTotal = Math.max(state.files.length,
+                                        state.filesTotal + m.added + m.skipped - m.removed);
+        }
+    }
+    // the selected sample: keep the object current (its badges, status)
+    if (state.selectedFile) {
+        const sel = rows.find(r => sampleUid(r) === sampleUid(state.selectedFile));
+        if (sel) state.selectedFile = sel;
+    }
+    // a server search on screen is re-asked (it has its own query)
+    const q = (document.getElementById('universal-search')?.value || '').trim();
+    const searching = state.searchResult && state.searchResult.q === q && q;
+    if (searching) _serverSearch(q, { bg: true });
+    // only the changed rows' items are redrawn, unless rows came or went
+    if (searching || m.orderChanged || !patchFileRows(m.replaced)) _renderListsKeepingScroll();
+    else _updateSearchCount();
+    if (rows.some(r => r.status === 'final')) _tableChanged();
+}
+
+/** Final results changed: reload the table if it is on screen, else later. */
+function _tableChanged() {
+    if (currentTab === DISTILL_DATA_TAB) _reloadTableSoon();
+    else _tableStale = true;
+}
+
+const _reloadTableSoon = debounce(() => loadTableData({ bg: true }), 2000);
+
+async function onLiveUpdate(u) {
+    try {
+        if (u.reset) {
+            // The first reset is the start: the page's own load covers it.
+            if (!_liveFirstReset) {
+                await loadFiles({ bg: true });
+                _tableChanged();
+            }
+            _liveFirstReset = false;
+        } else if (u.samples && u.samples.length) {
+            await applyLiveSamples(u.samples);
+        }
+    } catch (e) {
+        console.error('Live update failed:', e);
+    }
+    if (u.notifications_unread !== _liveUnread || (u.kinds || []).includes('notification')) {
+        _liveUnread = u.notifications_unread;
+        loadNotifications({ bg: true });
+    }
+    if (u.version_changed) showVersionBanner(u.version);
+}
+
+/** The hub was updated while this page was open: offer a reload (never
+    forced: the operator may be in the middle of something). */
+function showVersionBanner(version) {
+    let bar = document.getElementById('version-banner');
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'version-banner';
+        bar.setAttribute('role', 'status');
+        bar.setAttribute('data-testid', 'version-banner');
+        const text = document.createElement('span');
+        text.id = 'version-banner-text';
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-secondary';
+        btn.textContent = 'Reload';
+        btn.addEventListener('click', () => window.location.reload());
+        const close = document.createElement('button');
+        close.className = 'version-banner-close';
+        close.title = 'Dismiss';
+        close.textContent = '\u00d7';
+        close.addEventListener('click', () => bar.remove());
+        bar.append(text, btn, close);
+        document.body.appendChild(bar);
+    }
+    document.getElementById('version-banner-text').textContent =
+        `Updated to ${version} \u2014 reload to use it`;
+}
+
+function renderLiveIndicator() {
+    const el = document.getElementById('live-indicator');
+    if (!el || typeof GCLive === 'undefined') return;
+    const st = GCLive.status();
+    el.textContent = GCLive.statusText(st, Date.now());
+    el.classList.toggle('live-offline', !st.connected);
+    el.title = st.error ? `Live updates: ${st.error}` : 'Live updates from the hub';
+}
+
+/** Start live updates (before the first data load, so nothing is missed). */
+function startLive() {
+    if (typeof GCLive === 'undefined') {           // live.js missing: the old poll
+        setInterval(loadNotifications, 30000);
+        return Promise.resolve();
+    }
+    GCLive.subscribe(onLiveUpdate);
+    renderLiveIndicator();
+    setInterval(renderLiveIndicator, 1000);
+    return GCLive.start();                          // resolves after the first answer
 }
 
 /* ===================================================================
@@ -531,27 +706,52 @@ function convertToD86(d2887) {
 // Global filter: show only early-signal-flagged samples
 let earlySignalFilterActive = false;
 
-function renderFileList(containerId, files, mode) {
-    const container = document.getElementById(containerId);
-    if (!container) return;
-
+/** The lists' client-side filters (search box, instrument, Flagged). */
+function _listShows(file) {
     // Universal search — read from the shared search input
     const searchEl = document.getElementById('universal-search');
     const filter = searchEl ? searchEl.value.toLowerCase() : '';
-
     // The instrument filter (the server already applied it; this also covers
     // a list fetched before the filter changed).
-    let filtered = filterByInstrument(files, state.listInstrument).filter(f =>
-        (f.name || '').toLowerCase().includes(filter) ||
-        (f.display_name || '').toLowerCase().includes(filter));
-
+    if (!filterByInstrument([file], state.listInstrument).length) return false;
+    if (!((file.name || '').toLowerCase().includes(filter) ||
+          (file.display_name || '').toLowerCase().includes(filter))) return false;
     // Apply early-signal filter if active
-    if (earlySignalFilterActive) {
-        filtered = filtered.filter(f => f.early_signal);
-    }
+    return !earlySignalFilterActive || !!file.early_signal;
+}
 
+const _LIST_MODES = { 'dash-file-list': 'dashboard', 'chrom-file-list': 'chrom',
+                      'dcurve-file-list': 'dc', 'analysis-sample-list': 'analysis' };
+
+function renderFileList(containerId, files, mode) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const filtered = (files || []).filter(_listShows);
     container.innerHTML = '';
-    for (const file of filtered) {
+    for (const file of filtered) container.appendChild(_fileItem(file, mode));
+}
+
+/** v3.1 live updates: replace just these rows' <li> in every list. False
+    when that isn't enough (a row must appear where it wasn't): the caller
+    then re-renders the lists. */
+function patchFileRows(rows) {
+    for (const [containerId, mode] of Object.entries(_LIST_MODES)) {
+        const container = document.getElementById(containerId);
+        if (!container) continue;
+        for (const file of rows) {
+            const old = container.querySelector(`li[data-uid="${CSS.escape(sampleUid(file))}"]`);
+            const shows = _listShows(file);
+            if (old && shows) old.replaceWith(_fileItem(file, mode));
+            else if (old) old.remove();
+            else if (shows) return false;
+        }
+    }
+    return true;
+}
+
+/** One sample's list item (click, double-click and context menu wired). */
+function _fileItem(file, mode) {
+    {
         const item = document.createElement('li');
         item.dataset.sampleId = file.sample_id;
         item.dataset.name = file.name;
@@ -649,7 +849,7 @@ function renderFileList(containerId, files, mode) {
             showContextMenu(e, file);
         });
 
-        container.appendChild(item);
+        return item;
     }
 }
 
@@ -664,6 +864,13 @@ function renderAllFileLists() {
     renderFileList('chrom-file-list', files, 'chrom');
     renderFileList('dcurve-file-list', files, 'dc');
     renderFileList('analysis-sample-list', files, 'analysis');
+    _updateSearchCount();
+}
+
+function _updateSearchCount() {
+    const q = (document.getElementById('universal-search')?.value || '').trim();
+    const sr = state.searchResult;
+    const useSearch = sr && sr.q === q && q !== '';
     const countEl = document.getElementById('search-count');
     if (countEl) {
         countEl.textContent = useSearch ? countLabel(sr.samples.length, sr.total)
@@ -674,11 +881,12 @@ function renderAllFileLists() {
 /** Search box changed: filter the loaded page at once and, when the server
     holds more samples than were loaded, ask it (debounced) and show that. */
 let _searchSeq = 0;
-const _serverSearch = debounce(async (q) => {
+const _serverSearch = debounce(async (q, opts) => {
     const seq = ++_searchSeq;
     try {
-        const res = await apiGet(filesUrl({ q, instrument: state.listInstrument,
-                                            status: state.listStatus }, FILES_PAGE_LIMIT));
+        const url = filesUrl({ q, instrument: state.listInstrument, status: state.listStatus },
+                             FILES_PAGE_LIMIT);
+        const res = await ((opts && opts.bg) ? apiGetBg(url) : apiGet(url));
         if (seq !== _searchSeq) return;                 // a newer search is under way
         state.searchResult = { q, samples: res.samples || [], total: res.total || 0 };
         renderAllFileLists();
@@ -3063,6 +3271,8 @@ function switchTab(tabIndex) {
 
     // Re-render file lists to sync selection highlighting in newly visible tab
     renderAllFileLists();
+    // live changes arrived while the table was hidden
+    if (tabIndex === DISTILL_DATA_TAB && _tableStale) loadTableData({ bg: true });
 
     // Tab-specific actions when switching with a selected sample
     if (state.selectedFile) {
@@ -3612,9 +3822,10 @@ function toggleNotifPanel(forceOpen) {
     if (show) loadNotifications();
 }
 
-async function loadNotifications() {
+async function loadNotifications(opts) {
     try {
-        const notes = await apiGet('/api/notifications');
+        const bg = !!(opts && opts.bg);
+        const notes = await (bg ? apiGetBg('/api/notifications') : apiGet('/api/notifications'));
         renderNotifications(Array.isArray(notes) ? notes : []);
     } catch (_) { /* tray is best-effort */ }
 }
@@ -3719,15 +3930,40 @@ function _showReprocessToast(count, pending) {
     toast.querySelector('#reprocess-toast-close').addEventListener('click', () => toast.remove());
 }
 
-/** Poll the reprocess status of *sampleIds* and update the persistent toast. */
+/** Follow the reprocess of *sampleIds* in the persistent toast: its status
+    is asked once now and again whenever GCLive reports one of the samples
+    changed (the Worker publishes each one it processes), not on a timer. */
 function _pollReprocessStatus(sampleIds) {
     const ids = (sampleIds || []).join(',');
-    const _timer = setInterval(async () => {
+    const wanted = new Set((sampleIds || []).map(Number));
+    let unsubscribe = () => {};
+    let _timer = null;
+    let busy = false, again = false, stopped = false;
+    const stop = () => { stopped = true; unsubscribe(); if (_timer) clearInterval(_timer); };
+    const check = async () => {
+        if (stopped) return;
+        if (busy) { again = true; return; }
+        busy = true;
+        try { await checkOnce(); } finally {
+            busy = false;
+            if (again) { again = false; check(); }
+        }
+    };
+    if (typeof GCLive !== 'undefined') {
+        unsubscribe = GCLive.subscribe(u => {
+            if (u.reset || (u.samples || []).some(id => wanted.has(Number(id)))) check();
+        });
+    } else {
+        _timer = setInterval(check, 1500);         // live.js missing: the old poll
+    }
+    check();
+
+    async function checkOnce() {
         const toast = document.getElementById('reprocess-toast');
-        if (!toast) { clearInterval(_timer); return; }
+        if (!toast) { stop(); return; }
 
         try {
-            const st = await apiGet(`/api/reprocess/status?sample_ids=${encodeURIComponent(ids)}`);
+            const st = await apiGetBg(`/api/reprocess/status?sample_ids=${encodeURIComponent(ids)}`);
             const titleEl = toast.querySelector('#reprocess-toast-title');
             const barEl = toast.querySelector('#reprocess-toast-bar');
             const detailEl = toast.querySelector('#reprocess-toast-detail');
@@ -3759,14 +3995,15 @@ function _pollReprocessStatus(sampleIds) {
                 if (closeBtn) closeBtn.style.display = '';
                 toast.style.borderLeftColor = accent;
 
-                clearInterval(_timer);
-                refreshAll();
+                stop();
+                // the rows themselves arrived through GCLive; the table follows
+                _tableChanged();
 
                 // Auto-dismiss after 8 seconds
                 setTimeout(() => { if (toast.parentNode) toast.remove(); }, 8000);
             }
         } catch (_) { /* ignore */ }
-    }, 1500);
+    }
 }
 
 /* ===================================================================
@@ -4026,7 +4263,6 @@ function setupEventListeners() {
         'btn-settings': openSettingsModal,
         'btn-export': exportPDF,
         'btn-comparison-export': exportComparison,
-        'btn-refresh': () => refreshAll(),
         'btn-reprocess': openReprocessModal,
         'btn-help': openHelpModal,
         'btn-restart-server': restartServer,
@@ -4152,11 +4388,6 @@ function setupEventListeners() {
 
     // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
-        // Ctrl+R — Refresh
-        if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
-            e.preventDefault();
-            refreshAll();
-        }
         // Ctrl+S — Settings
         if ((e.ctrlKey || e.metaKey) && e.key === 's') {
             e.preventDefault();
@@ -4202,6 +4433,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     // instruments once they are loaded).
     state.listInstrument = restoreInstrumentFilter(readSavedInstrumentFilter(), []);
 
+    // Live updates first: take the cursor, then load, so nothing that
+    // changes during the load is missed (the first answer is a reset, which
+    // the load below covers).
+    await startLive();
+
     // Load all data in parallel
     try {
         await Promise.all([
@@ -4220,9 +4456,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     showNotification('GC Viewer ready', 'success');
 
-    // Load persistent system notifications and poll for new ones.
+    // Load persistent system notifications (GCLive reports new ones).
     loadNotifications();
-    setInterval(loadNotifications, 30000);
 
     // Reconnect to any active upload (e.g. page was refreshed during upload)
     try {

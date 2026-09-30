@@ -243,10 +243,27 @@ def _valid(view: dict, now: float) -> bool:
     return now - seen < IDLE_SECONDS
 
 
+BACKGROUND_HEADER = "X-GC-Background"
+
+
+def is_background_request() -> bool:
+    """A GET an open tab made on its own (``X-GC-Background: 1``; live.js's
+    ``GCLive.bgFetch``): the follow-ups of a live update. It is not activity
+    and never keeps a session alive. Only GET and HEAD qualify: a write
+    (POST, ...) carrying the header is still activity and still refreshes
+    the session."""
+    try:
+        return (request.method in ("GET", "HEAD")
+                and request.headers.get(BACKGROUND_HEADER) == "1")
+    except RuntimeError:        # outside a request
+        return False
+
+
 def note_seen(session: Optional[dict]) -> None:
     """A signed-in request that counts as activity: remember it; the
-    refresher writes ``last_seen`` at most once a minute per session."""
-    if not session:
+    refresher writes ``last_seen`` at most once a minute per session.
+    A background GET (``is_background_request``) is not remembered."""
+    if not session or is_background_request():
         return
     now = _clock()
     with _lock:

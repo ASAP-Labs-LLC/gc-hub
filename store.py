@@ -1154,8 +1154,15 @@ def _listify(v: Union[str, Sequence[Any]]) -> list:
 
 
 def _search_where(q, instrument, date_from, date_to, status, method_name, backfill,
-                  time_unverifiable=None) -> tuple[str, list]:
+                  time_unverifiable=None, ids=None) -> tuple[str, list]:
     where, args = [], []
+    if ids is not None:
+        idl = [int(i) for i in ids]
+        if idl:
+            where.append(f"id IN ({_in(idl)})")
+            args += idl
+        else:
+            where.append("0")               # an empty id list matches nothing
     if q:
         pat = f"%{_like_escape(str(q).strip())}%"
         where.append("(lab_id LIKE ? ESCAPE '\\' OR source_name LIKE ? ESCAPE '\\')")
@@ -1349,7 +1356,7 @@ class samples:  # noqa: N801
                status: Union[None, str, Sequence[str]] = None, limit: int = 100,
                offset: int = 0, *, method_name: Union[None, str, Sequence[str]] = None,
                backfill: Optional[bool] = None, time_unverifiable: Optional[bool] = None,
-               db: Db = None) -> list[dict]:
+               ids: Optional[Sequence[int]] = None, db: Db = None) -> list[dict]:
         """Filter samples, newest injection first (ties: newest id first).
 
         ``q``: case-insensitive substring of ``lab_id`` or ``source_name``
@@ -1357,9 +1364,10 @@ class samples:  # noqa: N801
         one value or a list. ``date_from``/``date_to`` are normalised with
         ``local_dt`` and compared with ``injection_dt``; a bare date
         ``date_to`` includes that whole day. ``backfill``: True/False/None.
+        ``ids``: only these sample ids (an empty list matches nothing).
         """
         where, args = _search_where(q, instrument, date_from, date_to, status, method_name, backfill,
-                                    time_unverifiable)
+                                    time_unverifiable, ids)
         with connection(db) as conn:
             return _rows(conn.execute(
                 f"SELECT * FROM samples{where} ORDER BY injection_dt DESC, id DESC LIMIT ? OFFSET ?",
@@ -1372,10 +1380,10 @@ class samples:  # noqa: N801
               status: Union[None, str, Sequence[str]] = None, *,
               method_name: Union[None, str, Sequence[str]] = None,
               backfill: Optional[bool] = None, time_unverifiable: Optional[bool] = None,
-              db: Db = None) -> int:
+              ids: Optional[Sequence[int]] = None, db: Db = None) -> int:
         """How many samples ``search`` would match without paging."""
         where, args = _search_where(q, instrument, date_from, date_to, status, method_name, backfill,
-                                    time_unverifiable)
+                                    time_unverifiable, ids)
         with connection(db) as conn:
             return int(conn.execute(f"SELECT COUNT(*) FROM samples{where}", args).fetchone()[0])
 

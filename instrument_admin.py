@@ -45,6 +45,7 @@ from typing import Any, Optional
 
 import distill
 import instruments
+import live
 import methods
 import paths
 import store
@@ -72,6 +73,11 @@ class AdminError(ValueError):
         self.message = message
         self.status = status
         self.extra = extra
+
+
+def _changed(instrument_id: Any) -> None:
+    """Live update (v3.1): the instrument changed (after the commit)."""
+    live.publish("instrument", {"instrument_id": instrument_id})
 
 
 def _not_found(instrument_id: Any) -> AdminError:
@@ -184,6 +190,7 @@ def create(fields: Any, *, db: store.Db = None) -> dict:
             row = store.instruments.upsert(dict(
                 clean, id=iid, method_map=json.dumps(instruments.DEFAULT_METHOD_MAP)), db=conn)
     log.warning("instrument %s created (%s)", iid, row["name"])
+    _changed(iid)
     return public_row(row)
 
 
@@ -197,6 +204,7 @@ def update(instrument_id: Any, fields: Any, *, db: store.Db = None) -> tuple:
             old = get(instrument_id, db=conn)
             row = store.instruments.upsert(dict(clean, id=instrument_id), db=conn)
     log.warning("instrument %s updated: %s", instrument_id, sorted(clean))
+    _changed(instrument_id)
     warnings: list = []
     if "live_since" in clean:
         warnings = live_since_change_warnings(old.get("live_since"), clean["live_since"])
@@ -303,6 +311,7 @@ def set_export_path(instrument_id: str, path: Any, exporter) -> dict:
     except exports.ExportRefused as err:
         raise _refused(err) from None
     log.warning("instrument %s export path set to %s", instrument_id, path.strip())
+    _changed(instrument_id)
     return export_status(instrument_id, exporter)
 
 
@@ -314,6 +323,7 @@ def adopt_export(instrument_id: str, exporter, *, by: Optional[str]) -> dict:
         side = exporter.adopt(instrument_id, by=by)
     except exports.ExportRefused as err:
         raise _refused(err) from None
+    _changed(instrument_id)
     return {"adopted": side, "status": export_status(instrument_id, exporter)}
 
 
@@ -430,6 +440,7 @@ def set_calibration_cdf(instrument_id: str, conf: dict, *, sample_id: Any = None
             st = calibration_status(instrument_id, conf, db=conn, data_dir=data_dir)
             st["queued"] = pipeline.on_calibration_saved(instrument_id, db=conn) if st["usable"] else 0
     log.warning("instrument %s calibration CDF set to %s", instrument_id, new)
+    _changed(instrument_id)
     return st
 
 
@@ -492,6 +503,7 @@ def save_calibration(instrument_id: str, assignments: Any, sensitivity: Any, con
         distill.upsert_assignments("", cal, clean)), cal) if clean else None
     log.warning("instrument %s calibration saved (%d entries, %d queued)", instrument_id,
                 len(clean), queued)
+    _changed(instrument_id)
     return dict(st, saved=len(clean), queued=queued,
                 anchors=0 if anchors is None else int(anchors[0].size))
 
@@ -558,6 +570,7 @@ def _write_corrections(instrument_id: str, values: dict, reason: str, by: Option
             get(instrument_id, db=conn)
             changed = store.corrections.set_all(conn, instrument_id, values, by=by, reason=reason)
             queued = store.jobs.enqueue_for_status(instrument_id, "pending_corrections", db=conn)
+    _changed(instrument_id)
     return {"changed": changed, "queued": queued}
 
 
@@ -626,6 +639,7 @@ def seed_gc1(conf: dict, *, by: Optional[str], db: store.Db = None) -> dict:
                                                 reason=SEED_REASON)
             queued = store.jobs.enqueue_for_status(instruments.GC1, "pending_corrections", db=conn)
     log.warning("gc1 corrections seeded from %s by %s", conf.get("correction_factors_json"), by)
+    _changed(instruments.GC1)
     return {"changed": changed, "queued": queued, "values": values}
 
 
@@ -679,6 +693,7 @@ def set_method_mapping(instrument_id: str, method_name: Any, hub_method: Any, *,
             queued = pipeline.on_method_mapped(instrument_id, name, db=conn) if target else 0
     log.warning("instrument %s: method %s %s", instrument_id, name,
                 f"mapped to {target} ({queued} queued)" if target else "unmapped")
+    _changed(instrument_id)
     return {"method_map": mapping, "queued": queued}
 
 
@@ -693,16 +708,21 @@ def mark_review_other(instrument_id: str, sample_ids: Any = None, *, db: store.D
     with store.connection(db) as conn:
         with store.write_txn(conn):
             get(instrument_id, db=conn)
-            sql = ("UPDATE samples SET status='other_method', error=? WHERE instrument_id=? "
-                   "AND status='review_method'")
-            args: list = ["classified as another method by an admin", instrument_id]
+            where = "instrument_id=? AND status='review_method'"
+            where_args: list = [instrument_id]
             if ids is not None:
                 if not ids:
                     return 0
-                sql += f" AND id IN ({','.join('?' for _ in ids)})"
-                args += ids
-            n = conn.execute(sql, args).rowcount
+                where += f" AND id IN ({','.join('?' for _ in ids)})"
+                where_args += ids
+            changed_ids = [r[0] for r in conn.execute(
+                f"SELECT id FROM samples WHERE {where}", where_args)]
+            n = conn.execute(
+                f"UPDATE samples SET status='other_method', error=? WHERE {where}",
+                ["classified as another method by an admin", *where_args]).rowcount
     log.warning("instrument %s: %d review_method sample(s) marked other_method", instrument_id, n)
+    live.publish_samples(changed_ids)
+    _changed(instrument_id)
     return n
 
 
@@ -800,6 +820,7 @@ def release(instrument_id: str, sample_ids: Any, *, by: Optional[str], db: store
         out.append({"sample_id": sid, "ok": True, "seq": seq})
     log.warning("instrument %s: backfill release by %s: %d of %d released", instrument_id, by,
                 sum(1 for r in out if r["ok"]), len(out))
+    _changed(instrument_id)
     return out
 
 
@@ -865,6 +886,7 @@ def keep_existing(conflict_id: Any, *, by: Optional[str], db: store.Db = None) -
     except ValueError as exc:
         raise AdminError(str(exc), 409) from None
     log.warning("conflict %s: kept existing (by %s)", c["id"], by)
+    _changed(c["instrument_id"])
 
 
 def replace(conflict_id: Any, *, by: Optional[str], db: store.Db = None, data_dir=None) -> int:

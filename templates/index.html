@@ -219,6 +219,12 @@
 
     /* ── Status bar (bottom of page) ──────────────────────────────── */
     #status-bar { display: flex; align-items: center; gap: 12px; padding: 4px 12px; background: #161b22; border-top: 1px solid #21262d; flex-shrink: 0; font-size: 11px; color: #7d8590; min-height: 24px; }
+    #live-indicator { flex-shrink: 0; white-space: nowrap; }
+    #live-indicator::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #3fb950; margin-right: 6px; vertical-align: middle; }
+    #live-indicator.live-offline::before { background: transparent; border: 1px solid #7d8590; width: 4px; height: 4px; }
+    #version-banner { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 10003; display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #161b22; border: 1px solid #30363d; border-left: 3px solid #58a6ff; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.4); font-size: 12px; color: #e6edf3; }
+    #version-banner .btn { font-size: 11px; padding: 2px 10px; }
+    .version-banner-close { background: none; border: none; color: #7d8590; font-size: 16px; cursor: pointer; padding: 0 2px; }
 
     /* ── Range overlay cards ─────────────────────────────────────── */
     .range-card { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 6px 8px; margin-bottom: 4px; position: relative; }
@@ -276,10 +282,6 @@
 
     <span class="tb-sep"></span>
 
-    <button class="tb-btn" id="btn-refresh" title="Refresh all data">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3a5 5 0 1 0 4.546 2.914.75.75 0 1 1 1.36-.636A6.5 6.5 0 1 1 8 1.5v2A.75.75 0 0 1 6.75 4L9.25.75A.75.75 0 0 1 10.5 1.5l-2.5 3z"/></svg>
-      Refresh
-    </button>
     <button class="tb-btn" id="btn-reprocess" title="Re-process specific Lab IDs">Re-process</button>
 
     <span class="tb-sep"></span>
@@ -768,6 +770,7 @@
 
   <!-- Persistent status bar -->
   <div id="status-bar">
+    <div id="live-indicator" data-testid="live-indicator" aria-live="off">Connecting&hellip;</div>
     <div id="status-scan-info" style="flex:1;">Ready</div>
   </div>
 
@@ -1074,11 +1077,10 @@
       <p style="margin-top:8px;"><strong>Distillation Data</strong> (Advanced) &mdash; Browse the full distillation results table. Click column headers to sort. Use the search bar to filter rows.</p>
       <p style="margin-top:8px;"><strong>Distillation Curve</strong> (Advanced) &mdash; Click samples to overlay their distillation curves for visual comparison.</p>
       <p style="margin-top:8px;"><strong>Analysis</strong> &mdash; Select a sample and comparison standards, adjust trend parameters and thresholds, then click <em>Run Analysis</em>. The trend and difference plots show deviations from expected baselines. The deviation report summarizes findings. Use the queue to batch multiple analyses for QBench export.</p>
-      <p style="margin-top:12px;"><strong>Sample status</strong> &mdash; New CDFs are processed automatically. A sample that is not finished shows a badge (e.g. <em>Awaiting calibration</em>, <em>Pending corrections</em>, <em>Other method</em>); hover it for the reason. &#9201; marks an injection time corrected from the old parser's misreading. Only final samples can be exported to LIMS or uploaded to QBench.</p>
+      <p style="margin-top:12px;"><strong>Sample status</strong> &mdash; New CDFs are processed automatically and appear in the list by themselves (the page updates live; "Live · updated&hellip;" at the bottom left says when it last heard from the hub). A sample that is not finished shows a badge (e.g. <em>Awaiting calibration</em>, <em>Pending corrections</em>, <em>Other method</em>); hover it for the reason. &#9201; marks an injection time corrected from the old parser's misreading. Only final samples can be exported to LIMS or uploaded to QBench.</p>
       <p style="margin-top:8px;"><strong>Corrected D86</strong> &mdash; When checked, applies EQM correction factors from the configured JSON file to D86 distillation values.</p>
       <p style="margin-top:8px;"><strong>Keyboard shortcuts:</strong></p>
       <ul style="margin-left:18px; margin-top:4px;">
-        <li><kbd style="background:#21262d; padding:1px 5px; border-radius:3px; font-size:11px;">Ctrl+R</kbd> &mdash; Refresh all data</li>
         <li><kbd style="background:#21262d; padding:1px 5px; border-radius:3px; font-size:11px;">Ctrl+S</kbd> &mdash; Open Settings</li>
         <li><kbd style="background:#21262d; padding:1px 5px; border-radius:3px; font-size:11px;">Escape</kbd> &mdash; Close active modal</li>
       </ul>
@@ -1107,14 +1109,15 @@
      ================================================================== -->
 <script src="{{ url_for('static', filename='js/selection.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/report_payload.js') }}?v=4"></script>
-<script src="{{ url_for('static', filename='js/samples.js') }}?v=3"></script>
+<script src="{{ url_for('static', filename='js/samples.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/live.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/comments.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/ladder.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/distill_view.js') }}?v=2"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=53"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=54"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

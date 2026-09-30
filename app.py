@@ -109,6 +109,7 @@ try:
     import fuel_fit
 except Exception:  # pragma: no cover - scipy.optimize missing
     fuel_fit = None
+import live
 import notifications as notifications_mod
 import reprocess_query
 import hub
@@ -708,6 +709,7 @@ def _record_qbench_upload(sample_id, revision: Optional[int], db) -> None:
     try:
         store.samples.update(int(sample_id), qbench_revision=revision,
                              qbench_uploaded_at=store.now_iso(), db=db)
+        live.publish("sample", {"sample_id": sample_id})
     except Exception:
         LOGGER.exception("Could not record the QBench upload of sample %s", sample_id)
 
@@ -793,12 +795,14 @@ def _admin_json_body():
 # them as activity would keep the idle timer from ever advancing: the updater
 # polls /healthz continuously, static assets load on every page view, and
 # these are the endpoints app.js hits on its own timers for the life of an
-# open tab (not from a click): /api/notifications every 30s
-# (setInterval(loadNotifications, 30000)); /healthz every 2s while waiting
+# open tab (not from a click): /api/live every 3 s (30 s hidden; live.js, v3.1),
+# /api/notifications when the live count changes (every 30 s in tabs still
+# running an older app.js); /healthz every 2s while waiting
 # for a restart (_waitForServerAndReload; /api/server-status, which it used
 # to poll, stays excluded for tabs still running an older app.js);
-# /api/reprocess/status every 2s while a reprocess runs
-# (_pollReprocessStatus); /api/qbench-upload-status once on load to
+# /api/reprocess/status while a reprocess runs (_pollReprocessStatus: when
+# GCLive reports one of its samples, every 1.5 s in older tabs);
+# /api/qbench-upload-status once on load to
 # reconnect to an in-progress upload. Excluding /static/ covers page assets;
 # excluding paths ending in /stream covers the SSE routes' *reconnects* —
 # before_request fires once per connection attempt, not per keep-alive byte
@@ -810,6 +814,8 @@ _NON_ACTIVITY_PATHS = {
     "/api/server-status",
     "/api/reprocess/status",
     "/api/qbench-upload-status",
+    # v3.1 live updates: every open tab polls it every 3 s (30 s hidden)
+    "/api/live",
     # 2B1: GC-PC agents are machines, never users (ingest_api)
     "/api/ingest", "/api/agent/heartbeat", "/api/agent/results",
     "/api/agent/package", "/api/agent/package.zip",
@@ -828,6 +834,10 @@ def _track_activity():
     global _last_activity
     path = request.path
     if path in _NON_ACTIVITY_PATHS or path.startswith("/static/") or path.endswith("/stream"):
+        return
+    if web_auth.is_background_request():
+        # v3.1 live: a GET/HEAD an open tab made on its own (X-GC-Background: 1,
+        # GCLive.bgFetch). Never a POST or other write: those stay activity.
         return
     session = web_auth.current_user()
     if session is None:
@@ -1639,7 +1649,9 @@ def api_save_analysis_defaults():
 def api_files():
     """The sample list: a store query, newest injection first, with paging and
     filters (``instrument``, ``status`` and ``method`` take comma lists; ``q``,
-    ``date_from``, ``date_to``, ``backfill``, ``limit``, ``offset``). Flags and
+    ``date_from``, ``date_to``, ``backfill``, ``limit``, ``offset``; ``ids``, a
+    comma list of at most ``FILES_MAX_IDS`` sample ids, for the live client's
+    changed rows). Flags and
     best-fit come from ``sample_cache`` (and the current revision's recorded
     best-fit); this route never reads a CDF. Stale cache rows are refreshed
     in the background and counted in ``cache_pending``."""
@@ -1651,7 +1663,14 @@ def api_files():
     except ValueError:
         return _error("limit and offset must be integers")
     backfill = args.get("backfill")
+    ids = None
+    if args.get("ids") is not None:
+        raw_ids = _list_arg(args.get("ids")) or []
+        if len(raw_ids) > FILES_MAX_IDS or not all(i.isascii() and i.isdigit() and len(i) <= 18 for i in raw_ids):
+            return _error(f"ids must be a comma list of at most {FILES_MAX_IDS} sample ids")
+        ids = [int(i) for i in raw_ids]
     filters = {
+        "ids": ids,
         "q": (args.get("q") or "").strip() or None,
         "instrument": _list_arg(args.get("instrument")),
         "date_from": args.get("date_from") or None,
@@ -1692,6 +1711,7 @@ def api_files():
 
 FILES_DEFAULT_LIMIT = 500
 FILES_MAX_LIMIT = 5000
+FILES_MAX_IDS = 1000
 
 
 def _list_arg(raw: Optional[str]) -> Optional[list]:
@@ -2280,6 +2300,21 @@ def api_reprocess_preview():
         return jsonify(_resolve_lab_query(str(body.get("query") or ""), body.get("instrument"), db))
     except ValueError as exc:
         return _error(str(exc))
+
+
+# ── Live updates (v3.1; live.py, static/js/live.js) ──────────────────
+@app.route("/api/live", methods=["GET"])
+def api_live():
+    """What changed since ``?since=<boot_id>:<seq>``: ``{cursor, reset,
+    samples, instruments, agents, notifications_unread, hub}``. Answered from
+    memory only (the event ring, ``hub_control``'s refresher cache, the
+    in-memory notification store): never SQLite, and not activity
+    (``_NON_ACTIVITY_PATHS``), so an open tab neither blocks the idle
+    restart/deploy nor keeps its session alive."""
+    resp = jsonify(live.poll(request.args.get("since"), agents=hub_control.live_agents,
+                             hub=hub_control.live_hub, unread=live.notifications_unread))
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 # ── Persistent system-notification tray ──────────────────────────────

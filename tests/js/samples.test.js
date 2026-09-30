@@ -69,4 +69,57 @@ module.exports = (t) => {
     // escapeHtml escapes quotes too (attribute contexts)
     t.eq(s.escapeHtml(`<a href="x" title='y'>&`), '&lt;a href=&quot;x&quot; title=&#39;y&#39;&gt;&amp;');
     t.eq(s.escapeHtml(null), '');
+
+    // ── v3.1 live updates: fetch only the changed rows, merge them in place ──
+    t.eq(s.filesUrl({ ids: [3, 9], instrument: 'gc1' }, 5000),
+         '/api/files?limit=5000&instrument=gc1&ids=3%2C9');
+    t.eq(s.filesUrl({ ids: [] }, 10), '/api/files?limit=10');
+
+    const row = (id, dt, over) => Object.assign({ sample_id: id, uid: String(id), injection_dt: dt,
+                                                  status: 'final' }, over || {});
+    const list = [row(5, '2026-09-25 12:00:00'), row(4, '2026-09-25 11:00:00'),
+                  row(2, '2026-09-24 10:00:00')];
+    // a changed row is replaced in place; a new one lands in injection order
+    let m = s.mergeChangedRows(list, [4, 7], [row(4, '2026-09-25 11:00:00', { status: 'error' }),
+                                             row(7, '2026-09-25 11:30:00', { status: 'received' })]);
+    t.eq(m.files.map(f => f.sample_id), [5, 7, 4, 2]);
+    t.eq(m.files[2].status, 'error');
+    t.eq(m.added, 1);
+    t.eq(m.removed, 0);
+    // the input list is not modified
+    t.eq(list.map(f => f.sample_id), [5, 4, 2]);
+    t.eq(list[1].status, 'final');
+    // a changed id the server no longer returns (filtered out, or gone) is removed
+    m = s.mergeChangedRows(list, [4], []);
+    t.eq(m.files.map(f => f.sample_id), [5, 2]);
+    t.eq(m.removed, 1);
+    // newest first; ties on the time: the higher id first (as the server orders)
+    m = s.mergeChangedRows(list, [6], [row(6, '2026-09-25 12:00:00')]);
+    t.eq(m.files.map(f => f.sample_id), [6, 5, 4, 2]);
+    m = s.mergeChangedRows(list, [1], [row(1, '2026-09-30 00:00:00')]);
+    t.eq(m.files.map(f => f.sample_id), [1, 5, 4, 2]);
+    // an older sample than the page holds, when the page is full, is not added
+    m = s.mergeChangedRows(list, [1], [row(1, '2020-01-01 00:00:00')], { pageFull: true });
+    t.eq(m.files.map(f => f.sample_id), [5, 4, 2]);
+    t.eq(m.added, 0);
+    t.eq(m.skipped, 1);
+    // nothing changed
+    m = s.mergeChangedRows(list, [], []);
+    t.eq(m.files.map(f => f.sample_id), [5, 4, 2]);
+    t.eq(m.orderChanged, false);
+    // a replaced row whose injection time changed (a conflict Replace) moves
+    m = s.mergeChangedRows(list, [2], [row(2, '2026-09-26 08:00:00')]);
+    t.eq(m.files.map(f => f.sample_id), [2, 5, 4]);
+    t.eq(m.orderChanged, true);
+    t.eq([m.added, m.removed], [0, 0]);
+    // a plain in-place update keeps the order and says so
+    m = s.mergeChangedRows(list, [4], [row(4, '2026-09-25 11:00:00', { status: 'error' })]);
+    t.eq(m.orderChanged, false);
+    t.eq(m.replaced.map(f => f.sample_id), [4]);
+    // additions and removals change the order
+    t.eq(s.mergeChangedRows(list, [4], []).orderChanged, true);
+    t.eq(s.mergeChangedRows(list, [7], [row(7, '2026-09-25 11:30:00')]).orderChanged, true);
+    // an id repeated in the answer is merged once (no duplicate rows)
+    m = s.mergeChangedRows(list, [7], [row(7, '2026-09-25 11:30:00'), row(7, '2026-09-25 11:30:00')]);
+    t.eq(m.files.map(f => f.sample_id), [5, 7, 4, 2]);
 };

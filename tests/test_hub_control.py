@@ -468,3 +468,95 @@ def test_status_carries_the_effective_hub_url(env):
     _store.settings_kv.set(admin_auth.HUB_URL_KEY, "http://asapsv1:5560", db=env["db"])
     assert hub_control.refresh_cache()
     assert hub_control.status_snapshot()["hub_url"] == "http://asapsv1:5560"
+
+
+# ── live updates (v3.1): the agent snapshot and hub state for /api/live ──
+
+def _events_since(cursor):
+    import live
+    return live.BUS.since(cursor)
+
+
+def test_refresher_caches_every_instruments_agent_for_live(env):
+    import ingest_api
+    store.instruments.upsert({"id": "gc1", "name": "GC-1"}, db=env["db"])
+    store.instruments.upsert({"id": "gc2", "name": "GC-2"}, db=env["db"])
+    ingest_api.record_heartbeat("gc1", {"version": "1.4.0", "host": "GC1-PC",
+                                        "state": "idle"}, db=env["db"])
+    assert hub_control.refresh_cache()
+    agents = {a["instrument_id"]: a for a in hub_control.live_agents()}
+    assert set(agents) == {"gc1", "gc2"}
+    a = agents["gc1"]
+    assert set(a) == {"instrument_id", "last_seen", "version", "host", "status"}
+    assert a["version"] == "1.4.0" and a["host"] == "GC1-PC" and a["status"] == "idle"
+    assert a["last_seen"]
+    assert agents["gc2"] == {"instrument_id": "gc2", "last_seen": None, "version": None,
+                             "host": None, "status": None}
+
+
+def test_refresher_publishes_an_agent_event_only_when_the_snapshot_changes(env):
+    import ingest_api
+    import live
+    store.instruments.upsert({"id": "gc1", "name": "GC-1"}, db=env["db"])
+    assert hub_control.refresh_cache()
+    cur = live.BUS.cursor()
+    assert hub_control.refresh_cache()
+    assert "agent" not in _events_since(cur)["kinds"]
+    ingest_api.record_heartbeat("gc1", {"state": "sending"}, db=env["db"], publish=False)
+    assert "agent" not in _events_since(cur)["kinds"]
+    assert hub_control.refresh_cache()
+    assert "agent" in _events_since(cur)["kinds"]
+
+
+def test_note_agent_updates_the_cache_at_once_and_publishes(env):
+    import live
+    store.instruments.upsert({"id": "gc1", "name": "GC-1"}, db=env["db"])
+    assert hub_control.refresh_cache()
+    cur = live.BUS.cursor()
+    hub_control.note_agent("gc1", {"version": "2.0", "host": "H", "state": "paused"},
+                           "2026-09-30T10:00:00+00:00")
+    a = [x for x in hub_control.live_agents() if x["instrument_id"] == "gc1"][0]
+    assert a == {"instrument_id": "gc1", "last_seen": "2026-09-30T10:00:00+00:00",
+                 "version": "2.0", "host": "H", "status": "paused"}
+    assert "agent" in _events_since(cur)["kinds"]
+    # an instrument the cache has not seen yet is added
+    hub_control.note_agent("gc9", {"state": "idle"}, "2026-09-30T10:00:01+00:00")
+    assert any(x["instrument_id"] == "gc9" for x in hub_control.live_agents())
+
+
+def test_a_refresh_racing_a_heartbeat_never_rolls_the_agent_back(env):
+    """The refresher may read the store just before a heartbeat commits and
+    store its (older) row after ``note_agent``: the newer ``last_seen`` wins."""
+    import ingest_api
+    store.instruments.upsert({"id": "gc1", "name": "GC-1"}, db=env["db"])
+    ingest_api.record_heartbeat("gc1", {"version": "1.0"}, db=env["db"], publish=False)
+    hub_control.note_agent("gc1", {"version": "2.0", "state": "idle"}, "2999-01-01T00:00:00+00:00")
+    assert hub_control.refresh_cache()
+    a = [x for x in hub_control.live_agents() if x["instrument_id"] == "gc1"][0]
+    assert a["version"] == "2.0" and a["last_seen"] == "2999-01-01T00:00:00+00:00"
+
+
+def test_live_hub_state_follows_pause_and_publishes(env):
+    import live
+    assert hub_control.refresh_cache()
+    assert hub_control.live_hub() == {"state": "running", "staged_update": None}
+    cur = live.BUS.cursor()
+    assert _post(env["client"], "/api/admin/hub/pause-processing")[0] == 202
+    assert _wait(lambda: hub_control.live_hub()["state"] == "processing-paused")
+    assert "hub" in _events_since(cur)["kinds"]
+    cur = live.BUS.cursor()
+    assert _post(env["client"], "/api/admin/hub/resume-processing")[0] == 202
+    assert _wait(lambda: hub_control.live_hub()["state"] == "running")
+    assert "hub" in _events_since(cur)["kinds"]
+
+
+def test_live_snapshots_never_touch_sqlite(env, monkeypatch):
+    store.instruments.upsert({"id": "gc1", "name": "GC-1"}, db=env["db"])
+    assert hub_control.refresh_cache()
+
+    def boom(*a, **k):
+        raise AssertionError("the request path opened the database")
+    monkeypatch.setattr(sqlite3, "connect", boom)
+    monkeypatch.setattr(store, "connection", boom)
+    assert [a["instrument_id"] for a in hub_control.live_agents()] == ["gc1"]
+    assert hub_control.live_hub()["state"] == "running"
