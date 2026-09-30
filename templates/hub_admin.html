@@ -29,14 +29,19 @@
     input[type=text],input[type=password],select{background:var(--bg);color:var(--txt);
       border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
     input.wide{width:100%;margin:4px 0 8px}
-    button{background:var(--accent);border:0;color:#fff;border-radius:6px;padding:6px 12px;
+    button{background:#21262d;color:var(--txt);border:1px solid var(--line);border-radius:6px;
+      padding:6px 12px;
       font:inherit;cursor:pointer;margin:4px 4px 4px 0}
     button:disabled{opacity:.45;cursor:not-allowed}
-    button.warn{background:var(--warn);color:#0d1117}
+    button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+    button.warn{color:var(--warn);border-color:#d2992266}
     button.quiet{background:#21262d;color:var(--txt);border:1px solid var(--line)}
     table{width:100%;border-collapse:collapse;font-size:13px}
-    th,td{text-align:left;border-bottom:1px solid var(--line);padding:5px 6px;vertical-align:top;
-      overflow-wrap:anywhere}
+    th,td{text-align:left;border-bottom:1px solid var(--line);padding:5px 6px;vertical-align:top}
+    td.path{overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+    td.actions{white-space:nowrap}
+    tr.path-edit td{background:var(--bg)}
+    tr.path-edit input{width:100%;margin:2px 0 6px}
     table.counts{width:auto;min-width:260px;margin:6px 0}
     table.counts td:last-child{text-align:right;font-variant-numeric:tabular-nums;padding-left:24px}
     .err{color:var(--danger)} .ok{color:var(--green)} .muted{color:var(--muted)} .warn{color:var(--warn)}
@@ -69,7 +74,7 @@
     <form class="row locked" id="unlock-form" autocomplete="on">
       <label for="pw">Admin password</label>
       <input id="pw" type="password" autocomplete="current-password">
-      <button id="btn-unlock" type="submit">Unlock</button>
+      <button id="btn-unlock" class="primary" type="submit">Unlock</button>
       <span id="unlock-msg" class="msg" role="status"></span>
     </form>
     <div class="unlocked" id="unlocked" hidden>
@@ -109,7 +114,7 @@
     <label><input id="lf-backfill" type="checkbox"> force backfill</label>
     <input id="lf-folder" class="wide" type="text" placeholder="Folder on the server, absolute path">
     <div class="row">
-      <button id="btn-load" type="button">Start</button>
+      <button id="btn-load" class="primary" type="button">Start</button>
       <button id="btn-lf-stop" type="button" class="quiet" disabled>Stop</button>
       <span id="lf-msg" class="msg" role="status"></span>
     </div>
@@ -130,8 +135,8 @@
     <input id="ih-aliases" class="wide" type="text"
       placeholder="Folder aliases the CSV's Source File names (comma-separated)">
     <div class="row">
-      <button id="btn-ih-dryrun" type="button">Dry run</button>
-      <button id="btn-ih-start" type="button" class="warn">Start real import</button>
+      <button id="btn-ih-dryrun" class="primary" type="button">Dry run</button>
+      <button id="btn-ih-start" type="button" class="warn">Start real import…</button>
       <button id="btn-ih-stop" type="button" class="quiet" disabled>Stop</button>
       <span id="ih-msg" class="msg" role="status"></span>
     </div>
@@ -209,7 +214,7 @@
     <p id="diag-total" class="muted" style="margin-top:8px"></p>
     <p id="diag-warning" class="warn"></p>
     <div class="row">
-      <button id="btn-diag-download" type="button">Download diagnostics</button>
+      <button id="btn-diag-download" class="primary" type="button">Download diagnostics</button>
       <button id="btn-diag-estimate" type="button" class="quiet">Check sizes again</button>
       <span id="diag-msg" class="msg" role="status"></span>
     </div>
@@ -236,7 +241,7 @@
     <div class="row">
       <input id="preset-new-text" type="text" maxlength="200" placeholder="New preset text"
              style="flex:1">
-      <button id="btn-preset-add" type="button">Add preset</button>
+      <button id="btn-preset-add" class="primary" type="button">Add preset</button>
       <span id="presets-msg" class="msg" role="status"></span>
     </div>
   </div>
@@ -250,15 +255,15 @@
     <input id="hub-url" class="wide" type="text" value="{{ hub_url }}"
       placeholder="https://gc.asaplabs.net">
     <div class="row">
-      <button id="btn-hub-url" type="button">Save hub address</button>
+      <button id="btn-hub-url" class="primary" type="button">Save hub address</button>
       <span id="hub-url-msg" class="msg" role="status"></span>
     </div>
   </div>
 </main>
-<script src="{{ url_for('static', filename='js/live.js') }}?v=4"></script>
-<script src="{{ url_for('static', filename='js/running_now.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/admin_unlock.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=6"></script>
+<script src="{{ url_for('static', filename='js/live.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/running_now.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/admin_unlock.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=7"></script>
 <script src="{{ url_for('static', filename='js/diagnostics.js') }}?v=5"></script>
 <script src="{{ url_for('static', filename='js/purge.js') }}?v=6"></script>
 

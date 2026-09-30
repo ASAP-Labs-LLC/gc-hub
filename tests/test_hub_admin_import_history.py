@@ -331,14 +331,16 @@ def test_admin_page_dry_run_polls_the_job_and_shows_the_summary(admin_hub, tmp_p
         drv.find_element("id", "ih-processed").clear()
         drv.find_element("id", "ih-processed").send_keys(str(processed))
         drv.find_element("id", "btn-ih-dryrun").click()
-        assert _poll_until(lambda: "Dry run: Finished (nothing written)"
+        assert _poll_until(lambda: "Dry run finished at "
                            in drv.find_element("id", "ih-job").text, timeout=60), \
             drv.find_element("id", "ih-job").text + " | " + drv.find_element("id", "ih-msg").text
         text = drv.find_element("id", "ih-job").text
-        # the summary is a short table of counts, never JSON; shown once, in its own card
+        # the summary is a short table of counts, never JSON; shown once, in its own card,
+        # with the time it finished and no "Finished" repeated (v4.0 lane E review)
         assert "CDF files" in text and "{" not in text and '"dry_run"' not in text
-        assert text.count("Dry run:") == 1
+        assert text.count("Dry run") == 1 and "nothing written" in text
         assert drv.find_element("id", "lf-job").text == ""
-        assert "Dry run started" in drv.find_element("id", "ih-msg").text
+        # "Dry run started…" is stale once it finished: cleared
+        assert _poll_until(lambda: drv.find_element("id", "ih-msg").text == "", timeout=10)
     finally:
         drv.quit()

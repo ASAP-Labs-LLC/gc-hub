@@ -35,17 +35,23 @@ module.exports = (t) => {
     t.eq(H.label('no_injection_time'), 'No injection time');
     t.eq(H.label('csv_rows'), 'CSV rows');
 
-    // ── one line for a job, running or ended ──
+    // ── one line for a job: running, or what happened and when (never the
+    //    title and a state word twice; v4.0 lane E review) ──
+    const hm = (iso) => { const d = new Date(iso); return String(d.getHours()).padStart(2, '0') + ':' +
+                                                        String(d.getMinutes()).padStart(2, '0'); };
+    const at = '2026-09-30T14:05:00+00:00';
     const running = { kind: 'load-folder', state: 'running',
                       progress: { phase: 'submit', done: 3, total: 9 } };
-    t.eq(H.jobView(running), { title: 'Folder load', line: 'Submitting CDFs: 3 of 9', cls: '',
-                               running: true });
-    t.eq(H.jobView({ kind: 'import-history-dry-run', state: 'done' }),
-         { title: 'Dry run', line: 'Finished (nothing written)', cls: 'ok', running: false });
-    t.eq(H.jobView({ kind: 'import-history', state: 'stopped' }).line,
-         'Stopped; running it again resumes');
-    t.eq(H.jobView({ kind: 'import-history', state: 'failed', error: 'OSError: gone' }),
-         { title: 'History import', line: 'Failed: OSError: gone', cls: 'err', running: false });
+    t.eq(H.jobView(running), { line: 'Folder load: Submitting CDFs: 3 of 9', cls: '', running: true });
+    t.eq(H.jobView({ kind: 'import-history-dry-run', state: 'done', finished_at: at }),
+         { line: 'Dry run finished at ' + hm(at) + ' · nothing written', cls: 'ok', running: false });
+    t.eq(H.jobView({ kind: 'load-folder', state: 'done', finished_at: at }).line,
+         'Folder load finished at ' + hm(at));
+    t.eq(H.jobView({ kind: 'import-history', state: 'stopped', finished_at: at }).line,
+         'History import stopped at ' + hm(at) + ' · running it again resumes');
+    t.eq(H.jobView({ kind: 'import-history', state: 'failed', error: 'OSError: gone', finished_at: at }),
+         { line: 'History import failed at ' + hm(at) + ': OSError: gone', cls: 'err', running: false });
+    t.eq(H.jobView({ kind: 'import-history', state: 'done' }).line, 'History import finished');
 
     // ── Stop: only while this card's job runs ──
     t.eq(H.stopEnabled('ih', { kind: 'import-history-dry-run', state: 'running' }), true);
@@ -65,4 +71,16 @@ module.exports = (t) => {
     t.eq(H.feedTaskFor('diag', feed), null);
     t.eq(H.feedLine(feed[1]), 'Dry run running · Scanning the folder · started by Ryan C');
     t.eq(H.feedLine(feed[2]), 'Folder load finished');
+    // the hub's outcome line wins once it has one
+    t.eq(H.feedLine(Object.assign({}, feed[2], { outcome: 'Loaded 12 CDFs into GC-1' })),
+         'Loaded 12 CDFs into GC-1');
+
+    // ── a message is stale once its job ended ──
+    t.eq(H.jobEnded({ id: 3, state: 'running' }, { id: 3, state: 'done' }), true);
+    t.eq(H.jobEnded({ id: 3, state: 'running' }, { id: 3, state: 'running' }), false);
+    t.eq(H.jobEnded(null, { id: 3, state: 'done' }), false);
+    t.eq(H.jobEnded({ id: 2, state: 'running' }, { id: 3, state: 'done' }), true);
+
+    // ── the admin-call queue: a hung request is abandoned after 30 s ──
+    t.eq(H.CALL_TIMEOUT_MS, 30000);
 };

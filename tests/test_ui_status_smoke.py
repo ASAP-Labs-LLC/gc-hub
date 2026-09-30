@@ -83,7 +83,7 @@ class Stall:
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a FIFO to hold the job")
 def test_running_now_follows_a_dry_run_then_shows_its_outcome(tmp_path):
-    build_hub(tmp_path)
+    hub = build_hub(tmp_path)
     processed = tmp_path / "v1" / "processed"
     sample(processed, "PG-1", datetime(2026, 9, 19, 10, 0, 0), method=SIMDIS)
     stall = Stall(processed)
@@ -114,13 +114,30 @@ def test_running_now_follows_a_dry_run_then_shows_its_outcome(tmp_path):
             assert "Test Operator" in pop()               # who started it
             assert "Open" in pop() and "Dismiss" not in pop()
             assert str(processed) not in pop()            # never its folder
+            assert pop().startswith("Running now")
 
             stall.release()
-            # the outcome, still without a reload
-            assert _wait(lambda: "finished" in _indicator(drv), timeout=60), _indicator(drv)
+            # the outcome, still without a reload: one line with its count
+            assert _wait(lambda: "dry run finished" in _indicator(drv), timeout=60), _indicator(drv)
+            assert "classified" in _indicator(drv)
             assert _js(drv, "return document.getElementById('running-now').dataset.state;") == "done"
-            assert _wait(lambda: "Finished" in pop()), pop()
+            assert _wait(lambda: pop().startswith("Recent work")), pop()
+            assert "dry run finished" in pop() and "Scanning the folder" not in pop()
             assert _js(drv, "return window.__sameDocument === true;")
+
+            # a second ended task, then Dismiss one: the list stays open (review #5)
+            code, body = post(port, "/api/reprocess", {"sample_ids": [hub.ids["final"]]})
+            assert code == 200, body
+            assert _wait(lambda: "Re-processed 1 sample" in pop(), timeout=60), pop()
+            items = lambda: _js(drv, "return document.querySelectorAll("  # noqa: E731
+                                     "'#running-now-popover .rn-task').length;")
+            assert items() == 2
+            drv.find_element("css selector",
+                             "#running-now-popover li[data-task-id^='import-history-dry-run'] "
+                             ".rn-dismiss").click()
+            assert _wait(lambda: items() == 1)
+            assert _js(drv, "return document.getElementById('running-now-popover').hidden;") is False
+            assert "Re-processed 1 sample" in pop()
 
             # dismissed in this browser: the pill goes, and stays gone after a reload
             drv.find_element("css selector", "#running-now-popover .rn-dismiss").click()
@@ -147,22 +164,44 @@ def test_the_gc_strip_follows_heartbeats_and_the_list_order(tmp_path):
         browser_sign_in(drv, port)
         try:
             drv.get(f"http://127.0.0.1:{port}/")
-            chips = lambda: _js(drv, """return Array.from(document.querySelectorAll(
-                '#gc-strip .gc-chip')).map(a => [a.dataset.instrument, a.textContent,
-                a.getAttribute('href')]);""")
-            assert _wait(lambda: len(chips()) == 2), chips()
-            by_id = {c[0]: c for c in chips()}
-            assert "Never checked in" in by_id["gc1"][1]
-            assert by_id["gc2"][1].startswith("GC-2") and "Never checked in" in by_id["gc2"][1]
-            assert by_id["gc1"][2] == "/instruments?instrument=gc1"
+            strip = lambda: _js(drv, "const b = document.getElementById('gc-strip');"  # noqa: E731
+                                     "return b.hidden ? '' : b.textContent;")
+            assert _wait(lambda: strip() == "\u25cb0/2 GCs live"), strip()
             _js(drv, "window.__sameDocument = true;")
 
             code, _ = _heartbeat(port, token)
             assert code == 200
-            assert _wait(lambda: "●" in {c[0]: c for c in chips()}["gc1"][1]
-                         and "Live" in {c[0]: c for c in chips()}["gc1"][1]), chips()
-            assert "Never checked in" in {c[0]: c for c in chips()}["gc2"][1]
+            assert _wait(lambda: strip() == "\u25cb1/2 GCs live"), strip()
             assert _js(drv, "return window.__sameDocument === true;")
+
+            # click: each GC with its status and a link to its page
+            drv.find_element("id", "gc-strip").click()
+            rows_ = lambda: _js(drv, """return Array.from(document.querySelectorAll(
+                '#gc-strip-popover .gc-row')).map(li => [li.dataset.instrument,
+                li.textContent, li.querySelector('a').getAttribute('href')]);""")
+            assert _wait(lambda: len(rows_()) == 2), rows_()
+            by_id = {r[0]: r for r in rows_()}
+            assert "Live" in by_id["gc1"][1] and by_id["gc1"][2] == "/instruments/gc1"
+            assert "Never checked in" in by_id["gc2"][1] and "GC-2" in by_id["gc2"][1]
+
+            # review blocker: with no new answer, the age keeps going (it used to
+            # freeze at "Not seen for 1 min"): stop polling, move the clock on 3 min
+            _js(drv, "GCLive.stop(); const t0 = Date.now(); Date.now = () => t0 + 180000;")
+            assert _wait(lambda: strip() == "\u25cb0/2 GCs live", timeout=25), strip()
+            drv.find_element("id", "gc-strip").click()
+            drv.find_element("id", "gc-strip").click()
+            assert _wait(lambda: "Not seen for 3 min" in {r[0]: r for r in rows_()}["gc1"][1]), rows_()
+            drv.refresh()
+
+            # the toolbar fits: nothing pushed off-screen at 1366 or 1440 px (review #6)
+            for width in (1366, 1440):
+                drv.set_window_size(width, 900)
+                assert _wait(lambda: _js(drv, "return !document.getElementById('gc-strip').hidden;"))
+                over = _js(drv, """const t = document.getElementById('toolbar');
+                    return Array.from(t.children).filter(c => c.offsetParent !== null
+                        && c.getBoundingClientRect().right > t.clientWidth + 1).map(c => c.id);""")
+                assert over == [], (width, over)
+            drv.set_window_size(1600, 1000)
 
             # ── the sample list ──
             rows = lambda: _js(drv, """return Array.from(document.querySelectorAll(
@@ -176,10 +215,19 @@ def test_the_gc_strip_follows_heartbeats_and_the_list_order(tmp_path):
             assert days[-1] == "No injection time", days
             assert r[-1][0] == str(nt) and r[-1][2] == "file 2026-09-26 10:00"
             final = [x for x in r if x[0] == str(hub.ids["final"])][0]
-            assert final[2] == "2026-09-25 14:23"
-            # newest first: injection times descend outside the last group
-            times = [x[2] for x in r if x[0] != "day" and not x[2].startswith("file")]
-            assert times == sorted(times, reverse=True), times
+            assert final[2] == "14:23"          # under its day heading: the time only (review #2)
+            assert _js(drv, f"return document.querySelector('#dash-file-list li[data-sample-id="
+                            f"\"{hub.ids['final']}\"] .file-item-time').title;") == \
+                "Injected 2026-09-25 14:23:00"
+            # newest first: injection times descend within each day
+            day, per_day = None, {}
+            for x in r:
+                if x[0] == "day":
+                    day = x[1]
+                elif not x[2].startswith("file"):
+                    per_day.setdefault(day, []).append(x[2])
+            for d, times in per_day.items():
+                assert times == sorted(times, reverse=True), (d, times)
 
             # full lab IDs: the name is never cut (no ellipsis, nothing hidden)
             cut = _js(drv, """return Array.from(document.querySelectorAll(
@@ -193,6 +241,8 @@ def test_the_gc_strip_follows_heartbeats_and_the_list_order(tmp_path):
             assert _wait(lambda: not any(x[0] == "day" for x in rows()))
             n = names()
             lab = [x.split(" (")[0] for x in n]
+            # no headings in Lab ID order: each row says its date again
+            assert final_time_in_lab_mode(drv, hub.ids["final"]) == "2026-09-25 14:23"
             assert lab.index("39999") < lab.index("40298") < lab.index("40304") < lab.index("50001"), n
             drv.refresh()
             assert _wait(lambda: len(names()) > 3 and not any(x[0] == "day" for x in rows()))
@@ -200,6 +250,11 @@ def test_the_gc_strip_follows_heartbeats_and_the_list_order(tmp_path):
                             ".getAttribute('aria-pressed');") == "true"
         finally:
             drv.quit()
+
+
+def final_time_in_lab_mode(drv, sid):
+    return _js(drv, f"return document.querySelector('#dash-file-list li[data-sample-id="
+                    f"\"{sid}\"] .file-item-time').textContent;")
 
 
 def test_hub_admin_unlocks_once_and_starts_a_folder_load(tmp_path):
@@ -224,6 +279,15 @@ def test_hub_admin_unlocks_once_and_starts_a_folder_load(tmp_path):
             for gone in ("btn-refresh", "btn-sessions", "btn-presets-load", "btn-ih-last"):
                 assert _js(drv, f"return document.getElementById('{gone}');") is None, gone
 
+            # a wrong password never shows "Unlocked" (review #8)
+            drv.find_element("id", "pw").send_keys("not-the-password")
+            drv.find_element("id", "btn-unlock").click()
+            assert _wait(lambda: drv.find_element("id", "unlock-msg").text not in ("", "Checking…"),
+                         timeout=30)
+            assert _js(drv, "return document.getElementById('unlocked').hidden;") is True
+            drv.find_element("id", "pw").clear()
+            time.sleep(1.2)                               # the hub's one-attempt-at-a-time rule
+
             # unlock once: sessions, presets and results files load by themselves
             drv.find_element("id", "pw").send_keys(pw)
             drv.find_element("id", "btn-unlock").click()
@@ -239,11 +303,12 @@ def test_hub_admin_unlocks_once_and_starts_a_folder_load(tmp_path):
             drv.find_element("id", "lf-folder").send_keys(str(folder))
             drv.find_element("id", "btn-load").click()
             lf = lambda: drv.find_element("id", "lf-job").text  # noqa: E731
-            assert _wait(lambda: "Folder load: Finished" in lf(), timeout=60), \
+            assert _wait(lambda: "Folder load finished at " in lf(), timeout=60), \
                 lf() + " | " + drv.find_element("id", "lf-msg").text
             assert "Created" in lf() and "{" not in lf()           # counts, never JSON
             assert drv.find_element("id", "ih-job").text == ""     # not in the import card
-            assert "Started" in drv.find_element("id", "lf-msg").text   # next to its button
+            # "Started" was stale once it finished: cleared (review #7)
+            assert _wait(lambda: drv.find_element("id", "lf-msg").text == "")
             assert _js(drv, "return document.getElementById('btn-lf-stop').disabled;") is True
 
             # a wrong start gets its message next to the button, not at the top
@@ -251,6 +316,16 @@ def test_hub_admin_unlocks_once_and_starts_a_folder_load(tmp_path):
             drv.find_element("id", "lf-folder").send_keys("relative/path")
             drv.find_element("id", "btn-load").click()
             assert _wait(lambda: "absolute path" in drv.find_element("id", "lf-msg").text)
+
+            # New path is an inline field, never window.prompt (review #7)
+            _js(drv, "window.prompt = () => { throw new Error('prompt used'); };")
+            drv.find_element("css selector", "#exports-rows tr:first-child td.actions button").click()
+            assert _wait(lambda: _js(drv, "return !!document.querySelector("
+                                          "'#exports-rows tr.path-edit input.path-input');"))
+            drv.find_element("css selector", "#exports-rows tr.path-edit input").send_keys("relative.csv")
+            drv.find_element("css selector", "#exports-rows tr.path-edit button.primary").click()
+            assert _wait(lambda: "absolute" in drv.find_element(
+                "css selector", "#exports-rows tr.path-edit .msg").text)
 
             # Lock forgets the password
             drv.find_element("id", "btn-lock").click()
