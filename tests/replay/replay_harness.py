@@ -51,6 +51,11 @@ where numbers differ, proven by re-running v1 with the hub's input:
 ``no-new-row``           a duplicate file / same lab ID and time: neither side
                          writes a row
 ``both-failed``          neither side produces a result
+``fp-platform``          only against a recording made on another machine:
+                         a ``Case.fp_fragile`` case (a signal near the noise
+                         floor) whose numbers moved by at most
+                         ``FP_PLATFORM_TOL`` from floating-point differences
+                         between CPUs. Live runs compare it exactly.
 ``v1-bug``               investigated, v1 wrong (``Case.v1_bug`` says why)
 =======================  =================================================
 
@@ -251,6 +256,10 @@ class Case:
     same_bytes_as: Optional[str] = None  # an identical copy of an earlier case's file
     note: str = ""
     v1_bug: str = ""            # a documented v1 defect explains this case's difference
+    # A signal so close to the noise floor that the last bits of a sum move its
+    # cut points by a hundredth of a degree between CPUs (Mac arm64 vs CI's
+    # Linux x86-64, same numpy/scipy): exact live, ``fp-platform`` vs a recording.
+    fp_fragile: bool = False
     # The InjectionDateTime the hub must write, known independently of the hub's
     # parser (default: ``injected``, when the stamp is written from it).
     expect_dt: Optional[str] = None
@@ -296,7 +305,8 @@ def sweep() -> list[Case]:
         Case("saturating_solvent", lambda s, t: np.minimum(
             _g(t, s.solvent_rt, 5e6, 0.01) + hydrocarbon(s, t, 0.15, 0.60, S), 1.0e6)),
         Case("near_zero", lambda s, t: hydrocarbon(s, t, 0.15, 0.60, 3.0)),
-        Case("near_zero_noisy", lambda s, t: hydrocarbon(s, t, 0.15, 0.60, 3.0) + _noise(t, 1.0, 4)),
+        Case("near_zero_noisy", lambda s, t: hydrocarbon(s, t, 0.15, 0.60, 3.0) + _noise(t, 1.0, 4),
+             fp_fragile=True),
         Case("flat_zero", lambda s, t: np.zeros_like(t), base_scale=0.0),
         Case("same_as_blank", lambda s, t: np.zeros_like(t)),
         Case("double_blank", lambda s, t: np.zeros_like(t), base_scale=2.0),
@@ -833,8 +843,24 @@ DOCUMENTED = {
     "truncated-refused",   # v2.0.0 "Truncated CDFs are refused"
     "no-new-row",          # a duplicate / same key: neither side writes a new row
     "both-failed",         # neither side produces a result
+    "fp-platform",         # a Case.fp_fragile case vs a recording from another CPU, within tolerance
     "v1-bug",              # investigated: v1 is wrong, the hub right (Case.v1_bug says why)
 }
+
+
+# How far an ``fp_fragile`` case's numbers may move between CPUs (°F/°C, as
+# printed); seen on CI: at most 0.05.
+FP_PLATFORM_TOL = 0.1
+
+
+def _within_fp_tolerance(left: dict) -> bool:
+    for v1_val, hub_val in left.values():
+        try:
+            if abs(float(v1_val) - float(hub_val)) > FP_PLATFORM_TOL:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return bool(left)
 
 
 def _row_diff(v1: dict, hub: dict) -> dict:
@@ -880,7 +906,7 @@ _HOLDS = {"other_method": "method-excluded", "review_method": "review-method"}
 
 
 def compare(suite: str, config: str, items: list[Item], hub: dict, v1: dict,
-            proof: Optional[dict] = None) -> list[Finding]:
+            proof: Optional[dict] = None, cross_platform: bool = False) -> list[Finding]:
     out: list[Finding] = []
     auto_off = CONFIGS[config][0] == "none"
     for it in items:
@@ -950,7 +976,11 @@ def compare(suite: str, config: str, items: list[Item], hub: dict, v1: dict,
                     "v1 given the assignments the hub keeps reproduces the hub", left)
                 continue
         if left:
-            if case is not None and case.v1_bug:
+            if (cross_platform and case is not None and case.fp_fragile
+                    and _within_fp_tolerance(left)):
+                add("+".join(verdicts + ["fp-platform"]),
+                    f"within {FP_PLATFORM_TOL} of v1's recording from another machine", left)
+            elif case is not None and case.v1_bug:
                 add("v1-bug", case.v1_bug, left)
             else:
                 add("UNEXPLAINED", "same inputs, different output", left)
@@ -1028,7 +1058,7 @@ def run_config(s: Suite, config: str, root: Path, cases: list[Case],
     if missing:
         raise AssertionError(f"{config}: no v1 output for {missing} (re-record: "
                              f"tests/replay/record_v1.py)")
-    return (compare(s.name, config, items, hub, v1, proof),
+    return (compare(s.name, config, items, hub, v1, proof, cross_platform=recorded is not None),
             {"hub": hub, "v1": v1, "items": items, "proof": proof})
 
 

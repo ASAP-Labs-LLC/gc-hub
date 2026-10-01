@@ -196,3 +196,31 @@ def test_results_page_uncorrected_d86_of_every_v1_row(tmp_path):
         py = distill.x4_midpoints(distill._convert_to_d86(case))
         bad += [(k, py[k], js.get(k)) for k in LABELS if js.get(k) != py[k]]
     assert not bad, bad[:10]
+
+
+def _fragile_compare(hub_t80: str, *, fragile: bool, cross_platform: bool) -> str:
+    """compare() on one sample whose only difference from v1 is D86 T80."""
+    case = rh.Case("near_zero_noisy", lambda s, t: None, fp_fragile=fragile)
+    item = rh.Item("near_zero_noisy", Path("near_zero_noisy.CDF"), case, "2026-09-25 14:23:00")
+    v1_row = {c: "1" for c in rh.COLUMNS}
+    v1_row.update({"InjectionDateTime": item.expect_dt, "D86 T80": "376.57"})
+    hub_row = dict(v1_row, **{"D86 T80": hub_t80})
+    hub = {item.id: {"row": hub_row, "status": "final", "blank": None, "line": None}}
+    v1_rec = {"row": v1_row, "blank_id": None, "line": None, "errors": [], "rows_added": 1}
+    v1 = {"looker": {item.id: v1_rec}, "direct": {item.id: v1_rec}}
+    [finding] = [f for f in rh.compare("synthetic", "operator", [item], hub, v1,
+                                        cross_platform=cross_platform)
+                 if f.case == item.id]
+    return finding.verdict
+
+
+def test_a_fragile_case_may_move_a_hundredth_only_against_another_machines_recording():
+    """CI (Linux x86-64) moved near_zero_noisy's cut points by up to 0.05 from
+    the recording made on a Mac (arm64), same code and numpy/scipy."""
+    assert _fragile_compare("376.56", fragile=True, cross_platform=True) == "fp-platform"
+    # live (same machine): exact, as every other case
+    assert _fragile_compare("376.56", fragile=True, cross_platform=False) == "UNEXPLAINED"
+    # only cases marked fragile
+    assert _fragile_compare("376.56", fragile=False, cross_platform=True) == "UNEXPLAINED"
+    # never more than the tolerance
+    assert _fragile_compare("376.80", fragile=True, cross_platform=True) == "UNEXPLAINED"
