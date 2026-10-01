@@ -95,6 +95,21 @@ def make_app():
         from werkzeug.exceptions import abort
         abort(code)
 
+    @app.route("/api/locked", methods=["POST"])
+    def locked():
+        import sqlite3
+        raise sqlite3.OperationalError("database is locked")
+
+    @app.route("/api/sql-other", methods=["POST"])
+    def sql_other():
+        import sqlite3
+        raise sqlite3.OperationalError("no such table: nope")
+
+    @app.route("/locked-page")
+    def locked_page():
+        import sqlite3
+        raise sqlite3.OperationalError("database is locked")
+
     return app
 
 
@@ -125,6 +140,33 @@ def test_a_route_that_raises_answers_json_500_with_a_ref_and_no_internals(client
     assert errs[-1].exc_info and errs[-1].exc_info[0] is RuntimeError
     # never the request body
     assert "hunter2-secret" not in caplog.text
+
+
+def test_a_locked_store_is_a_503_try_again_not_send_diagnostics(client, caplog):
+    """A write that waited out ``busy_timeout`` behind another writer (a purge's
+    one transaction, an import batch) is a busy hub, not a bug: 503 with
+    Retry-After and a "try again" message, logged at WARNING without a
+    traceback, instead of the generic 500 asking for the diagnostics bundle."""
+    with caplog.at_level(logging.INFO):
+        r = client.post("/api/locked", data="{}", headers={"Content-Type": "application/json"})
+    assert r.status_code == 503
+    assert r.is_json
+    body = r.get_json()
+    assert set(body) == {"error", "status", "ref"} and body["status"] == 503
+    assert "try again" in body["error"].lower() and "diagnostics" not in body["error"]
+    assert r.headers.get("Retry-After") == str(api_errors.BUSY_RETRY_AFTER)
+    assert not [rec for rec in caplog.records if rec.levelno >= logging.ERROR], caplog.text
+    assert body["ref"] in caplog.text
+
+
+def test_other_sqlite_errors_stay_the_generic_500(client):
+    r = client.post("/api/sql-other", data="{}", headers={"Content-Type": "application/json"})
+    assert r.status_code == 500 and GENERIC.match(r.get_json()["error"])
+
+
+def test_a_locked_store_on_a_page_keeps_the_html_500(client):
+    r = client.get("/locked-page")
+    assert r.status_code == 500 and not r.is_json
 
 
 def test_refs_differ_between_failures(client):

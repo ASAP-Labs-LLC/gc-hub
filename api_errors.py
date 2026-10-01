@@ -10,7 +10,11 @@ page, and the front end showed ``SyntaxError: Unexpected token '<'``.
   405, ``Retry-After`` on a 503), logged at INFO (a deliberate 502/503/504
   keeps its status and is logged at ERROR; a plain 500 is the generic answer
   below);
-* any uncaught ``Exception`` on an ``/api/`` path → 500 ``{error, status,
+* SQLite giving up on a lock (``database is locked``: a write waited out
+  ``busy_timeout`` behind another writer) → 503 ``{error, status, ref}`` with
+  ``Retry-After`` and a "try again" message, logged at WARNING (a busy hub,
+  not a bug);
+* any other uncaught ``Exception`` on an ``/api/`` path → 500 ``{error, status,
   ref}`` with a generic message naming the ref, and the full traceback logged
   at ERROR with the ref, method, path and ``netctx.client_ip()``. Never the
   request body, never internals in the answer.
@@ -33,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import sqlite3
 
 from flask import jsonify, request
 from werkzeug.exceptions import HTTPException
@@ -44,6 +49,9 @@ log = logging.getLogger("api_errors")
 HUB_HEADER = "X-GC-Hub"
 GENERIC_500 = ("Something went wrong on the hub (ref {ref}). Send the diagnostics bundle "
                "or app.log to have it looked at.")
+BUSY_MESSAGE = ("The hub's database is busy with other work (ref {ref}). Try again in a "
+                "moment.")
+BUSY_RETRY_AFTER = 5
 # Headers of an HTTPException worth carrying over to the JSON answer.
 _KEEP_HEADERS = frozenset({"allow", "retry-after", "www-authenticate"})
 
@@ -90,7 +98,7 @@ def handle_http_exception(exc: HTTPException):
         return exc
     original = getattr(exc, "original_exception", None)
     if exc.code >= 500 and original is not None:
-        return _server_error(original)          # Flask's wrapper around an uncaught error
+        return _busy(original) if _store_busy(original) else _server_error(original)          # Flask's wrapper around an uncaught error
     if exc.code == 500:
         return _server_error(exc)
     ref = new_ref()
@@ -106,9 +114,27 @@ def handle_http_exception(exc: HTTPException):
     return resp
 
 
+def _store_busy(exc: BaseException) -> bool:
+    """SQLite gave up waiting (``busy_timeout``) for another writer's lock."""
+    return isinstance(exc, sqlite3.OperationalError) and (
+        "locked" in str(exc).lower() or "busy" in str(exc).lower())
+
+
+def _busy(exc: BaseException):
+    ref = new_ref()
+    method, path = _where()
+    log.warning("store busy ref %s on %s %s from %s: %s", ref, method, path, _client(),
+                netctx.log_safe(str(exc)))
+    resp = _answer(BUSY_MESSAGE.format(ref=ref), 503, ref)
+    resp.headers["Retry-After"] = str(BUSY_RETRY_AFTER)
+    return resp
+
+
 def handle_exception(exc: Exception):
     if not _is_api():
         raise exc      # Flask logs it and serves its HTML 500 page, as before
+    if _store_busy(exc):
+        return _busy(exc)
     return _server_error(exc)
 
 
