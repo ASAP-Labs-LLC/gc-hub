@@ -363,6 +363,14 @@ def test_qbench_skip_item_refuses_a_bad_index(hub, body):
     assert code == 400, (code, raw[:300])
 
 
+@pytest.mark.parametrize("queue", [5, 1.5, True])
+def test_qbench_upload_with_a_non_list_queue_is_a_400(hub, queue):
+    port, _data = hub
+    code, _h, raw = _raw(port, "POST", "/api/qbench-upload", json.dumps({"queue": queue}).encode(),
+                         {"Content-Type": "application/json"})
+    assert code == 400, (code, raw[:300])
+
+
 def test_reprocess_with_a_non_list_missing_is_a_400(hub):
     port, _data = hub
     code, _h, raw = _raw(port, "POST", "/api/reprocess",

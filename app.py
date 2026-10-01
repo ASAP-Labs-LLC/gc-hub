@@ -3235,6 +3235,8 @@ def api_qbench_upload():
         return _error(NOT_AN_OBJECT)
     data, db = _hub()
     new_queue, refused = [], []
+    if not isinstance(body.get("queue") or [], list):
+        return _error("queue must be a list of {sample_id, standard_name, ...}")
     for item in body.get("queue") or []:
         if not isinstance(item, dict):
             return _error("queue items must be objects {sample_id, standard_name, ...}")
