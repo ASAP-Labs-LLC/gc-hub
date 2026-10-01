@@ -339,6 +339,10 @@ def sweep() -> list[Case]:
         Case("no_stamp_mtime", lambda s, t: hydrocarbon(s, t, 0.25, 0.5, S), raw_stamp="",
              mtime=datetime(2026, 9, 25, 14, 37, 10, 250000).timestamp(),
              expect_dt="2026-09-25 14:37:10"),   # the sender's file time, to the second
+        # a fraction of 0.5 s or more: the hub truncates the file time, never rounds
+        Case("no_stamp_mtime_late_fraction", lambda s, t: hydrocarbon(s, t, 0.25, 0.5, S),
+             raw_stamp="", mtime=datetime(2026, 9, 25, 14, 38, 10, 750000).timestamp(),
+             expect_dt="2026-09-25 14:38:10"),
         *stamp_cases(),
         Case("five_points", lambda s, t: hydrocarbon(s, t, 0.15, 0.60, S), run_frac=5e-4),
         Case("empty_signal", lambda s, t: np.zeros_like(t), run_frac=0.0),

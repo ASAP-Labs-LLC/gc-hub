@@ -49,6 +49,7 @@ PINNED = {
     ("operator", "stamp_25_00"): "injection-time-fix",
     ("operator", "stamp_25_13"): "match",
     ("operator", "no_stamp_mtime"): "injection-time-fix",
+    ("operator", "no_stamp_mtime_late_fraction"): "injection-time-fix",
     ("operator", "injected_before_blank"): "blank-rule",
     ("operator", "paren_blank_named"): "blank-rule",
     ("operator", "before_blank2_arriving_after"): "blank-rule",
