@@ -916,7 +916,10 @@ def _peak_height_outside_solvent(t: np.ndarray, y: np.ndarray,
     if t.size < 3:
         return 0.0
     dt = float(np.median(np.diff(t))) if t.size > 1 else 0.01
-    win = max(3, int(round(1.0 / dt)))
+    # 2n + 1 already spans the whole trace from every point (edge padding adds
+    # no values), so the cap changes nothing; a file claiming a tiny sampling
+    # interval would otherwise ask for a window of billions of points.
+    win = min(max(3, int(round(1.0 / dt))), 2 * y.size + 1)
     baseline = minimum_filter1d(y, size=win, mode="nearest")
     resid = y - baseline
     mask = t > solvent_end_min
