@@ -69,3 +69,36 @@ def test_blank_check_window_is_capped_at_the_trace_length(monkeypatch):
     win = max(3, int(round(1.0 / 0.001)))
     resid = yy - real(yy, size=win, mode="nearest")
     assert base == float(resid[t > d.BLANK_SOLVENT_END_MIN].max())
+
+
+def _declared_huge_cdf(path, n=400_000_000):
+    """A small netCDF-4 (HDF5) file declaring ``n`` intensity values it never
+    wrote: chunked storage keeps it a few KB, but reading the variable
+    allocates n * 8 bytes (3.2 GB here)."""
+    import netCDF4
+    with netCDF4.Dataset(path, "w", format="NETCDF4") as ds:
+        ds.sample_name = "40304"
+        ds.injection_date_time_stamp = "20260925142300+0000"
+        ds.detection_method_name = SIMDIS
+        ds.createDimension("point_number", n)
+        v = ds.createVariable("actual_sampling_interval", "f8")
+        v.assignValue(0.06)
+        ds.createVariable("ordinate_values", "f8", ("point_number",), zlib=True,
+                          chunksizes=(1 << 20,))
+    return path
+
+
+def test_a_cdf_declaring_more_values_than_any_upload_can_hold_is_rejected(hub):
+    """A netCDF-4 CDF is checked only for an empty intensity array, so a
+    tiny file declaring hundreds of millions of values was received, and
+    the Worker's read then allocated gigabytes: the hub process was killed
+    (or raised MemoryError), and since a received sample is requeued at
+    every start, it crashed again on each restart. More values than the
+    25 MB upload cap could hold even at one byte each is not a
+    chromatogram: refused at receive time (400)."""
+    hub.gc1()
+    p = _declared_huge_cdf(hub.src / "huge.CDF")
+    assert p.stat().st_size < 1_000_000
+    import pipeline
+    with pytest.raises(pipeline.SubmitRejected, match="values"):
+        hub.submit(p)

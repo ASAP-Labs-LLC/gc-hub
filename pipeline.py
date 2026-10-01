@@ -426,6 +426,10 @@ def _lab_id_list(conn, sample_ids: list, limit: int = NOTIFY_LAB_IDS_MAX) -> str
 
 _NC_TYPE_SIZE = {1: 1, 2: 1, 3: 2, 4: 4, 5: 4, 6: 8}
 _INTENSITY_VARS = ("total_intensity", "intensity_values", "intensity", "ordinate_values")
+# One value per byte of the largest upload (ingest_api.MAX_BODY): a NetCDF-3
+# file can't hold more, but a compressed/unwritten netCDF-4 variable can
+# declare any size and reading it would allocate it all.
+MAX_CDF_VALUES = 25 * 1024 * 1024
 
 
 class _Header:
@@ -536,6 +540,10 @@ def cdf_problem(path) -> Optional[str]:
         with distill._NETCDF_LOCK:
             with Dataset(p) as ds:
                 vars_lc = {n.lower(): n for n in ds.variables}
+                for name, var in ds.variables.items():
+                    if var.size > MAX_CDF_VALUES:     # read from the header, not the data
+                        return (f"the CDF declares {var.size} values in {name}, more than a "
+                                f"chromatogram can have ({MAX_CDF_VALUES})")
                 for key in _INTENSITY_VARS:
                     if key in vars_lc:
                         if ds.variables[vars_lc[key]].size == 0:
