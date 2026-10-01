@@ -36,7 +36,7 @@ def ladder_times(n=20, first=0.50, step=0.30):
 
 
 def write_cdf(path, times, signal, sample_name, injected: datetime, method_name=None,
-              raw_stamp=None):
+              raw_stamp=None, dtype="f8", fmt="NETCDF3_CLASSIC"):
     """Write the variables/attributes distill reads (see the module docstring).
 
     ``times`` must be evenly spaced minutes; it is stored as a sampling
@@ -46,14 +46,15 @@ def write_cdf(path, times, signal, sample_name, injected: datetime, method_name=
     fixtures the golden rows were captured from stay exactly as they were.
     distill does not read it. ``raw_stamp`` overrides the injection stamp text
     verbatim (``""`` leaves the stamp out); ``sample_name=None`` leaves the
-    name out."""
+    name out. ``dtype`` is the intensity variable's type (``"f4"`` stores it
+    as real Agilent files do); ``fmt`` the netCDF file format."""
     path = Path(path)
     times = np.asarray(times, float)
     signal = np.asarray(signal, float)
     if times.size != signal.size:
         raise ValueError("times and signal differ in length")
     interval_s = DT_MIN * 60.0 if times.size < 2 else float(times[1] - times[0]) * 60.0
-    with netCDF4.Dataset(path, "w", format="NETCDF3_CLASSIC") as ds:
+    with netCDF4.Dataset(path, "w", format=fmt) as ds:
         ds.dataset_completeness = "C1+C2"
         if sample_name is not None:
             ds.sample_name = sample_name
@@ -69,7 +70,7 @@ def write_cdf(path, times, signal, sample_name, injected: datetime, method_name=
         v.assignValue(float(times[0]) * 60.0 if times.size else 0.0)
         v = ds.createVariable("actual_run_time_length", "f8")
         v.assignValue(float(times[-1] - times[0]) * 60.0 if times.size else 0.0)
-        v = ds.createVariable("ordinate_values", "f8", ("point_number",))
+        v = ds.createVariable("ordinate_values", dtype, ("point_number",))
         v[:] = signal
     return path
 
