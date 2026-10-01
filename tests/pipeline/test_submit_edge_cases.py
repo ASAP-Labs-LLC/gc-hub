@@ -102,3 +102,46 @@ def test_a_cdf_declaring_more_values_than_any_upload_can_hold_is_rejected(hub):
     import pipeline
     with pytest.raises(pipeline.SubmitRejected, match="values"):
         hub.submit(p)
+
+
+def _record_cdf(path, dtype, n=1001, extra_record_var=None):
+    """A complete NetCDF-3 CDF whose intensity runs along the unlimited
+    (record) dimension, as some data systems write it."""
+    import netCDF4
+    with netCDF4.Dataset(path, "w", format="NETCDF3_CLASSIC") as ds:
+        ds.sample_name = "40304"
+        ds.injection_date_time_stamp = "20260925142300+0000"
+        ds.detection_method_name = SIMDIS
+        ds.createDimension("point_number", None)
+        v = ds.createVariable("actual_sampling_interval", "f8")
+        v.assignValue(0.06)
+        v = ds.createVariable("ordinate_values", dtype, ("point_number",))
+        v[:n] = (np.arange(n) % 100) + 1
+        if extra_record_var:
+            w = ds.createVariable("extra", extra_record_var, ("point_number",))
+            w[:n] = np.arange(n) % 7
+    return path
+
+
+@pytest.mark.parametrize("dtype", ["i1", "i2"])
+def test_a_complete_file_with_one_short_record_variable_is_not_called_truncated(hub, dtype):
+    """NetCDF-3's special case: when a file's ONLY record variable is a
+    byte, char or short, its records are not padded to 4 bytes. The size
+    check strode by the padded vsize, so every such complete file (a short
+    intensity along the record dimension) was refused as "truncated"."""
+    import pipeline
+    hub.gc1()
+    p = _record_cdf(hub.src / f"rec-{dtype}.CDF", dtype)
+    assert pipeline.cdf_problem(p) is None
+    assert hub.submit(p).outcome == "created"
+    # a cut copy is still caught
+    cut = fx.truncated_copy(p, hub.src / f"rec-{dtype}-cut.CDF", keep_fraction=0.9)
+    assert "truncated" in (pipeline.cdf_problem(cut) or "")
+
+
+def test_record_padding_still_applies_with_two_record_variables(hub):
+    import pipeline
+    p = _record_cdf(hub.src / "rec2.CDF", "i2", extra_record_var="i2")
+    assert pipeline.cdf_problem(p) is None
+    cut = fx.truncated_copy(p, hub.src / "rec2-cut.CDF", keep_fraction=0.9)
+    assert "truncated" in (pipeline.cdf_problem(cut) or "")

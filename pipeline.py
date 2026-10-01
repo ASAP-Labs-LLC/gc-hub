@@ -509,15 +509,22 @@ def _netcdf3_required_size(path: Path) -> Optional[int]:
             n = size
             for d in shape[1:]:
                 n *= d
-            records.append((begin, vsize, n))
+            records.append((begin, vsize, n, nc_type))
         else:
             n = size
             for d in shape:
                 n *= d
             required = max(required, begin + n)
     if records and numrecs:
-        recsize = sum(v for _, v, _ in records) if len(records) > 1 else records[0][1]
-        for begin, _vsize, n in records:
+        if len(records) > 1:
+            recsize = sum(r[1] for r in records)
+        elif records[0][3] in (1, 2, 3):
+            # the spec's special case: a lone byte/char/short record variable's
+            # records are not padded to 4 bytes (its vsize is)
+            recsize = records[0][2]
+        else:
+            recsize = records[0][1]
+        for begin, _vsize, n, _type in records:
             required = max(required, begin + (numrecs - 1) * recsize + n)
     return required
 
