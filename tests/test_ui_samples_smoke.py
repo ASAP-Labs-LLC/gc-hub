@@ -355,3 +355,21 @@ def test_the_detail_clears_the_badge_with_overlay_scrollbars(page):
                     assert _js(drv, BADGE_OVERLAP_JS) == [], (size, view, top)
     finally:
         drv.quit()
+
+
+def test_back_from_a_missing_sample_shows_the_pick_a_sample_placeholder(page):
+    """A run that is gone (purged while its row was on screen, or an old
+    link) shows its error in the empty detail; going Back to the list must
+    bring back "Pick a sample", not keep the old error on screen."""
+    drv, base, _hub = page
+    _open(drv, base, "/samples")
+    assert wait_for(drv, lambda: "Pick a sample" in _js(drv, "return document.querySelector('[data-testid=detail-empty]').textContent"))
+    _js(drv, "GCSamples.openSample(987654, 'push');")
+    assert wait_for(drv, lambda: _path(drv) == "/samples/987654")
+    assert wait_for(drv, lambda: "not found" in _js(drv, "return document.querySelector('[data-testid=detail-empty]').textContent"))
+    drv.back()
+    assert wait_for(drv, lambda: _path(drv) == "/samples")
+    assert wait_for(drv, lambda: "Pick a sample" in _js(drv, "return document.querySelector('[data-testid=detail-empty]').textContent")), \
+        _js(drv, "return document.querySelector('[data-testid=detail-empty]').textContent")
+    assert _js(drv, "return document.querySelector('[data-testid=detail-empty]').hidden") is False
+    assert _errors(drv, expected=("/api/samples/987654/metadata",)) == []

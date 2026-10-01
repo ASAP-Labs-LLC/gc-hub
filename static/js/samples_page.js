@@ -534,6 +534,7 @@
         const empty = $('detail-empty');
         const body = $('detail-body');
         if (id == null) {
+            if (S.emptyNote) empty.replaceChildren(...S.emptyNote.map(n => n.cloneNode(true)));
             empty.hidden = false;
             body.hidden = true;
             unmountCompare();
@@ -548,6 +549,8 @@
         ]);
         if (seq !== S.detailSeq) return;
         if (!meta.ok) {
+            // the error replaces "Pick a sample" until the list is back (kept to restore)
+            if (!S.emptyNote) S.emptyNote = Array.from(empty.childNodes, n => n.cloneNode(true));
             empty.hidden = false;
             body.hidden = true;
             empty.replaceChildren(h('p', { role: 'alert', text: errText(meta, 'Loading sample #' + id) }));
