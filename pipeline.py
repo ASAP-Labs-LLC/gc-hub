@@ -386,6 +386,28 @@ def _naive_local(value) -> Optional[datetime]:
     return value
 
 
+MTIME_YEARS = (1971, 2100)
+
+
+def _plausible_mtime(mtime) -> tuple:
+    """``(naive local datetime, epoch seconds)`` of the sender's file time, or
+    ``(None, None)`` when it is outside ``MTIME_YEARS`` or can't be converted
+    (year 1, or pre-1970 on Windows, raise in ``fromtimestamp``/``timestamp``).
+    Such a time is treated as not sent: a stamped CDF is received as usual,
+    a stampless one is refused for having no injection time."""
+    try:
+        raw = _naive_local(mtime)
+        if raw is None:
+            return None, None
+        if not MTIME_YEARS[0] <= raw.year <= MTIME_YEARS[1]:
+            raise ValueError(f"year {raw.year} is outside {MTIME_YEARS}")
+        ts = float(mtime) if isinstance(mtime, (int, float)) else raw.timestamp()
+    except (ValueError, OverflowError, OSError) as exc:
+        log.warning("pipeline: ignoring the sender's file time %r: %s", mtime, exc)
+        return None, None
+    return raw, ts
+
+
 def safe_stem(lab_id: str) -> str:
     stem = _UNSAFE_FILENAME.sub("_", lab_id).strip().rstrip(". ")
     return (stem or "Sample")[:80]
@@ -850,10 +872,8 @@ def _submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os
             source_name = p.name
         if mtime is None:
             mtime = p.stat().st_mtime
-    raw_mtime = _naive_local(mtime)                  # exactly as sent (v1's legacy string)
+    raw_mtime, mtime_ts = _plausible_mtime(mtime)    # exactly as sent (v1's legacy string)
     sender_mtime = raw_mtime.replace(microsecond=0) if raw_mtime is not None else None
-    mtime_ts = (float(mtime) if isinstance(mtime, (int, float))
-                else raw_mtime.timestamp() if raw_mtime is not None else None)
     sha = hashlib.sha256(body).hexdigest()
 
     known = existing_result(sha, instrument_id, db)

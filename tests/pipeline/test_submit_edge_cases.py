@@ -190,3 +190,30 @@ def test_worker_survives_mismatched_axis_lengths_for_a_sample(hub, nt, ny):
         assert c.execute("SELECT COUNT(*) FROM jobs WHERE sample_id=? AND state IN "
                          "('queued','running')", (res.sample_id,)).fetchone()[0] == 0
 
+
+@pytest.mark.parametrize("mtime", [datetime(1, 1, 1), "0001-01-01T00:00:00",
+                                   "1969-12-31T19:00:00", "9999-12-31T23:59:59", -86400.0])
+def test_an_implausible_sender_file_time_is_ignored(hub, mtime):
+    """X-GC-Mtime 0001-01-01 made submit raise in .timestamp() (a 500 on any
+    OS; pre-1970 does on a Windows hub), and 9999 was filed under
+    cdf/gc1/9999/12. A file time outside 1971-2100 is treated as absent: a
+    stamped CDF is received as usual (its own injection time)..."""
+    hub.gc1()
+    src = hub.cdf(name="40304")
+    res = hub.submit(src.read_bytes(), mtime=mtime, source_name="x.CDF")
+    assert res.outcome == "created"
+    s = hub.sample(res.sample_id)
+    assert (s["injection_dt"], s["injection_dt_source"]) == ("2026-09-25 14:23:00", "cdf")
+    assert "/2026/09/" in s["cdf_path"]
+
+
+@pytest.mark.parametrize("mtime", ["0001-01-01T00:00:00", "9999-12-31T23:59:59"])
+def test_a_stampless_cdf_with_an_implausible_file_time_is_refused(hub, mtime):
+    """...and a stampless one is refused as having no injection time (400),
+    exactly as when no file time is sent, never filed under a made-up year."""
+    import pipeline
+    hub.gc1()
+    p = fx.write_cdf(hub.src / "ns.CDF", fx._axis(), fx._axis() * 0 + 50, "40999",
+                     datetime(2026, 9, 25), method_name=SIMDIS, raw_stamp="")
+    with pytest.raises(pipeline.SubmitRejected, match="no injection time"):
+        hub.submit(p.read_bytes(), mtime=mtime, source_name="ns.CDF")
