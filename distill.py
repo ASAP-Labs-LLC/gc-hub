@@ -733,7 +733,7 @@ def _cumulative_percent(t: np.ndarray, y: np.ndarray) -> np.ndarray:
     area = np.cumsum((y[:-1] + y[1:]) / 2 * np.diff(t))
     area = np.insert(area, 0, 0.0)
     if area[-1] <= 0:
-        raise ValueError("Chromatogram has zero integrated area")
+        raise NoSignal("Chromatogram has zero integrated area")
     return area / area[-1] * 100.0
 
 
@@ -879,7 +879,7 @@ def _apply_blank_and_clip(
     d_pct = np.gradient(pct, t * 60)
     mask = d_pct > 1e-5
     if not mask.any():
-        raise ValueError("No elution window found")
+        raise NoSignal("No elution window found")
     start = mask.argmax()
     end = len(mask) - mask[::-1].argmax() - 1
     return t[start : end + 1], y[start : end + 1]
@@ -895,6 +895,12 @@ class BlankRejected(ValueError):
 
 class BlankUnreadable(RuntimeError):
     """``compute(strict_blank=True)``: the blank CDF could not be read."""
+
+
+class NoSignal(ValueError):
+    """The chromatogram has nothing left to integrate: zero area, or no
+    elution window. After a blank subtraction, ``compute(strict_blank=True)``
+    turns it into ``BlankRejected`` (v1 then computed with no blank)."""
 
 
 # A genuine ASTM D2887 blank has no peaks outside the solvent window. Anything
@@ -1344,7 +1350,7 @@ def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None
     of silently auto-detecting), explicit ``corrections`` and
     ``strict_blank=True``: a blank that can't be read raises
     ``BlankUnreadable``, and one that fails at subtraction (the
-    relative-height guard, or no elution window left) raises
+    relative-height guard, or no elution window or no area left) raises
     ``BlankRejected``, instead of v1's silent "no blank".
 
     Returns a dict:
@@ -1381,7 +1387,9 @@ def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None
                 if strict_blank:
                     if isinstance(exc, BlankRejected):
                         raise
-                    if isinstance(exc, ValueError) and "No elution window" in str(exc):
+                    # The subtraction left nothing: no elution window, or no
+                    # area at all. v1 computed such a sample with no blank.
+                    if isinstance(exc, NoSignal):
                         raise BlankRejected(f"after subtracting the blank: {exc}") from exc
                     raise
                 LOGGER.warning("Blank subtraction failed: %s", exc)
