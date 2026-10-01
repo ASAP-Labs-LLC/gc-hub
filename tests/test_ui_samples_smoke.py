@@ -389,6 +389,35 @@ def test_a_live_update_in_flight_never_adds_rows_of_the_old_filter(page):
     assert rid not in _rows(drv)
 
 
+def test_compare_mounts_once_when_asked_twice_while_the_standards_load(page):
+    """Compare waits for the standards before it mounts. Asked twice in that
+    wait (the Compare tab clicked twice, or a live update for the open run),
+    it mounted twice: the first view's Adjust drawer stayed in the page
+    (duplicate ids) and every change was analysed twice."""
+    drv, base, hub = page
+    _open(drv, base, f"/samples/{hub.ids['final']}")
+    assert wait_for(drv, lambda: _tid(drv, "results-table") == 1)
+    _js(drv, """
+        window.__analysis = 0;
+        const realFetch = window.fetch;
+        window.fetch = function (url, opts) {
+            const u = String(url);
+            if (u.startsWith('/api/analysis')) window.__analysis++;
+            if (u.startsWith('/api/comparison-standards'))
+                return new Promise(r => setTimeout(r, 1500)).then(() => realFetch.call(window, url, opts));
+            return realFetch.apply(this, arguments);
+        };
+        GCSamples.state.standardsReady = null;           // as on a first visit: the standards still to load
+        document.querySelector('[data-testid=view-compare]').click();""")
+    time.sleep(0.2)
+    _js(drv, "document.querySelector('[data-testid=view-compare]').click();")
+    assert wait_for(drv, lambda: _js(drv, "return !!GCSamples.state.compare") and _tid(drv, "compare-standard") == 1)
+    time.sleep(2.5)
+    assert _tid(drv, "compare-drawer") == 1
+    assert _js(drv, "return window.__analysis") == 1
+    assert _errors(drv) == []
+
+
 def test_the_queue_upload_cannot_start_twice_while_its_request_is_out(page):
     """The report queue's Upload is disabled while its POST is out; a re-render
     in that window (an item removed, the upload status answering) must not

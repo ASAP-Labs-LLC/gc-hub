@@ -38,7 +38,7 @@
         standards: [], settings: null, standardsReady: null, table: null,
         sel: L.selection(),
         row: null, meta: null, cache: new Map(),       // sample id -> {meta, trace, curve, lab}
-        detailSeq: 0, compare: null, compareFor: null,
+        detailSeq: 0, compare: null, compareFor: null, mountSeq: 0,
         corrected: loadBool(D86_KEY, false),
         counts: { held: 0, error: 0, today: 0 },
         bulkRunning: false, bulkStop: false,
@@ -797,6 +797,7 @@
             return;
         }
         unmountCompare();
+        const mine = ++S.mountSeq;                // a second call while this one waits wins
         const el = $('view-compare');
         if (!window.GCCompare || typeof window.GCCompare.mount !== 'function') {
             el.replaceChildren(h('p', { className: 'errline', role: 'alert', text: 'Compare did not load (compare_view.js). Reload the page.' }));
@@ -804,7 +805,7 @@
         }
         el.replaceChildren(h('p', { className: 'side-note', text: 'Loading Compare…' }));
         await settingsAndStandards();
-        if (S.route.sampleId !== id || S.route.view !== 'compare') return;
+        if (mine !== S.mountSeq || S.route.sampleId !== id || S.route.view !== 'compare') return;
         el.replaceChildren();
         try {
             S.compare = window.GCCompare.mount(el, {
