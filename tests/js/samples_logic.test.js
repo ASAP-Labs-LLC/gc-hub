@@ -81,6 +81,10 @@ module.exports = async (t) => {
     t.eq(all.all, true);
     t.eq(L.bulkBar(all, { shown: 7, total: 1234 }),
          { count: 1234, text: 'All 1,234 matching this filter are selected', offerAll: null, all: true });
+    // live updates move the matching total: the bar names the current one (the action fetches it anyway)
+    t.eq(L.bulkBar(all, { shown: 7, total: 1240 }),
+         { count: 1240, text: 'All 1,240 matching this filter are selected', offerAll: null, all: true });
+    t.eq(L.bulkBar(all, { shown: 0, total: 0 }).count, 0);
     // any change to a single row ends "all matching"
     t.eq(L.toggle(all, 9).all, false);
     t.eq(L.clear(all).all, false);

@@ -152,7 +152,9 @@
         const shown = Number(counts && counts.shown) || 0;
         const total = Number(counts && counts.total) || 0;
         if (s.all) {
-            return { count: s.total, text: 'All ' + number(s.total) + ' matching this filter are selected',
+            // the list's total now (live updates move it), else the one it had when chosen
+            const n = counts && counts.total != null ? total : (Number(s.total) || 0);
+            return { count: n, text: 'All ' + number(n) + ' matching this filter are selected',
                      offerAll: null, all: true };
         }
         const count = s.ids.size;
