@@ -941,9 +941,15 @@ def is_plausible_blank(path: Path, max_intensity_pa: float | None = None) -> boo
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("Cannot read candidate blank %s: %s", path, exc)
         return False
+    if t.size != y.size:
+        # a corrupt file: as a blank it would make every later sample's
+        # subtraction fail, so it is never a genuine blank
+        LOGGER.warning("Rejecting %s as blank: %d times for %d intensities", Path(path).name,
+                       t.size, y.size)
+        return False
     try:
         height = _peak_height_outside_solvent(t, y)
-    except (ArithmeticError, ValueError) as exc:    # a 0/NaN sampling interval (a corrupt file)
+    except Exception as exc:  # noqa: BLE001 - a corrupt axis (0/NaN interval, lengths differ)
         LOGGER.warning("Cannot measure candidate blank %s: %s", Path(path).name, exc)
         return False
     ok = height <= max_intensity_pa

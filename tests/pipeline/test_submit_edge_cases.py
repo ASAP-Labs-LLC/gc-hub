@@ -145,3 +145,48 @@ def test_record_padding_still_applies_with_two_record_variables(hub):
     assert pipeline.cdf_problem(p) is None
     cut = fx.truncated_copy(p, hub.src / "rec2-cut.CDF", keep_fraction=0.9)
     assert "truncated" in (pipeline.cdf_problem(cut) or "")
+
+
+def _mismatched_axis_cdf(path, nt, ny, name):
+    """A CDF whose scan_acquisition_time has ``nt`` values and ordinate_values ``ny``."""
+    import netCDF4
+    with netCDF4.Dataset(path, "w", format="NETCDF3_CLASSIC") as ds:
+        ds.sample_name = name
+        ds.injection_date_time_stamp = "20260925142300+0000"
+        ds.detection_method_name = SIMDIS
+        ds.createDimension("point_number", ny)
+        ds.createDimension("scan_number", nt)
+        v = ds.createVariable("ordinate_values", "f4", ("point_number",))
+        v[:] = np.full(ny, 50.0)
+        w = ds.createVariable("scan_acquisition_time", "f8", ("scan_number",))
+        w[:] = np.arange(nt) * 0.06
+    return path
+
+
+@pytest.mark.parametrize("nt,ny", [(3000, 4000), (4000, 3000), (2, 4000)])
+def test_blank_named_file_with_mismatched_axis_lengths_is_received(hub, nt, ny):
+    """A time axis and intensity of different lengths made the blank check
+    raise IndexError out of submit (a 500). Not a plausible blank: received,
+    and the Worker ends it in a status (error), never stuck in received."""
+    hub.gc1()
+    p = _mismatched_axis_cdf(hub.src / f"b{nt}_{ny}.CDF", nt, ny, "Blank")
+    res = hub.submit(p)
+    assert res.outcome == "created"
+    assert hub.sample(res.sample_id)["is_blank"] == 0
+    hub.worker().run_until_idle()
+    assert hub.sample(res.sample_id)["status"] not in ("received",)
+
+
+@pytest.mark.parametrize("nt,ny", [(3000, 4000), (4000, 3000)])
+def test_worker_survives_mismatched_axis_lengths_for_a_sample(hub, nt, ny):
+    hub.gc1()
+    hub.submit(hub.cdf("blank", injected=datetime(2026, 9, 25, 8, 0, 0)))   # a blank to subtract
+    res = hub.submit(_mismatched_axis_cdf(hub.src / f"s{nt}_{ny}.CDF", nt, ny, "40304"))
+    hub.worker().run_until_idle()
+    s = hub.sample(res.sample_id)
+    assert s["status"] == "error" and s["error"]
+    import store
+    with store.connection(hub.db) as c:
+        assert c.execute("SELECT COUNT(*) FROM jobs WHERE sample_id=? AND state IN "
+                         "('queued','running')", (res.sample_id,)).fetchone()[0] == 0
+
