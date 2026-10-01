@@ -458,43 +458,61 @@ def test_the_queue_upload_cannot_start_twice_while_its_request_is_out(page):
 
 
 HUNG_UPLOAD_JS = """
+    // the start hangs; the upload status answers from __statusSeq (the last one
+    // repeats; null = the status call fails). __statusEarly answers before the start.
     window.__uploads = 0;
-    window.__statusAnswer = arguments[1];          // an object, or null = the status call fails
+    window.__statusSeq = arguments[1];
+    window.__statusEarly = arguments[2] || {active: false, items: []};
+    const json = (o) => Promise.resolve(new Response(JSON.stringify(o),
+        {status: 200, headers: {'Content-Type': 'application/json'}}));
     const realFetch = window.fetch;
     window.fetch = function (url, opts) {
         const u = String(url);
         if (u === '/api/qbench-upload') { window.__uploads++; return new Promise(() => {}); }
         if (u.startsWith('/api/qbench-upload-status')) {
-            // nothing runs until the start went out (opening the sheet asks too)
-            if (!window.__uploads) return Promise.resolve(new Response('{"active": false, "items": []}',
-                {status: 200, headers: {'Content-Type': 'application/json'}}));
-            if (window.__statusAnswer === null) return Promise.reject(new TypeError('Failed to fetch'));
-            return Promise.resolve(new Response(JSON.stringify(window.__statusAnswer),
-                {status: 200, headers: {'Content-Type': 'application/json'}}));
+            if (!window.__uploads) return json(window.__statusEarly);
+            const a = window.__statusSeq.length > 1 ? window.__statusSeq.shift() : window.__statusSeq[0];
+            return a === null ? Promise.reject(new TypeError('Failed to fetch')) : json(a);
         }
         return realFetch.apply(this, arguments);
     };
     window.EventSource = function () { this.close = () => {}; };   // no stream in this test
     GCReportQueue.timeouts.start = 1000;
+    GCReportQueue.timeouts.watch = 3000;
+    GCReportQueue.timeouts.watchEvery = 300;
     GCReportQueue.clear();
     GCReportQueue.add({sample_id: arguments[0], lab_id: '40304', sample_name: 'GC Analysis',
                        instrument: 'gc1', standard_name: 'Diesel'}, {quiet: true});
     GCReportQueue.openSheet();"""
+RUNNING_40304 = {"active": True, "items": [{"idx": 0, "lab_id": "40304", "status": "uploading", "msg": "Uploading"}]}
+UP = "document.querySelector('[data-testid=rq-upload]')"
 
 
-def _start_hung_upload(drv, base, hub, status_answer):
+def _hung_queue(drv, base, hub, status_seq, early=None):
     _open(drv, base, f"/samples/{hub.ids['final']}")
-    _js(drv, HUNG_UPLOAD_JS, hub.ids["final"], status_answer)
-    up = "document.querySelector('[data-testid=rq-upload]')"
-    _js(drv, f"{up}.click();")
+    _js(drv, HUNG_UPLOAD_JS, hub.ids["final"], status_seq, early)
+
+
+def _start_hung_upload(drv, base, hub, status_seq):
+    _hung_queue(drv, base, hub, status_seq)
+    _js(drv, f"{UP}.click();")
     assert wait_for(drv, lambda: _js(drv, "return !document.querySelector('[data-testid=rq-signin]').hidden"))
-    _js(drv, f"{up}.click();")
+    _js(drv, f"{UP}.click();")
     assert wait_for(drv, lambda: _js(drv, "return window.__uploads") == 1)
-    return up
 
 
 def _rq_msg(drv):
     return _js(drv, "return document.querySelector('[data-testid=rq-msg]').textContent")
+
+
+def _sent(drv):
+    return _js(drv, "return GCReportQueue.items()[0].sent_at || null") is not None
+
+
+def _rq_done(drv):
+    _js(drv, "GCReportQueue.timeouts.start = 60000; GCReportQueue.timeouts.watch = 60000;"
+             "GCReportQueue.timeouts.watchEvery = 5000; GCReportQueue.clear();"
+             "document.getElementById('report-queue-sheet').close();")
 
 
 def test_a_hung_upload_start_that_did_start_is_attached_not_retried(page):
@@ -505,27 +523,56 @@ def test_a_hung_upload_start_that_did_start_is_attached_not_retried(page):
     queue follows the progress; it never says "Not uploaded", which would
     invite a retry that uploads the same reports twice."""
     drv, base, hub = page
-    _start_hung_upload(drv, base, hub, {"active": True, "items": [
-        {"idx": 0, "lab_id": "40304", "status": "uploading", "msg": "Uploading"}]})
-    assert wait_for(drv, lambda: _js(drv, "return GCReportQueue.items()[0].sent_at || null") is not None,
-                    timeout=10), _rq_msg(drv)
+    _start_hung_upload(drv, base, hub, [RUNNING_40304])
+    assert wait_for(drv, lambda: _sent(drv), timeout=10), _rq_msg(drv)
     assert "Not uploaded" not in _rq_msg(drv)
-    _js(drv, "GCReportQueue.timeouts.start = 60000; GCReportQueue.clear();"
-             "document.getElementById('report-queue-sheet').close();")
+    _rq_done(drv)
+
+
+def test_a_hung_upload_start_that_starts_late_is_found_while_the_sheet_watches(page):
+    """The hub registers the upload only after the timeout's first status
+    check: the sheet keeps checking (Upload off meanwhile, saying so), finds
+    it, marks the report sent, and never offers "Add 1 to the upload"; one
+    POST in all."""
+    drv, base, hub = page
+    _start_hung_upload(drv, base, hub, [{"active": False, "items": []}, {"active": False, "items": []},
+                                        RUNNING_40304])
+    assert wait_for(drv, lambda: "Checking whether the hub started it" in _rq_msg(drv), timeout=10), _rq_msg(drv)
+    assert _js(drv, f"return {UP}.disabled") is True
+    assert wait_for(drv, lambda: _sent(drv), timeout=10), _rq_msg(drv)
+    _js(drv, f"if (!{UP}.hidden && !{UP}.disabled) {UP}.click();")
+    time.sleep(0.5)
+    assert "Add 1" not in _js(drv, f"return {UP}.hidden ? '' : {UP}.textContent")
+    assert "Not uploaded" not in _rq_msg(drv)
+    assert _js(drv, "return window.__uploads") == 1
+    _rq_done(drv)
 
 
 def test_a_hung_upload_start_with_no_status_says_it_may_still_start(page):
-    """No answer from the start, and none from the status either: the queue
-    cannot know, so it says so (never "Not uploaded"), nothing is marked
-    sent, and Upload stays usable."""
+    """No answer from the start, and the status never shows the upload: after
+    the watch the queue says so (never "Not uploaded"), nothing is marked
+    sent, and Upload is usable again."""
     drv, base, hub = page
-    up = _start_hung_upload(drv, base, hub, None)
-    assert wait_for(drv, lambda: "may still start" in _rq_msg(drv), timeout=10), _rq_msg(drv)
+    _start_hung_upload(drv, base, hub, [None])
+    assert wait_for(drv, lambda: "Checking whether the hub started it" in _rq_msg(drv), timeout=10), _rq_msg(drv)
+    assert _js(drv, f"return {UP}.disabled") is True
+    assert wait_for(drv, lambda: "may still start" in _rq_msg(drv), timeout=15), _rq_msg(drv)
     assert "Not uploaded" not in _rq_msg(drv)
-    assert _js(drv, "return GCReportQueue.items()[0].sent_at || null") is None
-    assert _js(drv, f"return {up}.disabled") is False
-    _js(drv, "GCReportQueue.timeouts.start = 60000; GCReportQueue.clear();"
-             "document.getElementById('report-queue-sheet').close();")
+    assert not _sent(drv)
+    assert _js(drv, f"return {UP}.disabled") is False
+    _rq_done(drv)
+
+
+def test_opening_the_queue_during_a_running_upload_marks_its_reports_sent(page):
+    """The sheet's own status check (on open) finds an upload already running
+    with a queued report's lab ID: that report counts as sent, so the sheet
+    never offers to add it to the upload a second time."""
+    drv, base, hub = page
+    _hung_queue(drv, base, hub, [RUNNING_40304], early=RUNNING_40304)
+    assert wait_for(drv, lambda: _sent(drv), timeout=10), _js(drv, f"return {UP}.textContent")
+    assert "Add 1" not in _js(drv, f"return {UP}.hidden ? '' : {UP}.textContent")
+    assert _js(drv, "return window.__uploads") == 0
+    _rq_done(drv)
 
 
 def test_back_from_a_missing_sample_shows_the_pick_a_sample_placeholder(page):

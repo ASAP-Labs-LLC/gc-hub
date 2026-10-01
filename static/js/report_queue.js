@@ -222,7 +222,7 @@
 
     // The upload's start only queues the work on the hub (the PDFs are built on its
     // thread), so a minute without an answer means the hub is not answering.
-    const timeouts = { start: 60000 };
+    const timeouts = { start: 60000, watch: 60000, watchEvery: 5000 };
 
     async function postJson(url, body, timeoutMs) {
         const ctl = timeoutMs && typeof AbortController === 'function' ? new AbortController() : null;
@@ -397,7 +397,9 @@
                 ? `Upload ${unsent.length} to QBench` : 'Upload to QBench';
         }
         // off while a start is out: a second click would queue the same reports again
-        el.upload.disabled = !unsent.length || busy.upload;
+        // and while looking for a start that got no answer: a retry would upload twice
+        el.upload.disabled = !unsent.length || busy.upload || !!up.watching;
+        if (up.watching) el.upload.textContent = 'Checking…';
         el.stop.hidden = !up.active;
         renderUpload();
     }
@@ -572,29 +574,65 @@
         syncButton();
     }
 
-    /** The start got no answer in time: ask the hub whether the upload started
-        with these reports. Yes: they are sent, follow it. Unknown: say so. */
-    async function afterStartTimeout(items) {
-        let st = null;
+    /** Queued reports whose lab IDs are in a running upload: they are being
+        sent, so mark them sent (never offer to add them a second time).
+        Returns how many were marked. One rule for the sheet's status check
+        and for a start that got no answer. */
+    function adoptRunning(running) {
+        const labs = new Set((Array.isArray(running) ? running : []).map(x => String(x && x.lab_id)));
+        const hit = store.unsent().filter(it => labs.has(String(it.lab_id)));
+        if (hit.length) store.markSent(hit.map(x => x.id));
+        return hit.length;
+    }
+
+    /** Attach to a running upload: its rows, the stream, the flag for the next page. */
+    function attach(running) {
+        up.active = true;
+        up.states = Array.isArray(running) ? running.slice() : up.states;
+        up.overall = null;
+        flag(UPLOAD_KEY, '1');
+        el.signin.hidden = true;
+        connect();
+    }
+
+    /** The upload status, or null when the hub cannot say. */
+    async function uploadStatus() {
         try {
-            const r = await getJson('/api/qbench-upload-status');
-            if (r.ok) st = r.body;
-        } catch (_e) { /* unknown */ }
-        const running = st && st.active && Array.isArray(st.items) ? st.items : null;
-        const labs = new Set((running || []).map(x => String(x && x.lab_id)));
-        if (running && items.every(it => labs.has(String(it.lab_id)))) {
-            store.markSent(items.map(x => x.id));
-            up.active = true;
-            up.states = running.slice();
-            up.overall = null;
-            flag(UPLOAD_KEY, '1');
-            el.signin.hidden = true;
-            el.msg.textContent = 'The upload started (the hub answered slowly).';
-            connect();
-            return;
+            const r = await getJson('/api/qbench-upload-status', true);
+            return r.ok ? r.body : null;
+        } catch (_e) { return null; }
+    }
+
+    /** The start got no answer in time. Giving up in the browser does not stop
+        the hub, which may still start it: look for it every few seconds for a
+        minute (Upload off meanwhile) and attach when it shows. */
+    async function afterStartTimeout(items) {
+        const ids = new Set(items.map(x => x.id));
+        const waiting = () => store.items().some(it => ids.has(it.id) && !it.sent_at);
+        up.watching = true;
+        el.msg.textContent = 'No answer from the hub yet. Checking whether the hub started it…';
+        render();
+        const until = Date.now() + timeouts.watch;
+        for (;;) {
+            const st = await uploadStatus();
+            if (st && st.active && Array.isArray(st.items)) {
+                adoptRunning(st.items);
+                if (!waiting()) {
+                    attach(st.items);
+                    el.msg.textContent = 'The upload started (the hub answered slowly).';
+                    break;
+                }
+            }
+            if (!waiting()) break;                       // attached meanwhile (the sheet's own check)
+            if (Date.now() + timeouts.watchEvery > until) {
+                el.msg.textContent = 'No answer from the hub, and it has not started the upload in the last '
+                    + Math.round(timeouts.watch / 1000) + ' s. It may still start late: this sheet shows it '
+                    + 'if it does. Upload again only if it does not appear.';
+                break;
+            }
+            await new Promise(res => setTimeout(res, timeouts.watchEvery));
         }
-        el.msg.textContent = 'No answer from the hub in ' + Math.round(timeouts.start / 1000)
-            + ' s. It may still start: check the upload status before trying again.';
+        up.watching = false;
     }
 
     function connect() {
@@ -655,6 +693,7 @@
         if (!res.ok) return;
         const b = res.body;
         if (b.active) {
+            adoptRunning(b.items);
             up.active = true;
             up.states = Array.isArray(b.items) ? b.items.slice() : up.states;
             flag(UPLOAD_KEY, '1');
