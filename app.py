@@ -3273,7 +3273,7 @@ def api_qbench_upload():
             for i, item in enumerate(new_queue):
                 _upload_item_status.append({
                     "t": "item", "idx": base_idx + i,
-                    "lab_id": item.get("lab_id", "?"),
+                    "lab_id": item.get("lab_id", "?"), "sample_id": item["sample_id"],
                     "status": "waiting", "step": 0, "steps": 1, "msg": "Waiting",
                 })
         _upload_new_items.set()  # wake the thread
@@ -3305,7 +3305,7 @@ def api_qbench_upload():
         for i, item in enumerate(new_queue):
             _upload_item_status.append({
                 "t": "item", "idx": i,
-                "lab_id": item.get("lab_id", "?"),
+                "lab_id": item.get("lab_id", "?"), "sample_id": item["sample_id"],
                 "status": "waiting", "step": 0, "steps": 1, "msg": "Waiting",
             })
     _upload_credentials.update({
@@ -3346,8 +3346,8 @@ def api_qbench_upload():
                 "step": step, "steps": steps_per + 2, "msg": msg,
             }
             with _upload_items_lock:
-                if idx < len(_upload_item_status):
-                    _upload_item_status[idx] = evt
+                if idx < len(_upload_item_status):   # keep the row's sample_id (the queue matches by it)
+                    _upload_item_status[idx] = dict(evt, sample_id=_upload_item_status[idx].get("sample_id"))
             _upload_task_progress()     # v4.0 lane E
             print(f"[UPLOAD] [{idx+1}/{total}] {lab_id}: {status} — {msg}", flush=True)
             try:
@@ -3687,7 +3687,7 @@ def api_qbench_skip_item():
         }
         with _upload_items_lock:
             if idx < len(_upload_item_status):
-                _upload_item_status[idx] = evt
+                _upload_item_status[idx] = dict(evt, sample_id=_upload_item_status[idx].get("sample_id"))
         _upload_task_progress()         # v4.0 lane E
         _publish_json(_upload_subscribers, _upload_sub_lock, evt)
     return jsonify({"status": "ok"})

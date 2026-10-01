@@ -574,13 +574,20 @@
         syncButton();
     }
 
-    /** Queued reports whose lab IDs are in a running upload: they are being
-        sent, so mark them sent (never offer to add them a second time).
-        Returns how many were marked. One rule for the sheet's status check
-        and for a start that got no answer. */
+    /** Queued reports that a running upload holds (by sample_id: re-injections
+        share a lab ID, and adopting another run's row would leave this report
+        never sent): mark them sent, so the sheet never offers to add them a
+        second time. Rows with no sample_id, or that failed or were skipped,
+        are never adopted. Returns how many were marked. One rule for the
+        sheet's status check and for a start that got no answer. */
+    const NOT_SENDING = ['failed', 'error', 'skipped'];
     function adoptRunning(running) {
-        const labs = new Set((Array.isArray(running) ? running : []).map(x => String(x && x.lab_id)));
-        const hit = store.unsent().filter(it => labs.has(String(it.lab_id)));
+        const sids = new Set();
+        for (const x of Array.isArray(running) ? running : []) {
+            if (!x || x.sample_id == null || NOT_SENDING.includes(x.status)) continue;
+            sids.add(Number(x.sample_id));
+        }
+        const hit = store.unsent().filter(it => sids.has(Number(it.sample_id)));
         if (hit.length) store.markSent(hit.map(x => x.id));
         return hit.length;
     }

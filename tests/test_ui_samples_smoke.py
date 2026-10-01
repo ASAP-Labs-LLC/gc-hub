@@ -484,13 +484,16 @@ HUNG_UPLOAD_JS = """
     GCReportQueue.add({sample_id: arguments[0], lab_id: '40304', sample_name: 'GC Analysis',
                        instrument: 'gc1', standard_name: 'Diesel'}, {quiet: true});
     GCReportQueue.openSheet();"""
-RUNNING_40304 = {"active": True, "items": [{"idx": 0, "lab_id": "40304", "status": "uploading", "msg": "Uploading"}]}
+def _running(sample_id, lab_id="40304"):
+    """An upload status with one running item (the hub names its sample_id)."""
+    return {"active": True, "items": [{"idx": 0, "lab_id": lab_id, "sample_id": sample_id,
+                                       "status": "uploading", "msg": "Uploading"}]}
 UP = "document.querySelector('[data-testid=rq-upload]')"
 
 
-def _hung_queue(drv, base, hub, status_seq, early=None):
+def _hung_queue(drv, base, hub, status_seq, early=None, queued=None):
     _open(drv, base, f"/samples/{hub.ids['final']}")
-    _js(drv, HUNG_UPLOAD_JS, hub.ids["final"], status_seq, early)
+    _js(drv, HUNG_UPLOAD_JS, queued or hub.ids["final"], status_seq, early)
 
 
 def _start_hung_upload(drv, base, hub, status_seq):
@@ -523,7 +526,7 @@ def test_a_hung_upload_start_that_did_start_is_attached_not_retried(page):
     queue follows the progress; it never says "Not uploaded", which would
     invite a retry that uploads the same reports twice."""
     drv, base, hub = page
-    _start_hung_upload(drv, base, hub, [RUNNING_40304])
+    _start_hung_upload(drv, base, hub, [_running(hub.ids['final'])])
     assert wait_for(drv, lambda: _sent(drv), timeout=10), _rq_msg(drv)
     assert "Not uploaded" not in _rq_msg(drv)
     _rq_done(drv)
@@ -536,7 +539,7 @@ def test_a_hung_upload_start_that_starts_late_is_found_while_the_sheet_watches(p
     POST in all."""
     drv, base, hub = page
     _start_hung_upload(drv, base, hub, [{"active": False, "items": []}, {"active": False, "items": []},
-                                        RUNNING_40304])
+                                        _running(hub.ids['final'])])
     assert wait_for(drv, lambda: "Checking whether the hub started it" in _rq_msg(drv), timeout=10), _rq_msg(drv)
     assert _js(drv, f"return {UP}.disabled") is True
     assert wait_for(drv, lambda: _sent(drv), timeout=10), _rq_msg(drv)
@@ -568,9 +571,25 @@ def test_opening_the_queue_during_a_running_upload_marks_its_reports_sent(page):
     with a queued report's lab ID: that report counts as sent, so the sheet
     never offers to add it to the upload a second time."""
     drv, base, hub = page
-    _hung_queue(drv, base, hub, [RUNNING_40304], early=RUNNING_40304)
+    _hung_queue(drv, base, hub, [_running(hub.ids['final'])], early=_running(hub.ids['final']))
     assert wait_for(drv, lambda: _sent(drv), timeout=10), _js(drv, f"return {UP}.textContent")
     assert "Add 1" not in _js(drv, f"return {UP}.hidden ? '' : {UP}.textContent")
+    assert _js(drv, "return window.__uploads") == 0
+    _rq_done(drv)
+
+
+def test_a_running_upload_of_another_run_of_the_same_lab_id_is_not_this_report(page):
+    """Re-injections share a lab ID: an upload running for 40304's first run
+    must not mark the queued re-run as sent (it would never reach QBench,
+    silently). The sheet matches by sample_id, and still offers to add the
+    re-run to the upload."""
+    drv, base, hub = page
+    other = _running(hub.ids["final"])
+    _hung_queue(drv, base, hub, [other], early=other, queued=hub.ids["rerun"])
+    assert wait_for(drv, lambda: "Add 1 to the upload" in _js(drv, f"return {UP}.hidden ? '' : {UP}.textContent"),
+                    timeout=10), _js(drv, f"return {UP}.textContent")
+    assert not _sent(drv)
+    assert _js(drv, f"return {UP}.disabled") is False
     assert _js(drv, "return window.__uploads") == 0
     _rq_done(drv)
 
