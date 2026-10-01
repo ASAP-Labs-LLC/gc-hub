@@ -899,6 +899,10 @@ def _submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os
         except Exception as exc:  # noqa: BLE001 - netCDF raises many kinds
             raise SubmitRejected(f"not a readable CDF: {exc}") from exc
         if dt_source == "mtime" and sender_mtime is None:
+            if mtime is not None and not (isinstance(mtime, str) and not mtime.strip()):
+                raise SubmitRejected(f"the CDF has no injection time and the file time sent "
+                                     f"({mtime}) is implausible (outside "
+                                     f"{MTIME_YEARS[0]}-{MTIME_YEARS[1]})")
             raise SubmitRejected("the CDF has no injection time and no file time was sent")
         lab_id = normalise_lab_id(sample)
         injection_dt = inj.isoformat(sep=" ")

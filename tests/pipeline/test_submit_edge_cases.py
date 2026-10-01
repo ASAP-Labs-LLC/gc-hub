@@ -210,10 +210,18 @@ def test_an_implausible_sender_file_time_is_ignored(hub, mtime):
 @pytest.mark.parametrize("mtime", ["0001-01-01T00:00:00", "9999-12-31T23:59:59"])
 def test_a_stampless_cdf_with_an_implausible_file_time_is_refused(hub, mtime):
     """...and a stampless one is refused as having no injection time (400),
-    exactly as when no file time is sent, never filed under a made-up year."""
+    never filed under a made-up year. The message says the file time was
+    sent but implausible, with its value (the agent log must not read "no
+    file time was sent"); with no time at all the wording is unchanged."""
     import pipeline
     hub.gc1()
     p = fx.write_cdf(hub.src / "ns.CDF", fx._axis(), fx._axis() * 0 + 50, "40999",
                      datetime(2026, 9, 25), method_name=SIMDIS, raw_stamp="")
-    with pytest.raises(pipeline.SubmitRejected, match="no injection time"):
+    with pytest.raises(pipeline.SubmitRejected) as exc:
         hub.submit(p.read_bytes(), mtime=mtime, source_name="ns.CDF")
+    msg = str(exc.value)
+    assert "no injection time" in msg and "implausible" in msg and mtime in msg
+    assert "no file time was sent" not in msg
+    with pytest.raises(pipeline.SubmitRejected,
+                       match="no injection time and no file time was sent"):
+        hub.submit(p.read_bytes(), source_name="ns.CDF")
