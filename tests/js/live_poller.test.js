@@ -172,7 +172,7 @@ module.exports = async (t) => {
         t.eq(w.calls.length, 1);
         await w.reply(answer());
         t.eq(w.calls.length, 2);               // the queued follow-up, at once
-        t.eq(w.nextDelay(), null);             // no timer while it is in flight
+        t.eq(w.nextDelay(), L.POLL_TIMEOUT_MS); // no next poll while it is in flight: only its timeout
         await w.reply(answer());
         t.eq(w.calls.length, 2);
         t.eq(w.maxInFlight, 1);
@@ -217,6 +217,57 @@ module.exports = async (t) => {
         await w.fire();
         await w.reply(answer({ cursor: 'b:3', samples: [8] }));
         t.eq(after.some(u => (u.samples || []).includes(8)), true);
+        p.stop();
+    }
+
+    // ── a hung hub (connection accepted, no reply): the poll gives up, status says so, polling goes on ──
+    {
+        const w = world();
+        w.now = 1_000_000;                           // a real clock (last_ok_at 0 reads as "never")
+        const p = L.createPoller(w.deps);
+        p.start();
+        await flush();
+        await w.reply(answer({ reset: true }));
+        t.eq(p.status().connected, true);
+        await w.fire();                              // the next poll goes out ...
+        t.eq(w.calls.length, 2);
+        t.eq(!!(w.calls[1].opts && w.calls[1].opts.signal), true);   // abortable
+        // ... and never comes back: the timeout fires
+        t.eq(w.nextDelay(), L.POLL_TIMEOUT_MS);
+        await w.fire();
+        const st = p.status();
+        t.eq(st.connected, false);
+        t.eq(/Reconnecting/.test(L.statusText(st, w.now)), true);
+        t.eq(w.calls[1].opts.signal.aborted, true);
+        // the backoff after one failure, then a second request goes out (not blocked by the hung one)
+        t.eq(w.nextDelay(), L.nextDelay(true, 1));
+        await w.fire();
+        t.eq(w.calls.length, 3);
+        // the hung request answering late changes nothing
+        const late = w.pending.shift(); w.inFlight--;
+        late.resolve({ ok: true, status: 200, json: async () => answer({ cursor: 'zz:9' }),
+                       text: async () => JSON.stringify(answer({ cursor: 'zz:9' })) });
+        await flush();
+        t.eq(p.status().connected, false);
+        // the hub is back: the third request answers and all is live again
+        await w.reply(answer({ cursor: 'b:2' }));
+        t.eq(p.status().connected, true);
+        t.eq(w.calls.length, 3);
+        p.stop();
+    }
+
+    // ── backstop: no answer for a long time is never reported as connected ──
+    {
+        const w = world();
+        w.now = 1_000_000;
+        const p = L.createPoller(w.deps);
+        p.start();
+        await flush();
+        await w.reply(answer({ reset: true }));
+        t.eq(p.status().connected, true);
+        w.now += 10 * 60 * 1000;                    // the timers stalled (a frozen tab), ten minutes on
+        t.eq(p.status().connected, false);
+        t.eq(/Reconnecting/.test(L.statusText(p.status(), w.now)), true);
         p.stop();
     }
 

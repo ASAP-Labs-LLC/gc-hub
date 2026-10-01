@@ -102,8 +102,11 @@ module.exports = (t) => {
          'Live · updated just now');
     t.eq(L.statusText({ connected: true, last_ok_at: now - 12_000, error: null }, now),
          'Live · updated 12 s ago');
+    t.eq(L.statusText({ connected: true, last_ok_at: now - 85_000, error: null }, now),
+         'Live · updated 1 min ago');
+    // no answer for longer than three hidden-tab polls is not "Live", whatever the flag says
     t.eq(L.statusText({ connected: true, last_ok_at: now - 125_000, error: null }, now),
-         'Live · updated 2 min ago');
+         'Reconnecting… · last update 2 min ago');
     t.eq(L.statusText({ connected: false, last_ok_at: now - 40_000, error: 'HTTP 503' }, now),
          'Reconnecting… · last update 40 s ago');
     t.eq(L.statusText({ connected: false, last_ok_at: 0, error: null }, now), 'Connecting…');
