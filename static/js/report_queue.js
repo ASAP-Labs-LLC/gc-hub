@@ -232,7 +232,9 @@
         const gaveUp = !timeoutMs ? null : new Promise((_, reject) => {
             timer = setTimeout(() => {
                 if (ctl) { try { ctl.abort(); } catch (_e) { /* done */ } }
-                reject(new Error('no answer from the hub in ' + Math.round(timeoutMs / 1000) + ' s; try again'));
+                const err = new Error('no answer from the hub in ' + Math.round(timeoutMs / 1000) + ' s');
+                err.timedOut = true;
+                reject(err);
             }, timeoutMs);
         });
         try {
@@ -528,6 +530,16 @@
                 password: el.pass.value,
             }, timeouts.start);
         } catch (e) {
+            if (e && e.timedOut) {
+                // Giving up in the browser does not stop the hub: the start may still go
+                // through. Never say "Not uploaded" here: a retry would upload twice.
+                el.pass.value = '';
+                await afterStartTimeout(items);
+                busy.upload = false;
+                render();
+                syncButton();
+                return;
+            }
             res = { ok: false, status: 0, body: { error: e.message } };
         }
         busy.upload = false;
@@ -558,6 +570,31 @@
         }
         render();
         syncButton();
+    }
+
+    /** The start got no answer in time: ask the hub whether the upload started
+        with these reports. Yes: they are sent, follow it. Unknown: say so. */
+    async function afterStartTimeout(items) {
+        let st = null;
+        try {
+            const r = await getJson('/api/qbench-upload-status');
+            if (r.ok) st = r.body;
+        } catch (_e) { /* unknown */ }
+        const running = st && st.active && Array.isArray(st.items) ? st.items : null;
+        const labs = new Set((running || []).map(x => String(x && x.lab_id)));
+        if (running && items.every(it => labs.has(String(it.lab_id)))) {
+            store.markSent(items.map(x => x.id));
+            up.active = true;
+            up.states = running.slice();
+            up.overall = null;
+            flag(UPLOAD_KEY, '1');
+            el.signin.hidden = true;
+            el.msg.textContent = 'The upload started (the hub answered slowly).';
+            connect();
+            return;
+        }
+        el.msg.textContent = 'No answer from the hub in ' + Math.round(timeouts.start / 1000)
+            + ' s. It may still start: check the upload status before trying again.';
     }
 
     function connect() {
