@@ -452,6 +452,39 @@ def test_the_queue_upload_cannot_start_twice_while_its_request_is_out(page):
     _js(drv, "GCReportQueue.clear(); document.getElementById('report-queue-sheet').close();")
 
 
+def test_a_hung_upload_start_gives_up_and_says_so(page):
+    """The upload's start request is quick on a healthy hub (it only queues).
+    A hub that never answers it left the queue on "Starting the upload…"
+    with Upload off for good; it now gives up after the start timeout (cut
+    to 1 s here), shows why, and Upload works again."""
+    drv, base, hub = page
+    _open(drv, base, f"/samples/{hub.ids['final']}")
+    _js(drv, """
+        window.__uploads = 0;
+        const realFetch = window.fetch;
+        window.fetch = function (url, opts) {
+            if (String(url) === '/api/qbench-upload') { window.__uploads++; return new Promise(() => {}); }
+            return realFetch.apply(this, arguments);
+        };
+        GCReportQueue.timeouts.start = 1000;
+        GCReportQueue.clear();
+        GCReportQueue.add({sample_id: arguments[0], lab_id: '40304', sample_name: 'GC Analysis',
+                           instrument: 'gc1', standard_name: 'Diesel'}, {quiet: true});
+        GCReportQueue.openSheet();""", hub.ids["final"])
+    up = "document.querySelector('[data-testid=rq-upload]')"
+    _js(drv, f"{up}.click();")
+    assert wait_for(drv, lambda: _js(drv, "return !document.querySelector('[data-testid=rq-signin]').hidden"))
+    _js(drv, f"{up}.click();")
+    assert wait_for(drv, lambda: _js(drv, "return window.__uploads") == 1)
+    assert wait_for(drv, lambda: "Not uploaded" in _js(drv, "return document.querySelector('[data-testid=rq-msg]').textContent"),
+                    timeout=10), _js(drv, "return document.querySelector('[data-testid=rq-msg]').textContent")
+    assert "no answer" in _js(drv, "return document.querySelector('[data-testid=rq-msg]').textContent")
+    assert _js(drv, f"return {up}.disabled") is False
+    assert _js(drv, "return GCReportQueue.items()[0].sent_at || null") is None     # not marked sent
+    _js(drv, "GCReportQueue.timeouts.start = 60000; GCReportQueue.clear();"
+             "document.getElementById('report-queue-sheet').close();")
+
+
 def test_back_from_a_missing_sample_shows_the_pick_a_sample_placeholder(page):
     """A run that is gone (purged while its row was on screen, or an old
     link) shows its error in the empty detail; going Back to the list must

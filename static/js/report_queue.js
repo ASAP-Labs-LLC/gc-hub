@@ -220,11 +220,28 @@
         return null;
     }
 
-    async function postJson(url, body) {
-        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json',
-            Accept: 'application/json' }, body: JSON.stringify(body || {}) });
-        const res = await root.GCSession.readJson(r);
-        return { status: r.status, ok: r.ok, body: res.body || {} };
+    // The upload's start only queues the work on the hub (the PDFs are built on its
+    // thread), so a minute without an answer means the hub is not answering.
+    const timeouts = { start: 60000 };
+
+    async function postJson(url, body, timeoutMs) {
+        const ctl = timeoutMs && typeof AbortController === 'function' ? new AbortController() : null;
+        let timer = null;
+        const req = fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json',
+            Accept: 'application/json' }, body: JSON.stringify(body || {}), signal: ctl ? ctl.signal : undefined });
+        const gaveUp = !timeoutMs ? null : new Promise((_, reject) => {
+            timer = setTimeout(() => {
+                if (ctl) { try { ctl.abort(); } catch (_e) { /* done */ } }
+                reject(new Error('no answer from the hub in ' + Math.round(timeoutMs / 1000) + ' s; try again'));
+            }, timeoutMs);
+        });
+        try {
+            const r = await (gaveUp ? Promise.race([req, gaveUp]) : req);
+            const res = await root.GCSession.readJson(r);
+            return { status: r.status, ok: r.ok, body: res.body || {} };
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
     }
     async function getJson(url, background) {
         const opts = { headers: { Accept: 'application/json' }, cache: 'no-store' };
@@ -509,7 +526,7 @@
                 queue: payloads(items),
                 username: el.user.value.trim(),
                 password: el.pass.value,
-            });
+            }, timeouts.start);
         } catch (e) {
             res = { ok: false, status: 0, body: { error: e.message } };
         }
@@ -679,5 +696,6 @@
         count: () => store.count(),
         onChange: (fn) => store.onChange(fn),
         openSheet,
+        timeouts,
     });
 })(typeof window !== 'undefined' ? window : globalThis);
