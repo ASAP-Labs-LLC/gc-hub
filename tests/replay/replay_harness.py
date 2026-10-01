@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import json
 import os
 import shutil
@@ -140,6 +141,7 @@ class Suite:
     cal_path: Path
     cal_configs: dict             # name -> assignments list (None = no assignments)
     corrections_docs: dict        # name -> phase-1 corrections document (dict) or path
+    cal_dt: str = ""              # the calibration run's injection time, as stamped
 
     def u(self, u: float) -> float:
         return self.ladder_lo + u * (self.ladder_hi - self.ladder_lo)
@@ -176,7 +178,8 @@ def real_suite(work: Path) -> Suite:
     return Suite("real", t, np.asarray(y, float), solvent_rt=peaks[0], ladder_lo=op[5],
                  ladder_hi=max(op.values()), blank_path=blank,
                  blank_dt=datetime(2026, 9, 24, 15, 30, 27), cal_path=cal, cal_configs=configs,
-                 corrections_docs={"ref": corr, "all11": ALL11_DOC, **BAD_CORRECTIONS})
+                 corrections_docs={"ref": corr, "all11": ALL11_DOC, **BAD_CORRECTIONS},
+                 cal_dt="2022-02-24 15:09:25")    # its stamp: 20220224150925+0000
 
 
 def synthetic_suite(work: Path) -> Suite:
@@ -203,7 +206,8 @@ def synthetic_suite(work: Path) -> Suite:
                  ladder_hi=lad[-1], blank_path=blank, blank_dt=datetime(2026, 9, 24, 15, 30, 27),
                  cal_path=cal, cal_configs=configs,
                  corrections_docs={"ref": make_golden.correction_factors_doc(), "all11": ALL11_DOC,
-                                   **BAD_CORRECTIONS})
+                                   **BAD_CORRECTIONS},
+                 cal_dt="2026-09-16 09:00:00")    # cdf_fixtures.calibration_cdf
 
 
 # ── the sample sweep ───────────────────────────────────────────────────────
@@ -247,6 +251,9 @@ class Case:
     same_bytes_as: Optional[str] = None  # an identical copy of an earlier case's file
     note: str = ""
     v1_bug: str = ""            # a documented v1 defect explains this case's difference
+    # The InjectionDateTime the hub must write, known independently of the hub's
+    # parser (default: ``injected``, when the stamp is written from it).
+    expect_dt: Optional[str] = None
     configs: tuple = ("operator",)  # extra cal configs it also runs in (always "operator")
 
 
@@ -324,11 +331,14 @@ def sweep() -> list[Case]:
              injected=datetime(2026, 9, 26, 0, 24, 50),
              note="v1 reads 20260926002450+0000 as 02:45:00"),
         Case("stamp_with_colon_zone", lambda s, t: hydrocarbon(s, t, 0.25, 0.5, S),
-             raw_stamp="20260925143510+00:00", injected=datetime(2026, 9, 25, 14, 35, 10)),
+             raw_stamp="20260925143510+00:00", injected=datetime(2026, 9, 25, 14, 35, 10),
+             expect_dt="2026-09-25 14:35:10"),
         Case("iso_stamp", lambda s, t: hydrocarbon(s, t, 0.25, 0.5, S),
-             raw_stamp="2026-09-25 14:36:10", injected=datetime(2026, 9, 25, 14, 36, 10)),
+             raw_stamp="2026-09-25 14:36:10", injected=datetime(2026, 9, 25, 14, 36, 10),
+             expect_dt="2026-09-25 14:36:10"),
         Case("no_stamp_mtime", lambda s, t: hydrocarbon(s, t, 0.25, 0.5, S), raw_stamp="",
-             mtime=datetime(2026, 9, 25, 14, 37, 10, 250000).timestamp()),
+             mtime=datetime(2026, 9, 25, 14, 37, 10, 250000).timestamp(),
+             expect_dt="2026-09-25 14:37:10"),   # the sender's file time, to the second
         *stamp_cases(),
         Case("five_points", lambda s, t: hydrocarbon(s, t, 0.15, 0.60, S), run_frac=5e-4),
         Case("empty_signal", lambda s, t: np.zeros_like(t), run_frac=0.0),
@@ -362,7 +372,7 @@ def sweep() -> list[Case]:
         Case("calibration_run_as_sample", None, source="calibration",
              note="the calibration run itself (real data in the real suite), injected before the blank"),
         Case("calibration_run_restamped", None, source="calibration", lab="CAL as sample",
-             raw_stamp="20260925151000+0000"),
+             raw_stamp="20260925151000+0000", expect_dt="2026-09-25 15:10:00"),
         # a second, newer genuine blank, then samples after it
         Case("blank2", lambda s, t: 150.0 * (t / t[-1]) ** 2, lab="Blank2",   # more bleed
              method=BLANK_METHOD, injected=datetime(2026, 9, 25, 14, 50, 0)),
@@ -402,14 +412,24 @@ def stamp_cases() -> list[Case]:
         for h in hours:
             when = datetime(2026, 9, day, h, 24, 50)
             out.append(Case(f"stamp_{day}_{h:02d}", body, injected=when, mtime=STAMP_MTIME))
-    for i, raw in enumerate([
-        "20260925132450Z", "20260925132451", "20260925132452-0500", "20260925132453 +0100",
-        "25-Sep-2026 13:24:54", "09/25/2026 13:24:55", "2026-09-25T13:24:56+05:00",
-        "2026-09-25 13:24:57.500", "2026/09/25 13:24:58", "  20260925132459+0000  ",
-        "not a date", "20260931132450+0000",
+    # (stamp, the time it means); one that doesn't parse means the file time
+    # (STAMP_MTIME + i = 13:59:59.125 + i s, to the second)
+    for i, (raw, means) in enumerate([
+        ("20260925132450Z", "2026-09-25 13:24:50"),
+        ("20260925132451", "2026-09-25 13:24:51"),
+        ("20260925132452-0500", "2026-09-25 13:24:52"),          # the zone is dropped
+        ("20260925132453 +0100", "2026-09-25 13:24:53"),
+        ("25-Sep-2026 13:24:54", "2026-09-25 13:24:54"),
+        ("09/25/2026 13:24:55", "2026-09-25 13:24:55"),
+        ("2026-09-25T13:24:56+05:00", "2026-09-25 13:24:56"),
+        ("2026-09-25 13:24:57.500", "2026-09-25 13:24:57.500000"),
+        ("2026/09/25 13:24:58", "2026-09-25 13:24:58"),
+        ("  20260925132459+0000  ", "2026-09-25 13:24:59"),
+        ("not a date", "2026-09-25 14:00:09"),
+        ("20260931132450+0000", "2026-09-25 14:00:10"),            # 31 September
     ]):
         out.append(Case(f"stamp_form_{i:02d}", body, raw_stamp=raw, mtime=STAMP_MTIME + i,
-                        note=f"stamp {raw!r}"))
+                        expect_dt=means, note=f"stamp {raw!r}"))
     return out
 
 
@@ -420,6 +440,21 @@ def bleed_ramp(s: Suite, t, level):
 
 def weak_peaks(s: Suite, t, height):
     return sum(_g(t, s.u(u), height, 0.006) for u in (0.75, 0.8, 0.85, 0.9))
+
+
+def expected_injection_dt(s: "Suite", case: Optional[Case]) -> Optional[str]:
+    """The InjectionDateTime the hub must write for ``case``, independent of
+    the hub's parser: ``expect_dt``, else the time the stamp was written from
+    (for a copy of the calibration run, that run's own stamp)."""
+    if case is None:
+        return s.blank_dt.isoformat(sep=" ")
+    if case.expect_dt is not None:
+        return case.expect_dt
+    if case.raw_stamp is not None:
+        raise ValueError(f"case {case.name}: a raw stamp needs expect_dt")
+    if case.source == "calibration":
+        return s.cal_dt
+    return case.injected.isoformat(sep=" ")
 
 
 def build_case_cdf(s: Suite, case: Case, dest: Path) -> Path:
@@ -518,12 +553,14 @@ class Item:
     id: str
     path: Path
     case: Optional[Case]
+    expect_dt: Optional[str] = None   # expected_injection_dt: what the hub must write
 
 
 def inputs(s: Suite, config: str, folder: Path, cases: list[Case]) -> list[Item]:
     """The arrival order: the reference blank first, then the config's cases."""
     folder.mkdir(parents=True, exist_ok=True)
-    items = [Item("BLANK", folder / "Blank_09242026_153027.CDF", None)]
+    items = [Item("BLANK", folder / "Blank_09242026_153027.CDF", None,
+                  expected_injection_dt(s, None))]
     shutil.copy2(s.blank_path, items[0].path)
     for case in cases:
         if config == "operator" or config in case.configs:
@@ -532,7 +569,7 @@ def inputs(s: Suite, config: str, folder: Path, cases: list[Case]) -> list[Item]
                 shutil.copy2(folder / f"{case.same_bytes_as}.CDF", dest)
             else:
                 build_case_cdf(s, case, dest)
-            items.append(Item(case.name, dest, case))
+            items.append(Item(case.name, dest, case, expected_injection_dt(s, case)))
     return items
 
 
@@ -714,6 +751,15 @@ def run_v1(items: list[Item], conf: dict, hub: dict, root: Path) -> dict:
 
 # ── recorded v1 output (the CI replay, where the share snapshot is absent) ─
 
+_ABS_DIRS = re.compile(r"(?:[A-Za-z]:)?(?:[\\/][^\s\\/'\"]+)+[\\/]")
+
+
+def _scrub(lines: list) -> list:
+    """v1's log lines without the folders in their paths (a recording holds
+    no temp or user paths; the file names stay)."""
+    return [_ABS_DIRS.sub("", line) for line in lines]
+
+
 def compact_v1(v1: Optional[dict]) -> Optional[dict]:
     """What ``compare`` needs of a v1 run, small enough to commit: rows as
     lists without ``Source File``; the looker row only where it differs from
@@ -725,7 +771,7 @@ def compact_v1(v1: Optional[dict]) -> Optional[dict]:
         return None if r is None else [r.get(c, "") for c in COLUMNS[:-1]]
 
     direct = {k: {"row": row(r["row"]), "line": _strip_source(r.get("line")) or None,
-                  "blank_id": r["blank_id"], "errors": r["errors"][-2:],
+                  "blank_id": r["blank_id"], "errors": _scrub(r["errors"][-2:]),
                   "rows_added": r["rows_added"]}
               for k, r in v1["direct"].items()}
     looker = {}
@@ -733,7 +779,7 @@ def compact_v1(v1: Optional[dict]) -> Optional[dict]:
         d = v1["direct"].get(k) or {}
         same = r["row"] is not None and r["row"] == d.get("row")
         looker[k] = {"same_as_direct": same, "row": None if same else row(r["row"]),
-                     "blank": r["blank"], "errors": r["errors"][-2:],
+                     "blank": r["blank"], "errors": _scrub(r["errors"][-2:]),
                      "rows_added": r["rows_added"]}
     return {"looker": looker, "direct": direct}
 
@@ -810,8 +856,8 @@ def _explain_columns(diff: dict, hub_rec: dict, case: Optional[Case], item: Item
     verdicts, left = [], dict(diff)
     if "InjectionDateTime" in left:
         v1_val, hub_val = left["InjectionDateTime"]
-        if (v1_val == (hub_rec.get("legacy_injection_dt") or "")
-                and hub_val == hub_rec.get("injection_dt")):
+        if (item.expect_dt is not None and hub_val == item.expect_dt
+                and v1_val == (hub_rec.get("legacy_injection_dt") or "")):
             verdicts.append("injection-time-fix")
             left.pop("InjectionDateTime")
     if "Lab ID" in left and case is not None:
@@ -843,6 +889,10 @@ def compare(suite: str, config: str, items: list[Item], hub: dict, v1: dict,
 
         hub_ok = h.get("row") is not None
         status = h.get("status")
+        if hub_ok and h["row"].get("InjectionDateTime") != it.expect_dt:
+            add("UNEXPLAINED", "the hub wrote the wrong injection time",
+                {"InjectionDateTime": (it.expect_dt, h["row"].get("InjectionDateTime"))})
+            continue
         if dr.get("blank_id") != h.get("blank"):
             add("UNEXPLAINED", f"v1 was run with blank {dr.get('blank_id')}, the hub chose "
                                f"{h.get('blank')} (a recording made before a change?)")

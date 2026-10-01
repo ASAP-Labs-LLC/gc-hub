@@ -99,6 +99,29 @@ def test_hub_matches_recorded_v1(tmp_path):
     _check(findings)
 
 
+def test_a_wrong_hub_injection_time_is_caught(tmp_path, monkeypatch):
+    """The ``injection-time-fix`` allowance must not trust the hub's own
+    parse: a hub that reads compact stamps in hours 00-02 seven seconds late
+    fails the replay (each case's expected time is known independently)."""
+    from datetime import timedelta
+    real = distill.parse_injection_datetime
+
+    def late(raw):
+        got = real(raw)
+        text = (raw or "").strip()
+        if got is not None and len(text) >= 14 and text[:14].isdigit() and got.hour <= 2:
+            return got + timedelta(seconds=7)
+        return got
+
+    monkeypatch.setattr(distill, "parse_injection_datetime", late)
+    recorded = json.loads(RECORDING.read_text(encoding="utf-8"))
+    findings, _raw = rh.run_suite(rh.synthetic_suite(tmp_path), tmp_path,
+                                  configs=["operator"], recorded=recorded)
+    bad = {f.case for f in rh.unexplained(findings)}
+    assert {"stamp_25_00", "stamp_25_01", "stamp_25_02", "misparsed_stamp"} <= bad, \
+        rh.report(findings)
+
+
 @needs_snapshot
 def test_hub_matches_live_v1_on_synthetic_inputs(tmp_path):
     findings, raw = rh.run_suite(rh.synthetic_suite(tmp_path), tmp_path)
