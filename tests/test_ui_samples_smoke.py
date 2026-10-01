@@ -321,3 +321,37 @@ def test_copy_link_compare_and_adjust(page):
     _js(drv, "document.dispatchEvent(new CustomEvent('gc:adjust', {detail: {open: false}}));")
     assert wait_for(drv, lambda: _js(drv, "return getComputedStyle(document.querySelector('[data-testid=list-pane]')).display") != "none")
     assert _errors(drv) == []
+
+
+def test_the_detail_clears_the_badge_with_overlay_scrollbars(page):
+    """Overlay scrollbars (Chrome on a Mac trackpad; ``--hide-scrollbars``
+    here) take no width, and a release tag (``v5.0.0``) is wider than this
+    checkout's ``dev``: the detail's right gutter must clear the version badge
+    on its own, not thanks to a 15 px classic scrollbar (v5.0.0 put the
+    Overview's results table under the badge at 1366 and 1440)."""
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    _drv0, base, hub = page
+    opts = Options()
+    for arg in ("--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+                "--force-device-scale-factor=1", "--hide-scrollbars"):
+        opts.add_argument(arg)
+    try:
+        drv = webdriver.Chrome(options=opts)
+    except Exception as exc:  # noqa: BLE001 - no Chrome / driver here
+        pytest.skip(f"headless Chrome unavailable: {exc}")
+    try:
+        browser_sign_in(drv, int(base.rsplit(":", 1)[1]))
+        sid = hub.ids["final"]
+        for size in SIZES:
+            for view, ready in (("", "results-table"), ("/data", "data-table")):
+                _open(drv, base, f"/samples/{sid}{view}", "light", size)
+                assert wait_for(drv, lambda: _tid(drv, ready) == 1)
+                _js(drv, "document.getElementById('app-version').textContent = 'v5.0.0';")
+                for top in (True, False):
+                    _js(drv, "const d = document.getElementById('detail');"
+                             "d.scrollTop = arguments[0] ? 0 : d.scrollHeight;", top)
+                    time.sleep(0.15)
+                    assert _js(drv, BADGE_OVERLAP_JS) == [], (size, view, top)
+    finally:
+        drv.quit()
