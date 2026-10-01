@@ -547,6 +547,11 @@ def _error(msg: str, status: int = 400) -> tuple:
     return jsonify({"error": msg}), status
 
 
+# A JSON body that parses but is not an object ("str", 123, [1]) is the
+# client's mistake: a 400, never the generic 500 from ``body.get``.
+NOT_AN_OBJECT = "Expected a JSON object"
+
+
 # ===================================================================== #
 #  The hub store: samples are addressed by sample_id (phase 2, 2A1 T4)
 # ===================================================================== #
@@ -2278,7 +2283,7 @@ def _resolve_lab_query(query: str, instrument_id: Optional[str], db) -> dict:
     ``sample_ids`` holds the latest injection of each matched lab ID.
     ``ValueError`` (400) without an instrument or for a bad query;
     ``SampleNotFound`` (404) for an unknown instrument."""
-    inst = (instrument_id or "").strip()
+    inst = instrument_id.strip() if isinstance(instrument_id, str) else ""
     if not inst:
         raise ValueError("A lab-ID selection needs an instrument")
     if store.instruments.get(inst, db=db) is None:
@@ -2305,6 +2310,8 @@ def api_reprocess():
     are refused; an unknown id fails the whole request (404)."""
     _data, db = _hub()
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return _error(NOT_AN_OBJECT)
     # ``missing`` = Lab IDs the user asked for (e.g. inside a typed range) that
     # had no matching sample. Surface them in the persistent notification tray.
     missing = [str(m) for m in body.get("missing", []) if str(m).strip()]
@@ -2390,6 +2397,8 @@ def api_reprocess_preview():
     before the user confirms. ``instrument`` is required."""
     _data, db = _hub()
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return _error(NOT_AN_OBJECT)
     try:
         return jsonify(_resolve_lab_query(str(body.get("query") or ""), body.get("instrument"), db))
     except ValueError as exc:
@@ -2454,6 +2463,8 @@ def api_restart():
     Worker jobs, an export append) it answers 409 ``{error, busy, blocked}``
     unless ``force: true``; a purge (``blocked``) is refused even with it."""
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return _error(NOT_AN_OBJECT)
     blocked = hub_control.blocking_reasons()
     busy = hub_control.busy_reasons(export_pass=False)
     if not body.get("dry_run"):
@@ -2630,6 +2641,8 @@ def api_analysis():
     the UI draws, the counted ``spikes``, ``params_used`` and the generated
     ``conclusion``."""
     body = request.get_json(force=True) or {}
+    if not isinstance(body, dict):
+        return _error(NOT_AN_OBJECT)
     standard_name = str(body.get("standard_name") or "").strip()
     if body.get("sample_id") is None:
         return _error("sample_id is required")
@@ -2700,6 +2713,8 @@ def api_best_fit():
     label, score, per-standard ranking and mix breakdown (the Analysis tab),
     plus ``recorded``: the best fit its current revision reported."""
     body = request.get_json(force=True) or {}
+    if not isinstance(body, dict):
+        return _error(NOT_AN_OBJECT)
     if body.get("sample_id") is None:
         return _error("sample_id is required")
     data, db = _hub()
@@ -2741,6 +2756,8 @@ def api_export_lims():
     fails the whole request (404) before anything is written."""
     data, db = _hub()
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return _error(NOT_AN_OBJECT)
     try:
         ids = _sample_ids(body.get("sample_ids"))
     except ValueError as exc:
@@ -2770,6 +2787,8 @@ def api_export_lims():
 @app.route("/api/export-pdf", methods=["POST"])
 def api_export_pdf():
     body = request.get_json(force=True) or {}
+    if not isinstance(body, dict):
+        return _error(NOT_AN_OBJECT)
     if body.get("sample_id") is None:
         return _error("sample_id is required")
     data, db = _hub()
@@ -2799,6 +2818,8 @@ def _sample_title(s: dict) -> str:
 @app.route("/api/export-comparison", methods=["POST"])
 def api_export_comparison():
     body = request.get_json(force=True) or {}
+    if not isinstance(body, dict):
+        return _error(NOT_AN_OBJECT)
     try:
         ids = _sample_ids(body.get("sample_ids"))
     except ValueError as exc:
@@ -3004,6 +3025,8 @@ def _build_report_pdf(sample: dict, params: dict, conf: dict, db) -> tuple[bytes
 @app.route("/api/export-analysis-report", methods=["POST"])
 def api_export_analysis_report():
     body = request.get_json(force=True) or {}
+    if not isinstance(body, dict):
+        return _error(NOT_AN_OBJECT)
     if body.get("sample_id") is None:
         return _error("sample_id is required")
     _data, db = _hub()
@@ -3046,6 +3069,8 @@ def api_export_analysis_reports_zip():
     ``.../<job_id>/download`` once. Unknown samples and missing standards are
     skipped; when every item is, the job fails saying so."""
     body = request.get_json(force=True) or {}
+    if not isinstance(body, dict):
+        return _error(NOT_AN_OBJECT)
     items = body.get("items", [])
     if not items:
         return _error("items list is required")
@@ -3201,6 +3226,8 @@ def api_qbench_upload():
     and nothing is queued. A successful upload records ``qbench_revision``
     (the revision the PDF was built from) and ``qbench_uploaded_at``."""
     body = request.get_json(force=True) or {}
+    if not isinstance(body, dict):
+        return _error(NOT_AN_OBJECT)
     data, db = _hub()
     new_queue, refused = [], []
     for item in body.get("queue") or []:
@@ -3641,10 +3668,16 @@ def api_qbench_upload_status():
 def api_qbench_skip_item():
     """Mark a specific queue item to be skipped."""
     body = request.get_json(force=True)
+    if not isinstance(body, dict):
+        return _error(NOT_AN_OBJECT)
     idx = body.get("idx")
     if idx is None:
         return _error("idx is required")
-    _upload_skipped.add(int(idx))
+    # a queue position: a non-negative integer (a negative one would wrap
+    # around the status list and mark the wrong item)
+    if isinstance(idx, bool) or not isinstance(idx, int) or not 0 <= idx < 10 ** 9:
+        return _error("idx must be a queue position (a non-negative integer)")
+    _upload_skipped.add(idx)
     # Update the item status immediately so the UI reflects it
     with _upload_items_lock:
         if idx < len(_upload_item_status):

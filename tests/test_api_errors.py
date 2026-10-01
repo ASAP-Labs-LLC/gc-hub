@@ -290,3 +290,41 @@ def test_the_real_app_log_has_no_forged_line_from_a_percent_encoded_path(hub):
     text = (data / "app.log").read_text(encoding="utf-8", errors="replace")
     assert "\\x0a2026-01-01 00:00:00 [ERROR] forged: x" in text      # logged, escaped
     assert not any(line.startswith(FORGED) for line in text.splitlines()), text[-2000:]
+
+
+# A JSON body that is not an object ("str", 123, [1]) on an operator route was
+# read with ``body.get(...)`` and answered the generic 500 (and an ERROR
+# traceback in app.log): a client mistake must be a 400 that says so.
+NON_OBJECT_ROUTES = ("/api/reprocess", "/api/reprocess/preview", "/api/analysis",
+                     "/api/best-fit", "/api/export-lims", "/api/export-pdf",
+                     "/api/export-comparison", "/api/export-analysis-report",
+                     "/api/export-analysis-reports-zip", "/api/qbench-skip-item",
+                     "/api/restart")
+
+
+@pytest.mark.parametrize("path", NON_OBJECT_ROUTES)
+@pytest.mark.parametrize("raw_body", [b'"str"', b"123", b"[1]", b"true"])
+def test_a_non_object_json_body_is_a_400_not_a_500(hub, path, raw_body):
+    port, _data = hub
+    code, h, raw = _raw(port, "POST", path, raw_body, {"Content-Type": "application/json"})
+    assert code == 400, (code, raw[:300])
+    assert h["content-type"].startswith("application/json")
+    assert json.loads(raw)["error"]
+
+
+@pytest.mark.parametrize("body", [{"idx": "x"}, {"idx": -1}, {"idx": 1.5}, {"idx": [1]},
+                                  {"idx": True}, {"idx": 10 ** 30}])
+def test_qbench_skip_item_refuses_a_bad_index(hub, body):
+    port, _data = hub
+    code, _h, raw = _raw(port, "POST", "/api/qbench-skip-item", json.dumps(body).encode(),
+                         {"Content-Type": "application/json"})
+    assert code == 400, (code, raw[:300])
+
+
+@pytest.mark.parametrize("instrument", [5, ["gc1"], {"a": 1}])
+def test_reprocess_preview_with_a_non_string_instrument_is_a_400(hub, instrument):
+    port, _data = hub
+    code, _h, raw = _raw(port, "POST", "/api/reprocess/preview",
+                         json.dumps({"query": "1-3", "instrument": instrument}).encode(),
+                         {"Content-Type": "application/json"})
+    assert code == 400, (code, raw[:300])
