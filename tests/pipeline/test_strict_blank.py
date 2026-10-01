@@ -67,7 +67,7 @@ def test_no_elution_window_after_subtraction_is_a_rejected_blank(case):
 
     def clip(t, y, b):
         if b is not None:
-            raise ValueError("No elution window found")
+            raise distill.NoSignal("No elution window found")   # what the real one raises
         return real(t, y, b)
 
     with mock.patch.object(distill, "_apply_blank_and_clip", clip):
@@ -107,6 +107,23 @@ def _bleed_blank_and_weak_sample(folder: Path):
     sample = fx.write_cdf(folder / "weak.CDF", t, base + peaks, "40399",
                           datetime(2026, 9, 25, 15, 25, 0), method_name="SIMDISB.M")
     return blank, sample
+
+
+def test_no_signal_left_is_its_own_error_type():
+    """Strict blank handling decides by type, not message text: both ways a
+    chromatogram can be left with nothing raise ``distill.NoSignal``, still a
+    ``ValueError`` with the same message as before."""
+    import numpy as np
+    t = np.linspace(0.0, 1.0, 200)
+    with pytest.raises(distill.NoSignal, match="zero integrated area"):
+        distill._cumulative_percent(t, np.zeros_like(t))
+    assert issubclass(distill.NoSignal, ValueError)
+    real = distill._cumulative_percent
+    with mock.patch.object(distill, "_cumulative_percent",
+                           lambda tt, yy: np.full(tt.shape, 50.0)):   # flat: no window
+        with pytest.raises(distill.NoSignal, match="No elution window found"):
+            distill._apply_blank_and_clip(t, np.ones_like(t), None)
+    assert distill._cumulative_percent is real
 
 
 def test_a_blank_that_wipes_the_sample_out_is_a_rejected_blank(case, tmp_path):
