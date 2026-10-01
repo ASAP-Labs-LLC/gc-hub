@@ -636,6 +636,29 @@ def _sample_or_404(sample_id, db, *, from_path: bool = False) -> dict:
     return s
 
 
+class NotAJsonObject(ValueError):
+    """A JSON request body that parsed to something other than an object → 400."""
+
+
+@app.errorhandler(NotAJsonObject)
+def _not_a_json_object(exc):
+    return _error(str(exc), 400)
+
+
+def _json_object(force: bool = False) -> dict:
+    """The request's JSON body as a dict (``{}`` when there is none);
+    ``NotAJsonObject`` (400) for an array, string, number or boolean, which
+    the routes reading ``body.get`` would otherwise turn into a 500.
+    ``force`` parses any content type (an unparseable body is still
+    werkzeug's 400); without it a non-JSON body is ``{}``, as before."""
+    body = request.get_json(force=True) if force else request.get_json(silent=True)
+    if body is None:
+        return {}
+    if not isinstance(body, dict):
+        raise NotAJsonObject("Expected a JSON object")
+    return body
+
+
 def _sample_ids(raw) -> list[int]:
     """A request's ``sample_ids`` as ints, in order, without repeats.
     ``ValueError`` if it isn't a list of integers in 1..2^63-1."""
@@ -2304,7 +2327,7 @@ def api_reprocess():
     ``use_current_blank``/``use_current_corrections``. Result-only samples
     are refused; an unknown id fails the whole request (404)."""
     _data, db = _hub()
-    body = request.get_json(silent=True) or {}
+    body = _json_object()
     # ``missing`` = Lab IDs the user asked for (e.g. inside a typed range) that
     # had no matching sample. Surface them in the persistent notification tray.
     missing = [str(m) for m in body.get("missing", []) if str(m).strip()]
@@ -2389,7 +2412,7 @@ def api_reprocess_preview():
     that would be queued) and which are missing, so the modal can preview
     before the user confirms. ``instrument`` is required."""
     _data, db = _hub()
-    body = request.get_json(silent=True) or {}
+    body = _json_object()
     try:
         return jsonify(_resolve_lab_query(str(body.get("query") or ""), body.get("instrument"), db))
     except ValueError as exc:
@@ -2453,7 +2476,7 @@ def api_restart():
     an admin job, a diagnostics build, a report ZIP, a QBench upload, running
     Worker jobs, an export append) it answers 409 ``{error, busy, blocked}``
     unless ``force: true``; a purge (``blocked``) is refused even with it."""
-    body = request.get_json(silent=True) or {}
+    body = _json_object()
     blocked = hub_control.blocking_reasons()
     busy = hub_control.busy_reasons(export_pass=False)
     if not body.get("dry_run"):
@@ -2629,7 +2652,7 @@ def api_analysis():
     returns the bullets (``items`` and their ``text``), the range ``windows``
     the UI draws, the counted ``spikes``, ``params_used`` and the generated
     ``conclusion``."""
-    body = request.get_json(force=True) or {}
+    body = _json_object(force=True)
     standard_name = str(body.get("standard_name") or "").strip()
     if body.get("sample_id") is None:
         return _error("sample_id is required")
@@ -2699,7 +2722,7 @@ def api_best_fit():
     """Full fuel-type best-fit classification for one sample (``sample_id``):
     label, score, per-standard ranking and mix breakdown (the Analysis tab),
     plus ``recorded``: the best fit its current revision reported."""
-    body = request.get_json(force=True) or {}
+    body = _json_object(force=True)
     if body.get("sample_id") is None:
         return _error("sample_id is required")
     data, db = _hub()
@@ -2740,7 +2763,7 @@ def api_export_lims():
     gate are refused and listed; 409 if none was exported. Any unknown id
     fails the whole request (404) before anything is written."""
     data, db = _hub()
-    body = request.get_json(silent=True) or {}
+    body = _json_object()
     try:
         ids = _sample_ids(body.get("sample_ids"))
     except ValueError as exc:
@@ -2769,7 +2792,7 @@ def api_export_lims():
 
 @app.route("/api/export-pdf", methods=["POST"])
 def api_export_pdf():
-    body = request.get_json(force=True) or {}
+    body = _json_object(force=True)
     if body.get("sample_id") is None:
         return _error("sample_id is required")
     data, db = _hub()
@@ -2798,7 +2821,7 @@ def _sample_title(s: dict) -> str:
 
 @app.route("/api/export-comparison", methods=["POST"])
 def api_export_comparison():
-    body = request.get_json(force=True) or {}
+    body = _json_object(force=True)
     try:
         ids = _sample_ids(body.get("sample_ids"))
     except ValueError as exc:
@@ -3003,7 +3026,7 @@ def _build_report_pdf(sample: dict, params: dict, conf: dict, db) -> tuple[bytes
 
 @app.route("/api/export-analysis-report", methods=["POST"])
 def api_export_analysis_report():
-    body = request.get_json(force=True) or {}
+    body = _json_object(force=True)
     if body.get("sample_id") is None:
         return _error("sample_id is required")
     _data, db = _hub()
@@ -3045,7 +3068,7 @@ def api_export_analysis_reports_zip():
     ``GET /api/export-analysis-reports-zip/<job_id>`` and then fetches
     ``.../<job_id>/download`` once. Unknown samples and missing standards are
     skipped; when every item is, the job fails saying so."""
-    body = request.get_json(force=True) or {}
+    body = _json_object(force=True)
     items = body.get("items", [])
     if not items:
         return _error("items list is required")
@@ -3200,7 +3223,7 @@ def api_qbench_upload():
     again just before its upload: any refusal refuses the whole request (409)
     and nothing is queued. A successful upload records ``qbench_revision``
     (the revision the PDF was built from) and ``qbench_uploaded_at``."""
-    body = request.get_json(force=True) or {}
+    body = _json_object(force=True)
     data, db = _hub()
     new_queue, refused = [], []
     for item in body.get("queue") or []:
@@ -3640,10 +3663,12 @@ def api_qbench_upload_status():
 @app.route("/api/qbench-skip-item", methods=["POST"])
 def api_qbench_skip_item():
     """Mark a specific queue item to be skipped."""
-    body = request.get_json(force=True)
+    body = _json_object(force=True)
     idx = body.get("idx")
     if idx is None:
         return _error("idx is required")
+    if isinstance(idx, bool) or not isinstance(idx, int):
+        return _error("idx must be an integer")
     _upload_skipped.add(int(idx))
     # Update the item status immediately so the UI reflects it
     with _upload_items_lock:

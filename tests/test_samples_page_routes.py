@@ -14,6 +14,7 @@ additions, booted against a hub with real samples (``tests/hub_boot.py``).
 from __future__ import annotations
 
 import http.client
+import json
 import shutil
 import sys
 import tempfile
@@ -148,3 +149,30 @@ def test_the_cdf_downloads(hub_app):
     assert "attachment" in headers["Content-Disposition"] and "40304" in headers["Content-Disposition"]
     assert get(port, f"/api/samples/{hub.ids['resultonly']}/cdf")[0] == 404
     assert get(port, "/api/samples/999999/cdf")[0] == 404
+
+
+# ── a JSON body that is not an object ──────────────────────────────────────
+
+@pytest.mark.parametrize("path", ["/api/reprocess", "/api/reprocess/preview", "/api/export-lims", "/api/analysis",
+                                  "/api/best-fit", "/api/export-pdf", "/api/export-comparison",
+                                  "/api/export-analysis-report", "/api/export-analysis-reports-zip",
+                                  "/api/qbench-skip-item", "/api/qbench-upload"])
+@pytest.mark.parametrize("raw", [b"[1]", b'"x"', b"5", b"true"])
+def test_a_json_body_that_is_not_an_object_is_a_400_not_a_500(hub_app, path, raw):
+    """The bulk bar's and Compare's POST routes read ``body.get``: a JSON
+    array, string, number or boolean is the caller's mistake (400 with a
+    JSON error), not an unhandled error (500)."""
+    from bootapp import send
+    port, _hub, _store = hub_app
+    status, body = send(port, path, raw, headers={"Content-Type": "application/json"})
+    assert status == 400, (path, raw, status, body)
+    assert "JSON object" in body["error"], body
+
+
+def test_a_skip_with_a_non_integer_index_is_a_400(hub_app):
+    from bootapp import send
+    port, _hub, _store = hub_app
+    for idx in ("abc", 1.5, True, [1]):
+        status, body = send(port, "/api/qbench-skip-item", json.dumps({"idx": idx}).encode(),
+                            headers={"Content-Type": "application/json"})
+        assert status == 400 and "integer" in body["error"], (idx, status, body)
