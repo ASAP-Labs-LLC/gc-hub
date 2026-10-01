@@ -97,8 +97,8 @@ def handle_http_exception(exc: HTTPException):
     if not _is_api() or exc.code is None or exc.code < 400:
         return exc
     original = getattr(exc, "original_exception", None)
-    if exc.code >= 500 and original is not None:
-        return _busy(original) if _store_busy(original) else _server_error(original)          # Flask's wrapper around an uncaught error
+    if exc.code >= 500 and original is not None:  # Flask's wrapper around an uncaught error
+        return _busy(original) if store_busy(original) else _server_error(original)
     if exc.code == 500:
         return _server_error(exc)
     ref = new_ref()
@@ -114,10 +114,13 @@ def handle_http_exception(exc: HTTPException):
     return resp
 
 
-def _store_busy(exc: BaseException) -> bool:
-    """SQLite gave up waiting (``busy_timeout``) for another writer's lock."""
-    return isinstance(exc, sqlite3.OperationalError) and (
-        "locked" in str(exc).lower() or "busy" in str(exc).lower())
+def store_busy(exc: BaseException) -> bool:
+    """SQLite gave up waiting (``busy_timeout``) for another writer's lock:
+    result code SQLITE_BUSY (or an extended BUSY code), never words in the
+    message. SQLITE_LOCKED (a conflict on the same connection) is a bug."""
+    code = getattr(exc, "sqlite_errorcode", None)        # Python 3.11+
+    return (isinstance(exc, sqlite3.OperationalError) and isinstance(code, int)
+            and code & 0xFF == sqlite3.SQLITE_BUSY)
 
 
 def _busy(exc: BaseException):
@@ -133,7 +136,7 @@ def _busy(exc: BaseException):
 def handle_exception(exc: Exception):
     if not _is_api():
         raise exc      # Flask logs it and serves its HTML 500 page, as before
-    if _store_busy(exc):
+    if store_busy(exc):
         return _busy(exc)
     return _server_error(exc)
 

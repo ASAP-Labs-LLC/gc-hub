@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -34,6 +35,15 @@ import api_errors  # noqa: E402
 
 GENERIC = re.compile(r"^Something went wrong on the hub \(ref ([A-Za-z0-9]+)\)\. Send the "
                      r"diagnostics bundle or app\.log to have it looked at\.$")
+
+
+def sqlite_error(message: str, code: int) -> sqlite3.OperationalError:
+    """An OperationalError as SQLite raises it: with its result code."""
+    exc = sqlite3.OperationalError(message)
+    exc.sqlite_errorcode = code
+    exc.sqlite_errorname = {5: "SQLITE_BUSY", 6: "SQLITE_LOCKED", 517: "SQLITE_BUSY_SNAPSHOT"}.get(
+        code, "SQLITE_ERROR")
+    return exc
 
 
 def make_app():
@@ -97,18 +107,24 @@ def make_app():
 
     @app.route("/api/locked", methods=["POST"])
     def locked():
-        import sqlite3
-        raise sqlite3.OperationalError("database is locked")
+        raise sqlite_error("database is locked", sqlite3.SQLITE_BUSY)
 
-    @app.route("/api/sql-other", methods=["POST"])
-    def sql_other():
-        import sqlite3
-        raise sqlite3.OperationalError("no such table: nope")
+    @app.route("/api/locked-extended", methods=["POST"])
+    def locked_extended():
+        raise sqlite_error("database is locked", 517)        # SQLITE_BUSY_SNAPSHOT
+
+    @app.route("/api/sql/<int:case>", methods=["POST"])
+    def sql_not_busy(case):
+        raise [sqlite_error("no such column: busy_flag", sqlite3.SQLITE_ERROR),
+               sqlite_error("no such table: unlocked_tbl", sqlite3.SQLITE_ERROR),
+               # SQLITE_LOCKED: a conflict on this same connection, a bug
+               sqlite_error("database table is locked", sqlite3.SQLITE_LOCKED),
+               # no error code at all (raised by hand, not by SQLite)
+               sqlite3.OperationalError("database is locked")][case]
 
     @app.route("/locked-page")
     def locked_page():
-        import sqlite3
-        raise sqlite3.OperationalError("database is locked")
+        raise sqlite_error("database is locked", sqlite3.SQLITE_BUSY)
 
     return app
 
@@ -159,8 +175,17 @@ def test_a_locked_store_is_a_503_try_again_not_send_diagnostics(client, caplog):
     assert body["ref"] in caplog.text
 
 
-def test_other_sqlite_errors_stay_the_generic_500(client):
-    r = client.post("/api/sql-other", data="{}", headers={"Content-Type": "application/json"})
+def test_an_extended_busy_code_is_also_a_503(client):
+    r = client.post("/api/locked-extended", data="{}", headers={"Content-Type": "application/json"})
+    assert r.status_code == 503
+
+
+@pytest.mark.parametrize("case", range(4))
+def test_other_sqlite_errors_stay_the_generic_500(client, case):
+    """Only SQLITE_BUSY (by its result code, never words in the message) is a
+    503: 'no such column: busy_flag', 'no such table: unlocked_tbl',
+    SQLITE_LOCKED and a code-less error are bugs, so the generic 500."""
+    r = client.post(f"/api/sql/{case}", data="{}", headers={"Content-Type": "application/json"})
     assert r.status_code == 500 and GENERIC.match(r.get_json()["error"])
 
 
