@@ -59,6 +59,11 @@
     const HIDDEN_MAX_MS = 60000;
     const BG_HEADER = 'X-GC-Background';
     const LIVE_SECONDS = 90;        // live.LIVE_SECONDS on the hub
+    // a poll the hub accepted but never answered (hung, half-open connection) is
+    // given up after this, so the status says so and the next poll can go out
+    const POLL_TIMEOUT_MS = 15000;
+    // no answer for longer than this is never "Live" (three hidden-tab polls)
+    const STALE_MS = 3 * HIDDEN_MS;
 
     /** Milliseconds to the next poll. */
     function nextDelay(visible, failures) {
@@ -186,7 +191,8 @@
     /** The bottom-bar indicator's text. */
     function statusText(st, now) {
         if (!st || !st.last_ok_at) return 'Connecting…';
-        if (!st.connected) return 'Reconnecting… · last update ' + agoText(st.last_ok_at, now);
+        const stale = (now == null ? Date.now() : now) - st.last_ok_at > STALE_MS;
+        if (!st.connected || stale) return 'Reconnecting… · last update ' + agoText(st.last_ok_at, now);
         return 'Live · updated ' + agoText(st.last_ok_at, now);
     }
 
@@ -235,9 +241,20 @@
             if (inFlight) { again = true; return; }
             inFlight = true;
             if (timer != null) { d.clearTimeout(timer); timer = null; }
-            bgFetch(pollUrl(state.cursor), { cache: 'no-store',
-                                             headers: { Accept: 'application/json' } }, d.fetch)
-                .then(r => {
+            const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+            let gaveUp = null;
+            const hung = new Promise((_, reject) => {
+                gaveUp = d.setTimeout(() => {
+                    gaveUp = null;
+                    if (ctl) { try { ctl.abort(); } catch (_e) { /* already done */ } }
+                    reject(new Error('no answer from the hub in ' + Math.round(POLL_TIMEOUT_MS / 1000) + ' s'));
+                }, POLL_TIMEOUT_MS);
+            });
+            hung.catch(() => {});
+            const opts = { cache: 'no-store', headers: { Accept: 'application/json' } };
+            if (ctl) opts.signal = ctl.signal;
+            Promise.race([bgFetch(pollUrl(state.cursor), opts, d.fetch), hung])
+                .then(r => Promise.race([Promise.resolve(r).then(r => {
                     if (!r.ok) throw new Error('HTTP ' + r.status);
                     // GCSession.readJson where the page has it (a Cloudflare page is a readable error)
                     if (typeof GCSession !== 'undefined' && GCSession.readJson) {
@@ -247,7 +264,7 @@
                         });
                     }
                     return r.text().then(t => JSON.parse(t));
-                })
+                }), hung]))
                 .then(body => {
                     const out = applyResponse(state, body);
                     if (out.state === state) throw new Error('bad /api/live answer');
@@ -266,6 +283,7 @@
                                error: String((err && err.message) || err) };
                 })
                 .then(() => {
+                    if (gaveUp != null) { d.clearTimeout(gaveUp); gaveUp = null; }
                     inFlight = false;
                     if (resolveStart) { const r = resolveStart; resolveStart = null; r(); }
                     if (!started) return;
@@ -323,7 +341,16 @@
             tasks: () => _copyAll(state.tasks),
             hub: () => (state.hub ? Object.assign({}, state.hub) : null),
             serverToday: () => state.server_today,
-            status: () => Object.assign({}, status),
+            status: () => {
+                // backstop: whatever stalled the poll, an old answer is not "connected"
+                const st = Object.assign({}, status);
+                const limit = 3 * nextDelay(d.isVisible(), 0) + POLL_TIMEOUT_MS;
+                if (st.connected && st.last_ok_at && d.now() - st.last_ok_at > limit) {
+                    st.connected = false;
+                    st.error = st.error || 'no answer from the hub';
+                }
+                return st;
+            },
         };
     }
 
@@ -352,6 +379,7 @@
         serverToday: () => page.serverToday(), agentAge, agentLive, LIVE_SECONDS,
         status: () => page.status(), pollNow: () => page.pollNow(),
         bgFetch, nextDelay, initialState, applyResponse, pollUrl, statusText, agoText, createPoller,
+        POLL_TIMEOUT_MS, STALE_MS,
     };
     root.GCLive = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;

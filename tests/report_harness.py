@@ -177,6 +177,8 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
         time.sleep(0.25)
     # v3.1 live updates: the upload record publishes the sample
     out["live_after_qbench"] = app.live.BUS.since(live_cursor)
+    # the status the report queue matches its reports against (by sample_id)
+    out["upload_status"] = client.get("/api/qbench-upload-status").get_json()
 
     import pypdf
     out["pdf_text"] = {

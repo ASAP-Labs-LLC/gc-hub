@@ -86,7 +86,11 @@
 .list-empty { padding: var(--s5) var(--s3); color: var(--text-muted); font-size: var(--fs-sm); text-align: center; }
 
 /* ── the detail ───────────────────────────────────────────────────────── */
-.s-detail { min-width: 0; overflow: auto; padding: var(--s5) var(--s6) calc(var(--badge-room) + var(--s7) + 72px); }
+/* the right gutter clears the fixed version badge by itself: overlay scrollbars (a Mac
+   trackpad) take no width, so it cannot rely on a classic one. --badge-w is the badge's
+   real width (shell.js); the badge sits 10px from the edge, plus a 4px gap. */
+.s-detail { min-width: 0; overflow: auto;
+    padding: var(--s5) max(var(--s7), calc(var(--badge-w, 34px) + 14px)) calc(var(--badge-room) + var(--s7) + 72px) var(--s6); }
 .s-empty { display: grid; place-items: center; align-content: center; gap: var(--s1); min-height: 60vh; text-align: center; color: var(--text); }
 .s-empty p { margin: 0; }
 .d-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s2) var(--s4); margin-bottom: var(--s4); }
@@ -198,7 +202,7 @@
 
 @media (max-width: 1500px) {
     .ov-grid { grid-template-columns: minmax(0, 1fr) 280px; }
-    .s-detail { padding-left: var(--s5); padding-right: var(--s5); }
+    .s-detail { padding-left: var(--s5); }
 }
 @media (max-width: 1300px) {
     .samples { --list-w: 300px; }

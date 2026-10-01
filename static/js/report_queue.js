@@ -220,11 +220,30 @@
         return null;
     }
 
-    async function postJson(url, body) {
-        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json',
-            Accept: 'application/json' }, body: JSON.stringify(body || {}) });
-        const res = await root.GCSession.readJson(r);
-        return { status: r.status, ok: r.ok, body: res.body || {} };
+    // The upload's start only queues the work on the hub (the PDFs are built on its
+    // thread), so a minute without an answer means the hub is not answering.
+    const timeouts = { start: 60000, watch: 60000, watchEvery: 5000 };
+
+    async function postJson(url, body, timeoutMs) {
+        const ctl = timeoutMs && typeof AbortController === 'function' ? new AbortController() : null;
+        let timer = null;
+        const req = fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json',
+            Accept: 'application/json' }, body: JSON.stringify(body || {}), signal: ctl ? ctl.signal : undefined });
+        const gaveUp = !timeoutMs ? null : new Promise((_, reject) => {
+            timer = setTimeout(() => {
+                if (ctl) { try { ctl.abort(); } catch (_e) { /* done */ } }
+                const err = new Error('no answer from the hub in ' + Math.round(timeoutMs / 1000) + ' s');
+                err.timedOut = true;
+                reject(err);
+            }, timeoutMs);
+        });
+        try {
+            const r = await (gaveUp ? Promise.race([req, gaveUp]) : req);
+            const res = await root.GCSession.readJson(r);
+            return { status: r.status, ok: r.ok, body: res.body || {} };
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
     }
     async function getJson(url, background) {
         const opts = { headers: { Accept: 'application/json' }, cache: 'no-store' };
@@ -371,15 +390,16 @@
         el.upload.hidden = up.active && !unsent.length;          // Stop and the progress say it
         if (up.active) {
             el.upload.textContent = `Add ${unsent.length} to the upload`;
-            el.upload.disabled = !unsent.length;
         } else if (signing) {
             el.upload.textContent = `Start upload (${unsent.length})`;
-            el.upload.disabled = !unsent.length;
         } else {
             el.upload.textContent = unsent.length && unsent.length !== items.length
                 ? `Upload ${unsent.length} to QBench` : 'Upload to QBench';
-            el.upload.disabled = !unsent.length;
         }
+        // off while a start is out: a second click would queue the same reports again
+        // and while looking for a start that got no answer: a retry would upload twice
+        el.upload.disabled = !unsent.length || busy.upload || !!up.watching;
+        if (up.watching) el.upload.textContent = 'Checking…';
         el.stop.hidden = !up.active;
         renderUpload();
     }
@@ -431,7 +451,7 @@
     }
 
     // ── Download all ────────────────────────────────────────────────────────
-    const busy = { download: false };
+    const busy = { download: false, upload: false };
     async function downloadAll() {
         const items = store.items();
         if (!items.length || busy.download) return;
@@ -500,7 +520,8 @@
 
     async function startUpload() {
         const items = store.unsent();
-        if (!items.length) return;
+        if (!items.length || busy.upload) return;
+        busy.upload = true;
         el.upload.disabled = true;
         el.msg.textContent = up.active ? 'Adding to the running upload…' : 'Starting the upload…';
         let res;
@@ -509,10 +530,21 @@
                 queue: payloads(items),
                 username: el.user.value.trim(),
                 password: el.pass.value,
-            });
+            }, timeouts.start);
         } catch (e) {
+            if (e && e.timedOut) {
+                // Giving up in the browser does not stop the hub: the start may still go
+                // through. Never say "Not uploaded" here: a retry would upload twice.
+                el.pass.value = '';
+                await afterStartTimeout(items);
+                busy.upload = false;
+                render();
+                syncButton();
+                return;
+            }
             res = { ok: false, status: 0, body: { error: e.message } };
         }
+        busy.upload = false;
         el.pass.value = '';
         if (!res.ok) {
             const refused = Array.isArray(res.body.refused) ? res.body.refused : [];
@@ -540,6 +572,74 @@
         }
         render();
         syncButton();
+    }
+
+    /** Queued reports that a running upload holds (by sample_id: re-injections
+        share a lab ID, and adopting another run's row would leave this report
+        never sent): mark them sent, so the sheet never offers to add them a
+        second time. Rows with no sample_id, or that failed or were skipped,
+        are never adopted. Returns how many were marked. One rule for the
+        sheet's status check and for a start that got no answer. */
+    const NOT_SENDING = ['failed', 'error', 'skipped'];
+    function adoptRunning(running) {
+        const sids = new Set();
+        for (const x of Array.isArray(running) ? running : []) {
+            if (!x || x.sample_id == null || NOT_SENDING.includes(x.status)) continue;
+            sids.add(Number(x.sample_id));
+        }
+        const hit = store.unsent().filter(it => sids.has(Number(it.sample_id)));
+        if (hit.length) store.markSent(hit.map(x => x.id));
+        return hit.length;
+    }
+
+    /** Attach to a running upload: its rows, the stream, the flag for the next page. */
+    function attach(running) {
+        up.active = true;
+        up.states = Array.isArray(running) ? running.slice() : up.states;
+        up.overall = null;
+        flag(UPLOAD_KEY, '1');
+        el.signin.hidden = true;
+        connect();
+    }
+
+    /** The upload status, or null when the hub cannot say. */
+    async function uploadStatus() {
+        try {
+            const r = await getJson('/api/qbench-upload-status', true);
+            return r.ok ? r.body : null;
+        } catch (_e) { return null; }
+    }
+
+    /** The start got no answer in time. Giving up in the browser does not stop
+        the hub, which may still start it: look for it every few seconds for a
+        minute (Upload off meanwhile) and attach when it shows. */
+    async function afterStartTimeout(items) {
+        const ids = new Set(items.map(x => x.id));
+        const waiting = () => store.items().some(it => ids.has(it.id) && !it.sent_at);
+        up.watching = true;
+        el.msg.textContent = 'No answer from the hub yet. Checking whether the hub started it…';
+        render();
+        const until = Date.now() + timeouts.watch;
+        for (;;) {
+            const st = await uploadStatus();
+            if (st && st.active && Array.isArray(st.items)) {
+                adoptRunning(st.items);
+                if (!waiting()) {
+                    attach(st.items);
+                    el.msg.textContent = 'The upload started (the hub answered slowly).';
+                    break;
+                }
+            }
+            if (!waiting()) break;                       // attached meanwhile (the sheet's own check)
+            if (Date.now() + timeouts.watchEvery > until) {
+                el.msg.textContent = 'No answer from the hub, and it has not started the upload in the last '
+                    + Math.round(timeouts.watch / 1000) + ' s. It may still start late: this sheet shows it '
+                    + 'if it does. Upload again only if it does not appear.';
+                break;
+            }
+            await new Promise(res => setTimeout(res, timeouts.watchEvery));
+        }
+        up.watching = false;
     }
 
     function connect() {
@@ -600,6 +700,7 @@
         if (!res.ok) return;
         const b = res.body;
         if (b.active) {
+            adoptRunning(b.items);
             up.active = true;
             up.states = Array.isArray(b.items) ? b.items.slice() : up.states;
             flag(UPLOAD_KEY, '1');
@@ -678,5 +779,6 @@
         count: () => store.count(),
         onChange: (fn) => store.onChange(fn),
         openSheet,
+        timeouts,
     });
 })(typeof window !== 'undefined' ? window : globalThis);

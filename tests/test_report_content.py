@@ -95,6 +95,16 @@ def test_a_qbench_upload_publishes_the_sample_live(harness):
     assert harness["sample_id"] in live["samples"]
 
 
+def test_the_upload_status_names_each_items_sample_id(harness):
+    """The report queue matches a running upload to its reports by sample_id
+    (a lab ID is shared by re-injections), so every status row carries it,
+    also after the upload thread has rewritten the row with its progress."""
+    items = harness["upload_status"]["items"]
+    assert len(items) == 1, items
+    assert items[0]["sample_id"] == harness["sample_id"], items
+    assert items[0]["status"] not in ("waiting",), items      # rewritten by the thread
+
+
 def test_report_content_is_identical_across_the_four_paths(harness):
     recs = harness["records"]
     assert sorted(r["path"] for r in recs) == ["analysis", "direct", "qbench", "zip"]

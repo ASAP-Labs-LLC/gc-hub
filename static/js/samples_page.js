@@ -38,7 +38,7 @@
         standards: [], settings: null, standardsReady: null, table: null,
         sel: L.selection(),
         row: null, meta: null, cache: new Map(),       // sample id -> {meta, trace, curve, lab}
-        detailSeq: 0, compare: null, compareFor: null,
+        detailSeq: 0, compare: null, compareFor: null, mountSeq: 0,
         corrected: loadBool(D86_KEY, false),
         counts: { held: 0, error: 0, today: 0 },
         bulkRunning: false, bulkStop: false,
@@ -534,6 +534,7 @@
         const empty = $('detail-empty');
         const body = $('detail-body');
         if (id == null) {
+            if (S.emptyNote) empty.replaceChildren(...S.emptyNote.map(n => n.cloneNode(true)));
             empty.hidden = false;
             body.hidden = true;
             unmountCompare();
@@ -548,6 +549,8 @@
         ]);
         if (seq !== S.detailSeq) return;
         if (!meta.ok) {
+            // the error replaces "Pick a sample" until the list is back (kept to restore)
+            if (!S.emptyNote) S.emptyNote = Array.from(empty.childNodes, n => n.cloneNode(true));
             empty.hidden = false;
             body.hidden = true;
             empty.replaceChildren(h('p', { role: 'alert', text: errText(meta, 'Loading sample #' + id) }));
@@ -794,6 +797,7 @@
             return;
         }
         unmountCompare();
+        const mine = ++S.mountSeq;                // a second call while this one waits wins
         const el = $('view-compare');
         if (!window.GCCompare || typeof window.GCCompare.mount !== 'function') {
             el.replaceChildren(h('p', { className: 'errline', role: 'alert', text: 'Compare did not load (compare_view.js). Reload the page.' }));
@@ -801,7 +805,7 @@
         }
         el.replaceChildren(h('p', { className: 'side-note', text: 'Loading Compare…' }));
         await settingsAndStandards();
-        if (S.route.sampleId !== id || S.route.view !== 'compare') return;
+        if (mine !== S.mountSeq || S.route.sampleId !== id || S.route.view !== 'compare') return;
         el.replaceChildren();
         try {
             S.compare = window.GCCompare.mount(el, {
@@ -997,17 +1001,21 @@
         const changed = (update.samples || []).map(Number).filter(Boolean);
         if (!changed.length) return;
         for (const id of changed) S.cache.delete(id);
+        const query = listQuery();
         const parts = L.chunks(changed, 900);
         const rows = [];
         for (const part of parts) {
             const res = await getJSON('/api/files?' + listQuery('limit=' + part.length + '&ids=' + part.join(',')), true);
             if (res.ok) rows.push(...(res.body.samples || []));
         }
-        const merged = window.mergeChangedRows(S.files, changed, rows, { pageFull: S.files.length < S.total });
-        S.files = merged.files;
-        S.total = Math.max(0, S.total + merged.added - merged.removed);
-        renderList();
-        loadCounts(true);
+        // the rows match the filter of that moment: if it changed meanwhile, the reload it started is newer
+        if (query === listQuery()) {
+            const merged = window.mergeChangedRows(S.files, changed, rows, { pageFull: S.files.length < S.total });
+            S.files = merged.files;
+            S.total = Math.max(0, S.total + merged.added - merged.removed);
+            renderList();
+            loadCounts(true);
+        }
         if (S.route.sampleId != null && changed.includes(S.route.sampleId)) showDetail({ background: true });
     }
 
