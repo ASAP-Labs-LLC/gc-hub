@@ -299,8 +299,23 @@
         renderLive();
     }
 
+    // ── the version badge's width, for gutters that must clear it ──────────
+    // --badge-w on <html> is the badge's rendered width (a release tag is wider
+    // than "dev", and v10.10.10 wider still); kept current as it changes.
+    function trackBadgeWidth() {
+        const b = $('app-version');
+        if (!b) return;
+        const set = () => {
+            const w = b.getBoundingClientRect().width;
+            if (w > 0) document.documentElement.style.setProperty('--badge-w', Math.ceil(w) + 'px');
+        };
+        set();
+        if (typeof ResizeObserver === 'function') new ResizeObserver(set).observe(b);
+    }
+
     // ── wiring ──────────────────────────────────────────────────────────────
     document.addEventListener('DOMContentLoaded', () => {
+        trackBadgeWidth();
         if (!$('sidebar')) return;
         const name = $('user-name').textContent.trim();
         $('user-initials').textContent = U.initials(name);

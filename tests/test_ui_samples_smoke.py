@@ -347,12 +347,17 @@ def test_the_detail_clears_the_badge_with_overlay_scrollbars(page):
             for view, ready in (("", "results-table"), ("/data", "data-table")):
                 _open(drv, base, f"/samples/{sid}{view}", "light", size)
                 assert wait_for(drv, lambda: _tid(drv, ready) == 1)
-                _js(drv, "document.getElementById('app-version').textContent = 'v5.0.0';")
-                for top in (True, False):
-                    _js(drv, "const d = document.getElementById('detail');"
-                             "d.scrollTop = arguments[0] ? 0 : d.scrollHeight;", top)
-                    time.sleep(0.15)
-                    assert _js(drv, BADGE_OVERLAP_JS) == [], (size, view, top)
+                # today's tag, then a wider one: the gutter follows the badge's real width
+                for tag in ("v5.0.0", "v10.10.10"):
+                    _js(drv, "document.getElementById('app-version').textContent = arguments[0];", tag)
+                    time.sleep(0.2)
+                    if tag == "v5.0.0":       # no visible change at today's tag
+                        assert _js(drv, "return getComputedStyle(document.getElementById('detail')).paddingRight") == "48px"
+                    for top in (True, False):
+                        _js(drv, "const d = document.getElementById('detail');"
+                                 "d.scrollTop = arguments[0] ? 0 : d.scrollHeight;", top)
+                        time.sleep(0.15)
+                        assert _js(drv, BADGE_OVERLAP_JS) == [], (size, view, tag, top)
     finally:
         drv.quit()
 
