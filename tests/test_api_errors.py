@@ -427,3 +427,68 @@ def test_reprocess_preview_with_a_non_string_instrument_is_a_400(hub, instrument
                          json.dumps({"query": "1-3", "instrument": instrument}).encode(),
                          {"Content-Type": "application/json"})
     assert code == 400, (code, raw[:300])
+
+
+# ── a busy store behind a route's own ``except Exception`` ───────────────────
+# Many app.py routes catch every exception and answer ``_error(str(exc), 500)``,
+# so a locked store never reached api_errors: a 500 with SQLite's raw "database
+# is locked" text. The app is booted with ``store`` patched (in the child, by a
+# wrapper around app.py) to raise SQLITE_BUSY from the named call, only inside
+# a request to the named path, so start-up is untouched.
+
+_BUSY_WRAPPER = r"""
+import os, sqlite3, sys, runpy
+import flask, store
+targets = dict(t.split("=", 1) for t in os.environ["GC_TEST_BUSY"].split(";"))
+def busy_wrap(name, real):
+    def wrapper(*a, **k):
+        if flask.has_request_context() and targets.get(flask.request.path) == name:
+            exc = sqlite3.OperationalError("database is locked")
+            exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
+            exc.sqlite_errorname = "SQLITE_BUSY"
+            raise exc
+        return real(*a, **k)
+    return staticmethod(wrapper)
+for name in set(targets.values()):
+    owner, attr = name.split(".")
+    cls = getattr(store, owner)
+    setattr(cls, attr, busy_wrap(name, getattr(cls, attr)))
+sys.argv = ["app.py", "--no-tray"]
+runpy.run_path("app.py", run_name="__main__")
+"""
+
+BUSY_ROUTES = [
+    # (method, path, JSON body or None, the store call that is busy)
+    ("POST", "/api/calibration", {"assignments": []}, "instruments.upsert"),
+    ("GET", "/api/settings", None, "instruments.get"),
+]
+
+
+@pytest.fixture(scope="module")
+def busy_hub():
+    from bootapp import setup_admin, sign_in
+    from hub_boot import build_hub
+    tmp = Path(tempfile.mkdtemp(prefix="gc-apibusy-"))
+    try:
+        build_hub(tmp)
+        env = {"GC_TEST_BUSY": ";".join(f"{p}={call}" for _m, p, _b, call in BUSY_ROUTES)}
+        with booted(tmp, cmd=[sys.executable, "-c", _BUSY_WRAPPER], extra_env=env) as (
+                port, _proc, data, _home):
+            sign_in(port, data)
+            yield port, data, setup_admin(port, data)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.parametrize("method,path,body,call", BUSY_ROUTES)
+def test_a_busy_store_inside_a_routes_own_except_is_a_503(busy_hub, method, path, body, call):
+    port, _data, pw = busy_hub
+    raw_body, headers = b"", {}
+    if body is not None:
+        raw_body = json.dumps(dict(body, password=pw)).encode()
+        headers["Content-Type"] = "application/json"
+    code, h, raw = _raw(port, method, path, raw_body, headers)
+    assert code == 503, (code, raw[:300])
+    assert h.get("retry-after") == str(api_errors.BUSY_RETRY_AFTER)
+    out = json.loads(raw)
+    assert "locked" not in out["error"].lower() and "try again" in out["error"].lower()

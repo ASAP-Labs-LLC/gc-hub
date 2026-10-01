@@ -547,6 +547,15 @@ def _error(msg: str, status: int = 400) -> tuple:
     return jsonify({"error": msg}), status
 
 
+def _route_failure(exc: Exception) -> tuple:
+    """What a route's own ``except Exception`` answers: the error text as a
+    500, except a busy store (SQLITE_BUSY), which is re-raised so api_errors
+    answers its 503 "try again" with ``Retry-After``."""
+    if api_errors.store_busy(exc):
+        raise exc
+    return _error(str(exc), 500)
+
+
 # A JSON body that parses but is not an object ("str", 123, [1]) is the
 # client's mistake: a 400, never the generic 500 from ``body.get``.
 NOT_AN_OBJECT = "Expected a JSON object"
@@ -1599,7 +1608,7 @@ def api_get_settings():
             conf = dict(conf, calibration_cdf=cal)
         return jsonify(conf)
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 @app.route("/api/settings", methods=["POST"])
@@ -1654,7 +1663,7 @@ def api_save_settings():
     except HTTPException:
         raise
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 @app.route("/api/save-analysis-defaults", methods=["POST"])
@@ -1689,7 +1698,7 @@ def api_save_analysis_defaults():
             LOGGER.info("Analysis defaults saved by %s: %s", _who(), ", ".join(sorted(changes)))
         return jsonify({"ok": True})
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 # ===================================================================== #
@@ -1931,7 +1940,7 @@ def api_sample_trace(sample_id: int):
         return jsonify({"sample_id": s["id"], "x": t.tolist(), "y": y.tolist(), "name": s["lab_id"],
                         "cal_times": cal_times, "cal_carbons": cal_carbons})
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 @app.route("/api/samples/<int:sample_id>/cdf", methods=["GET"])
@@ -2034,7 +2043,7 @@ def api_sample_distillation_curve(sample_id: int):
             "calibration": calibration,
         })
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 # ===================================================================== #
@@ -2153,7 +2162,7 @@ def api_calibration():
             "boiling_points": overlay_bp,
         })
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 @app.route("/api/calibration", methods=["POST"])
@@ -2229,7 +2238,7 @@ def api_calibration_save():
             "queued": queued,
         })
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 @app.route("/api/calibration/active", methods=["GET"])
@@ -2272,7 +2281,7 @@ def api_calibration_active():
             ]
         return jsonify(out)
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 # ===================================================================== #
@@ -2533,7 +2542,7 @@ def api_comparison_standards():
                 })
         return jsonify(files)
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 def _fixed_standards_dir() -> Path:
@@ -2581,7 +2590,7 @@ def api_add_comparison_standard():
         LOGGER.info("Comparison standard %s added from sample %s by %s", name, s["id"], _who())
         return jsonify({"status": "ok", "path": str(dest)})
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 @app.route("/api/comparison-standard/<name>", methods=["DELETE"])
@@ -2604,7 +2613,7 @@ def api_delete_comparison_standard(name: str):
         LOGGER.info("Comparison standard %s deleted by %s", name, _who())
         return jsonify({"status": "ok"})
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 @app.route("/api/comparison-standard/rename", methods=["POST"])
@@ -2630,7 +2639,7 @@ def api_rename_comparison_standard():
         old_path.rename(new_path)
         return jsonify({"status": "ok", "path": str(new_path)})
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 # ===================================================================== #
@@ -2690,7 +2699,7 @@ def api_analysis():
         raise
     except Exception as exc:
         LOGGER.exception("Analysis failed")
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 def _standard_path(conf: dict, standard_name: str) -> Optional[Path]:
@@ -2744,7 +2753,7 @@ def api_best_fit():
         return jsonify(dict(res, recorded=recorded))
     except Exception as exc:
         LOGGER.exception("Best-fit classification failed")
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 # ===================================================================== #
@@ -2813,7 +2822,7 @@ def api_export_pdf():
             download_name=filename,
         )
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 def _sample_title(s: dict) -> str:
@@ -2885,7 +2894,7 @@ def api_export_comparison():
 
         return jsonify({"status": "ok", "files": generated_files})
     except Exception as exc:
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 #: The request fields a report is built from. ``bullets`` is deliberately not
@@ -3062,7 +3071,7 @@ def api_export_analysis_report():
         raise
     except Exception as exc:
         LOGGER.exception("Analysis report generation failed")
-        return _error(str(exc), 500)
+        return _route_failure(exc)
 
 
 @app.route("/api/export-analysis-reports-zip", methods=["POST"])
