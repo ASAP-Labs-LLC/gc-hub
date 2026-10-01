@@ -1000,17 +1000,21 @@
         const changed = (update.samples || []).map(Number).filter(Boolean);
         if (!changed.length) return;
         for (const id of changed) S.cache.delete(id);
+        const query = listQuery();
         const parts = L.chunks(changed, 900);
         const rows = [];
         for (const part of parts) {
             const res = await getJSON('/api/files?' + listQuery('limit=' + part.length + '&ids=' + part.join(',')), true);
             if (res.ok) rows.push(...(res.body.samples || []));
         }
-        const merged = window.mergeChangedRows(S.files, changed, rows, { pageFull: S.files.length < S.total });
-        S.files = merged.files;
-        S.total = Math.max(0, S.total + merged.added - merged.removed);
-        renderList();
-        loadCounts(true);
+        // the rows match the filter of that moment: if it changed meanwhile, the reload it started is newer
+        if (query === listQuery()) {
+            const merged = window.mergeChangedRows(S.files, changed, rows, { pageFull: S.files.length < S.total });
+            S.files = merged.files;
+            S.total = Math.max(0, S.total + merged.added - merged.removed);
+            renderList();
+            loadCounts(true);
+        }
         if (S.route.sampleId != null && changed.includes(S.route.sampleId)) showDetail({ background: true });
     }
 

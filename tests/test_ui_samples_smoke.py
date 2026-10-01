@@ -357,6 +357,38 @@ def test_the_detail_clears_the_badge_with_overlay_scrollbars(page):
         drv.quit()
 
 
+def test_a_live_update_in_flight_never_adds_rows_of_the_old_filter(page):
+    """A live update fetches its changed rows with the filter of the moment;
+    if the operator changes the filter before that answer arrives, its rows
+    must not be merged into the new filter's list (a re-processed Final run
+    showed up under Held)."""
+    from bootapp import post
+    drv, base, hub = page
+    port = int(base.rsplit(":", 1)[1])
+    _open(drv, base, "/samples")
+    assert wait_for(drv, lambda: len(_rows(drv)) == len(hub.ids))
+    _js(drv, """
+        window.__held = 0;
+        const realFetch = window.fetch;
+        window.fetch = function (url, opts) {
+            const u = String(url);
+            if (u.startsWith('/api/files?') && /[?&]ids=/.test(u) && !/status=/.test(u)) {
+                window.__held++;
+                return new Promise(r => setTimeout(r, 2500)).then(() => realFetch.call(window, url, opts));
+            }
+            return realFetch.apply(this, arguments);
+        };""")
+    rid = hub.ids["rerun"]
+    assert post(port, "/api/reprocess", {"sample_ids": [rid]})[0] == 200
+    assert wait_for(drv, lambda: _js(drv, "return window.__held") >= 1, timeout=20)
+    _js(drv, "document.querySelector('[data-testid=chip-status-held]').click();")
+    assert wait_for(drv, lambda: _path(drv) == "/samples?status=held")
+    time.sleep(3.5)                                   # the held-back live answer lands
+    statuses = _js(drv, "return [...document.querySelectorAll('[data-testid=sample-row]')].map(r => r.dataset.status);")
+    assert statuses and set(statuses) == {"held"}, (statuses, _rows(drv))
+    assert rid not in _rows(drv)
+
+
 def test_the_queue_upload_cannot_start_twice_while_its_request_is_out(page):
     """The report queue's Upload is disabled while its POST is out; a re-render
     in that window (an item removed, the upload status answering) must not
