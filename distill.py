@@ -897,6 +897,11 @@ class BlankUnreadable(RuntimeError):
     """``compute(strict_blank=True)``: the blank CDF could not be read."""
 
 
+# ``_apply_blank_and_clip``'s errors when subtracting the blank wiped the
+# sample out (``compute(strict_blank=True)`` raises ``BlankRejected`` for them).
+_WIPED_OUT = ("No elution window", "zero integrated area")
+
+
 # A genuine ASTM D2887 blank has no peaks outside the solvent window. Anything
 # above this height (pA, after removing the slow bleed ramp) is a sample.
 BLANK_MAX_INTENSITY_PA = 200.0
@@ -1331,7 +1336,7 @@ def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None
     of silently auto-detecting), explicit ``corrections`` and
     ``strict_blank=True``: a blank that can't be read raises
     ``BlankUnreadable``, and one that fails at subtraction (the
-    relative-height guard, or no elution window left) raises
+    relative-height guard, or no elution window or no area left) raises
     ``BlankRejected``, instead of v1's silent "no blank".
 
     Returns a dict:
@@ -1368,7 +1373,10 @@ def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None
                 if strict_blank:
                     if isinstance(exc, BlankRejected):
                         raise
-                    if isinstance(exc, ValueError) and "No elution window" in str(exc):
+                    # The subtraction left nothing: no elution window, or no
+                    # area at all. v1 computed such a sample with no blank.
+                    if isinstance(exc, ValueError) and any(
+                            why in str(exc) for why in _WIPED_OUT):
                         raise BlankRejected(f"after subtracting the blank: {exc}") from exc
                     raise
                 LOGGER.warning("Blank subtraction failed: %s", exc)

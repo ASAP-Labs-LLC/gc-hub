@@ -82,3 +82,66 @@ def test_strict_blank_is_keyword_only_and_off_by_default(case):
     import inspect
     p = inspect.signature(distill.compute).parameters["strict_blank"]
     assert p.kind is inspect.Parameter.KEYWORD_ONLY and p.default is False
+
+
+# ── a genuine blank whose bleed is above every point of a weak sample ──────
+# Found by the v1 differential replay (tests/replay): the blank passes the
+# plausibility check and the relative-height guard (its bleed rises gently),
+# but subtracting it leaves no signal at all, so the clipped chromatogram has
+# zero area. v1 caught that and computed the sample with no blank; the hub
+# re-raised the bare ValueError and left the sample in error.
+
+def _bleed_blank_and_weak_sample(folder: Path):
+    from datetime import datetime
+
+    import numpy as np
+
+    import cdf_fixtures as fx
+
+    t = np.arange(0, fx.RUN_MIN, fx.DT_MIN)
+    base = fx.gaussian(t, 0.30, 50000, 0.01) + 40 + 5 * t            # the fixture blank
+    bleed = 1000.0 * np.clip((t - 0.5) / 3.5, 0.0, 1.0)               # +1000 pA, gently
+    peaks = sum(fx.gaussian(t, c, 900.0, 0.006) for c in (5.0, 5.3, 5.6, 5.9))
+    blank = fx.write_cdf(folder / "Blank3.CDF", t, base + bleed, "Blank3",
+                         datetime(2026, 9, 25, 15, 20, 0), method_name="SIMDISTB.M")
+    sample = fx.write_cdf(folder / "weak.CDF", t, base + peaks, "40399",
+                          datetime(2026, 9, 25, 15, 25, 0), method_name="SIMDISB.M")
+    return blank, sample
+
+
+def test_a_blank_that_wipes_the_sample_out_is_a_rejected_blank(case, tmp_path):
+    _inputs, conf, _cdf, _blank = case
+    blank, sample = _bleed_blank_and_weak_sample(tmp_path)
+    assert distill.is_plausible_blank(blank, distill.BLANK_MAX_INTENSITY_PA)
+    with pytest.raises(distill.BlankRejected) as got:
+        _hub_compute(sample, conf, blank, strict_blank=True)
+    assert "zero integrated area" in str(got.value)
+    # v1's mode: the blank skipped, the sample computed as with no blank
+    lax = _hub_compute(sample, conf, blank)
+    assert lax["blank_applied"] is False
+    assert lax["row"] == _hub_compute(sample, conf, None)["row"]
+
+
+def test_the_pipeline_computes_it_with_no_blank_and_notes_the_rejection(hub):
+    import json
+
+    import store
+
+    hub.gc1()
+    blank, sample = _bleed_blank_and_weak_sample(hub.src)
+    bid = hub.submit(blank).sample_id
+    assert hub.sample(bid)["is_blank"] == 1
+    hub.worker().run_until_idle()
+    sid = hub.submit(sample).sample_id
+    hub.worker().run_until_idle()
+    s = hub.sample(sid)
+    assert s["status"] == "final", s["error"]
+    rev = store.get_revision(sid, db=hub.db)
+    assert rev["blank_used"] is None
+    notes = json.loads(rev["notes"])
+    assert notes["blank_rejected"]["sample_id"] == bid
+    assert "zero integrated area" in notes["blank_rejected"]["reason"]
+    expected = distill.compute(sample, dict(hub.conf), None, honour_env=False)["row"]
+    got = json.loads(rev["results"])
+    numeric = [k for k in expected if k.startswith(("2887 ", "D86 "))]
+    assert [got[k] for k in numeric] == [expected[k] for k in numeric]
