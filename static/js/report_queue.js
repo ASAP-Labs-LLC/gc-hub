@@ -371,15 +371,14 @@
         el.upload.hidden = up.active && !unsent.length;          // Stop and the progress say it
         if (up.active) {
             el.upload.textContent = `Add ${unsent.length} to the upload`;
-            el.upload.disabled = !unsent.length;
         } else if (signing) {
             el.upload.textContent = `Start upload (${unsent.length})`;
-            el.upload.disabled = !unsent.length;
         } else {
             el.upload.textContent = unsent.length && unsent.length !== items.length
                 ? `Upload ${unsent.length} to QBench` : 'Upload to QBench';
-            el.upload.disabled = !unsent.length;
         }
+        // off while a start is out: a second click would queue the same reports again
+        el.upload.disabled = !unsent.length || busy.upload;
         el.stop.hidden = !up.active;
         renderUpload();
     }
@@ -431,7 +430,7 @@
     }
 
     // ── Download all ────────────────────────────────────────────────────────
-    const busy = { download: false };
+    const busy = { download: false, upload: false };
     async function downloadAll() {
         const items = store.items();
         if (!items.length || busy.download) return;
@@ -500,7 +499,8 @@
 
     async function startUpload() {
         const items = store.unsent();
-        if (!items.length) return;
+        if (!items.length || busy.upload) return;
+        busy.upload = true;
         el.upload.disabled = true;
         el.msg.textContent = up.active ? 'Adding to the running upload…' : 'Starting the upload…';
         let res;
@@ -513,6 +513,7 @@
         } catch (e) {
             res = { ok: false, status: 0, body: { error: e.message } };
         }
+        busy.upload = false;
         el.pass.value = '';
         if (!res.ok) {
             const refused = Array.isArray(res.body.refused) ? res.body.refused : [];

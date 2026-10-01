@@ -357,6 +357,40 @@ def test_the_detail_clears_the_badge_with_overlay_scrollbars(page):
         drv.quit()
 
 
+def test_the_queue_upload_cannot_start_twice_while_its_request_is_out(page):
+    """The report queue's Upload is disabled while its POST is out; a re-render
+    in that window (an item removed, the upload status answering) must not
+    turn it back on, or a second click queues the same reports for QBench
+    again (markSent only runs when the first answer arrives)."""
+    drv, base, hub = page
+    _open(drv, base, f"/samples/{hub.ids['final']}")
+    _js(drv, """
+        window.__uploads = 0;
+        const realFetch = window.fetch;
+        window.fetch = function (url, opts) {
+            if (String(url) === '/api/qbench-upload') { window.__uploads++; return new Promise(() => {}); }
+            return realFetch.apply(this, arguments);
+        };
+        GCReportQueue.clear();
+        GCReportQueue.addMany([
+            {sample_id: arguments[0], lab_id: '40304', sample_name: 'GC Analysis', instrument: 'gc1', standard_name: 'Diesel'},
+            {sample_id: arguments[1], lab_id: '40304', sample_name: 'GC Analysis', instrument: 'gc1', standard_name: 'Diesel'},
+        ], {quiet: true});
+        GCReportQueue.openSheet();""", hub.ids["final"], hub.ids["rerun"])
+    up = "document.querySelector('[data-testid=rq-upload]')"
+    _js(drv, f"{up}.click();")                       # shows the sign-in
+    assert wait_for(drv, lambda: _js(drv, "return !document.querySelector('[data-testid=rq-signin]').hidden"))
+    _js(drv, f"{up}.click();")                       # Start upload: the POST stays out
+    assert wait_for(drv, lambda: _js(drv, "return window.__uploads") == 1)
+    assert _js(drv, f"return {up}.disabled") is True
+    _js(drv, "GCReportQueue.remove(arguments[0]);", f"s{hub.ids['rerun']}")
+    assert _js(drv, f"return {up}.disabled") is True
+    _js(drv, f"{up}.click();")
+    time.sleep(0.3)
+    assert _js(drv, "return window.__uploads") == 1
+    _js(drv, "GCReportQueue.clear(); document.getElementById('report-queue-sheet').close();")
+
+
 def test_back_from_a_missing_sample_shows_the_pick_a_sample_placeholder(page):
     """A run that is gone (purged while its row was on screen, or an old
     link) shows its error in the empty detail; going Back to the list must
