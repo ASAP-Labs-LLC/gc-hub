@@ -67,6 +67,18 @@ def test_missing_or_garbled_cursor_resets():
         assert out["samples"] == [] and out["instruments"] == []
 
 
+def test_non_ascii_digit_cursor_resets_instead_of_raising():
+    """``str.isdigit`` accepts superscripts ("²") that ``int`` rejects: such a
+    cursor on this boot made ``since``/``poll`` raise (GET /api/live 500)."""
+    b = _bus()
+    b.publish("sample", {"sample_id": 1})
+    for c in ("b00t:\u00b2", "b00t:1\u00b9", "b00t:\u2460", "b00t:\u0661"):
+        out = b.since(c)
+        assert out["reset"] is True, c
+        assert out["cursor"] == b.cursor()
+        assert live.poll(c, bus=b)["reset"] is True
+
+
 def test_boot_id_mismatch_resets():
     b = _bus()
     b.publish("sample", {"sample_id": 1})

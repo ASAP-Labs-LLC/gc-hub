@@ -130,7 +130,7 @@ class Bus:
         if not isinstance(cursor, str) or not cursor or len(cursor) > CURSOR_MAX:
             return None
         boot, sep, raw = cursor.partition(":")
-        if not sep or boot != self.boot_id or not raw.isdigit():
+        if not sep or boot != self.boot_id or not (raw.isascii() and raw.isdigit()):
             return None
         return int(raw)
 
