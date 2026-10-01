@@ -386,6 +386,28 @@ def _naive_local(value) -> Optional[datetime]:
     return value
 
 
+MTIME_YEARS = (1971, 2100)
+
+
+def _plausible_mtime(mtime) -> tuple:
+    """``(naive local datetime, epoch seconds)`` of the sender's file time, or
+    ``(None, None)`` when it is outside ``MTIME_YEARS`` or can't be converted
+    (year 1, or pre-1970 on Windows, raise in ``fromtimestamp``/``timestamp``).
+    Such a time is treated as not sent: a stamped CDF is received as usual,
+    a stampless one is refused for having no injection time."""
+    try:
+        raw = _naive_local(mtime)
+        if raw is None:
+            return None, None
+        if not MTIME_YEARS[0] <= raw.year <= MTIME_YEARS[1]:
+            raise ValueError(f"year {raw.year} is outside {MTIME_YEARS}")
+        ts = float(mtime) if isinstance(mtime, (int, float)) else raw.timestamp()
+    except (ValueError, OverflowError, OSError) as exc:
+        log.warning("pipeline: ignoring the sender's file time %r: %s", mtime, exc)
+        return None, None
+    return raw, ts
+
+
 def safe_stem(lab_id: str) -> str:
     stem = _UNSAFE_FILENAME.sub("_", lab_id).strip().rstrip(". ")
     return (stem or "Sample")[:80]
@@ -426,6 +448,10 @@ def _lab_id_list(conn, sample_ids: list, limit: int = NOTIFY_LAB_IDS_MAX) -> str
 
 _NC_TYPE_SIZE = {1: 1, 2: 1, 3: 2, 4: 4, 5: 4, 6: 8}
 _INTENSITY_VARS = ("total_intensity", "intensity_values", "intensity", "ordinate_values")
+# One value per byte of the largest upload (ingest_api.MAX_BODY): a NetCDF-3
+# file can't hold more, but a compressed/unwritten netCDF-4 variable can
+# declare any size and reading it would allocate it all.
+MAX_CDF_VALUES = 25 * 1024 * 1024
 
 
 class _Header:
@@ -505,15 +531,22 @@ def _netcdf3_required_size(path: Path) -> Optional[int]:
             n = size
             for d in shape[1:]:
                 n *= d
-            records.append((begin, vsize, n))
+            records.append((begin, vsize, n, nc_type))
         else:
             n = size
             for d in shape:
                 n *= d
             required = max(required, begin + n)
     if records and numrecs:
-        recsize = sum(v for _, v, _ in records) if len(records) > 1 else records[0][1]
-        for begin, _vsize, n in records:
+        if len(records) > 1:
+            recsize = sum(r[1] for r in records)
+        elif records[0][3] in (1, 2, 3):
+            # the spec's special case: a lone byte/char/short record variable's
+            # records are not padded to 4 bytes (its vsize is)
+            recsize = records[0][2]
+        else:
+            recsize = records[0][1]
+        for begin, _vsize, n, _type in records:
             required = max(required, begin + (numrecs - 1) * recsize + n)
     return required
 
@@ -536,6 +569,10 @@ def cdf_problem(path) -> Optional[str]:
         with distill._NETCDF_LOCK:
             with Dataset(p) as ds:
                 vars_lc = {n.lower(): n for n in ds.variables}
+                for name, var in ds.variables.items():
+                    if var.size > MAX_CDF_VALUES:     # read from the header, not the data
+                        return (f"the CDF declares {var.size} values in {name}, more than a "
+                                f"chromatogram can have ({MAX_CDF_VALUES})")
                 for key in _INTENSITY_VARS:
                     if key in vars_lc:
                         if ds.variables[vars_lc[key]].size == 0:
@@ -835,10 +872,8 @@ def _submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os
             source_name = p.name
         if mtime is None:
             mtime = p.stat().st_mtime
-    raw_mtime = _naive_local(mtime)                  # exactly as sent (v1's legacy string)
+    raw_mtime, mtime_ts = _plausible_mtime(mtime)    # exactly as sent (v1's legacy string)
     sender_mtime = raw_mtime.replace(microsecond=0) if raw_mtime is not None else None
-    mtime_ts = (float(mtime) if isinstance(mtime, (int, float))
-                else raw_mtime.timestamp() if raw_mtime is not None else None)
     sha = hashlib.sha256(body).hexdigest()
 
     known = existing_result(sha, instrument_id, db)
@@ -864,6 +899,10 @@ def _submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os
         except Exception as exc:  # noqa: BLE001 - netCDF raises many kinds
             raise SubmitRejected(f"not a readable CDF: {exc}") from exc
         if dt_source == "mtime" and sender_mtime is None:
+            if mtime is not None and not (isinstance(mtime, str) and not mtime.strip()):
+                raise SubmitRejected(f"the CDF has no injection time and the file time sent "
+                                     f"({mtime}) is implausible (outside "
+                                     f"{MTIME_YEARS[0]}-{MTIME_YEARS[1]})")
             raise SubmitRejected("the CDF has no injection time and no file time was sent")
         lab_id = normalise_lab_id(sample)
         injection_dt = inj.isoformat(sep=" ")

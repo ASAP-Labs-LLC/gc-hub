@@ -916,7 +916,10 @@ def _peak_height_outside_solvent(t: np.ndarray, y: np.ndarray,
     if t.size < 3:
         return 0.0
     dt = float(np.median(np.diff(t))) if t.size > 1 else 0.01
-    win = max(3, int(round(1.0 / dt)))
+    # 2n + 1 already spans the whole trace from every point (edge padding adds
+    # no values), so the cap changes nothing; a file claiming a tiny sampling
+    # interval would otherwise ask for a window of billions of points.
+    win = min(max(3, int(round(1.0 / dt))), 2 * y.size + 1)
     baseline = minimum_filter1d(y, size=win, mode="nearest")
     resid = y - baseline
     mask = t > solvent_end_min
@@ -938,7 +941,17 @@ def is_plausible_blank(path: Path, max_intensity_pa: float | None = None) -> boo
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("Cannot read candidate blank %s: %s", path, exc)
         return False
-    height = _peak_height_outside_solvent(t, y)
+    if t.size != y.size:
+        # a corrupt file: as a blank it would make every later sample's
+        # subtraction fail, so it is never a genuine blank
+        LOGGER.warning("Rejecting %s as blank: %d times for %d intensities", Path(path).name,
+                       t.size, y.size)
+        return False
+    try:
+        height = _peak_height_outside_solvent(t, y)
+    except Exception as exc:  # noqa: BLE001 - a corrupt axis (0/NaN interval, lengths differ)
+        LOGGER.warning("Cannot measure candidate blank %s: %s", Path(path).name, exc)
+        return False
     ok = height <= max_intensity_pa
     if not ok:
         LOGGER.warning("Rejecting %s as blank: %.0f pA of sample signal after %.2f min (limit %.0f pA)",
