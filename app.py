@@ -649,11 +649,13 @@ def _sample_ids(raw) -> list[int]:
     if not isinstance(raw, list):
         raise ValueError("sample_ids must be a list of integers")
     out: list[int] = []
+    seen: set = set()
     for v in raw:
         i = _valid_id(v)
         if i is None:
             raise ValueError(f"sample_ids must be integers from 1 to {MAX_SAMPLE_ID}, not {v!r}")
-        if i not in out:
+        if i not in seen:
+            seen.add(i)
             out.append(i)
     return out
 
@@ -2314,7 +2316,10 @@ def api_reprocess():
         return _error(NOT_AN_OBJECT)
     # ``missing`` = Lab IDs the user asked for (e.g. inside a typed range) that
     # had no matching sample. Surface them in the persistent notification tray.
-    missing = [str(m) for m in body.get("missing", []) if str(m).strip()]
+    raw_missing = body.get("missing") or []
+    if not isinstance(raw_missing, list):
+        return _error("missing must be a list of lab IDs")
+    missing = [str(m) for m in raw_missing if str(m).strip()]
     try:
         if body.get("query") is not None:
             resolved = _resolve_lab_query(str(body.get("query") or ""), body.get("instrument"), db)

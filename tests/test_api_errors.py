@@ -363,6 +363,30 @@ def test_qbench_skip_item_refuses_a_bad_index(hub, body):
     assert code == 400, (code, raw[:300])
 
 
+def test_reprocess_with_a_non_list_missing_is_a_400(hub):
+    port, _data = hub
+    code, _h, raw = _raw(port, "POST", "/api/reprocess",
+                         json.dumps({"sample_ids": [1], "missing": 5}).encode(),
+                         {"Content-Type": "application/json"})
+    assert code == 400, (code, raw[:300])
+
+
+def test_a_large_sample_ids_list_is_answered_quickly(hub):
+    """``_sample_ids`` deduplicated with ``i not in out`` (quadratic): the
+    ~130,000 ids a 1 MB body holds kept one request thread busy for tens of
+    seconds while holding the GIL, stalling every other request."""
+    import time
+    port, _data = hub
+    body = json.dumps({"sample_ids": list(range(10 ** 5, 10 ** 5 + 120_000))}).encode()
+    assert len(body) < 1024 * 1024
+    t0 = time.monotonic()
+    code, _h, raw = _raw(port, "POST", "/api/export-lims", body,
+                         {"Content-Type": "application/json"})
+    elapsed = time.monotonic() - t0
+    assert code in (400, 404), (code, raw[:300])
+    assert elapsed < 4, elapsed
+
+
 @pytest.mark.parametrize("instrument", [5, ["gc1"], {"a": 1}])
 def test_reprocess_preview_with_a_non_string_instrument_is_a_400(hub, instrument):
     port, _data = hub
