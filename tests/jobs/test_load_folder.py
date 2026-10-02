@@ -300,3 +300,25 @@ def test_cli_exit_codes(hub, folder):
     res = _cli("--data-dir", hub.data, "gc1", folder)
     assert res.returncode == 1                                               # a file was rejected
     assert "junk.CDF" in res.stdout
+
+
+def test_a_lem_note_added_to_a_late_blank_note_is_not_counted_as_a_new_one(hub):
+    # v5.1.0: an export during the load can append the LEM warning to a sample
+    # that already had a late-blank note; that is not a new late blank.
+    import jobs.load_folder as lf
+    hub.gc1()
+    sid = store.samples.insert_received("gc1", "40304, rerun", "2026-09-25 14:23:00", "cdf",
+                                        cdf_sha256="ab" * 32, cdf_path=None, method_name=SIMDIS,
+                                        source_name="s.CDF", is_blank=0, backfill=0, db=hub.db)
+    late = pipeline.LATE_BLANK_NOTE.format(blank_id=7)
+    store.samples.update(sid, review_note=late, db=hub.db)
+    before = lf._late_blank_notes("gc1", hub.db)
+    store.samples.update(sid, review_note=late + "; Lab ID 'x,y' contains a comma. LEM splits",
+                         db=hub.db)
+    summary = {}
+    lf._finish(summary, "gc1", hub.db, before, 0.0)
+    assert summary["late_blank_review_notes"] == 0
+    # a different late blank on the same sample still counts
+    store.samples.update(sid, review_note=pipeline.LATE_BLANK_NOTE.format(blank_id=9), db=hub.db)
+    lf._finish(summary, "gc1", hub.db, before, 0.0)
+    assert summary["late_blank_review_notes"] == 1

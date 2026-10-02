@@ -73,6 +73,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import time
 from datetime import datetime
@@ -88,7 +89,8 @@ log = logging.getLogger("jobs.load_folder")
 
 Progress = Callable[[dict], object]
 PROCESS_LOCK = ".gc-load-folder.lock"
-_LATE_BLANK_PREFIX = pipeline.LATE_BLANK_NOTE.split("{", 1)[0]
+_LATE_BLANK_RE = re.compile(re.escape(pipeline.LATE_BLANK_NOTE).replace(
+    re.escape("{blank_id}"), r"\d+"))
 _FAR_FUTURE = datetime.max
 
 
@@ -288,10 +290,17 @@ def _order_key(path: Path, root: Path):
 
 
 def _late_blank_notes(instrument_id: str, db) -> dict:
+    """Sample id -> its late-blank note only: a LEM warning appended to the
+    same review note (v5.1.0) is not a late blank and must not count as one."""
+    out = {}
     with store.connection(db) as conn:
-        return {r[0]: r[1] for r in conn.execute(
-            "SELECT id, review_note FROM samples WHERE instrument_id=? AND review_note IS NOT NULL",
-            (instrument_id,)) if r[1].startswith(_LATE_BLANK_PREFIX)}
+        for sid, note in conn.execute(
+                "SELECT id, review_note FROM samples WHERE instrument_id=? "
+                "AND review_note IS NOT NULL", (instrument_id,)):
+            m = _LATE_BLANK_RE.match(note)
+            if m:
+                out[sid] = m.group(0)
+    return out
 
 
 def _emit(progress: Optional[Progress], event: dict) -> None:

@@ -13,11 +13,13 @@ module.exports = (t) => {
 
     // v5.1.0: a Lab ID LEM will misread goes to its sample, whatever the
     // (CDF-controlled) name says; the id is read from the start only.
-    t.eq(N.link("Sample 412 on GC-1: Lab ID '40304, rerun' contains a comma; LEM will read this row's values one column off. Rename the sample in QBench/LEM by hand."),
+    t.eq(N.link("Sample 412 on GC-1: Lab ID '40304, rerun' contains a comma. LEM splits each line at every comma and line break and keeps CSV quotes, so it will read the Lab ID as '\"40304' and every value after the Lab ID one column off. Rename the sample in QBench/LEM by hand."),
          { href: '/samples/412', text: 'Open sample' });
-    t.eq(N.link("Sample 7 on GC-2: Lab ID 'purge (Sample 9 on x), export' contains 2 commas; LEM will read this row's values two columns off. Rename the sample in QBench/LEM by hand."),
+    t.eq(N.link("Sample 7 on GC-2: Lab ID 'purge (Sample 9 on x), export' contains 2 commas. LEM splits each line at every comma and line break and keeps CSV quotes, so it will read the Lab ID as '\"purge (Sample 9 on x)' and every value after the Lab ID two columns off."),
          { href: '/samples/7', text: 'Open sample' });
-    t.eq(N.link("Lab ID 'Sample 5 on x: y' LEM will"), null);
+    t.eq(N.link("Sample 8 on GC-1: Best Fit 'Mix: A, B' contains a comma. LEM splits each line at every comma and line break and keeps CSV quotes, so it will read every value after Best Fit one column off. Check this reading in LEM by hand."),
+         { href: '/samples/8', text: 'Open sample' });
+    t.eq(N.link("Lab ID 'Sample 5 on x: y' LEM splits each line"), null);
     t.eq(N.link('Purge of GC-1 finished after a restart'), { href: '/admin/hub#purge-panel', text: 'Open Purge' });
     t.eq(N.link('History import interrupted by a restart'), { href: '/admin/hub#import-history', text: 'Open Import history' });
     t.eq(N.link('Results file for gc1 refused: ledger-mismatch'), { href: '/admin/hub#exports', text: 'Open Results files' });

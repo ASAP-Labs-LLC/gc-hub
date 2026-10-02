@@ -80,7 +80,7 @@ Public API
                    notifier=None) -> {revision, seq}
     release_backfill(sample_id, *, by, db=None, data_dir=None, format_line=None,
                      notifier=None) -> seq
-    lem_lab_id_note(lab_id) -> str | None   # v5.1.0: the review note for a Lab ID LEM misreads
+    lem_line_note(line) -> str | None   # v5.1.0: the review note for a line LEM misreads
     resolve_conflict_replace(conflict_id, *, by, conf=None, db=None, data_dir=None) -> job id
     revision_blank_path(sample_id, revision=None, *, db=None, data_dir=None) -> Path | None
     request_reprocess(sample_id, *, by=None, use_current_blank=False,
@@ -137,12 +137,15 @@ Decisions (where the spec left a choice):
   import matcher's ``normalise_lab_id``); an empty name falls back to the
   sender's file stem (v1). The export row keeps the name as
   ``distill.compute`` reads it, except that an empty one is the ``lab_id``.
-* **A Lab ID LEM will misread** (v5.1.0): every export row is written by
+* **A line LEM will misread** (v5.1.0): every export row is written by
   ``_append_export_row``, exactly as built (CSV-quoted; never sanitised or
-  refused). If the row's Lab ID contains a comma or a ``str.splitlines``
-  boundary, which LEM's parser splits on whatever the quotes say, the
-  sample's ``review_note`` gets ``lem_lab_id_note`` (what is wrong and what
-  to do) and one notification is raised after the commit, only when that
+  refused). LEM splits the text at every ``str.splitlines`` boundary and
+  each line at every comma, and keeps CSV quotes (``exports.lem_reading``).
+  If that reading differs from a CSV reader's (a comma, a double quote or a
+  line break in any field), the sample's ``review_note`` gets
+  ``lem_line_note`` (the fields, what LEM will read the Lab ID as, the
+  consequence, what to do, and that nothing more is needed in the hub
+  afterwards) and one notification is raised after the commit, only when that
   note is new on the sample: a reprocess or Export to LIMS of a flagged
   sample adds a row but no second notification. Other review notes keep it
   (``_review_note``), and a fresh-blank reprocess clears only the rest.
@@ -263,6 +266,9 @@ BLANK_REPLACED_NOTE = ("the CDF of blank sample {blank_id} was replaced after th
                        "(conflict {conflict_id}); the result still subtracts the previous file")
 
 LEM_NOTE_FIX = "Rename the sample in QBench/LEM by hand."
+LEM_NOTE_CHECK = "Check this reading in LEM by hand."
+LEM_NOTE_END = ("Once LEM is right there is nothing more to do in the hub; this note "
+                "stays as a record.")
 LEM_NOTE_NAME_MAX = 80
 _COUNT_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
 
@@ -464,48 +470,96 @@ def _lab_id_list(conn, sample_ids: list, limit: int = NOTIFY_LAB_IDS_MAX) -> str
     return text
 
 
-# ── Lab IDs LEM will misread (v5.1.0) ───────────────────────────────────────
+# ── lines LEM will misread (v5.1.0) ─────────────────────────────────────────
 # The export row is written exactly as before; this only warns. Every export
 # row goes through _append_export_row (the Worker's final write, Export to
-# LIMS, backfill release), which checks the Lab ID in the line it wrote.
+# LIMS, backfill release), which compares LEM's reading of the line it wrote
+# (exports.lem_reading) with a CSV reader's (exports.csv_fields).
 
-def lem_lab_id_note(lab_id: Any) -> Optional[str]:
-    """The review note for a Lab ID LEM will misread (a comma, or a character
-    ``str.splitlines`` breaks on), else ``None``. One line: line breaks are
-    shown escaped (``\\n``), and a long name is shortened."""
-    chars = exports.lem_misread_chars(lab_id)
-    if not chars:
-        return None
-    full = str(lab_id)
-    name = full if len(full) <= LEM_NOTE_NAME_MAX else full[:LEM_NOTE_NAME_MAX] + "…"
-    shown = "".join(exports.LEM_LINE_BREAKS.get(c, c) for c in name)
-    commas = full.count(exports.LEM_DELIMITER)
-    breaks = [exports.LEM_LINE_BREAKS[c] for c in chars if c in exports.LEM_LINE_BREAKS]
-    n_breaks = len(f"x{full}x".splitlines()) - 1
-    what = []
+def _lem_shown(value: Any) -> str:
+    """``value`` for a note: one line (line breaks escaped), at most
+    ``LEM_NOTE_NAME_MAX`` characters before the escaping."""
+    text = str(value)
+    if len(text) > LEM_NOTE_NAME_MAX:
+        text = text[:LEM_NOTE_NAME_MAX] + "…"
+    return "".join(exports.LEM_LINE_BREAKS.get(c, c) for c in text)
+
+
+def _lem_field_problems(value: str) -> list:
+    """What in one CSV field LEM reads differently: commas, double quotes
+    (``csv.writer`` quotes the field and LEM keeps the quotes), line breaks."""
+    out = []
+    commas = value.count(exports.LEM_DELIMITER)
     if commas:
-        what.append("a comma" if commas == 1 else f"{commas} commas")
-    if breaks:
-        what.append(("a line break" if n_breaks == 1 else "line breaks")
-                    + f" ({', '.join(breaks)})")
-    if commas and not breaks:
-        cols = "column" if commas == 1 else "columns"
-        effect = (f"LEM will read this row's values {_COUNT_WORDS.get(commas, str(commas))} "
-                  f"{cols} off")
-    elif breaks and not commas:
-        at = "the line break" if n_breaks == 1 else "the line breaks"
-        effect = f"LEM will split this row at {at}, read its values out of place and may record a fake row"
+        out.append("a comma" if commas == 1 else f"{commas} commas")
+    quotes = value.count('"')
+    if quotes:
+        out.append("a double quote" if quotes == 1 else f"{quotes} double quotes")
+    chars = [c for c in dict.fromkeys(value) if c in exports.LEM_LINE_BREAKS]
+    if chars:
+        n = len(f"x{value}x".splitlines()) - 1
+        out.append(("a line break" if n == 1 else f"{n} line breaks")
+                   + f" ({', '.join(exports.LEM_LINE_BREAKS[c] for c in chars)})")
+    return out
+
+
+def lem_line_note(line: Any) -> Optional[str]:
+    """The review note for a results-CSV line LEM will read differently from
+    a CSV reader (``None`` when it reads the same, or the line isn't one of
+    ours): which fields, what LEM will read, and what to do. One line."""
+    fields = exports.csv_fields(line)
+    if fields is None:
+        return None
+    prints = exports.lem_reading(line)
+    if [c for p in prints for c in p] == fields:
+        return None
+    header = exports.CSV_HEADER
+    bad = [(i, _lem_field_problems(f)) for i, f in enumerate(fields)]
+    bad = [(i, what) for i, what in bad if what]
+    if not bad:                      # can't happen for a csv.writer line; stay quiet
+        return None
+    parts = []
+    for n, (i, what) in enumerate(bad):
+        shown = f" '{_lem_shown(fields[i])}'" if n == 0 else ""
+        parts.append(f"{header[i]}{shown} contains {' and '.join(what)}")
+    lab_csv = fields[0].strip()
+    lab_lem = prints[0][0].strip() if prints and prints[0] else ""
+    lab_wrong = lab_lem != lab_csv
+    reads = []
+    if lab_wrong:
+        reads.append(f"read the Lab ID as '{_lem_shown(lab_lem)}'")
+    if len(prints) > 1:
+        second = prints[1][0].strip() if prints[1] else ""
+        reads.append(f"see this line as {len(prints)} rows; the second starts "
+                     f"'{_lem_shown(second)}', which it may record as a fake row with that Lab ID")
     else:
-        effect = "LEM will read this row's values out of place and may record a fake row"
-    return f"Lab ID '{shown}' contains {' and '.join(what)}; {effect}. {LEM_NOTE_FIX}"
+        shifted = [i for i, f in enumerate(fields[:-1]) if exports.LEM_DELIMITER in f]
+        if shifted:
+            i = shifted[0]
+            n = fields[i].count(exports.LEM_DELIMITER)
+            cols = "column" if n == 1 else "columns"
+            after = "the Lab ID" if i == 0 else header[i]
+            verb = "" if reads else "read "          # "read the Lab ID as … and every value …"
+            reads.append(f"{verb}every value after {after} {_COUNT_WORDS.get(n, str(n))} {cols} off")
+    if not reads:
+        reads.append("read " + " and ".join(header[i] for i, _ in bad) + " with the CSV quotes left in")
+    note = (f"{'; '.join(parts)}. LEM splits each line at every comma and line break and keeps "
+            f"CSV quotes, so it will {' and '.join(reads)}.")
+    if lab_wrong:
+        note += (" If that ID (after any Lab ID cleanup set up in LEM) matches no LabCore sample, "
+                 "LEM holds the reading; if it matches another sample's ID, the reading is "
+                 "filed there.")
+    lab_involved = lab_wrong or bad[0][0] == 0
+    note += f" {LEM_NOTE_FIX if lab_involved else LEM_NOTE_CHECK} {LEM_NOTE_END}"
+    return note
 
 
 def _lem_note_of_rows(conn, sample_id: int) -> Optional[str]:
-    """The LEM warning for the newest export row of this sample whose Lab ID
-    LEM misreads, or ``None``."""
+    """The LEM warning for the newest export row of this sample that LEM
+    misreads, or ``None``."""
     for (line,) in conn.execute('SELECT "row" FROM export_rows WHERE sample_id=? ORDER BY seq DESC',
                                 (sample_id,)):
-        note = lem_lab_id_note(exports.line_lab_id(line))
+        note = lem_line_note(line)
         if note:
             return note
     return None
@@ -524,12 +578,12 @@ def _review_note(conn, sample_id: int, note: Optional[str]) -> Optional[str]:
 def _append_export_row(conn, instrument_id: str, sample_id: int, revision: int,
                        line: str) -> tuple:
     """``store.export_rows.append_pending`` (the line exactly as built), then
-    the LEM check: a Lab ID LEM will misread adds its warning to the sample's
-    ``review_note``. Returns ``(seq, message)``, where ``message`` is the
+    the LEM check: a line LEM will read differently from a CSV reader
+    (``lem_line_note``) adds its warning to the sample's ``review_note``. Returns ``(seq, message)``, where ``message`` is the
     notification to raise after the commit: only when the warning is new on
     the sample (once per sample, however often it is exported), else ``None``."""
     seq = store.export_rows.append_pending(conn, instrument_id, sample_id, revision, line)
-    note = lem_lab_id_note(exports.line_lab_id(line))
+    note = lem_line_note(line)
     if note is None:
         return seq, None
     cur = (store.samples.get(sample_id, db=conn) or {}).get("review_note")
