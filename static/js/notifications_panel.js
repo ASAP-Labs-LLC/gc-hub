@@ -34,9 +34,14 @@
         [/\bresumed\b|hub (did not|could not) start/i, '/admin/hub#status', 'Open Hub status'],
         [/backup|diagnostic|disk/i, '/admin/hub#diagnostics', 'Open Diagnostics'],
     ];
+    // v5.1.0: "Sample <id> on <GC>: Lab ID '…' contains …; LEM will …" goes to
+    // that sample. Anchored at the start: the Lab ID inside comes from the CDF.
+    const LEM_LAB_ID = /^Sample (\d+) on [^\n]*?: Lab ID '[\s\S]*\bLEM will\b/;
     function link(message) {
         const m = String(message || '');
         if (!m) return null;
+        const lem = LEM_LAB_ID.exec(m);
+        if (lem) return { href: '/samples/' + lem[1], text: 'Open sample' };
         for (const [re, href, text] of LINKS) if (re.test(m)) return { href, text };
         return null;
     }

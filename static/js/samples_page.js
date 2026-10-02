@@ -200,6 +200,8 @@
         }
         const flags = L.flagText(f);
         if (flags) line2.push(h('span', { className: 'flag', text: '⚑ ' + flags }));
+        const review = L.reviewText(f);
+        if (review) line2.push(h('span', { className: 'review', title: review, 'data-testid': 'row-review', text: review }));
         if (st.fix) line2.push(fixEl(st.fix, f));
         const tags = [h('span', { className: 'tag', text: S.names[f.instrument] || f.instrument || '' })];
         if (f.time_corrected) tags.push(h('span', { className: 'tag', title: 'Injection time corrected', text: 'time fixed' }));
@@ -600,7 +602,8 @@
         add(h('span', { text: (row.method_name || 'D2887') + ' · ' + rev }));
         if (row.backfill) add(h('span', { text: row.released ? 'Backfill · released' : 'Backfill' }));
         if (row.time_corrected) add(h('span', { title: 'v1 misread this CDF’s time stamp', text: 'Injection time corrected' }));
-        if (meta.review_note) add(h('span', { text: 'Review: ' + meta.review_note }));
+        const review = L.reviewText(meta);
+        if (review) add(h('span', { className: 'd-review', 'data-testid': 'detail-review', text: review }));
         $('d-meta').replaceChildren(...parts);
         const reason = $('d-reason');
         if (st.reason) {

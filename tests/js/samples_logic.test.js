@@ -43,6 +43,15 @@ module.exports = async (t) => {
     t.eq(L.rowDetail(row(1)), '');
     t.eq(L.flagText(row(1, { flags: [{ name: 'Early high-signal' }, 'Late'] })), 'Early high-signal, Late');
     t.eq(L.flagText(row(1, { flags: [] })), '');
+    // v5.1.0: a review note (a late blank, a Lab ID LEM will misread) shows
+    // in the list row too, as "Review: <the note>", whole (the row's CSS
+    // shortens it; the full text is the tooltip and the sample's header).
+    t.eq(L.reviewText(row(1, { review_note: "Lab ID '40304, rerun' contains a comma; LEM will read this row's values one column off. Rename the sample in QBench/LEM by hand." })),
+         "Review: Lab ID '40304, rerun' contains a comma; LEM will read this row's values one column off. Rename the sample in QBench/LEM by hand.");
+    t.eq(L.reviewText(row(1, { review_note: '  ' })), '');
+    t.eq(L.reviewText(row(1, { review_note: null })), '');
+    t.eq(L.reviewText(row(1)), '');
+    t.eq(L.reviewText(null), '');
 
     // ── the injection time in the header ────────────────────────────────
     t.eq(L.injectedText('2026-09-29 14:28:05'), 'Injected Tue, Sep 29 at 14:28');

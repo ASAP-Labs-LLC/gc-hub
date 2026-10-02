@@ -72,6 +72,9 @@
 .srow .l2 .reason-error { color: var(--st-error); overflow-wrap: anywhere; }
 .srow.active .l2 .reason-held, .srow.checked .l2 .reason-held { color: var(--pill-held-fg); }
 .srow .l2 .flag { color: var(--text); }
+/* v5.1.0: a review note (a late blank, a Lab ID LEM will misread): one line, the whole note in its tooltip and the header */
+.srow .l2 .review { color: var(--warn-text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.srow.active .l2 .review, .srow.checked .l2 .review { color: var(--pill-held-fg); }
 .fix {
     border: 0; background: none; padding: 0; font: inherit; font-size: var(--fs-xs); color: var(--text); cursor: pointer;
     text-decoration: underline; text-underline-offset: 2px; white-space: nowrap;
@@ -100,6 +103,7 @@
 .d-meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3);
     font-size: var(--fs-sm); color: var(--text-muted); }
 .d-meta .sep { color: var(--text-muted); }
+.d-meta .d-review { color: var(--warn-text); overflow-wrap: anywhere; }
 .d-meta a { color: var(--text); }
 .d-reason { grid-column: 1 / -1; margin: 0; display: flex; flex-wrap: wrap; gap: var(--s2); align-items: baseline; font-size: var(--fs-sm); }
 .d-reason.held { color: var(--warn-text); }

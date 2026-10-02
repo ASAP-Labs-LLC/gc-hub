@@ -71,6 +71,7 @@ import ingest_api
 import instrument_activity
 import instrument_admin as ia
 import lem_machines
+import notifications
 import paths
 import setup_state
 import standards
@@ -122,6 +123,12 @@ def _comp_dir(conf: Optional[dict] = None) -> Path:
 
 def _by() -> str:
     return web_auth.actor()
+
+
+def _notify(level: str, message: str) -> None:
+    """The notifications panel, looked up when there is something to say (the
+    pipeline logs and swallows a failure here)."""
+    notifications.get_store().add(level, message)
 
 
 def _err(message: str, status: int = 400, **extra):
@@ -485,7 +492,8 @@ def api_backfill_release(iid):
     body, err = _admin()
     if err:
         return err
-    results = ia.release(iid, body.get("sample_ids"), by=_by(), db=_db(), data_dir=_data())
+    results = ia.release(iid, body.get("sample_ids"), by=_by(), db=_db(), data_dir=_data(),
+                         notifier=_notify)
     if any(r.get("ok") for r in results):
         _wake_exports()         # export rows were written outside the Worker: flush now
     return jsonify({"results": results})

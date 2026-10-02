@@ -299,6 +299,36 @@ def format_line(results_json: Union[str, Mapping[str, Any]], source_file: Any) -
     return _csv_line(values)
 
 
+# ── what LEM misreads (v5.1.0) ───────────────────────────────────────────────
+# LEM's parser (lem_station_module.split_cells) splits the text on
+# str.splitlines() and each line on the delimiter, ignoring CSV quotes. The
+# line above quotes such a field correctly; LEM still breaks it. The hub only
+# warns (pipeline.lem_lab_id_note); the line is never changed.
+
+LEM_LINE_BREAKS = {"\r": "\\r", "\n": "\\n", "\v": "\\v", "\f": "\\f", "\x1c": "\\x1c",
+                   "\x1d": "\\x1d", "\x1e": "\\x1e", "\x85": "\\x85", " ": "\\u2028",
+                   " ": "\\u2029"}
+LEM_DELIMITER = ","
+
+
+def lem_misread_chars(value: Any) -> list:
+    """The characters in ``value`` LEM splits on (the comma and every
+    ``str.splitlines`` boundary), each once, in order of first appearance."""
+    out: list = []
+    for ch in str(value or ""):
+        if (ch == LEM_DELIMITER or ch in LEM_LINE_BREAKS) and ch not in out:
+            out.append(ch)
+    return out
+
+
+def line_lab_id(line: Any) -> Optional[str]:
+    """The ``Lab ID`` field of one written results-CSV line (as a CSV reader,
+    not LEM, reads it); ``None`` if it isn't one record of ``CSV_HEADER``."""
+    if not isinstance(line, str) or not _is_one_record(line):
+        return None
+    return next(csv.reader(io.StringIO(line, newline="")))[CSV_HEADER.index("Lab ID")]
+
+
 def with_injection_dt(results_json: Union[str, Mapping[str, Any]], injection_dt: Optional[str]) -> str:
     """``results_json`` (JSON text or dict) with ``InjectionDateTime`` set to
     ``injection_dt`` (unchanged when ``None``), as JSON text. Hub-written

@@ -76,8 +76,11 @@ Public API
     attach_cdf_to_result_only(conn, sample_id, *, cdf_sha256, cdf_path, method_name,
         injection_dt, injection_dt_source, source_name, is_blank=0,
         legacy_injection_dt=None, status=None) -> dict   # in write_txn; submit and the 2D importer
-    export_to_lims(sample_id, *, by, db=None, data_dir=None, format_line=None) -> {revision, seq}
-    release_backfill(sample_id, *, by, db=None, data_dir=None, format_line=None) -> seq
+    export_to_lims(sample_id, *, by, db=None, data_dir=None, format_line=None,
+                   notifier=None) -> {revision, seq}
+    release_backfill(sample_id, *, by, db=None, data_dir=None, format_line=None,
+                     notifier=None) -> seq
+    lem_lab_id_note(lab_id) -> str | None   # v5.1.0: the review note for a Lab ID LEM misreads
     resolve_conflict_replace(conflict_id, *, by, conf=None, db=None, data_dir=None) -> job id
     revision_blank_path(sample_id, revision=None, *, db=None, data_dir=None) -> Path | None
     request_reprocess(sample_id, *, by=None, use_current_blank=False,
@@ -120,7 +123,8 @@ Injection points:
 * ``notifier(level, message)``: e.g. ``notifications.get_store().add``.
   Raised once per instrument when a job has retried a transient failure
   ``STUCK_ATTEMPTS`` times (cleared by the next success on that
-  instrument), and by ``submit`` for a late blank. ``None`` = log only.
+  instrument), by ``submit`` for a late blank, and for a Lab ID LEM will
+  misread (v5.1.0). ``None`` = log only.
 
 Decisions (where the spec left a choice):
 
@@ -133,6 +137,16 @@ Decisions (where the spec left a choice):
   import matcher's ``normalise_lab_id``); an empty name falls back to the
   sender's file stem (v1). The export row keeps the name as
   ``distill.compute`` reads it, except that an empty one is the ``lab_id``.
+* **A Lab ID LEM will misread** (v5.1.0): every export row is written by
+  ``_append_export_row``, exactly as built (CSV-quoted; never sanitised or
+  refused). If the row's Lab ID contains a comma or a ``str.splitlines``
+  boundary, which LEM's parser splits on whatever the quotes say, the
+  sample's ``review_note`` gets ``lem_lab_id_note`` (what is wrong and what
+  to do) and one notification is raised after the commit, only when that
+  note is new on the sample: a reprocess or Export to LIMS of a flagged
+  sample adds a row but no second notification. Other review notes keep it
+  (``_review_note``), and a fresh-blank reprocess clears only the rest.
+  Imported v1 rows have no export rows and are never flagged.
 * ``injection_dt`` without a CDF stamp is the sender's ``mtime``, truncated
   to whole seconds (hub-canonical); bytes with neither are refused (the hub's
   receive time is never used). The results' ``InjectionDateTime`` is always
@@ -247,6 +261,10 @@ INCOMING_DIR = ".incoming"
 LATE_BLANK_NOTE = "earlier-injected blank arrived after processing (blank sample {blank_id})"
 BLANK_REPLACED_NOTE = ("the CDF of blank sample {blank_id} was replaced after this result used it "
                        "(conflict {conflict_id}); the result still subtracts the previous file")
+
+LEM_NOTE_FIX = "Rename the sample in QBench/LEM by hand."
+LEM_NOTE_NAME_MAX = 80
+_COUNT_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
 
 # A genuine blank's name: "Blank", "blank2", "Blank - 1", "(Blank)", "[b] Blank2".
 _BLANK_NAME = re.compile(
@@ -444,6 +462,82 @@ def _lab_id_list(conn, sample_ids: list, limit: int = NOTIFY_LAB_IDS_MAX) -> str
     if len(ids) > limit:
         text += f" and {len(ids) - limit} more"
     return text
+
+
+# ── Lab IDs LEM will misread (v5.1.0) ───────────────────────────────────────
+# The export row is written exactly as before; this only warns. Every export
+# row goes through _append_export_row (the Worker's final write, Export to
+# LIMS, backfill release), which checks the Lab ID in the line it wrote.
+
+def lem_lab_id_note(lab_id: Any) -> Optional[str]:
+    """The review note for a Lab ID LEM will misread (a comma, or a character
+    ``str.splitlines`` breaks on), else ``None``. One line: line breaks are
+    shown escaped (``\\n``), and a long name is shortened."""
+    chars = exports.lem_misread_chars(lab_id)
+    if not chars:
+        return None
+    full = str(lab_id)
+    name = full if len(full) <= LEM_NOTE_NAME_MAX else full[:LEM_NOTE_NAME_MAX] + "…"
+    shown = "".join(exports.LEM_LINE_BREAKS.get(c, c) for c in name)
+    commas = full.count(exports.LEM_DELIMITER)
+    breaks = [exports.LEM_LINE_BREAKS[c] for c in chars if c in exports.LEM_LINE_BREAKS]
+    n_breaks = len(f"x{full}x".splitlines()) - 1
+    what = []
+    if commas:
+        what.append("a comma" if commas == 1 else f"{commas} commas")
+    if breaks:
+        what.append(("a line break" if n_breaks == 1 else "line breaks")
+                    + f" ({', '.join(breaks)})")
+    if commas and not breaks:
+        cols = "column" if commas == 1 else "columns"
+        effect = (f"LEM will read this row's values {_COUNT_WORDS.get(commas, str(commas))} "
+                  f"{cols} off")
+    elif breaks and not commas:
+        at = "the line break" if n_breaks == 1 else "the line breaks"
+        effect = f"LEM will split this row at {at}, read its values out of place and may record a fake row"
+    else:
+        effect = "LEM will read this row's values out of place and may record a fake row"
+    return f"Lab ID '{shown}' contains {' and '.join(what)}; {effect}. {LEM_NOTE_FIX}"
+
+
+def _lem_note_of_rows(conn, sample_id: int) -> Optional[str]:
+    """The LEM warning for the newest export row of this sample whose Lab ID
+    LEM misreads, or ``None``."""
+    for (line,) in conn.execute('SELECT "row" FROM export_rows WHERE sample_id=? ORDER BY seq DESC',
+                                (sample_id,)):
+        note = lem_lab_id_note(exports.line_lab_id(line))
+        if note:
+            return note
+    return None
+
+
+def _review_note(conn, sample_id: int, note: Optional[str]) -> Optional[str]:
+    """``note`` (a late blank, an unverifiable match, ... or ``None`` to clear
+    it) with the sample's LEM warning kept after it: setting or clearing
+    another review note never drops that warning while its rows exist."""
+    lem = _lem_note_of_rows(conn, sample_id)
+    if note and lem and lem in note:
+        return note
+    return "; ".join(p for p in (note, lem) if p) or None
+
+
+def _append_export_row(conn, instrument_id: str, sample_id: int, revision: int,
+                       line: str) -> tuple:
+    """``store.export_rows.append_pending`` (the line exactly as built), then
+    the LEM check: a Lab ID LEM will misread adds its warning to the sample's
+    ``review_note``. Returns ``(seq, message)``, where ``message`` is the
+    notification to raise after the commit: only when the warning is new on
+    the sample (once per sample, however often it is exported), else ``None``."""
+    seq = store.export_rows.append_pending(conn, instrument_id, sample_id, revision, line)
+    note = lem_lab_id_note(exports.line_lab_id(line))
+    if note is None:
+        return seq, None
+    cur = (store.samples.get(sample_id, db=conn) or {}).get("review_note")
+    if cur and note in cur:
+        return seq, None
+    store.samples.update(sample_id, review_note=f"{cur}; {note}" if cur else note, db=conn)
+    inst = store.instruments.get(instrument_id, db=conn) or {}
+    return seq, f"Sample {sample_id} on {inst.get('name') or instrument_id}: {note}"
 
 
 _NC_TYPE_SIZE = {1: 1, 2: 1, 3: 2, 4: 4, 5: 4, 6: 8}
@@ -798,7 +892,7 @@ def _flag_late_blank(conn, inst: dict, blank_id: int, blank_dt: str, method_name
                if not is_blank_name(r["lab_id"])]
     note = LATE_BLANK_NOTE.format(blank_id=blank_id)
     for sid in flagged:
-        store.samples.update(sid, review_note=note, db=conn)
+        store.samples.update(sid, review_note=_review_note(conn, sid, note), db=conn)
     return flagged
 
 
@@ -814,7 +908,7 @@ def _flag_blank_replaced(conn, cur: dict, src: dict) -> list:
         "AND s.id<>? ORDER BY s.injection_dt", (sid, sid))]
     note = BLANK_REPLACED_NOTE.format(blank_id=sid, conflict_id=src["conflict_id"])
     for uid in users:
-        store.samples.update(uid, review_note=note, db=conn)
+        store.samples.update(uid, review_note=_review_note(conn, uid, note), db=conn)
     late: list = []
     if src["is_blank"] and not cur["is_blank"]:
         inst = store.instruments.get(cur["instrument_id"], db=conn)
@@ -940,7 +1034,8 @@ def _submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os
                         is_blank=is_blank)
                     note = unmapped_method_note(inst, method_name)
                     if note:        # v1's revisions and status stay; say why it looks odd
-                        store.samples.update(ro["id"], review_note=note, db=conn)
+                        store.samples.update(ro["id"], review_note=_review_note(conn, ro["id"], note),
+                                             db=conn)
                     os.replace(tmp, final)
                     if mtime_ts is not None:
                         os.utime(final, (mtime_ts, mtime_ts))
@@ -980,8 +1075,8 @@ def _submit(instrument_id: str, cdf: Union[bytes, bytearray, memoryview, str, os
                     store.samples.update(sid, review_note="; ".join(
                         UNVERIFIABLE_MATCH_NOTE.format(other=x["id"]) for x in suspects), db=conn)
                     for x in suspects:
-                        store.samples.update(x["id"], db=conn,
-                                             review_note=UNVERIFIABLE_MATCH_NOTE_RO.format(other=sid))
+                        store.samples.update(x["id"], db=conn, review_note=_review_note(
+                            conn, x["id"], UNVERIFIABLE_MATCH_NOTE_RO.format(other=sid)))
                 if is_blank:
                     flagged = _flag_late_blank(conn, inst, sid, injection_dt, method_name)
                     flagged_labs = _lab_id_list(conn, flagged)
@@ -1507,6 +1602,7 @@ class Worker:
         sid = sample["id"]
         flagged: list = []
         flagged_labs = ""
+        lem_msg = None
         with store.connection(self.db) as conn:
             with store.write_txn(conn):
                 cur = store.samples.get(sid, db=conn)
@@ -1532,10 +1628,10 @@ class Worker:
                 rev = store.add_revision(conn, sid, results_json, reason=reason, by=by,
                                          notes=notes, **extra)
                 store.samples.set_status(sid, "final", db=conn)
-                if store.samples.is_gated(sid, db=conn):
-                    store.export_rows.append_pending(conn, cur["instrument_id"], sid, rev, line)
                 if clear_review and cur.get("review_note"):
-                    store.samples.update(sid, review_note=None, db=conn)
+                    store.samples.update(sid, review_note=_review_note(conn, sid, None), db=conn)
+                if store.samples.is_gated(sid, db=conn):
+                    _seq, lem_msg = _append_export_row(conn, cur["instrument_id"], sid, rev, line)
                 if src is not None:
                     store.conflicts.resolve(src["conflict_id"], "replaced", by=by or "", db=conn)
                 store.jobs.complete(job["id"], db=conn)
@@ -1555,6 +1651,8 @@ class Worker:
                     f"was replaced and changed the blank for {len(flagged)} final sample(s) "
                     f"on {cur['instrument_id']}: {flagged_labs}. They are marked for review "
                     f"and were not reprocessed.")
+        if lem_msg:
+            _notify(self.notifier, "warning", lem_msg)
         return rev
 
 
@@ -1587,7 +1685,8 @@ def _line_for(sample: dict, rev: dict, format_line) -> str:
 
 
 def export_to_lims(sample_id: int, *, by: Optional[str], db: store.Db = None, data_dir=None,
-                   format_line: Optional[Callable[[str, str], str]] = None) -> dict:
+                   format_line: Optional[Callable[[str, str], str]] = None,
+                   notifier: Optional[Notifier] = None) -> dict:
     """Export to LIMS: a new revision (reason ``export-lims``) copying the current
     revision's values (no recompute) and its export row, in one transaction.
     ``NotExportable`` unless the sample passes the gate. Returns
@@ -1608,14 +1707,17 @@ def export_to_lims(sample_id: int, *, by: Optional[str], db: store.Db = None, da
             line = _line_for(s, cur, format_line)
             rev = store.add_revision(conn, sample_id, cur["results"], reason="export-lims", by=by,
                                      **{k: cur[k] for k in _COPIED})
-            seq = store.export_rows.append_pending(conn, s["instrument_id"], sample_id, rev, line)
+            seq, lem_msg = _append_export_row(conn, s["instrument_id"], sample_id, rev, line)
     log.info("pipeline: sample %s exported to LIMS by %s (revision %s)", sample_id, by, rev)
     live.publish("sample", {"sample_id": sample_id})
+    if lem_msg:
+        _notify(notifier, "warning", lem_msg)
     return {"revision": rev, "seq": seq}
 
 
 def release_backfill(sample_id: int, *, by: Optional[str], db: store.Db = None, data_dir=None,
-                     format_line: Optional[Callable[[str, str], str]] = None) -> int:
+                     format_line: Optional[Callable[[str, str], str]] = None,
+                     notifier: Optional[Notifier] = None) -> int:
     """Release a ``final`` backfill sample (D11): set ``released_at``/``by`` and
     write the export row for its current revision, in one transaction. Returns
     the row's ``seq``. ``NotExportable`` if it isn't final, isn't backfill, or
@@ -1636,10 +1738,12 @@ def release_backfill(sample_id: int, *, by: Optional[str], db: store.Db = None, 
             if not store.samples.is_gated(sample_id, db=conn):
                 raise NotExportable(f"sample {sample_id} still fails the gate")
             cur = store.get_revision(sample_id, db=conn)
-            seq = store.export_rows.append_pending(conn, s["instrument_id"], sample_id,
-                                                   cur["revision"], _line_for(s, cur, format_line))
+            seq, lem_msg = _append_export_row(conn, s["instrument_id"], sample_id,
+                                              cur["revision"], _line_for(s, cur, format_line))
     log.info("pipeline: backfill sample %s released by %s", sample_id, by)
     live.publish("sample", {"sample_id": sample_id})
+    if lem_msg:
+        _notify(notifier, "warning", lem_msg)
     return seq
 
 

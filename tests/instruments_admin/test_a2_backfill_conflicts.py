@@ -158,3 +158,18 @@ def test_unknown_conflict(hub):
     with pytest.raises(ia.AdminError) as e:
         ia.replace(42, by="a", db=hub.db, data_dir=hub.data)
     assert e.value.status == 404
+
+
+def test_release_passes_the_notifier_for_the_lem_lab_id_warning(hub):
+    # v5.1.0: releasing a backfill sample writes its export row, so a Lab ID
+    # LEM will misread is flagged and notified then.
+    hub.gc1(live_since=datetime(2030, 1, 1))
+    sid = hub.submit(hub.cdf(name="A1, rerun", injected=datetime(2026, 9, 1, 8))).sample_id
+    hub.worker().run_until_idle()
+    calls = []
+    out = ia.release("gc1", [sid], by="a", db=hub.db, data_dir=hub.data,
+                     notifier=lambda level, msg: calls.append((level, msg)))
+    assert out[0]["ok"] is True
+    assert [lvl for lvl, _ in calls] == ["warning"]
+    assert "Lab ID 'A1, rerun' contains a comma" in calls[0][1]
+    assert "contains a comma" in store.samples.get(sid, db=hub.db)["review_note"]

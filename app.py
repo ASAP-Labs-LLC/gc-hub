@@ -2794,7 +2794,8 @@ def api_export_lims():
     exported, refused = [], []
     for sid in ids:
         try:
-            r = pipeline.export_to_lims(sid, by=_who(), db=db, data_dir=data)
+            r = pipeline.export_to_lims(sid, by=_who(), db=db, data_dir=data,
+                                        notifier=notifications_mod.get_store().add)
             exported.append({"sample_id": sid, "revision": r["revision"], "seq": r["seq"]})
         except pipeline.NotExportable as exc:
             refused.append({"sample_id": sid, "error": str(exc)})

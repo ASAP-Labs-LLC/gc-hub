@@ -93,6 +93,12 @@
         return flags.map(f => (f && typeof f === 'object') ? String(f.name || f.label || '') : String(f))
             .filter(Boolean).join(', ');
     }
+    /** "Review: <note>" for a sample with a review note (a late blank, a Lab ID
+        LEM will misread, v5.1.0), else ''. Text only: shown with textContent. */
+    function reviewText(r) {
+        const note = r && r.review_note != null ? String(r.review_note).trim() : '';
+        return note ? 'Review: ' + note : '';
+    }
 
     /** "Injected Tue, Sep 29 at 14:28" (the hub's local clock, as stored). */
     function injectedText(dt, source) {
@@ -399,7 +405,7 @@
     }
 
     const api = {
-        number, plural, fmt, rowStatus, rowDetail, flagText, injectedText,
+        number, plural, fmt, rowStatus, rowDetail, flagText, reviewText, injectedText,
         selection, selectedIds, toggle, extend, paint, selectShown, selectAllMatching, clear, keepOnly, bulkBar,
         CHUNK, BULK_LIMIT, chunks, runChunks, outcomeText, filterText, confirmText, countsText,
         resultRows, dataRows, dataTableText, curveFromTable, historyItems, carbonTicks, CHART_CONFIG, chartLayout, step, queueItem,

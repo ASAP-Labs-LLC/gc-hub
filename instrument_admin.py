@@ -863,10 +863,11 @@ def _id_list(sample_ids: Any, what: str = "sample_ids", most: int = RELEASE_MAX)
 
 
 def release(instrument_id: str, sample_ids: Any, *, by: Optional[str], db: store.Db = None,
-            data_dir=None) -> list:
+            data_dir=None, notifier=None) -> list:
     """Release the selected backfill samples of this instrument, one by one
     (``pipeline.release_backfill``: sets ``released_at`` and writes the export
-    row). ``[{sample_id, ok, seq | error}]`` in request order."""
+    row). ``[{sample_id, ok, seq | error}]`` in request order. ``notifier(level,
+    message)`` hears about a Lab ID LEM will misread (v5.1.0)."""
     import pipeline
     ids = _id_list(sample_ids)
     inst = get(instrument_id, db=db)
@@ -881,7 +882,7 @@ def release(instrument_id: str, sample_ids: Any, *, by: Optional[str], db: store
                         "error": f"sample {sid} is not from {inst['name']}"})
             continue
         try:
-            seq = pipeline.release_backfill(sid, by=by, db=db, data_dir=data_dir)
+            seq = pipeline.release_backfill(sid, by=by, db=db, data_dir=data_dir, notifier=notifier)
         except pipeline.NotExportable as exc:
             out.append({"sample_id": sid, "ok": False, "error": str(exc)})
             continue
