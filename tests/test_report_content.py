@@ -187,6 +187,36 @@ def test_annotation_comments_print_their_span_with_the_reports_ladder(harness):
         assert "Narrow mark (C10, 1.90–2.10 min; CD, 2026-09-29)" in pdf, path
 
 
+def test_v6_report_has_no_comments_section_marked_regions_and_notes_under_the_conclusion(harness):
+    """v6: comments and the conclusion are one thing. The report has no
+    Comments section: marked regions (annotations) print in their own
+    "Marked regions" section after the deviation analysis, and a sample's
+    earlier notes (free/preset comments from before v6) print inside the
+    Conclusion, under the conclusion text, headed "Notes"."""
+    for html in harness["htmls"]:
+        assert "<!-- COMMENTS -->" not in html and ">\n  Comments\n<" not in html
+        regions = html.index("Marked regions")
+        conclusion = html.index("<!-- CONCLUSION -->")
+        footer = html.index("<!-- FOOTER -->")
+        assert html.index("<!-- DEVIATION ANALYSIS -->") < regions < conclusion
+        narrow = html.index("Narrow mark (C10, 1.90–2.10 min; CD, 2026-09-29)")
+        assert regions < narrow < conclusion
+        note = html.index("Sample appears to be gasoline. (RB, 2026-09-29)")
+        notes = html.index("Notes", conclusion)
+        assert conclusion < notes < note < footer
+        # the conclusion text comes first, then its notes
+        generated = harness["records"][0]["content"]["conclusion_generated"]
+        assert conclusion < html.index(_esc_html(generated.split("\n")[0])) < notes
+    for path, pdf in harness["pdf_text"].items():
+        assert "Marked regions" in pdf and "Notes" in pdf, path
+        assert pdf.index("Conclusion") < pdf.index("Sample appears to be gasoline."), path
+
+
+def _esc_html(s: str) -> str:
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;").replace("'", "&#x27;"))
+
+
 def test_report_log_rows_for_every_export(harness):
     rows = harness["log_rows"]
     assert [r["kind"] for r in rows] == ["download", "zip", "qbench"]

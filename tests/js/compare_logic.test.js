@@ -201,4 +201,48 @@ module.exports = (t) => {
     t.eq(L.diffSpan([0, 1, 2, 3], [10, -300, 50, 9999], [], 100, 2.5), 300);
     t.eq(L.diffSpan([0, 1], [10, 20], [{ value: -800 }], 100, null), 800);
     t.eq(L.diffSpan([0, 1], [10, 20], [], 100, null), 100);
+
+    // v6: conclusion presets are inserted into the conclusion text (then edited)
+    const gen = 'No significant deviations from Diesel were found.';
+    // no caret: appended to the end, one space apart
+    t.eq(L.insertPreset(gen, 'Re-run requested.'),
+        { text: gen + ' Re-run requested.', caret: (gen + ' Re-run requested.').length });
+    // into nothing: just the preset
+    t.eq(L.insertPreset('', '  Re-run requested. '), { text: 'Re-run requested.', caret: 17 });
+    t.eq(L.insertPreset(null, 'A.'), { text: 'A.', caret: 2 });
+    // a text ending in white space (a new line) needs no separator
+    t.eq(L.insertPreset('Line one.\n', 'B.'), { text: 'Line one.\nB.', caret: 12 });
+    // at the caret, padded with a space on each side that needs one
+    t.eq(L.insertPreset('One.Two.', 'Mid.', { start: 4, end: 4 }), { text: 'One. Mid. Two.', caret: 9 });
+    t.eq(L.insertPreset('One. Two.', 'Mid.', { start: 5, end: 5 }), { text: 'One. Mid. Two.', caret: 9 });
+    t.eq(L.insertPreset('One.', 'Mid.', { start: 0, end: 0 }), { text: 'Mid. One.', caret: 4 });
+    // a selection is replaced
+    t.eq(L.insertPreset('Keep OLD keep.', 'new', { start: 5, end: 8 }), { text: 'Keep new keep.', caret: 8 });
+    // a caret out of range is clamped; an empty preset changes nothing
+    t.eq(L.insertPreset('abc', 'X.', { start: 99, end: 99 }), { text: 'abc X.', caret: 6 });
+    t.eq(L.insertPreset('abc', '   '), { text: 'abc', caret: 3 });
+    // never longer than the conclusion limit (1,500, the server's comments.CONCLUSION_MAX)
+    t.eq(L.CONCLUSION_MAX, 1500);
+    t.eq(L.insertPreset('x'.repeat(1495), 'Too long.'), null);
+    t.eq(L.insertPreset('x'.repeat(1490), 'Fits.').text.length, 1496);
+    t.eq(L.insertPreset('x'.repeat(1494), 'Fits.').text.length, 1500);   // exactly at the limit
+    t.eq(L.insertPreset('x'.repeat(1497), 'No.'), null);           // 1,501
+
+    // the live counter: "N / 1,500", warning from 90 % (1,350), at the limit
+    t.eq(L.conclusionCount(''), { text: '0 / 1,500', near: false, full: false });
+    t.eq(L.conclusionCount('x'.repeat(1349)), { text: '1,349 / 1,500', near: false, full: false });
+    t.eq(L.conclusionCount('x'.repeat(1350)), { text: '1,350 / 1,500', near: true, full: false });
+    t.eq(L.conclusionCount('x'.repeat(1500)), { text: '1,500 / 1,500', near: true, full: true });
+    t.eq(L.conclusionCount(null).text, '0 / 1,500');
+
+    // a paste: the result cut to the limit, and whether it was cut
+    t.eq(L.pasteInto('abc', 'XY', { start: 1, end: 2 }), { text: 'aXYc', caret: 3, cut: false });
+    const big = L.pasteInto('x'.repeat(1490), 'y'.repeat(50), { start: 1490, end: 1490 });
+    t.eq([big.text.length, big.caret, big.cut], [1500, 1500, true]);
+    t.eq(big.text.endsWith('y'.repeat(10)), true);
+    // pasted into the middle: what follows the caret is kept, the paste is cut
+    const mid = L.pasteInto('a'.repeat(1000) + 'TAIL', 'p'.repeat(800), { start: 1000, end: 1000 });
+    t.eq([mid.text.length, mid.text.endsWith('TAIL'), mid.caret, mid.cut], [1500, true, 1496, true]);
+    // replacing a selection frees its room
+    t.eq(L.pasteInto('a'.repeat(1500), 'bb', { start: 0, end: 2 }).cut, false);
 };

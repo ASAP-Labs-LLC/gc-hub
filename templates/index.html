@@ -246,6 +246,7 @@
 
     /* ── Comments (phase 4) ───────────────────────────────────────── */
     #analysis-comments-panel .panel-body { display:flex; flex-direction:column; gap:6px; }
+    #comment-presets { margin-top:4px; }
     .comment-author { margin-left:auto; font-size:10px; color:#7d8590; font-weight:normal; }
     .comment-chips { display:flex; flex-wrap:wrap; gap:4px; }
     .comment-chip { font-size:10px; padding:2px 8px; border:1px solid #30363d; border-radius:12px; background:#161b22; color:#c9d1d9; cursor:pointer; text-align:left; }
@@ -351,7 +352,7 @@
       <div style="font-size:12px; color:#7d8590; margin-bottom:8px;">
         <span id="annotation-region-desc"></span>
       </div>
-      <textarea id="annotation-comment-input" rows="3" style="width:100%; font-size:13px;" placeholder="Enter comment for this region (optional)..."></textarea>
+      <textarea id="annotation-comment-input" rows="3" style="width:100%; font-size:13px;" placeholder="Label for this region (optional)..."></textarea>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" id="btn-annotation-cancel">Cancel</button>
@@ -743,21 +744,16 @@
             <div class="panel" style="flex-shrink:0;">
               <div class="panel-header">Conclusion</div>
               <div class="panel-body">
-                <textarea id="analysis-conclusion" rows="3" style="width:100%; font-size:12px;" placeholder="Enter conclusion..."></textarea>
+                <textarea id="analysis-conclusion" rows="3" maxlength="1500" style="width:100%; font-size:12px;" placeholder="Enter conclusion..."></textarea>
+                <!-- v6: conclusion presets (static/js/comments.js) go into the conclusion -->
+                <div id="comment-presets" class="comment-chips" title="Conclusion presets: click one to add it to the conclusion"></div>
               </div>
             </div>
-            <!-- Comments (phase 4, static/js/comments.js): saved on the sample, printed in its reports -->
+            <!-- v6: the sample's earlier notes (comments from before v6; printed under the
+                 report's conclusion) and its marked regions (static/js/comments.js) -->
             <div class="panel" id="analysis-comments-panel" style="flex-shrink:0;">
-              <div class="panel-header" style="display:flex; align-items:center;">
-                <span>Comments</span>
-                <span class="comment-author" id="comment-author" title="Comments are saved with your signed-in name; reports print its initials"></span>
-              </div>
+              <div class="panel-header">Notes &amp; marked regions</div>
               <div class="panel-body">
-                <div id="comment-presets" class="comment-chips"></div>
-                <div class="comment-add">
-                  <input id="comment-free-text" type="text" maxlength="500" placeholder="Add a comment for the report...">
-                  <button class="btn btn-secondary" id="btn-comment-add" style="font-size:11px; padding:2px 10px;">Add</button>
-                </div>
                 <ul id="comment-list"></ul>
               </div>
             </div>
@@ -1022,7 +1018,7 @@
 
       <div style="margin-top:10px;">
         <label style="font-size:12px; color:#c9d1d9; font-weight:600; display:block; margin-bottom:4px;">Conclusion</label>
-        <textarea id="export-conclusion" rows="3" style="width:100%;" placeholder="Enter conclusion..."></textarea>
+        <textarea id="export-conclusion" rows="3" maxlength="1500" style="width:100%;" placeholder="Enter conclusion..."></textarea>
       </div>
 
       <div style="margin-top:10px; border-top:1px solid #21262d; padding-top:10px;">
@@ -1144,11 +1140,11 @@
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=4"></script>
 <script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/comments.js') }}?v=3"></script>
+<script src="{{ url_for('static', filename='js/comments.js') }}?v=4"></script>
 <script src="{{ url_for('static', filename='js/ladder.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/distill_view.js') }}?v=2"></script>
 <script src="{{ url_for('static', filename='js/deeplink.js') }}?v=4"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=58"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=59"></script>
 
 <!-- Which build is running, bottom-right. Same string /healthz reports. -->
 <div id="app-version" aria-hidden="true">{{ app_version }}</div>

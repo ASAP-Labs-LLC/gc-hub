@@ -18,6 +18,9 @@ module.exports = (t) => {
     t.eq(A.sectionForHash('#diagnostics'), 'diagnostics');
     t.eq(A.sectionForHash('#imports'), 'import-history');
     t.eq(A.sectionForHash('#presets'), 'presets-panel');
+    // v6: comments are part of the conclusion, so the presets are conclusion presets
+    t.eq(A.SECTIONS.find(s => s.id === 'presets-panel').label, 'Conclusion presets');
+    t.eq(A.sectionForHash('#conclusion-presets'), 'presets-panel');
     t.eq(A.sectionForHash('#running'), 'status');
     t.eq(A.sectionForHash(''), null);
     t.eq(A.sectionForHash('#nope'), null);

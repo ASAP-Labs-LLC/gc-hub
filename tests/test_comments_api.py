@@ -228,3 +228,66 @@ def test_admin_presets_create_update_reorder_deactivate(hub):
     assert post(port, url, {"password": pw, "action": "activate", "id": pid})[0] == 200
     assert pid in [p["id"] for p in get(port, "/api/comment-presets")[1]["presets"]]
     assert post(port, url, {"password": pw, "action": "explode"})[0] == 400
+
+
+# ── v6: conclusion presets (the same table under the name the UI uses) ──────
+
+def test_conclusion_presets_are_the_comment_presets_under_their_v6_names(hub):
+    """v6 merged comments into the conclusion: presets are *conclusion
+    presets*. ``/api/conclusion-presets`` and ``/api/admin/conclusion-presets``
+    serve the same rows as the v5 paths, which keep working (a v5 page still
+    open in a browser, the classic page)."""
+    port, _db, pw, _data = hub
+    code, new = get(port, "/api/conclusion-presets")
+    assert code == 200 and new == get(port, "/api/comment-presets")[1]
+    assert len(new["presets"]) >= 4 and all(set(p) == {"id", "text", "sort"}
+                                            for p in new["presets"])
+    url = "/api/admin/conclusion-presets"
+    code, body = post(port, url, {"password": pw, "action": "create",
+                                  "text": "Consistent with ULSD."})
+    assert code == 201, body
+    pid = body["preset"]["id"]
+    assert pid in [p["id"] for p in get(port, "/api/conclusion-presets")[1]["presets"]]
+    assert pid in [p["id"] for p in post(port, "/api/admin/comment-presets",
+                                         {"password": pw, "action": "list"})[1]["presets"]]
+    assert post(port, url, {"password": "wrong", "action": "list"})[0] == 403
+    assert post(port, url, {"password": pw, "action": "deactivate", "id": pid})[0] == 200
+    assert get(port, "/api/conclusion-presets", auth=False)[0] == 401
+
+
+# ── v6: the conclusion limit ────────────────────────────────────────────────
+
+def test_conclusion_limit_is_one_constant_mirrored_in_compare_logic():
+    import re
+    import comments
+    assert comments.CONCLUSION_MAX == 1500
+    src = (TESTS.parent / "static" / "js" / "compare_logic.js").read_text(encoding="utf-8")
+    assert re.search(r"const CONCLUSION_MAX = (\d+);", src).group(1) == str(comments.CONCLUSION_MAX)
+    assert comments.conclusion_problem("x" * 1500) is None
+    assert comments.conclusion_problem("  " + "x" * 1500 + "\n") is None     # trimmed
+    assert comments.conclusion_problem(None) is None
+    msg = comments.conclusion_problem("x" * 1501)
+    assert msg and "1,500" in msg and "1,501" in msg
+
+
+def test_every_report_path_refuses_a_conclusion_over_the_limit(hub):
+    """``_report_request`` refuses a conclusion over 1,500 characters with a
+    400 naming the limit, on every path: the analysis, the direct export,
+    the ZIP (before a job starts) and the QBench queue (before anything is
+    queued). Exactly 1,500 passes the check."""
+    port, db, _pw, _data = hub
+    sid = _sample(db)
+    long = "x" * 1501
+    item = {"sample_id": sid, "standard_name": "Base", "conclusion": long}
+    for path, body in (("/api/analysis", item),
+                       ("/api/export-analysis-report", item),
+                       ("/api/export-analysis-reports-zip", {"items": [item]}),
+                       ("/api/qbench-upload", {"queue": [item]})):
+        code, answer = post(port, path, body)
+        assert code == 400, (path, code, answer)
+        assert "1,500" in answer["error"], (path, answer)
+    # at the limit the conclusion check passes (this sample has no CDF/standard:
+    # whatever refuses it, it is not the conclusion)
+    code, answer = post(port, "/api/export-analysis-reports-zip",
+                        {"items": [dict(item, conclusion="x" * 1500)]})
+    assert "1,500" not in str(answer), answer

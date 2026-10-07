@@ -2559,6 +2559,22 @@ function _openAnnotationModal(regionDesc, t_start, t_end, trendDiv, sampleId) {
     }
 }
 
+/** v6: a conclusion preset is appended to the conclusion box, one space
+    from the text before it (the chip click has taken the focus, so there is
+    no cursor to insert at). */
+function _insertConclusionPreset(text) {
+    const box = document.getElementById('analysis-conclusion');
+    const piece = String(text || '').trim();
+    if (!box || !piece) return;
+    const v = box.value;
+    const out = v + ((!v || /\s$/.test(v)) ? '' : ' ') + piece;
+    // 1,500 = the server's comments.CONCLUSION_MAX (compare_logic.js mirrors it)
+    if (out.length > 1500) { showNotification('Not added: the conclusion would be longer than 1,500 characters', 'error'); return; }
+    box.value = out;
+    box.focus();
+    box.setSelectionRange(out.length, out.length);
+}
+
 /** Draw the selected sample's annotation comments on the trend plot. When
     the selected sample changed, its comments are fetched first (the
     redraw then comes from Comments' onChange). */
@@ -4518,10 +4534,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Initialize empty charts first (Plotly elements need to exist)
     initCharts();
     setupAnnotationHandler();
-    // Comments section (static/js/comments.js); its changes redraw the
-    // annotation spans on the trend plot
+    // The sample's notes and marked regions (static/js/comments.js); their
+    // changes redraw the annotation spans on the trend plot. v6: the preset
+    // chips are conclusion presets, added to the conclusion box.
     if (typeof Comments !== 'undefined') {
-        Comments.init({ onChange: list => _drawAnnotationShapes(list) });
+        Comments.init({ onChange: list => _drawAnnotationShapes(list),
+                        onPreset: text => _insertConclusionPreset(text) });
     }
     console.log('[GC Viewer] Charts initialized');
 

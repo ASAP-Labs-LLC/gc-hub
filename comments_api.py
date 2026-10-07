@@ -1,6 +1,13 @@
 """comments_api.py: the comment and preset routes (phase 4). A Blueprint
 registered by ``app.py``; the rules are ``comments.py``.
 
+Since v6 the analyst works with one thing, the Conclusion: the presets are
+**conclusion presets** (inserted into the conclusion text on Compare) and are
+served under ``/api/conclusion-presets`` and ``/api/admin/conclusion-presets``;
+the v5 ``comment-presets`` paths are the same handlers and keep working. A
+sample's comments are now its marked regions (annotations) and, from before
+v6, its notes (free/preset comments, printed under the report's conclusion).
+
 Operator routes (a signed-in session, no password, like the other operator
 actions; the app's cross-site guard covers every POST; JSON only, 64 KiB cap).
 The author is the session's account name (``web_auth.current_name``); the
@@ -15,11 +22,13 @@ initials are derived from it, and any ``initials`` in the body is ignored::
     POST /api/samples/<id>/comments/<cid>/delete   {}
          → {comment}; soft delete (deleted_at/by name + initials/by IP); 404 not
            this sample's, 409 already deleted
-    GET  /api/comment-presets → {presets: [{id, text, sort}]}   active, in order
+    GET  /api/conclusion-presets → {presets: [{id, text, sort}]}   active, in order
+         (also GET /api/comment-presets, the v5 name)
 
 Admin (``ingest_api._admin_body``: JSON, admin password, 64 KiB)::
 
-    POST /api/admin/comment-presets {password, action, ...}
+    POST /api/admin/conclusion-presets {password, action, ...}
+         (also POST /api/admin/comment-presets, the v5 name)
          action list                      → {presets}      (active and inactive)
          action create     {text}         → 201 {preset, presets}; 409 at 50 active
          action update     {id, text}     → {preset, presets}
@@ -102,6 +111,7 @@ def api_delete_sample_comment(sample_id, comment_id):
     return jsonify({"comment": c})
 
 
+@bp.route("/api/conclusion-presets", methods=["GET"])
 @bp.route("/api/comment-presets", methods=["GET"])
 def api_comment_presets():
     return jsonify({"presets": [{"id": p["id"], "text": p["text"], "sort": p["sort"]}
@@ -112,6 +122,7 @@ def _preset_view(p: dict) -> dict:
     return {"id": p["id"], "text": p["text"], "sort": p["sort"], "active": p["active"]}
 
 
+@bp.route("/api/admin/conclusion-presets", methods=["POST"])
 @bp.route("/api/admin/comment-presets", methods=["POST"])
 def api_admin_comment_presets():
     import ingest_api
@@ -141,7 +152,7 @@ def api_admin_comment_presets():
     except comments.CommentError as exc:
         return _refused(exc)
     if action != "list":
-        log.info("admin: comment preset %s %s by %s", action,
+        log.info("admin: conclusion preset %s %s by %s", action,
                  preset["id"] if preset else "", web_auth.actor())
     out = {"presets": [_preset_view(p) for p in comments.list_presets(True, db=db)]}
     if preset is not None:

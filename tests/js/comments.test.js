@@ -47,11 +47,24 @@ module.exports = (t) => {
     t.eq(C.commentMeta(list[1]).includes('JD'), true);
 
     // Clear Annotations confirmation names the count
-    t.eq(C.clearConfirmText(2).includes('2 annotation comments'), true);
-    t.eq(C.clearConfirmText(1).includes('1 annotation comment '), true);
-    t.eq(C.clearConfirmText(2, '40304').includes('on sample 40304'), true);
+        t.eq(C.clearConfirmText(2, '40304').includes('on sample 40304'), true);
 
     // the list line prefers the account name, else the initials
     t.eq(C.commentMeta({ source: 'free', name: 'Ryan C', initials: 'RC',
                          created_at: '2026-09-29T14:07:00.000000+00:00' }).startsWith('Ryan C, '), true);
+
+    // v6: free and preset comments are the sample's earlier notes (they print
+    // under the conclusion); annotations are its marked regions on the chart
+    t.eq(C.noteComments(list).map(c => c.id), [1, 4]);
+    t.eq(C.noteComments(null), []);
+    t.eq(C.clearConfirmText(2).includes('2 marked regions'), true);
+    t.eq(C.clearConfirmText(1).includes('1 marked region '), true);
+    t.eq(/comment/i.test(C.clearConfirmText(2, '40304')), false);
+    t.eq(C.removeNoteConfirmText({ text: 'Re-run requested.' }),
+        'Remove this note?\n\nRe-run requested.\n\nIt stays in the record as deleted and no longer prints on reports.');
+    t.eq(C.removeRegionConfirmText({ text: 'Hump', t0: 1.2, t1: 1.5 }),
+        'Remove the marked region "Hump" (1.20–1.50 min)?');
+    // the Annotate menu's line for one region
+    t.eq(C.regionLabel({ text: 'Hump', t0: 1.2, t1: 1.5 }), 'Hump · 1.20–1.50 min');
+    t.eq(C.regionLabel({ text: 'x'.repeat(40), t0: 1, t1: 2 }), 'x'.repeat(30) + '… · 1.00–2.00 min');
 };

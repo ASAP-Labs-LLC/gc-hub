@@ -19,13 +19,13 @@
         { id: 'purge-panel', label: 'Purge' },
         { id: 'exports', label: 'Results files' },
         { id: 'diagnostics', label: 'Diagnostics' },
-        { id: 'presets-panel', label: 'Comment presets' },
+        { id: 'presets-panel', label: 'Conclusion presets' },
         { id: 'sessions', label: 'Sessions' },
         { id: 'server', label: 'Server' },
         { id: 'hub-address', label: 'Hub address' },
     ];
     // older or shorter anchors (task Open links, bookmarks) → the section id
-    const ALIASES = { purge: 'purge-panel', imports: 'import-history', presets: 'presets-panel',
+    const ALIASES = { purge: 'purge-panel', imports: 'import-history', presets: 'presets-panel', 'conclusion-presets': 'presets-panel',
                       running: 'status', 'results-files': 'exports', 'hub-url': 'hub-address' };
 
     function sectionForHash(hash) {

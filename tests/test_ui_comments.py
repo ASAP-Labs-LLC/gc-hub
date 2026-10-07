@@ -1,4 +1,6 @@
-"""Phase 4 UI, in headless Chrome: the Analysis tab's Comments section, the
+"""Phase 4 UI, in headless Chrome (v6 wording): the classic Analysis tab's
+"Notes & marked regions" list (earlier notes are read-only; there is no
+comment composer), conclusion presets going into the conclusion box, the
 annotation → comment persistence, Clear Annotations and the presets admin
 panel.
 
@@ -24,6 +26,7 @@ pytest.importorskip("flask")
 pytest.importorskip("netCDF4")
 webdriver = pytest.importorskip("selenium.webdriver")
 
+import comments  # noqa: E402
 import store  # noqa: E402
 from bootapp import browser_sign_in, booted, setup_admin  # noqa: E402
 from hub_boot import build_hub  # noqa: E402
@@ -137,23 +140,29 @@ def page(tmp_path_factory):
             drv.quit()
 
 
-def test_comments_are_by_the_signed_in_name(page):
-    """Sign-in (D6 rev 2): no initials box; the page says who comments are
-    saved as, and the server records the session's name."""
+def _note(hub, sid, text):
+    """An earlier note: a free comment as v5 added it (by the signed-in name)."""
+    return comments.add_comment(sid, author_name="Ryan Brown", text=text, db=hub.db)
+
+
+def test_no_comment_composer_since_v6(page):
+    """v6: comments are part of the conclusion. No initials box, no comment
+    composer and no "Commenting as" line; the panel lists the sample's notes
+    and marked regions."""
     drv, hub, _port, _pw = page
-    assert _js(drv, "return document.getElementById('comment-initials')") is None
-    assert _wait(lambda: _js(drv, "return document.getElementById('comment-author')"
-                                  ".textContent") == "Commenting as Ryan Brown")
+    for gone in ("comment-initials", "comment-free-text", "btn-comment-add", "comment-author"):
+        assert _js(drv, "return document.getElementById(arguments[0])", gone) is None, gone
+    assert "Notes & marked regions" in _js(
+        drv, "return document.querySelector('#analysis-comments-panel .panel-header').textContent")
     assert "Ryan Brown" in _js(drv, "return document.getElementById('signed-in').textContent")
     assert _js(drv, "return 'INITIALS_KEY' in Comments || 'requireInitials' in Comments") is False
 
 
-def test_free_text_is_rendered_as_text(page):
+def test_earlier_notes_are_rendered_as_text(page):
     drv, hub, _port, _pw = page
     sid = hub.ids["final"]
+    _note(hub, sid, EVIL)
     _select(drv, sid)
-    _js(drv, "document.getElementById('comment-free-text').value = arguments[0];"
-             "document.getElementById('btn-comment-add').click();", EVIL)
     assert _wait(lambda: EVIL in (_list_texts(drv) or []))
     assert [c["text"] for c in _comments(hub.db, sid)] == [EVIL]
     assert _js(drv, "return document.querySelectorAll('#comment-list img').length") == 0
@@ -163,24 +172,29 @@ def test_free_text_is_rendered_as_text(page):
     assert "Ryan Brown" in meta           # the list shows the account name
 
 
-def test_preset_chip_adds_the_preset_text(page):
+def test_preset_chip_goes_into_the_conclusion(page):
+    """v6: a preset chip is a conclusion preset: its text is appended to the
+    conclusion box (one space from the text before it); no comment is added."""
     drv, hub, _port, _pw = page
     sid = hub.ids["rerun"]
     _select(drv, sid)
     assert _wait(lambda: _js(drv, "return document.querySelectorAll('#comment-presets "
                                   "button').length") >= 4)
-    _js(drv, "document.querySelectorAll('#comment-presets button')[1].click();")
-    assert _wait(lambda: _comments(hub.db, sid))
-    c = _comments(hub.db, sid)[0]
-    assert c["text"] == "Sample appears to be gasoline." and c["source"] == "preset"
-    assert c["author_initials"] == "RB" and c["author_name"] == "Ryan Brown"
-    assert _wait(lambda: _list_texts(drv) == ["Sample appears to be gasoline."])
+    _js(drv, "document.getElementById('analysis-conclusion').value = 'Looks like diesel.';"
+             "document.querySelectorAll('#comment-presets button')[1].click();")
+    assert _js(drv, "return document.getElementById('analysis-conclusion').value") == \
+        "Looks like diesel. Sample appears to be gasoline."
+    time.sleep(0.3)
+    assert _comments(hub.db, sid) == []
+    _js(drv, "document.getElementById('analysis-conclusion').value = '';")
 
 
 def test_delete_asks_for_confirmation(page):
     drv, hub, _port, _pw = page
     sid = hub.ids["rerun"]
+    _note(hub, sid, "Sample appears to be gasoline.")
     _select(drv, sid)
+    _js(drv, "Comments.load(arguments[0])", sid)
     assert _wait(lambda: _list_texts(drv) == ["Sample appears to be gasoline."])
     _js(drv, "window.__confirms = []; window.confirm = m => { __confirms.push(m); return false; };"
              "document.querySelector('#comment-list li .comment-delete').click();")
@@ -249,14 +263,14 @@ def test_clear_annotations_confirms_the_count_and_soft_deletes(page):
     drv, hub, _port, _pw = page
     sid = hub.ids["released"]
     _select(drv, sid)
-    _js(drv, "document.getElementById('comment-free-text').value = 'keep me';"
-             "document.getElementById('btn-comment-add').click();")
+    _note(hub, sid, "keep me")
+    _js(drv, "Comments.load(arguments[0])", sid)
     assert _wait(lambda: len(_comments(hub.db, sid)) == 3)
     _js(drv, "window.__confirms = []; window.confirm = m => { __confirms.push(m); return false; };"
              "document.getElementById('btn-clear-annotations').click();")
     time.sleep(0.5)
     assert len(_comments(hub.db, sid)) == 3                  # cancelled: nothing deleted
-    assert "2 annotation comments" in _js(drv, "return window.__confirms[0]")
+    assert "2 marked regions" in _js(drv, "return window.__confirms[0]")
     _js(drv, "window.confirm = m => true;"
              "document.getElementById('btn-clear-annotations').click();")
     assert _wait(lambda: [c["text"] for c in _comments(hub.db, sid)] == ["keep me"])
@@ -371,7 +385,7 @@ def test_clear_annotations_never_touches_the_previous_sample(page):
     time.sleep(0.5)
     assert store.sample_comments.get(ca, db=hub.db)["deleted_at"] is None   # A untouched
     msg = _js(drv, "return window.__confirms[0]")
-    assert "1 annotation comment" in msg and "AB/../12" in msg, msg
+    assert "1 marked region " in msg and "AB/../12" in msg, msg
     _js(drv, "window.__delay = {};")
 
 

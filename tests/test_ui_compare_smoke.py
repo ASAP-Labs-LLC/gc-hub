@@ -445,21 +445,122 @@ def test_upload_to_qbench_over_the_stream(env):
     js(drv, "GCReportQueue.clear(); document.querySelector('[data-testid=report-queue-sheet]').close()")
 
 
+# ── v6: conclusion presets and earlier notes ────────────────────────────────
+
+def test_conclusion_presets_insert_into_the_conclusion_and_earlier_notes_show_under_it(env):
+    drv = open_page(env)
+    sid = env["sid"]
+    generated = js(drv, "return document.querySelector('[data-testid=compare-conclusion-text]').textContent")
+    assert generated
+    # Insert preset: a menu by Edit; a pick opens the editor with the preset appended
+    btn = "document.querySelector('[data-testid=compare-preset-menu]')"
+    assert wait(lambda: js(drv, f"return !{btn}.hidden && !{btn}.disabled"))
+    js(drv, f"{btn}.click()")
+    assert js(drv, "return !document.querySelector('[data-testid=compare-presets]').hidden")
+    presets = js(drv, "return Array.from(document.querySelectorAll('[data-testid=compare-preset]'))"
+                      ".map(b => b.textContent)")
+    assert "Re-run requested." in presets, presets
+    frame(drv, "preset menu")
+    shot(drv, "v6-preset-menu.png")
+    js(drv, "Array.from(document.querySelectorAll('[data-testid=compare-preset]'))"
+            ".find(b => b.textContent === 'Re-run requested.').click()")
+    assert js(drv, "return document.querySelector('[data-testid=compare-presets]').hidden")
+    area = "document.querySelector('[data-testid=compare-conclusion-input]')"
+    assert js(drv, f"return {area}.offsetParent") is not None
+    assert js(drv, f"return {area}.value") == generated + " Re-run requested."
+    assert js(drv, f"return document.activeElement === {area} && {area}.selectionStart === {area}.value.length")
+    # a second preset while editing goes in at the cursor
+    js(drv, f"{area}.setSelectionRange(0, 0)")
+    js(drv, f"{btn}.click()")
+    js(drv, "Array.from(document.querySelectorAll('[data-testid=compare-preset]'))"
+            ".find(b => b.textContent === 'Sample appears to be gasoline.').click()")
+    assert js(drv, f"return {area}.value") == \
+        "Sample appears to be gasoline. " + generated + " Re-run requested."
+    js(drv, "document.querySelector('[data-testid=compare-conclusion-save]').click()")
+    final = "Sample appears to be gasoline. " + generated + " Re-run requested."
+    assert js(drv, "return document.querySelector('[data-testid=compare-conclusion-text]').textContent") == final
+    # the edited conclusion is what the report gets
+    assert js(drv, "return window.__h.handle.queueItem().conclusion") == final
+
+    # an earlier note (a comment from before v6): listed read-only under the conclusion
+    assert js(drv, "return document.querySelector('[data-testid=compare-notes]').hidden")
+    code = js(drv, "return fetch('/api/samples/' + arguments[0] + '/comments', {method: 'POST',"
+                   " headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: 'Old <b>note</b>'})})"
+                   ".then(r => r.status)", sid)
+    assert code == 201
+    js(drv, "Comments.load(arguments[0])", sid)
+    assert wait(lambda: js(drv, "return !document.querySelector('[data-testid=compare-notes]').hidden"))
+    assert js(drv, "return Array.from(document.querySelectorAll('[data-testid=compare-note] .cmp-note-text'))"
+                   ".map(p => p.textContent)") == ["Old <b>note</b>"]
+    assert js(drv, "return document.querySelectorAll('[data-testid=compare-notes] b').length") == 0
+    frame(drv, "notes")
+    shot(drv, "v6-notes.png")
+    # Add to conclusion: into the editor, then the analyst saves (or cancels)
+    js(drv, "document.querySelector('[data-testid=compare-note-insert]').click()")
+    assert js(drv, f"return {area}.value") == final + " Old <b>note</b>"
+    js(drv, "Array.from(document.querySelectorAll('.cmp-concl-form button')).find(b => b.textContent === 'Cancel').click()")
+    assert js(drv, "return document.querySelector('[data-testid=compare-conclusion-text]').textContent") == final
+    # Remove: confirmed, soft-deleted, gone from the list
+    js(drv, "window.confirm = (m) => { window.__asked = m; return true; };"
+            "document.querySelector('[data-testid=compare-note-remove]').click()")
+    assert wait(lambda: js(drv, "return document.querySelector('[data-testid=compare-notes]').hidden"))
+    assert "no longer prints on reports" in js(drv, "return window.__asked")
+    left = js(drv, "return fetch('/api/samples/' + arguments[0] + '/comments').then(r => GCSession.readJson(r))"
+                   ".then(r => r.body.comments.map(c => c.text))", sid)
+    assert "Old <b>note</b>" not in left
+
+
+def test_conclusion_limit_counter_paste_and_refused_preset(env):
+    """v6: 1,500 characters. A live "N / 1,500" counter (warning colour from
+    1,350), maxlength stops typing, a paste is cut to fit with a one-line
+    notice, and a preset that would pass the limit is refused, saying why."""
+    drv = open_page(env)
+    js(drv, "document.querySelector('[data-testid=compare-conclusion-edit]').click()")
+    area = "document.querySelector('[data-testid=compare-conclusion-input]')"
+    count = "document.querySelector('[data-testid=compare-conclusion-count]')"
+    assert js(drv, f"return {area}.maxLength") == 1500
+    n = js(drv, f"return {area}.value.length")
+    assert js(drv, f"return {count}.textContent") == f"{n:,} / 1,500"
+    # typing updates the counter; near the limit it takes the warning colour
+    js(drv, f"{area}.value = 'x'.repeat(1400); {area}.dispatchEvent(new Event('input'))")
+    assert js(drv, f"return {count}.textContent") == "1,400 / 1,500"
+    assert js(drv, f"return {count}.classList.contains('is-near')")
+    warn = js(drv, "return getComputedStyle(document.documentElement).getPropertyValue('--warn-text').trim()")
+    assert warn and js(drv, f"return getComputedStyle({count}).color") != \
+        js(drv, "return getComputedStyle(document.querySelector('.cmp-concl-hint')).color")
+    frame(drv, "counter near the limit")
+    # a paste past the limit is cut to fit, with the notice
+    js(drv, f"{area}.focus(); {area}.setSelectionRange(1400, 1400);"
+            "const dt = new DataTransfer(); dt.setData('text/plain', 'y'.repeat(300));"
+            f"{area}.dispatchEvent(new ClipboardEvent('paste', {{clipboardData: dt, bubbles: true, cancelable: true}}))")
+    assert js(drv, f"return {area}.value.length") == 1500
+    assert js(drv, f"return {area}.value.endsWith('y'.repeat(100))")
+    assert js(drv, f"return {count}.textContent") == "1,500 / 1,500"
+    cut = "document.querySelector('[data-testid=compare-conclusion-cut]')"
+    assert js(drv, f"return !{cut}.hidden && {cut}.textContent") == \
+        "The pasted text was cut to fit the 1,500-character limit."
+    frame(drv, "paste cut")
+    # a preset that does not fit is refused, the text unchanged
+    btn = "document.querySelector('[data-testid=compare-preset-menu]')"
+    assert wait(lambda: js(drv, f"return !{btn}.hidden"))
+    js(drv, f"{btn}.click(); document.querySelector('[data-testid=compare-preset]').click()")
+    assert js(drv, f"return {area}.value.length") == 1500
+    msg = wait(lambda: js(drv, "return document.getElementById('toast').textContent"))
+    assert "longer than 1,500 characters" in msg, msg
+    # the next keystroke clears the notice
+    js(drv, f"{area}.value = 'Short.'; {area}.dispatchEvent(new Event('input'))")
+    assert js(drv, f"return {cut}.hidden") and js(drv, f"return {count}.textContent") == "6 / 1,500"
+    js(drv, "Array.from(document.querySelectorAll('.cmp-concl-form button')).find(b => b.textContent === 'Cancel').click()")
+
+
 # ── annotate, comments, theme, unmount ───────────────────────────────────────
 
 def test_annotate_comments_retheme_and_unmount(env):
     drv = open_page(env)
     sid = env["sid"]
-    # a preset chip adds a comment
-    assert wait(lambda: js(drv, "return document.querySelectorAll('#comment-presets .comment-chip').length") > 0)
-    before = js(drv, "return document.querySelectorAll('#comment-list .comment-item').length")
-    js(drv, "document.querySelector('#comment-presets .comment-chip').click()")
-    assert wait(lambda: js(drv, "return document.querySelectorAll('#comment-list .comment-item').length") == before + 1)
-    # the composer
-    js(drv, "document.getElementById('comment-free-text').value = 'Free <b>text</b>';"
-            "document.getElementById('btn-comment-add').click()")
-    assert wait(lambda: "Free <b>text</b>" in js(drv, "return document.getElementById('comment-list').textContent"))
-    assert js(drv, "return document.querySelectorAll('#comment-list b').length") == 0
+    # v6: no separate Comments section and no comment composer
+    assert js(drv, "return document.querySelector('[data-testid=compare-comments]')") is None
+    assert js(drv, "return document.getElementById('comment-free-text')") is None
 
     # Annotate: drag-select on the trend -> a small form -> an annotation comment
     js(drv, "document.querySelector('[data-testid=compare-annotate]').click()")
@@ -480,7 +581,11 @@ def test_annotate_comments_retheme_and_unmount(env):
     assert "Hump &lt;x&gt;" in labels, labels
     # Clear annotations: in the Annotate menu, with the count, confirmed
     js(drv, "document.querySelector('[data-testid=compare-annotate-menu]').click()")
-    assert js(drv, "return document.querySelector('[data-testid=compare-clear-annotations]').textContent") == "Clear 1 annotation…"
+    assert js(drv, "return document.querySelector('[data-testid=compare-clear-annotations]').textContent") == "Clear 1 marked region…"
+    # the menu lists the marked region (escaped: textContent)
+    region_items = js(drv, "return Array.from(document.querySelectorAll('[data-testid=compare-region-remove]'))"
+                           ".map(b => b.textContent)")
+    assert region_items == ["Hump <x> · 2.40–3.10 min×"], region_items
     js(drv, "window.confirm = () => true; document.querySelector('[data-testid=compare-clear-annotations]').click()")
     assert wait(lambda: js(drv, "return document.querySelector('[data-testid=compare-trend]').layout.shapes"
                                 "  .filter(s => s.layer === 'above').length") == 0)
