@@ -98,6 +98,7 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/api/restart` | POST | unchanged | local | |
 | `/api/server-status` | GET | unchanged | session | |
 | `/api/comparison-standards` | GET | unchanged | session | |
+| `/api/comparison-standards/<name>/trace` | GET | new | session | v6.0.0 (read-only): a standard's chromatogram shaped like `/api/samples/<id>/trace` (`sample_id` null, `standard: true`, empty ladder) for the Samples page's stacked chart; 400 bad name, 404 not in the standards folder |
 | `/api/comparison-standard/<name>` | DELETE | unchanged | session | T5 review: admin (JSON body with `password`); only inside the standards folder |
 | `/api/comparison-standard/rename` | POST | unchanged | session | T5 review: admin (`password`) |
 | `/api/qbench-credentials` | GET | unchanged | session | |

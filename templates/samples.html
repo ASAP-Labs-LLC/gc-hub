@@ -6,7 +6,7 @@
 {% block title %}Samples{% endblock %}
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/gc_pages.css') }}?v=2">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/samples.css') }}?v=5">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/samples.css') }}?v=6">
 {% endblock %}
 {% block topbar %}
   <h1 class="tb-title">Samples</h1>
@@ -91,7 +91,24 @@
             <section class="card chart-card" aria-labelledby="chrom-title">
               <div class="card-bar"><h2 id="chrom-title">Chromatogram</h2><span class="spacer"></span>
                 <span class="caption" id="chrom-note"></span></div>
-              <div class="chart" id="chrom" data-testid="chromatogram"></div>
+              {#- v6: Add trace (other samples, comparison standards), and Overlay vs Stacked once there is more than one -#}
+              <div class="chart-tools">
+                <div class="more-wrap">
+                  <button type="button" class="btn btn-sm" id="btn-add-trace" data-testid="add-trace"
+                          aria-haspopup="true" aria-expanded="false" aria-controls="add-trace-pop">
+                    <span class="ico ico-plus" aria-hidden="true"></span>Add trace</button>
+                  <div class="menu trace-pop" id="add-trace-pop" role="group" aria-label="Add a trace to the chart" data-testid="add-trace-pop" hidden></div>
+                </div>
+                <div class="seg chrom-mode" role="radiogroup" aria-label="Show the traces" id="chrom-mode" data-testid="chrom-mode" hidden>
+                  <button type="button" role="radio" data-mode="overlay" aria-checked="true" title="All traces on the same axis">Overlay</button>
+                  <button type="button" role="radio" data-mode="stacked" aria-checked="false" title="Each trace lifted above the one before">Stacked</button>
+                </div>
+              </div>
+              <div class="chart-wrap">
+                <div class="chart" id="chrom" data-testid="chromatogram"></div>
+                <div class="chart-msg" id="chrom-msg" data-testid="chart-message" role="status" hidden></div>
+              </div>
+              <div class="trace-legend" id="chrom-legend" data-testid="chrom-legend" hidden></div>
             </section>
             <section class="runs" id="other-runs" data-testid="other-runs" hidden>
               <h2 class="sub">Other runs of <span id="runs-lab"></span></h2>
@@ -142,6 +159,7 @@
       <button type="button" class="btn btn-sm" data-bulk="lims" data-testid="bulk-lims">Export to LIMS</button>
       <button type="button" class="btn btn-sm" data-bulk="queue" data-testid="bulk-queue">Add to report queue</button>
       <button type="button" class="btn btn-sm" data-bulk="reports" data-testid="bulk-reports">Download reports</button>
+      <button type="button" class="btn btn-sm" id="bulk-overlay" data-testid="bulk-overlay" title="Show the ticked samples on one chart">Overlay on chart</button>
     </div>
     <div class="bulk-run" id="bulk-run" data-testid="bulk-progress" hidden>
       <div class="progress"><span id="bulk-bar-fill"></span></div>
@@ -169,8 +187,9 @@
 <script src="{{ url_for('static', filename='js/deeplink.js') }}?v=5"></script>
 <script src="{{ url_for('static', filename='js/results_logic.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/samples_router.js') }}?v=2"></script>
-<script src="{{ url_for('static', filename='js/samples_logic.js') }}?v=4"></script>
+<script src="{{ url_for('static', filename='js/backfill_logic.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/samples_logic.js') }}?v=5"></script>
 {#- lane C: Plotly, ladder.js, comments.js, compare_logic.js, compare_view.js and compare.css -#}
 {% include "_compare_assets.html" %}
-<script src="{{ url_for('static', filename='js/samples_page.js') }}?v=6"></script>
+<script src="{{ url_for('static', filename='js/samples_page.js') }}?v=7"></script>
 {% endblock %}

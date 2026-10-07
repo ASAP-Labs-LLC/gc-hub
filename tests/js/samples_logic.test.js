@@ -238,4 +238,129 @@ module.exports = async (t) => {
     const dr = L.dataRows(tc, conv);
     t.eq(dr[6], { label: '50%', d2887: 250, raw: 251, correction: 4, reported: 255 });
     t.eq(L.dataRows(tc)[6].raw, null);
+
+    // ── v6: the row's checkbox shows the selection, and only it ─────────
+    // (v5: the press toggled the selection, then the browser's click toggled
+    // the box back, so the box showed the opposite of the selection)
+    const order6 = [1, 2, 3, 4, 5];
+    let p6 = L.pressBox(L.clear(), order6, 2, false);
+    t.eq(L.selectedIds(p6.sel), [2]);
+    t.eq(p6.sel.anchor, 2);
+    t.eq(p6.drag, { on: true });
+    t.eq(L.isChecked(p6.sel, 2), true);
+    t.eq(L.isChecked(p6.sel, 3), false);
+    p6 = L.pressBox(p6.sel, order6, 4, true);             // shift: from the anchor
+    t.eq(L.selectedIds(p6.sel).sort(), [2, 3, 4]);
+    t.eq(p6.drag, null);
+    p6 = L.pressBox(p6.sel, order6, 3, false);            // press a checked one: off, and a drag paints off
+    t.eq(L.selectedIds(p6.sel).sort(), [2, 4]);
+    t.eq(p6.drag, { on: false });
+    // "all matching" → the rows shown, less the one pressed
+    const all6 = L.selectAllMatching(L.clear(), 900);
+    t.eq(L.isChecked(all6, 77), true);
+    p6 = L.pressBox(all6, order6, 5, false);
+    t.eq(p6.sel.all, false);
+    t.eq(L.selectedIds(p6.sel).sort(), [1, 2, 3, 4]);
+    t.eq(L.isChecked(null, 1), false);
+    // the press never mutates the selection it was given
+    const before6 = L.toggle(L.clear(), 1);
+    L.pressBox(before6, order6, 2, false);
+    t.eq(L.selectedIds(before6), [1]);
+
+    // ── v6: why the chart is not drawn, in one line ─────────────────────
+    t.eq(L.chartReason({ status: 404, body: { error: 'Sample 9 has no stored CDF (result-only import)' } }),
+         'No chromatogram: this result was imported from v1 without its CDF.');
+    t.eq(L.chartReason({ status: 404, body: { error: "Sample 9's CDF is missing: cdf/gc1/x.CDF" } }),
+         'No chromatogram: the stored CDF file is missing on the hub.');
+    t.eq(L.chartReason({ status: 0, body: { error: 'Failed to fetch' } }),
+         'The chromatogram did not load: the hub did not answer (Failed to fetch).');
+    t.eq(L.chartReason({ status: 500, body: { error: 'Internal error (ref abc).' } }),
+         'The chromatogram did not load: Internal error (ref abc).');
+    t.eq(L.chartReason({ status: 502, body: {} }), 'The chromatogram did not load: HTTP 502.');
+    t.eq(L.chartReason({ status: 404, body: { error: 'Standard not found: R99' } }), 'Standard not found: R99');
+
+    // ── v6: the backfill reason on the row ──────────────────────────────
+    const why = (r, info) => 'injected ' + r.injection_dt.slice(5, 10) + ' · before ' + info.name + ' went live';
+    t.eq(L.backfillReason(row(7, { backfill: true }), null, why), 'Backfill · not released');
+    t.eq(L.backfillReason(row(7, { backfill: true, injection_dt: '2026-09-20 13:30:00' }), { name: 'GC-1' }, why),
+         'Backfill · not released · injected 09-20 · before GC-1 went live');
+    t.eq(L.backfillReason(row(7), { name: 'GC-1' }, null), 'Backfill · not released');
+    // with the real whyText
+    const BF = require('../../static/js/backfill_logic.js');
+    t.eq(L.backfillReason({ injection_dt: '2026-09-20 13:30:00' }, { name: 'GC-1', live_since: '2026-09-22 00:00:00' }, BF.whyText),
+         'Backfill · not released · injected Sep 20 13:30 · before GC-1 went live (Sep 22 00:00)');
+
+    // ── v6: stacking chromatograms ──────────────────────────────────────
+    const s1 = { kind: 'sample', id: 11, label: '40304', sub: 'GC-1 · Sep 25 14:23' };
+    const s2 = { kind: 'sample', id: 12, label: '40304 (2)' };
+    const d2 = { kind: 'standard', name: 'Diesel #2' };
+    const r99 = { kind: 'standard', name: 'R99' };
+    t.eq(L.overlayKey(s1), 's:11');
+    t.eq(L.overlayKey(d2), 'std:Diesel #2');
+    let ov = L.overlayState(null);
+    t.eq(ov, { mode: 'overlay', items: [] });
+    let add = L.overlayAdd(ov, [s1, d2, s1, { kind: 'sample', id: 5 }], 5);   // 5 is the open sample
+    t.eq(add.added, 2);
+    t.eq(add.ov.items.map(L.overlayKey), ['s:11', 'std:Diesel #2']);
+    t.eq(add.ov.items[1].label, 'Diesel #2');                    // a standard is named by its name
+    t.eq(add.skipped.map(s => s.why), ['already', 'open']);
+    t.eq(L.overlayAddText(add), 'Added 2 traces to the chart');
+    t.eq(L.overlayAddText(L.overlayAdd(add.ov, [s1], 5)), 'Already on the chart');
+    t.eq(L.overlayAddText(L.overlayAdd(add.ov, [{ kind: 'sample', id: 5 }], 5)), 'That is the sample open now');
+    ov = add.ov;
+    // the cap: the open sample plus OVERLAY_MAX others
+    const many = [];
+    for (let i = 0; i < 10; i++) many.push({ kind: 'sample', id: 100 + i, label: 'S' + i });
+    const full = L.overlayAdd(ov, many, 5);
+    t.eq(full.ov.items.length, L.OVERLAY_MAX);
+    t.eq(full.added, L.OVERLAY_MAX - 2);
+    t.eq(L.overlayAddText(full), 'Added 5 traces to the chart · 5 not added: the chart holds 8 traces');
+    // remove one, clear all (the mode stays), switch mode
+    t.eq(L.overlayRemove(ov, 's:11').items.map(L.overlayKey), ['std:Diesel #2']);
+    t.eq(L.overlayMode(ov, 'stacked').mode, 'stacked');
+    t.eq(L.overlayMode(ov, 'sideways').mode, 'overlay');
+    t.eq(L.overlayClear(L.overlayMode(ov, 'stacked')), { mode: 'stacked', items: [] });
+    // the open sample is never drawn twice when it is also in the set
+    t.eq(L.overlayShown({ items: [s1, s2, d2] }, 12).map(L.overlayKey), ['s:11', 'std:Diesel #2']);
+    // sessionStorage round trip; junk is an empty overlay, never a throw
+    t.eq(L.overlayParse(L.overlayStringify(L.overlayMode(ov, 'stacked'))), L.overlayMode(ov, 'stacked'));
+    t.eq(L.overlayParse('not json'), { mode: 'overlay', items: [] });
+    t.eq(L.overlayParse('{"mode":"stacked","items":[{"kind":"sample","id":"x"},{"kind":"standard","name":" "},{"kind":"sample","id":3}]}').items,
+         [{ kind: 'sample', id: 3, label: '#3', sub: '' }]);
+
+    // styles: the open sample solid ink; samples step through ink/axis × dash; standards the reference grey
+    const col = { ink: 'INK', axis: 'AXIS', ref: 'REF' };
+    const st6 = L.traceStyles(['sample', 'sample', 'standard', 'sample', 'standard'], col);
+    t.eq(st6, [{ color: 'INK', dash: 'solid' }, { color: 'INK', dash: 'dash' }, { color: 'REF', dash: 'solid' },
+               { color: 'AXIS', dash: 'solid' }, { color: 'REF', dash: 'dash' }]);
+    // every pair told apart (no two the same colour and dash) up to the cap
+    const kinds8 = ['sample', 'sample', 'sample', 'sample', 'standard', 'standard', 'standard', 'standard'];
+    const pairs = L.traceStyles(kinds8, col).map(s => s.color + s.dash);
+    t.eq(new Set(pairs).size, 8);
+    const allSamples = L.traceStyles(new Array(8).fill('sample'), col).map(s => s.color + s.dash);
+    t.eq(new Set(allSamples).size, 8);
+
+    // overlay keeps the numbers; stacked lifts each baseline by 1.08 × the tallest trace
+    const tr = [{ key: 's:1', label: '<b>40304</b>', kind: 'sample', x: [0, 1, 2], y: [10, 110, 10] },
+                { key: 'std:R99', label: 'R99', kind: 'standard', x: [0, 1, 2], y: [5, 55, 5] },
+                { key: 's:2', label: '40305', kind: 'sample', x: [0, 1], y: [null, 20] }];
+    const o1 = L.overlayTraces(tr, 'overlay', col);
+    t.eq(o1.step, 0);
+    t.eq(o1.data[1].y, [5, 55, 5]);
+    t.eq(o1.data[0].name, '&lt;b&gt;40304&lt;/b&gt;');          // Plotly gets text, never markup
+    t.eq(o1.data[0].type, 'scatter');                          // SVG, never WebGL (scattergl)
+    t.eq(o1.data[1].line, { color: 'REF', width: 1.25, dash: 'solid' });
+    t.eq(o1.legend.map(l => [l.key, l.label, l.primary, l.dash]),
+         [['s:1', '<b>40304</b>', true, 'solid'], ['std:R99', 'R99', false, 'solid'], ['s:2', '40305', false, 'dash']]);
+    const o2 = L.overlayTraces(tr, 'stacked', col);
+    t.eq(o2.step, 108);
+    t.eq(o2.data[0].y, [0, 100, 0]);
+    t.eq(o2.data[1].y, [108, 158, 108]);
+    t.eq(o2.data[2].y, [null, 216]);
+    // one trace stacked is just the trace
+    t.eq(L.overlayTraces(tr.slice(0, 1), 'stacked', col).data[0].y, [10, 110, 10]);
+    // a trace without numbers is left out, not drawn as an empty line
+    t.eq(L.overlayTraces([tr[0], { key: 'x', label: 'x' }], 'overlay', col).data.length, 1);
+    t.eq(L.dashArray('dash'), '6 4');
+    t.eq(L.dashArray('solid'), '');
 };
