@@ -242,7 +242,7 @@ def test_admin_page_diagnostics_panel(diag_hub):
         drv.get(f"http://127.0.0.1:{port}/admin/hub")
         text = drv.find_element("id", "diag-panel").text
         assert "Diagnostics" in text and "Claude" in text
-        assert "soft-deleted comments" in text and "IP addresses" in text     # M6 (in view)
+        assert "soft-deleted notes, marked regions" in text and "IP addresses" in text   # M6 (in view)
         # v4.0 lane E: the details sit behind "What's inside" (a disclosure)
         full = drv.execute_script("return document.getElementById('diag-panel').textContent;")
         assert "qbenchlogin.txt on the share" in " ".join(full.split())
