@@ -438,9 +438,12 @@ def test_upload_to_qbench_over_the_stream(env):
     assert wait(lambda: js(drv, "return document.getElementById('rq-overall').textContent") == "1 uploaded, 0 failed.")
     assert js(drv, "return window.__es.closed") is True
     assert js(drv, "return document.querySelector('[data-testid=rq-stop]').hidden") is True
-    # both were sent: marked, and not offered again
-    assert js(drv, "return GCReportQueue.items().every(i => !!i.sent_at)")
-    assert js(drv, "return document.querySelector('[data-testid=rq-upload]').disabled") is True
+    # the uploaded one is sent and not offered again; v6.0.0: the skipped one
+    # was not uploaded, so it is back in the queue to send (never marked sent)
+    sent = js(drv, "return GCReportQueue.items().map(i => [i.lab_id, !!i.sent_at])")
+    assert sorted(sent) == [["40304", False], ["40329", True]], sent
+    assert js(drv, "return document.querySelector('[data-testid=rq-upload]').disabled") is False
+    assert js(drv, "return document.querySelector('[data-testid=rq-upload]').textContent") == "Upload 1 to QBench"
     assert js(drv, "return document.querySelector('[data-testid=rq-upload]').hidden") is False
     js(drv, "GCReportQueue.clear(); document.querySelector('[data-testid=report-queue-sheet]').close()")
 
