@@ -1196,7 +1196,9 @@ def _report_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str
                  footer_lines: list[str]) -> str:
     """The analysis report page (1:1 with the old desktop template). Every
     interpolated string is escaped: bullets, conclusion, lab ID, standard and
-    document names, range labels, comments."""
+    document names, range labels, comments. Since v6 there is no Comments
+    section: annotation comments print under "Marked regions" and any other
+    comment (an earlier note) under the conclusion text, headed "Notes"."""
     e = _esc
     blocks = []
     bullet_items: list[str] = []
@@ -1224,15 +1226,20 @@ def _report_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str
         '<p style="color:#888888; font-style:italic; margin:0; font-size:9pt;">'
         f"{e(analysis_core.NO_DEVIATION)}</p>")
 
-    comments_section = ""
-    if comments:
+    # v6: no Comments section. Marked regions (annotation comments) print in
+    # their own section; earlier notes (free/preset comments from before v6)
+    # print inside the Conclusion, under its text.
+    regions = [c for c in comments if c.get("t0") is not None and c.get("t1") is not None]
+    notes = [c for c in comments if c.get("t0") is None or c.get("t1") is None]
+    regions_section = ""
+    if regions:
         lis = "".join(f'<li style="margin-bottom:4px; color:#2c2c2c;">{e(_comment_line(c, ladder))}</li>'
-                      for c in comments)
-        comments_section = f"""
-<!-- COMMENTS -->
+                      for c in regions)
+        regions_section = f"""
+<!-- MARKED REGIONS -->
 <table width="100%" cellspacing="0" cellpadding="0" style="margin-top:6px;">
 <tr><td style="background-color:#555555; padding:3px 10px; color:#ffffff; font-size:9pt; font-weight:bold; letter-spacing:0.5px;">
-  Comments
+  Marked regions
 </td></tr>
 </table>
 <table width="100%" cellspacing="0" cellpadding="0" style="margin-top:0;">
@@ -1244,6 +1251,13 @@ def _report_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str
 </tr>
 </table>
 """
+    notes_html = ""
+    if notes:
+        lis = "".join(f'<li style="margin-bottom:3px;">{e(_comment_line(c, ladder))}</li>' for c in notes)
+        notes_html = (
+            '<div style="margin-top:6px; padding-top:4px; border-top:1px solid #e0e0e0; '
+            'font-style:normal;"><b style="font-size:8pt; color:#555555;">Notes</b>'
+            f'<ul style="margin:2px 0 0 0; padding-left:20px; font-size:8.5pt;">{lis}</ul></div>')
 
     logo_cell_html = (f'<img src="data:image/png;base64,{logo_b64}" height="56">' if logo_b64
                       else '<span style="color:#1c1c1c;">&#8203;</span>')
@@ -1310,7 +1324,7 @@ def _report_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str
   </td>
 </tr>
 </table>
-{comments_section}
+{regions_section}
 <!-- CONCLUSION -->
 <table width="100%" cellspacing="0" cellpadding="0" style="margin-top:6px;">
 <tr><td style="background-color:#555555; padding:3px 10px; color:#ffffff; font-size:9pt; font-weight:bold; letter-spacing:0.5px;">
@@ -1321,7 +1335,7 @@ def _report_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str
 <tr>
   <td width="4" style="background-color:#888888;"></td>
   <td style="background-color:#f3f3f3; padding:6px 12px 8px 12px; font-size:8.5pt; font-style:italic; color:#333333; border:1px solid #e0e0e0; border-left:none;">
-    {conc_html}
+    {conc_html}{notes_html}
   </td>
 </tr>
 </table>
@@ -2704,14 +2718,24 @@ _REPORT_PARAM_KEYS = ("quantile", "window", "sigma", "thresh_marginal", "thresh_
                       "thresh_significant", "x_max_min")
 
 
+class ReportRequestError(ValueError):
+    """A report request the hub refuses (v6: a conclusion over
+    ``comments.CONCLUSION_MAX``); the routes answer 400 with its text."""
+
+
 def _report_request(src: dict) -> dict:
     """The report fields of a request body, a ZIP item or a QBench queue item:
     the standard, the operator's trend parameters, thresholds and graph
     limit (top-level, or under ``params`` as a queue item captured them),
     the ranges (``None`` when absent: saved defaults; ``[]``: no ranges),
     the document name, overlay standards and an operator-edited conclusion.
-    Anything else, a client ``bullets`` string included, is dropped."""
+    Anything else, a client ``bullets`` string included, is dropped. A
+    conclusion longer than ``comments.CONCLUSION_MAX`` raises
+    ``ReportRequestError`` (every report path comes through here)."""
     src = src or {}
+    problem = comments_mod.conclusion_problem(src.get("conclusion"))
+    if problem:
+        raise ReportRequestError(problem)
     captured = src.get("params") if isinstance(src.get("params"), dict) else {}
     out = {
         "standard_name": str(src.get("standard_name") or "").strip(),
@@ -2849,8 +2873,8 @@ def api_export_analysis_report():
             return _error("Plotly/kaleido not installed", 500)
 
         conf = settings_mod.load_settings()
-        params = _report_request(body)
         try:
+            params = _report_request(body)
             report_bytes, content = _build_report_pdf(s, params, conf, db)
         except ValueError as exc:
             return _error(str(exc), 404 if "not found" in str(exc) else 400)
@@ -2887,6 +2911,11 @@ def api_export_analysis_reports_zip():
         return _error("items list is required")
     if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
         return _error("items must be a list of objects")
+    for n, item in enumerate(items, 1):
+        try:
+            _report_request(item)
+        except ReportRequestError as exc:
+            return _error(f"Item {n}: {exc}")
     _data, db = _hub()
     if go is None or pio is None:
         return _error("Plotly/kaleido not installed", 500)
@@ -3044,6 +3073,10 @@ def api_qbench_upload():
     for item in body.get("queue") or []:
         if not isinstance(item, dict):
             return _error("queue items must be objects {sample_id, standard_name, ...}")
+        try:
+            _report_request(item)
+        except ReportRequestError as exc:
+            return _error(f"{item.get('lab_id') or item.get('sample_id')}: {exc}")
         s = _sample_or_404(item.get("sample_id"), db)
         sid = s["id"]
         if not s["cdf_path"]:

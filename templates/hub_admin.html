@@ -38,7 +38,7 @@
     <a href="#purge-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>Purge</a>
     <a href="#exports"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6zM14 3v4h4M9 13h6M9 17h6"/></svg>Results files</a>
     <a href="#diagnostics"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m-5-5 5 5 5-5M5 20h14"/></svg>Diagnostics</a>
-    <a href="#presets-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/></svg>Comment presets</a>
+    <a href="#presets-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/></svg>Conclusion presets</a>
     <a href="#sessions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6.5 6.5 0 0 1 3.5 6"/></svg>Sessions</a>
     <a href="#server"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v8M6.5 6.5a8 8 0 1 0 11 0"/></svg>Server</a>
     <a href="#hub-address"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>Hub address</a>
@@ -122,7 +122,7 @@
         </div>
         <details class="adm-more">
           <summary>What is kept, and how to restore</summary>
-          <p>Removed with the samples: results, export rows, comments, report records, conflicts and
+          <p>Removed with the samples: results, export rows, notes and marked regions, report records, conflicts and
             queued jobs. Kept: the instrument and its settings (calibration, corrections, methods, LEM
             machine, live since, results file, agent and token), the other instruments' data and the
             global settings. That instrument's processing and uploads pause while it runs; its agent
@@ -177,7 +177,7 @@
         <p class="intro">One zip with what is needed to debug this hub, to hand to Claude. Secrets are left out.</p></div>
       <div class="body">
         <p class="adm-note">The database copy holds everything in the store, including soft-deleted
-          comments and the operators' IP addresses: treat the zip as lab data.</p>
+          notes, marked regions and the operators' IP addresses: treat the zip as lab data.</p>
         <table class="tbl adm-diag">
           <thead><tr><th><span class="visually-hidden">Include</span></th><th>Include</th><th class="num">Size</th></tr></thead>
           <tbody id="diag-options">
@@ -216,8 +216,8 @@
 
   <section class="adm-sec" id="presets-panel">
     <div class="adm-grid">
-      <div class="about"><h2>Comment presets</h2>
-        <p class="intro">One-click comments on the Analysis tab. They print on reports that may reach customers.</p></div>
+      <div class="about"><h2>Conclusion presets</h2>
+        <p class="intro">Phrases an analyst inserts into a sample's conclusion on Compare. They print on reports that may reach customers.</p></div>
       <div class="body">
         <ul id="presets" class="adm-presets"></ul>
         <div class="adm-actions">
@@ -226,8 +226,8 @@
           <button id="btn-preset-add" class="btn btn-primary" type="button">Add preset</button>
           <span id="presets-msg" class="msg" role="status"></span>
         </div>
-        <p class="caption">A preset's text is copied into the comment, so editing it later leaves existing
-          comments as they are. At most 50 active.</p>
+        <p class="caption">A preset's text is copied into the conclusion, where the analyst can edit it; editing
+          a preset later leaves conclusions already written as they are. At most 50 active.</p>
       </div>
     </div>
   </section>
@@ -296,10 +296,10 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=9"></script>
+<script src="{{ url_for('static', filename='js/hub_admin.js') }}?v=10"></script>
 <script src="{{ url_for('static', filename='js/diagnostics.js') }}?v=5"></script>
 <script src="{{ url_for('static', filename='js/purge.js') }}?v=6"></script>
-<script src="{{ url_for('static', filename='js/admin_page.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/admin_page.js') }}?v=2"></script>
 <script src="{{ url_for('static', filename='js/restart.js') }}?v=4"></script>
 <script src="{{ url_for('static', filename='js/admin_restart.js') }}?v=1"></script>
 {% endblock %}

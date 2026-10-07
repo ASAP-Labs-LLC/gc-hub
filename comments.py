@@ -34,6 +34,20 @@ Every refusal is a ``CommentError`` whose ``status`` is the HTTP status the
 route answers with (400 invalid, 404 unknown sample/comment/preset, 409 a
 limit or an already-deleted comment).
 
+Since v6 (comments merged into the conclusion)
+==============================================
+
+The analyst works with one thing, the Conclusion. The presets are
+**conclusion presets** (the same ``comment_presets`` table; the UI inserts a
+preset's text into the conclusion, which is sent with the report request and
+recorded in ``report_log.conclusion``). No page adds a free or preset comment
+any more, but the routes still accept them (v5 pages, rollback) and the
+stored ones are kept: annotations are the sample's **marked regions** (drawn
+on the chart, listed in the report's "Marked regions" section) and every
+other comment is an **earlier note**, shown read-only under the conclusion on
+Compare (insert into the conclusion, or remove = soft delete) and printed in
+the report under the conclusion text, headed "Notes". No schema change.
+
 The report seam (frozen with lane P3)
 =====================================
 
@@ -61,6 +75,10 @@ from typing import Any, Optional, Sequence
 import store
 
 MAX_COMMENT_TEXT = 500
+#: v6: the longest conclusion a report takes (characters). Mirrored by
+#: ``static/js/compare_logic.js`` ``CONCLUSION_MAX``; the report request
+#: (``app._report_request``) refuses a longer one with a 400.
+CONCLUSION_MAX = 1500
 MAX_ACTIVE_COMMENTS = 100
 MAX_PRESET_TEXT = 200
 MAX_PRESETS = 50
@@ -258,6 +276,16 @@ def delete_comment(sample_id: int, comment_id: int, *, author_name: Any,
 
 
 # ── the report seam ─────────────────────────────────────────────────────────
+
+def conclusion_problem(text: Any) -> Optional[str]:
+    """Why a report request's conclusion is refused (longer than
+    ``CONCLUSION_MAX`` characters, counted after trimming), or ``None``."""
+    n = len(str(text or "").strip())
+    if n > CONCLUSION_MAX:
+        return (f"The conclusion is {n:,} characters long; "
+                f"at most {CONCLUSION_MAX:,} characters are allowed.")
+    return None
+
 
 def for_report(sample_id: int, db=None) -> list[dict]:
     """The comments a report prints: non-deleted, oldest first, as

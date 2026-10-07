@@ -1,13 +1,16 @@
-/* Analysis-tab comments (phase 4): preset chips, free text, the sample's
-   comment list, and the annotation spans drawn on the trend plot.
+/* A sample's stored comments (phase 4; v6 wording): its marked regions
+   (annotation comments: t0/t1 spans drawn on the trend plot) and its earlier
+   notes (free or preset comments added before v6, which print under the
+   report's conclusion). Since v6 nothing here adds a note: the analyst's
+   words go in the Conclusion, and conclusion presets (GET
+   /api/conclusion-presets, fetchPresets) are inserted into it.
 
-   Pure helpers (commentingAs ... clearConfirmText) are shared with the Node
+   Pure helpers (commentingAs ... regionLabel) are shared with the Node
    tests (module.exports); the rest runs in the browser as window.Comments.
    Every string from the server is rendered with textContent; Plotly label
    text goes through plotlySafe (Plotly treats < > as markup). The author is
-   the signed-in account (GET /api/session via GCSession.whoami, shown as
-   "Commenting as <name>"); the server derives the initials from it and
-   ignores any the page might send. */
+   the signed-in account (GET /api/session via GCSession.whoami); the server
+   derives the initials from it and ignores any the page might send. */
 (function (root) {
     'use strict';
 
@@ -24,6 +27,12 @@
     function plotlySafe(s) {
         return String(s == null ? '' : s)
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    /** The earlier notes: every comment that is not a marked region. */
+    function noteComments(list) {
+        return (list || []).filter(c => c && !(c.source === 'annotation'
+            && c.t0 != null && c.t1 != null));
     }
 
     function annotationComments(list) {
@@ -77,14 +86,32 @@
 
     function clearConfirmText(n, label) {
         const where = label ? `on sample ${label}` : 'on this sample';
-        return `Delete the ${n} annotation comment${n === 1 ? '' : 's'} ${where}? ` +
+        return `Remove the ${n} marked region${n === 1 ? '' : 's'} ${where}? ` +
             'They stay in the record as deleted and leave the report.';
+    }
+
+    function _span(c) { return `${Number(c.t0).toFixed(2)}–${Number(c.t1).toFixed(2)} min`; }
+
+    function removeNoteConfirmText(c) {
+        return `Remove this note?\n\n${(c && c.text) || ''}\n\n` +
+            'It stays in the record as deleted and no longer prints on reports.';
+    }
+
+    function removeRegionConfirmText(c) {
+        return `Remove the marked region "${(c && c.text) || ''}" (${_span(c || {})})?`;
+    }
+
+    /** One marked region as the Annotate menu lists it. */
+    function regionLabel(c) {
+        const text = String((c && c.text) || '');
+        return `${text.length > LABEL_MAX ? text.slice(0, LABEL_MAX) + '…' : text} · ${_span(c || {})}`;
     }
 
     const pure = {
         ANNOT_FILL, ANNOT_LABEL_BG, commentingAs, plotlySafe,
         annotationComments, annotationOverlay, isAnnotationShape, isAnnotationLabel,
-        commentMeta, clearConfirmText,
+        commentMeta, clearConfirmText, noteComments, removeNoteConfirmText,
+        removeRegionConfirmText, regionLabel,
     };
     if (typeof module !== 'undefined' && module.exports) {
         module.exports = pure;
@@ -99,10 +126,12 @@
     let comments = [];
     let inflight = null;          // the pending load of ``sampleId``
     let loadSeq = 0;
-    let onChange = null;          // app.js: redraw the annotation shapes
+    let onChange = null;          // redraw the marked regions (and list the notes)
+    let onPreset = null;          // the classic page: put a preset into its conclusion
 
     function notify(msg, kind) {
         if (typeof root.showNotification === 'function') root.showNotification(msg, kind);
+        else if (root.GCShell && root.GCShell.toast) root.GCShell.toast(msg, kind === 'error' ? 'err' : kind);
     }
 
     /** Show "Commenting as <name>" (the signed-in account). */
@@ -138,9 +167,9 @@
         if (list) {
             list.textContent = '';
             if (sampleId == null) {
-                list.appendChild(el('li', 'Select a sample to see its comments.', 'muted'));
+                list.appendChild(el('li', 'Select a sample to see its notes and marked regions.', 'muted'));
             } else if (!comments.length) {
-                list.appendChild(el('li', 'No comments yet.', 'muted'));
+                list.appendChild(el('li', 'No notes or marked regions.', 'muted'));
             }
             for (const c of comments) {
                 const li = el('li', null, 'comment-item');
@@ -148,8 +177,10 @@
                 li.appendChild(el('span', c.text, 'comment-text'));
                 li.appendChild(el('span', commentMeta(c), 'comment-meta'));
                 const del = el('button', '×', 'comment-delete');
-                del.title = 'Delete this comment';
-                del.addEventListener('click', () => remove(c));
+                const region = annotationComments([c]).length > 0;
+                del.title = region ? 'Remove this marked region' : 'Remove this note';
+                del.addEventListener('click', () => remove(c, region
+                    ? removeRegionConfirmText(c) : removeNoteConfirmText(c)));
                 li.appendChild(del);
                 list.appendChild(li);
             }
@@ -241,12 +272,16 @@
             `/comments/${encodeURIComponent(c.id)}/delete`, {});
     }
 
-    async function remove(c) {
-        if (!root.confirm(`Delete this comment?\n\n${c.text}`)) return;
+    /** Soft-delete one note or marked region after `confirmText` (default:
+        the note wording) is confirmed. */
+    async function remove(c, confirmText) {
+        const ask = confirmText || (annotationComments([c]).length
+            ? removeRegionConfirmText(c) : removeNoteConfirmText(c));
+        if (!root.confirm(ask)) return;
         try {
             await _delete(c);
         } catch (e) {
-            notify('Comment not deleted: ' + e.message, 'error');
+            notify('Not removed: ' + e.message, 'error');
         }
         await load(sampleId);
     }
@@ -261,60 +296,52 @@
             return 0;
         }
         const targets = annotationComments(comments).filter(c => c.sample_id === target);
-        if (!targets.length) { notify('No annotations on this sample', 'info'); return 0; }
+        if (!targets.length) { notify('No marked regions on this sample', 'info'); return 0; }
         if (!root.confirm(clearConfirmText(targets.length, label))) return 0;
         let done = 0;
         for (const c of targets) {
             try { await _delete(c); done++; } catch (e) {
-                notify('Annotation not deleted: ' + e.message, 'error');
+                notify('Marked region not removed: ' + e.message, 'error');
             }
         }
         await load(sampleId);
         return done;
     }
 
+    /** The active conclusion presets ([{id, text, sort}], in order). */
+    async function fetchPresets() {
+        return (await request('GET', '/api/conclusion-presets')).presets || [];
+    }
+
+    /** The classic page's preset chips: each puts its text into the
+        conclusion (init's onPreset). No chips without onPreset. */
     async function loadPresets() {
         const box = $('comment-presets');
-        if (!box) return;
+        if (!box || !onPreset) return;
         let presets = [];
-        try { presets = (await request('GET', '/api/comment-presets')).presets || []; } catch (e) {
-            notify('Could not load comment presets: ' + e.message, 'error');
+        try { presets = await fetchPresets(); } catch (e) {
+            notify('Could not load the conclusion presets: ' + e.message, 'error');
         }
         box.textContent = '';
         for (const p of presets) {
             const b = el('button', p.text, 'comment-chip');
             b.type = 'button';
-            b.title = 'Add this comment';
-            b.addEventListener('click', () => add({ preset_id: p.id }));
+            b.title = 'Insert into the conclusion';
+            b.addEventListener('click', () => onPreset(p.text));
             box.appendChild(b);
         }
     }
 
-    async function addFreeText() {
-        const input = $('comment-free-text');
-        const text = input ? input.value.trim() : '';
-        if (!text) return;
-        const c = await add({ text });
-        if (c && input) input.value = '';
-    }
-
     function init(opts) {
         onChange = (opts && opts.onChange) || null;
+        onPreset = (opts && opts.onPreset) || null;
         showAuthor();
-        const btn = $('btn-comment-add');
-        if (btn) btn.addEventListener('click', addFreeText);
-        const input = $('comment-free-text');
-        if (input) {
-            input.addEventListener('keydown', e => {
-                if (e.key === 'Enter') { e.preventDefault(); addFreeText(); }
-            });
-        }
         render();
         return loadPresets();
     }
 
     root.Comments = Object.assign({}, pure, {
-        init, load, setSample, add, remove, clearAnnotations, loadPresets,
+        init, load, setSample, add, remove, clearAnnotations, loadPresets, fetchPresets,
         current,
         sampleId: () => sampleId,
     });

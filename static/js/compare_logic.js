@@ -363,6 +363,66 @@
         return span;
     }
 
+
+    /** v6: the longest conclusion (characters): the Conclusion box's
+        maxlength; mirrors the server's comments.CONCLUSION_MAX, which refuses
+        a longer one with a 400 (tests/test_comments_api.py pins the two). */
+    const CONCLUSION_MAX = 1500;
+    const CONCLUSION_NEAR = 0.9;          // the counter warns from 90 %
+
+    function fmtCount(n) { return Number(n).toLocaleString('en-US'); }
+
+    /** The live counter under the Conclusion editor: "N / 1,500", `near`
+        from 90 % of the limit (warning colour), `full` at the limit. */
+    function conclusionCount(text) {
+        const n = String(text == null ? '' : text).length;
+        return { text: `${fmtCount(n)} / ${fmtCount(CONCLUSION_MAX)}`,
+                 near: n >= Math.ceil(CONCLUSION_MAX * CONCLUSION_NEAR), full: n >= CONCLUSION_MAX };
+    }
+
+    /** A paste into the conclusion over `sel` ({start, end}): the pasted
+        text cut so the result fits CONCLUSION_MAX (what is around the caret
+        is kept). Returns {text, caret, cut}. */
+    function pasteInto(text, pasted, sel) {
+        const base = String(text == null ? '' : text);
+        const add = String(pasted == null ? '' : pasted);
+        const clamp = (n) => Math.max(0, Math.min(base.length, Number.isFinite(n) ? n : base.length));
+        const start = clamp(sel && sel.start);
+        const end = Math.max(start, clamp(sel && Number.isFinite(sel.end) ? sel.end : start));
+        const before = base.slice(0, start);
+        const after = base.slice(end);
+        const room = Math.max(0, CONCLUSION_MAX - before.length - after.length);
+        let piece = add.slice(0, room);
+        if (piece.length < add.length && /[\uD800-\uDBFF]$/.test(piece)) piece = piece.slice(0, -1);
+        return { text: before + piece + after, caret: before.length + piece.length,
+                 cut: piece.length < add.length };
+    }
+
+    /** Insert a conclusion preset into the conclusion text: at the caret or
+        over the selection (`sel` = {start, end}), else appended to the end;
+        padded with one space on a side that touches text. Returns {text,
+        caret} (the caret just after the preset), or null when the result
+        would be longer than CONCLUSION_MAX. An empty preset changes nothing. */
+    function insertPreset(text, preset, sel) {
+        const base = String(text == null ? '' : text);
+        const piece = String(preset == null ? '' : preset).trim();
+        const clamp = (n) => Math.max(0, Math.min(base.length, Number.isFinite(n) ? n : base.length));
+        let start = base.length;
+        let end = base.length;
+        if (sel && Number.isFinite(sel.start)) {
+            start = clamp(sel.start);
+            end = Math.max(start, clamp(Number.isFinite(sel.end) ? sel.end : sel.start));
+        }
+        if (!piece) return { text: base, caret: end };
+        const before = base.slice(0, start);
+        const after = base.slice(end);
+        const pre = (!before || /\s$/.test(before)) ? '' : ' ';
+        const post = (!after || /^\s/.test(after)) ? '' : ' ';
+        const out = before + pre + piece + post + after;
+        if (out.length > CONCLUSION_MAX) return null;
+        return { text: out, caret: (before + pre + piece).length };
+    }
+
     const api = {
         TREND_SLIDER_MAP, SLIDERS, PARAM_DEFAULTS, LABEL_MAX,
         sliderToReal, realToSlider, sliderReal, sliderLabel,
@@ -370,6 +430,7 @@
         pickStandard, parsePicks, rememberPick, recallPick,
         findingsView, draftFrom, validateAdjust, newRange, paramSummary,
         withAlpha, carbonTicks, diffSpan, cleanLabel,
+        CONCLUSION_MAX, insertPreset, conclusionCount, pasteInto,
     };
     root.GCCompareLogic = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;

@@ -1,7 +1,7 @@
-"""Phase 4 UI, in headless Chrome: the Comments section (``comments.js``) on
-the Samples page's Compare view (the classic Analysis tab until v6.0.0), and
-the presets admin panel on Hub admin. Annotate and Clear annotations are
-driven by ``tests/test_ui_compare_smoke.py``.
+"""Phase 4 UI, in headless Chrome: the conclusion presets admin panel on Hub
+admin. Since v6.0.0 comments are part of the conclusion: Compare's "Insert
+preset", earlier notes, Annotate and Clear annotations are driven by
+``tests/test_ui_compare_smoke.py``.
 
 Plotly's CDN is blocked and replaced by a recording stub (``newPlot``/``react``
 keep ``div.layout``, ``relayout`` merges into it, ``div.on`` keeps handlers).
@@ -130,64 +130,6 @@ def page(tmp_path_factory):
             yield drv, hub, port, pw
         finally:
             drv.quit()
-
-
-def test_comments_are_by_the_signed_in_name(page):
-    """Sign-in (D6 rev 2): no initials box; the page says who comments are
-    saved as, and the server records the session's name."""
-    drv, hub, port, _pw = page
-    _select(drv, hub.ids["final"], port)
-    assert _js(drv, "return document.getElementById('comment-initials')") is None
-    assert _wait(lambda: _js(drv, "return document.getElementById('comment-author')"
-                                  ".textContent") == "Commenting as Ryan Brown")
-    assert _js(drv, "return 'INITIALS_KEY' in Comments || 'requireInitials' in Comments") is False
-
-
-def test_free_text_is_rendered_as_text(page):
-    drv, hub, _port, _pw = page
-    sid = hub.ids["final"]
-    _select(drv, sid)
-    _js(drv, "document.getElementById('comment-free-text').value = arguments[0];"
-             "document.getElementById('btn-comment-add').click();", EVIL)
-    assert _wait(lambda: EVIL in (_list_texts(drv) or []))
-    assert [c["text"] for c in _comments(hub.db, sid)] == [EVIL]
-    assert _js(drv, "return document.querySelectorAll('#comment-list img').length") == 0
-    assert _js(drv, "return window.__pwned || 0") == 0
-    meta = _js(drv, "return document.querySelector('#comment-list li .comment-meta')"
-                    ".textContent")
-    assert "Ryan Brown" in meta           # the list shows the account name
-
-
-def test_preset_chip_adds_the_preset_text(page):
-    drv, hub, _port, _pw = page
-    sid = hub.ids["rerun"]
-    _select(drv, sid)
-    assert _wait(lambda: _js(drv, "return document.querySelectorAll('#comment-presets "
-                                  "button').length") >= 4)
-    _js(drv, "document.querySelectorAll('#comment-presets button')[1].click();")
-    assert _wait(lambda: _comments(hub.db, sid))
-    c = _comments(hub.db, sid)[0]
-    assert c["text"] == "Sample appears to be gasoline." and c["source"] == "preset"
-    assert c["author_initials"] == "RB" and c["author_name"] == "Ryan Brown"
-    assert _wait(lambda: _list_texts(drv) == ["Sample appears to be gasoline."])
-
-
-def test_delete_asks_for_confirmation(page):
-    drv, hub, _port, _pw = page
-    sid = hub.ids["rerun"]
-    _select(drv, sid)
-    assert _wait(lambda: _list_texts(drv) == ["Sample appears to be gasoline."])
-    _js(drv, "window.__confirms = []; window.confirm = m => { __confirms.push(m); return false; };"
-             "document.querySelector('#comment-list li .comment-delete').click();")
-    time.sleep(0.5)
-    assert len(_comments(hub.db, sid)) == 1
-    assert len(_js(drv, "return window.__confirms")) == 1
-    _js(drv, "window.confirm = m => true;"
-             "document.querySelector('#comment-list li .comment-delete').click();")
-    assert _wait(lambda: _comments(hub.db, sid) == [])
-    gone = _comments(hub.db, sid, deleted=True)[0]
-    assert gone["deleted_by_initials"] == "RB"
-    assert _wait(lambda: _list_texts(drv) == [])
 
 
 def test_presets_admin_panel(page):

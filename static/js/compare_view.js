@@ -15,7 +15,9 @@
    (Plotly, a monochrome template read from the tokens, range bands,
    drag-zoom, double-click to reset, fullscreen, Annotate), Findings (the
    /api/analysis items as rows, the sentence always the server's), the
-   Conclusion (read-only until Edit), Comments (comments.js) and the Adjust
+   Conclusion (read-only until Edit; v6: conclusion presets are inserted into
+   it, and the sample's earlier notes, comments from before v6, are listed
+   under it; there is no separate Comments section) and the Adjust
    drawer (it dispatches `gc:adjust` {open} on document; the page hides its
    list while it is open). Every change recomputes on the hub: there is no
    Run button, and the numbers are never computed here.
@@ -26,7 +28,8 @@
    and GCCompare.defaultStandard(sample, standards) for bulk actions.
 
    Needs: session.js, shell.js (GCShell), compare_logic.js, report_payload.js,
-   ladder.js is not needed; comments.js and Plotly are used when present.
+   ladder.js is not needed; comments.js (marked regions and earlier notes)
+   and Plotly are used when present.
    Text only (textContent); Plotly strings are escaped. */
 (function (root) {
     'use strict';
@@ -281,11 +284,13 @@
         d.clearAnnot = h('button', { type: 'button', role: 'menuitem', className: 'menu-item',
                                      'data-testid': 'compare-clear-annotations', onclick: () => clearAnnotations(v) },
             'Clear annotations…');
-        d.annotMenu = h('div', { className: 'menu cmp-menu', role: 'menu', hidden: true }, d.clearAnnot);
+        d.regionItems = h('div', { className: 'cmp-region-items', 'data-testid': 'compare-regions' });
+        d.annotMenu = h('div', { className: 'menu cmp-menu', role: 'menu', hidden: true },
+            d.regionItems, d.clearAnnot);
         d.annotHint = h('p', { className: 'caption cmp-annot-hint', hidden: true,
                                text: 'Drag across the trend to mark a region. Esc cancels.' });
         d.popRegion = h('p', { className: 'cmp-pop-region' });
-        d.popInput = h('input', { type: 'text', maxlength: '500', 'aria-label': 'Annotation comment',
+        d.popInput = h('input', { type: 'text', maxlength: '500', 'aria-label': 'Label for this region',
                                   placeholder: 'What is here? (optional)', 'data-testid': 'compare-annotation-text' });
         d.pop = h('form', { className: 'cmp-pop', hidden: true, 'data-testid': 'compare-annotation-pop' },
             d.popRegion, d.popInput,
@@ -321,7 +326,7 @@
                         () => fullscreen(v, d.diffCard))),
             d.diff);
 
-        // Findings, Conclusion, Comments
+        // Findings, Conclusion (with its presets and the earlier notes)
         d.findCount = h('span', { className: 'caption' });
         d.findings = h('ul', { className: 'cmp-findings', 'data-testid': 'compare-findings-list' });
         const findSec = h('section', { className: 'cmp-sec', 'data-testid': 'compare-findings',
@@ -336,36 +341,50 @@
         d.conclUse = h('button', { type: 'button', className: 'btn btn-sm btn-ghost', hidden: true,
                                    text: 'Use the generated text', onclick: () => {
                                        delete v.edited[v.standard]; renderConclusion(v); } });
-        d.conclArea = h('textarea', { rows: '5', maxlength: '4000', 'aria-label': 'Conclusion',
+        d.conclArea = h('textarea', { rows: '5', maxlength: String(L.CONCLUSION_MAX), 'aria-label': 'Conclusion',
+                                      'aria-describedby': 'cmp-concl-count',
                                       'data-testid': 'compare-conclusion-input' });
+        // the limit (v6): a live counter, typing stops at maxlength, a paste is cut with a notice
+        d.conclCount = h('span', { className: 'caption cmp-concl-count', id: 'cmp-concl-count',
+                                   'aria-live': 'polite', 'data-testid': 'compare-conclusion-count' });
+        d.conclCut = h('p', { className: 'caption cmp-concl-cut', role: 'status', hidden: true,
+                              'data-testid': 'compare-conclusion-cut' });
+        d.conclArea.addEventListener('input', () => { d.conclCut.hidden = true; syncCount(v); });
+        d.conclArea.addEventListener('paste', (e) => pasteConclusion(v, e));
         d.conclForm = h('div', { className: 'cmp-concl-form', hidden: true },
-            d.conclArea,
-            h('div', { className: 'row' }, h('span', { className: 'spacer' }),
+            d.conclArea, d.conclCut,
+            h('div', { className: 'row' },
+                h('span', { className: 'caption cmp-concl-hint', text: 'A preset goes in at the cursor.' }),
+                d.conclCount,
+                h('span', { className: 'spacer' }),
                 h('button', { type: 'button', className: 'btn btn-sm btn-ghost', text: 'Cancel',
                               onclick: () => { v.editing = false; renderConclusion(v); } }),
                 h('button', { type: 'button', className: 'btn btn-sm btn-primary', text: 'Save',
                               'data-testid': 'compare-conclusion-save', onclick: () => saveConclusion(v) })));
+        // conclusion presets: a menu of phrases inserted into the conclusion
+        d.presetBtn = h('button', { type: 'button', className: 'btn btn-sm btn-ghost', hidden: true,
+                                    'aria-haspopup': 'menu', 'aria-expanded': 'false',
+                                    'data-testid': 'compare-preset-menu', onclick: () => togglePresetMenu(v) },
+            'Insert preset');
+        d.presetMenu = h('div', { className: 'menu cmp-menu cmp-preset-menu', role: 'menu', hidden: true,
+                                  'aria-label': 'Conclusion presets', 'data-testid': 'compare-presets' });
+        // the sample's earlier notes (comments from before v6): read-only
+        d.notesList = h('ul', { className: 'cmp-notes-list', 'data-testid': 'compare-notes-list' });
+        d.notes = h('div', { className: 'cmp-notes', hidden: true, 'data-testid': 'compare-notes' },
+            h('h4', { className: 'cmp-notes-h', text: 'Notes' }),
+            h('p', { className: 'caption cmp-notes-intro',
+                     text: 'Earlier comments on this sample. ' +
+                           'They print under the conclusion on the report.' }),
+            d.notesList);
         const conclSec = h('section', { className: 'cmp-sec', 'data-testid': 'compare-conclusion',
                                         'aria-labelledby': 'cmp-concl-h' },
             h('div', { className: 'cmp-sec-head' }, h('h3', { id: 'cmp-concl-h', text: 'Conclusion' }),
-                h('span', { className: 'spacer' }), d.conclUse, d.conclEdit),
-            d.conclText, d.conclNote, d.conclForm);
-
-        const commentsSec = h('section', { className: 'cmp-sec cmp-comments', 'data-testid': 'compare-comments',
-                                           'aria-labelledby': 'cmp-com-h' },
-            h('div', { className: 'cmp-sec-head' }, h('h3', { id: 'cmp-com-h', text: 'Comments' }),
-                h('span', { className: 'spacer' }), h('span', { className: 'caption', id: 'comment-author' })),
-            h('div', { className: 'cmp-chips', id: 'comment-presets', 'data-testid': 'compare-presets' }),
-            h('ul', { className: 'cmp-comment-list', id: 'comment-list', 'data-testid': 'compare-comment-list' }),
-            h('div', { className: 'cmp-composer' },
-                h('input', { type: 'text', id: 'comment-free-text', maxlength: '500',
-                             placeholder: 'Add a comment for the report…', 'aria-label': 'Comment for the report',
-                             'data-testid': 'compare-comment-input' }),
-                h('button', { type: 'button', className: 'btn btn-sm', id: 'btn-comment-add', text: 'Add',
-                              'data-testid': 'compare-comment-add' })));
+                h('span', { className: 'spacer' }), d.conclUse,
+                h('span', { className: 'cmp-preset' }, d.presetBtn, d.presetMenu), d.conclEdit),
+            d.conclText, d.conclNote, d.conclForm, d.notes);
 
         const main = h('div', { className: 'cmp-main' }, d.trendCard, d.diffCard);
-        const side = h('div', { className: 'cmp-side' }, findSec, conclSec, commentsSec);
+        const side = h('div', { className: 'cmp-side' }, findSec, conclSec);
         const wrap = h('div', { className: 'cmp', 'data-testid': 'compare', 'data-sample': String(v.sample.sample_id) },
             toolbar, h('div', { className: 'cmp-body' }, main, side));
 
@@ -376,13 +395,15 @@
         renderConclusion(v);
         renderFindings(v);
 
-        // Comments: comments.js's DOM ids live in this view
+        // the sample's comments: marked regions (drawn) and earlier notes (listed)
         if (root.Comments && typeof root.Comments.init === 'function') {
-            root.Comments.init({ onChange: () => { if (v.alive) drawAnnotations(v); syncAnnotCount(v); } });
+            root.Comments.init({ onChange: () => {
+                if (!v.alive) return;
+                drawAnnotations(v); syncAnnotCount(v); renderNotes(v);
+            } });
             root.Comments.setSample(v.sample.sample_id);
-        } else {
-            commentsSec.appendChild(h('p', { className: 'caption', text: 'Comments are unavailable on this page.' }));
         }
+        loadPresets(v);
 
         // re-theme: GCTheme's event, and the attribute itself when it is absent
         const onTheme = () => { if (v.alive && v.result) draw(v); };
@@ -408,6 +429,7 @@
             if (!d.pop.hidden) { closePop(v); return; }
             if (v.annotating) { setAnnotate(v, false); return; }
             if (!d.annotMenu.hidden) { toggleAnnotMenu(v, false); return; }
+            if (!d.presetMenu.hidden) { togglePresetMenu(v, false); d.presetBtn.focus(); return; }
             if (v.drawerOpen && !document.querySelector('dialog[open]')) setDrawer(v, false);
         };
         document.addEventListener('keydown', onKey);
@@ -415,6 +437,9 @@
         const onDocClick = (e) => {
             if (!d.annotMenu.hidden && !d.annotMenu.contains(e.target) && !d.annotMenuBtn.contains(e.target)) {
                 toggleAnnotMenu(v, false);
+            }
+            if (!d.presetMenu.hidden && !d.presetMenu.contains(e.target) && !d.presetBtn.contains(e.target)) {
+                togglePresetMenu(v, false);
             }
         };
         document.addEventListener('click', onDocClick, true);
@@ -676,10 +701,32 @@
     }
 
     function syncAnnotCount(v) {
-        const n = root.Comments && root.Comments.annotationComments
-            ? root.Comments.annotationComments(root.Comments.current()).length : 0;
-        v.dom.clearAnnot.textContent = n ? `Clear ${n} annotation${n === 1 ? '' : 's'}…` : 'No annotations to clear';
-        v.dom.clearAnnot.disabled = !n;
+        const C = root.Comments;
+        const regions = C && C.annotationComments ? C.annotationComments(C.current()) : [];
+        const n = regions.length;
+        const d = v.dom;
+        d.clearAnnot.textContent = n === 1 ? 'Clear 1 marked region…'
+            : n ? `Clear all ${n} marked regions…` : 'No marked regions to clear';
+        d.clearAnnot.disabled = !n;
+        d.regionItems.textContent = '';
+        if (!n) return;
+        d.regionItems.appendChild(h('div', { className: 'menu-head', text: 'Marked regions' }));
+        for (const c of regions) {
+            const label = C.regionLabel(c);
+            d.regionItems.appendChild(h('button', {
+                type: 'button', role: 'menuitem', className: 'menu-item cmp-region-item',
+                'aria-label': 'Remove the marked region ' + label, title: 'Remove this marked region',
+                'data-testid': 'compare-region-remove',
+                onclick: () => { toggleAnnotMenu(v, false); removeRegion(v, c); } },
+                h('span', { className: 'cmp-region-text', text: label }),
+                h('span', { className: 'cmp-region-x', 'aria-hidden': 'true', text: '×' })));
+        }
+    }
+
+    function removeRegion(v, c) {
+        const C = root.Comments;
+        if (!C || c.sample_id !== v.sample.sample_id) return;
+        C.remove(c, C.removeRegionConfirmText(c));
     }
 
     function toggleAnnotMenu(v, force) {
@@ -744,11 +791,19 @@
         d.conclUse.hidden = v.editing || !edited;
         d.conclNote.hidden = v.editing || !edited;
         d.conclNote.textContent = edited ? 'Edited. Reports and the queue use your text.' : '';
+        d.presetBtn.hidden = !(v.presets && v.presets.length);
+        d.presetBtn.disabled = !v.result && !edited;
+        if (d.presetBtn.disabled && !d.presetMenu.hidden) togglePresetMenu(v, false);
     }
 
     function editConclusion(v) {
         v.editing = true;
-        v.dom.conclArea.value = conclusionText(v);
+        const full = conclusionText(v);
+        v.dom.conclArea.value = full.slice(0, L.CONCLUSION_MAX);
+        v.dom.conclCut.hidden = full.length <= L.CONCLUSION_MAX;
+        v.dom.conclCut.textContent = v.dom.conclCut.hidden ? ''
+            : `The conclusion was cut to the ${L.CONCLUSION_MAX.toLocaleString('en-US')}-character limit.`;
+        syncCount(v);
         renderConclusion(v);
         v.dom.conclArea.focus();
     }
@@ -759,6 +814,118 @@
         else v.edited[v.standard] = text;
         v.editing = false;
         renderConclusion(v);
+    }
+
+    // ── conclusion presets and earlier notes (v6) ──────────────────────────
+    async function loadPresets(v) {
+        let presets = [];
+        try {
+            const r = await fetch('/api/conclusion-presets', { headers: { Accept: 'application/json' } });
+            const res = await root.GCSession.readJson(r);
+            if (!r.ok) throw new Error((res.body && res.body.error) || ('HTTP ' + r.status));
+            presets = (res.body && res.body.presets) || [];
+        } catch (e) {
+            if (v.alive) toast('Could not load the conclusion presets: ' + e.message, 'err');
+        }
+        if (!v.alive) return;
+        v.presets = presets;
+        const d = v.dom;
+        d.presetMenu.textContent = '';
+        d.presetMenu.appendChild(h('div', { className: 'menu-head', text: 'Insert into the conclusion' }));
+        for (const p of presets) {
+            d.presetMenu.appendChild(h('button', {
+                type: 'button', role: 'menuitem', className: 'menu-item cmp-preset-item',
+                'data-testid': 'compare-preset',
+                onclick: () => { togglePresetMenu(v, false); insertIntoConclusion(v, p.text); } }, p.text));
+        }
+        d.presetMenu.appendChild(h('p', { className: 'menu-foot',
+            text: 'An admin edits these in Hub admin, Conclusion presets.' }));
+        renderConclusion(v);
+    }
+
+    function togglePresetMenu(v, force) {
+        const d = v.dom;
+        const open = force === undefined ? d.presetMenu.hidden : !!force;
+        d.presetMenu.hidden = !open;
+        d.presetBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (open) {
+            const first = d.presetMenu.querySelector('button');
+            if (first) setTimeout(() => first.focus(), 0);
+        }
+    }
+
+    /** Put `text` into the conclusion: at the cursor while editing, else the
+        editor opens on the conclusion with `text` appended. The analyst
+        then edits and saves (Save keeps it per standard, as any edit). */
+    function insertIntoConclusion(v, text) {
+        const d = v.dom;
+        if (!v.result && typeof v.edited[v.standard] !== 'string') {
+            toast('The conclusion appears with the findings; insert it then.', 'err');
+            return false;
+        }
+        let sel = null;
+        if (v.editing) sel = { start: d.conclArea.selectionStart, end: d.conclArea.selectionEnd };
+        else editConclusion(v);
+        const out = L.insertPreset(d.conclArea.value, text, sel);
+        if (!out) {
+            const max = L.CONCLUSION_MAX.toLocaleString('en-US');
+            toast(`Not inserted: the conclusion would be longer than ${max} characters. ` +
+                  'Shorten it first.', 'err');
+            d.conclArea.focus();
+            return false;
+        }
+        d.conclArea.value = out.text;
+        d.conclCut.hidden = true;
+        syncCount(v);
+        d.conclArea.focus();
+        try { d.conclArea.setSelectionRange(out.caret, out.caret); } catch (_e) { /* */ }
+        return true;
+    }
+
+    function syncCount(v) {
+        const d = v.dom;
+        const c = L.conclusionCount(d.conclArea.value);
+        d.conclCount.textContent = c.text;
+        d.conclCount.classList.toggle('is-near', c.near);
+        d.conclCount.classList.toggle('is-full', c.full);
+    }
+
+    /** A paste that would pass the limit is cut to fit, with a one-line notice
+        (the browser's maxlength would cut it silently). */
+    function pasteConclusion(v, e) {
+        const d = v.dom;
+        const data = e.clipboardData && e.clipboardData.getData('text');
+        if (data == null) return;
+        const out = L.pasteInto(d.conclArea.value, data,
+                                { start: d.conclArea.selectionStart, end: d.conclArea.selectionEnd });
+        if (!out.cut) return;
+        e.preventDefault();
+        d.conclArea.value = out.text;
+        try { d.conclArea.setSelectionRange(out.caret, out.caret); } catch (_e) { /* */ }
+        d.conclCut.textContent = `The pasted text was cut to fit the ${L.CONCLUSION_MAX.toLocaleString('en-US')}-character limit.`;
+        d.conclCut.hidden = false;
+        syncCount(v);
+    }
+
+    function renderNotes(v) {
+        const d = v.dom;
+        const C = root.Comments;
+        const notes = C && C.noteComments ? C.noteComments(C.current()) : [];
+        d.notesList.textContent = '';
+        d.notes.hidden = !notes.length;
+        for (const c of notes) {
+            d.notesList.appendChild(h('li', { className: 'cmp-note', 'data-testid': 'compare-note' },
+                h('p', { className: 'cmp-note-text', text: c.text }),
+                h('div', { className: 'cmp-note-foot' },
+                    h('span', { className: 'caption', text: C.commentMeta(c) }),
+                    h('span', { className: 'spacer' }),
+                    h('button', { type: 'button', className: 'btn btn-sm btn-ghost', text: 'Add to conclusion',
+                                  'data-testid': 'compare-note-insert',
+                                  onclick: () => insertIntoConclusion(v, c.text) }),
+                    h('button', { type: 'button', className: 'btn btn-sm btn-ghost', text: 'Remove',
+                                  'data-testid': 'compare-note-remove',
+                                  onclick: () => C.remove(c, C.removeNoteConfirmText(c)) }))));
+        }
     }
 
     // ── the Adjust drawer ───────────────────────────────────────────────────
@@ -1000,7 +1167,7 @@
         ex.sub = h('p', { className: 'caption' });
         ex.std = h('select', { 'data-testid': 'export-standard' });
         ex.doc = h('input', { type: 'text', value: 'GC Analysis Report', maxlength: '120', 'data-testid': 'export-title' });
-        ex.concl = h('textarea', { rows: '4', maxlength: '4000', 'data-testid': 'export-conclusion',
+        ex.concl = h('textarea', { rows: '4', maxlength: String(L.CONCLUSION_MAX), 'data-testid': 'export-conclusion',
                                    placeholder: 'Leave empty to use the generated conclusion.' });
         ex.others = h('div', { className: 'cmp-export-others' });
         ex.params = h('p', { className: 'caption cmp-export-params', 'data-testid': 'export-params' });

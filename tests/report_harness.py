@@ -81,6 +81,14 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
             app_version=app_version, created_at=created_at, db_given=db is not None))
         return len(log_rows)
     fake.log_report = log_report
+    # v6: the conclusion limit is the real module's (loaded by path, so the
+    # fake keeps the name ``comments``)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_real_comments", ROOT / "comments.py")
+    real = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(real)
+    fake.CONCLUSION_MAX = real.CONCLUSION_MAX
+    fake.conclusion_problem = real.conclusion_problem
     sys.modules["comments"] = fake
 
     import app  # noqa: E402  (after GC_DATA_DIR and the fake comments module)

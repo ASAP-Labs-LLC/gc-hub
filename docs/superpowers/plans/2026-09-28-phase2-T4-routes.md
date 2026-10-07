@@ -145,6 +145,8 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/api/samples/<int:sample_id>/comments/<int:comment_id>/delete` | POST | new | session | phase 4 `comments_api`: `{initials}` → `{comment}`; soft delete recording `deleted_by_initials`/`deleted_by_ip`; 404 not this sample's comment, 409 already deleted |
 | `/api/comment-presets` | GET | new | session | phase 4 `comments_api`: → `{presets:[{id, text, sort}]}` (active, in order) |
 | `/api/admin/comment-presets` | POST | new | session | phase 4 `comments_api` (admin password): `{password, action: list\|create\|update\|reorder\|deactivate\|activate, text?, id?, ids?}` → `{presets, preset?}` (create 201; ≤ 200 chars, ≤ 50 active; reorder names every preset once) |
+| `/api/conclusion-presets` | GET | new | session | v6 `comments_api`: the conclusion presets, the same handler and answer as `/api/comment-presets` (kept for v5 pages) |
+| `/api/admin/conclusion-presets` | POST | new | session | v6 `comments_api` (admin password): the same handler as `/api/admin/comment-presets` (kept for v5 pages) |
 | `/instruments` | GET | new | session | 2A2 `instruments_api` blueprint: the Instruments page; v3.1: the new design (card grid, Add a GC, Activity feed; `templates/instruments_home.html`) |
 | `/instruments/classic` | GET | new | session | v6.0.0: 302 to `/instruments/<?instrument>` when that page can open it, else `/instruments` (the 2A2 page is gone; old bookmarks) |
 | `/instruments/<iid>` | GET | new | session | v3.1 `instruments_api`: one instrument in the new design (setup checklist, Agent, Calibration, Correction factors, Results file, Methods, Backfill, Conflicts) over the same `/api/` routes; 404 for an unknown id |

@@ -68,7 +68,7 @@
 .cmp-chart:fullscreen { display: flex; flex-direction: column; padding: var(--s5); border-radius: 0; background: var(--bg); }
 .cmp-chart:fullscreen .cmp-plot { flex: 1; height: auto; min-height: 0; }
 
-/* findings, conclusion, comments */
+/* findings, conclusion */
 .cmp-sec-head { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s2); min-height: 30px; }
 .cmp-sec-head h3 { font-size: var(--fs-md); }
 .cmp-sec-head .spacer { flex: 1; }
@@ -96,24 +96,31 @@
     width: 100%; height: auto; min-height: 96px; padding: var(--s2) var(--s3); line-height: 1.5; resize: vertical;
 }
 
-.cmp-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: var(--s2); }
-.comment-chip {
-    max-width: 100%; padding: 4px 10px; border: 1px solid var(--border); border-radius: var(--radius-pill);
-    background: var(--bg-card); color: var(--text); font: inherit; font-size: var(--fs-xs); text-align: left; cursor: pointer;
-}
-.comment-chip:hover { background: var(--bg-hover); border-color: var(--border-strong); }
-.cmp-comment-list { list-style: none; margin: 0 0 var(--s2); padding: 0; }
-.cmp-comment-list li.muted { padding: var(--s2) 0; font-size: var(--fs-sm); color: var(--text-muted); }
-.comment-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px var(--s2); padding: var(--s2) 0; border-top: 1px solid var(--border-light); }
-.comment-text { grid-column: 1; font-size: var(--fs-sm); overflow-wrap: anywhere; }
-.comment-meta { grid-column: 1; font-size: var(--fs-xs); color: var(--text-muted); }
-.comment-delete {
-    grid-column: 2; grid-row: 1 / span 2; width: 28px; height: 28px; border: 0; border-radius: var(--radius-sm);
-    background: transparent; color: var(--text-muted); font-size: 18px; line-height: 1; cursor: pointer;
-}
-.comment-delete:hover { background: var(--bg-hover); color: var(--text); }
-.cmp-composer { display: flex; gap: var(--s2); }
-.gc .cmp-composer input { flex: 1; }
+/* v6: conclusion presets (a menu by Edit), the hint under the editor, the
+   sample's earlier notes under the conclusion, and the marked regions listed
+   in the Annotate menu */
+.cmp-preset { position: relative; display: inline-flex; }
+.cmp-preset-menu { width: 300px; max-height: min(60vh, 420px); overflow-y: auto; }
+.cmp-preset-menu .menu-item { align-items: flex-start; white-space: normal; overflow-wrap: anywhere; font-size: var(--fs-sm); line-height: 1.4; }
+.cmp-concl-hint { margin: 0; }
+.cmp-concl-count { margin: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cmp-concl-count.is-near { color: var(--warn-text); }
+.cmp-concl-count.is-full { color: var(--warn-text); font-weight: 600; }
+.cmp-concl-cut { margin: 0; color: var(--warn-text); }
+.cmp-notes { margin-top: var(--s3); padding-top: var(--s2); border-top: 1px solid var(--border-light); }
+.cmp-notes-h { margin: 0; font-size: var(--fs-sm); font-weight: 620; }
+.cmp-notes-intro { margin: 2px 0 var(--s1); }
+.cmp-notes-list { list-style: none; margin: 0; padding: 0; }
+.cmp-note { padding: var(--s2) 0; border-top: 1px solid var(--border-light); }
+.cmp-note:first-child { border-top: 0; }
+.cmp-note-text { margin: 0; font-size: var(--fs-sm); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cmp-note-foot { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s1) var(--s2); margin-top: 2px; }
+.cmp-note-foot .spacer { flex: 1; }
+.cmp-region-items { display: flex; flex-direction: column; gap: 2px; }
+.cmp-region-item { justify-content: space-between; }
+.cmp-region-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); }
+.cmp-region-x { flex: none; color: var(--text-muted); font-size: 16px; line-height: 1; }
+.cmp-region-item:hover .cmp-region-x { color: var(--text); }
 
 /* the Adjust drawer: beside the page, the page keeps its width minus the drawer */
 .cmp-drawer {

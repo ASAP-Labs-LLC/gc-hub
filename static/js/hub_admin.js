@@ -608,8 +608,9 @@
     }
   }
 
-  // ── comment presets (phase 4) ─────────────────────────────────────────
-  // One admin route, /api/admin/comment-presets {action, ...}; every answer
+  // ── conclusion presets (phase 4; v6 name) ─────────────────────────────
+  // One admin route, /api/admin/conclusion-presets {action, ...} (v5's
+  // /api/admin/comment-presets is the same handler); every answer
   // carries the full list, which is re-rendered (inputs are set with .value,
   // labels with textContent: preset text is data, never markup).
 
@@ -629,7 +630,7 @@
 
   async function presetCall(action, extra) {
     const edits = unsavedEdits();
-    const j = await call("/api/admin/comment-presets", Object.assign({action}, extra || {}));
+    const j = await call("/api/admin/conclusion-presets", Object.assign({action}, extra || {}));
     if (action === "update" && extra) delete edits[extra.id];
     renderPresets(j.presets || [], edits);
     return j;
