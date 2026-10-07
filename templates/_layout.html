@@ -6,7 +6,7 @@
 <html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>{% block title %}GC Hub{% endblock %} · GC Hub</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <script src="{{ url_for('static', filename='js/session.js') }}?v=2"></script>
@@ -21,15 +21,34 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/report_queue.css') }}?v=1">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/notifications.css') }}?v=1">
   {% block head %}{% endblock %}
+  {#- v6.0 lane L5: phones and tablets; last, so its media queries win over the page's own -#}
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/mobile.css') }}?v=1">
 </head>
 <body class="gc" data-nav="{{ nav or '' }}">
   <div class="app">
     {% include "_shell.html" %}
+    {#- v6.0 lane L5: behind the sidebar when it opens as a drawer on a phone (mobile.js) -#}
+    <div class="sb-scrim" id="sb-scrim" data-testid="nav-scrim" hidden></div>
     <div class="main-col">
       <header class="topbar" data-testid="topbar">
+        {#- v6.0 lane L5: phones only (mobile.css): the menu button opens the sidebar as a drawer -#}
+        <button type="button" class="tb-menu icon-btn" id="nav-open" data-testid="nav-open" aria-controls="sidebar" aria-expanded="false" aria-label="Open the menu" title="Menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
         {% block topbar %}{% endblock %}
         {#- v5.0.0 lane C: "Report queue N" (report_queue.js); shown while it holds reports or uploads -#}
         <button type="button" class="rq-btn" id="report-queue-btn" data-testid="report-queue-button" hidden><span class="ico rq-ico" aria-hidden="true"></span><span class="rq-label">Report queue</span><span class="rq-count" hidden></span><span class="rq-progress" hidden></span></button>
+        {#- v6.0 lane L5: phones only: the sidebar footer's status while the drawer is shut (mobile.js mirrors it) -#}
+        <span class="tb-status" id="tb-status" data-testid="topbar-status">
+          <button type="button" class="icon-btn tb-live" id="tb-live" data-testid="topbar-live" aria-controls="sidebar" aria-label="Status. Open the menu">
+            <span class="live-dot" id="tb-live-dot" data-state="connecting" aria-hidden="true"></span>
+            <span class="glyph working tb-working" id="tb-working" aria-hidden="true" hidden></span>
+          </button>
+          <button type="button" class="icon-btn tb-bell" id="tb-bell" data-testid="topbar-bell" aria-label="Notifications" aria-haspopup="dialog" aria-controls="bell-panel" aria-expanded="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20.5h4"/></svg>
+            <span class="bell-count" id="tb-bell-count" hidden></span>
+          </button>
+        </span>
         {#- a page with its own unlock at the top (Hub admin) replaces the chip -#}
         {% block unlock_chip %}
         <span id="unlock-chip" class="unlock-chip" hidden data-testid="unlock-chip">
@@ -69,6 +88,8 @@
   <script src="{{ url_for('static', filename='js/report_queue.js') }}?v=6"></script>
   <script src="{{ url_for('static', filename='js/notifications_panel.js') }}?v=2"></script>
   {% block scripts %}{% endblock %}
+  {#- v6.0 lane L5: the phone drawer, the top bar's status, Samples' one pane at a time, chart resizes -#}
+  <script src="{{ url_for('static', filename='js/mobile.js') }}?v=1"></script>
 
   <!-- Which build is running, bottom-right. Same string /healthz reports. -->
   <div id="app-version" aria-hidden="true">{{ app_version }}</div>

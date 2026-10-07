@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Sign in · GC hub</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=3">
@@ -33,6 +33,15 @@
     details button{background:var(--line);color:var(--txt)}
     #msg{margin-top:14px;min-height:1.5em}
     #msg.err{color:var(--danger)} #msg.ok{color:var(--green)}
+    /* v6.0: phones. 16px fields (iOS zooms into smaller ones), 44px targets, the notch kept clear */
+    @media (max-width:759.98px){
+      main{margin:max(24px, env(safe-area-inset-top)) auto 48px;
+        padding:0 max(16px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(16px, env(safe-area-inset-left))}
+      .panel{padding:20px 18px}
+      input{font-size:16px;min-height:44px}
+      button{min-height:44px}
+      summary{padding:12px 0}
+    }
   </style>
 </head>
 <body>
