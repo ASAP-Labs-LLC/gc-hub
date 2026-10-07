@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
 import os
 import shutil
 import struct
@@ -286,5 +287,5 @@ def test_worst_case_reports_are_one_page_on_every_path(worst_harness):
     concl = worst_harness["request"]["conclusion"]
     for path, pdf in worst_harness["pdf_text"].items():
         assert flat(concl) in pdf, path
-        assert "more comments on this sample are in the GC hub" in pdf, path
+        assert re.search(r"\d+ (more )?comments on this sample are in the GC hub", pdf), path
         assert "window 251" in pdf and "spike dominance ≥0.6" in pdf, path

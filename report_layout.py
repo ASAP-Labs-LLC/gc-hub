@@ -499,8 +499,8 @@ p {{ margin: 0; }}
 
 
 def _tag(sev: str | None) -> str:
-    """A finding's severity, as the app's severity pill: significant ink on
-    white, moderate ink on the sunken grey, marginal muted text."""
+    """A finding's severity, as the app's severity pill:
+    significant white on ink, moderate ink on grey, marginal muted text."""
     if not sev:
         return ""
     if sev == "significant":
