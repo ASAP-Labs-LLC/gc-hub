@@ -2,7 +2,8 @@
 additions, booted against a hub with real samples (``tests/hub_boot.py``).
 
 * ``/``, ``/samples`` and ``/samples/<id>[/compare|/data]`` render the new
-  Samples page; ``/classic`` the old page; ``/?open=settings|help`` (the old
+  Samples page; ``/classic…`` (v6.0.0: the old page is gone) redirect
+  there; ``/?open=settings|help`` (the old
   user-menu links) go to ``/settings`` and ``/help``; ``/lab/<id>`` lands on
   ``/samples/<its newest run>``;
 * ``GET /api/files/ids`` answers the ids ``/api/files`` would list for the
@@ -23,6 +24,7 @@ from pathlib import Path
 import pytest
 
 TESTS_DIR = Path(__file__).resolve().parent
+ROOT = TESTS_DIR.parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 
@@ -74,11 +76,15 @@ def test_the_samples_page_is_served_at_its_urls(hub_app, path):
     assert 'data-nav="samples"' in html
 
 
-def test_the_classic_page_moved_to_classic(hub_app):
+def test_the_classic_page_is_gone_and_its_address_opens_the_samples_page(hub_app):
+    """v6.0.0: ``/classic`` (with its query) redirects to ``/``."""
     port, _hub, _ = hub_app
+    code, headers, _ = _raw(port, "/classic")
+    assert code == 302 and headers["Location"].endswith("/") and "?" not in headers["Location"]
+    code, headers, _ = _raw(port, "/classic?q=40304")
+    assert code == 302 and headers["Location"].endswith("/?q=40304")
     html = get_text(port, "/classic")
-    assert 'id="dash-file-list"' in html and "js/app.js" in html
-    assert 'data-testid="samples-page"' not in html
+    assert 'data-testid="samples-page"' in html and "js/app.js" not in html
 
 
 @pytest.mark.parametrize("what", ["settings", "help"])
@@ -96,11 +102,35 @@ def test_a_lab_link_lands_on_its_newest_run(hub_app):
     assert code == 404 and b"No GC result" in body
 
 
-def test_classic_links_still_open_the_classic_page(hub_app):
+def test_old_classic_links_open_the_same_run_on_the_samples_page(hub_app):
     port, hub, _ = hub_app
-    for path in (f"/classic/samples/{hub.ids['final']}/data", "/classic/lab/40304"):
-        html = get_text(port, path)
-        assert 'id="dash-file-list"' in html, path
+    final = hub.ids["final"]
+    code, headers, _ = _raw(port, f"/classic/samples/{final}/data")
+    assert code == 302 and headers["Location"].endswith(f"/samples/{final}/data")
+    code, headers, _ = _raw(port, f"/classic/samples/{final}/compare?standard=Diesel")
+    assert code == 302 and headers["Location"].endswith(f"/samples/{final}/compare?standard=Diesel")
+    code, headers, _ = _raw(port, "/classic/lab/40304")
+    assert code == 302 and headers["Location"].endswith("/lab/40304")
+    for path in (f"/classic/samples/{final}/data", "/classic/lab/40304"):
+        html = get_text(port, path)       # urllib follows both hops
+        assert 'data-testid="samples-page"' in html, path
+
+
+def test_the_classic_only_routes_are_gone(hub_app):
+    """v6.0.0: Comparison Export, the chromatogram PDF and the classic
+    reprocess preview/progress went with the classic page (JSON 404)."""
+    from bootapp import send
+    port, hub, _ = hub_app
+    for path, body in (("/api/export-comparison", {"sample_ids": [hub.ids["final"]]}),
+                       ("/api/export-pdf", {"sample_id": hub.ids["final"]}),
+                       ("/api/reprocess/preview", {"query": "40304", "instrument": "gc1"})):
+        status, answer = send(port, path, json.dumps(body).encode(),
+                              headers={"Content-Type": "application/json"})
+        assert status == 404 and answer["error"], (path, status, answer)
+    assert get(port, f"/api/reprocess/status?sample_ids={hub.ids['final']}")[0] == 404
+    for rel in ("templates/index.html", "static/js/app.js", "templates/instruments.html",
+                "static/js/instruments.js"):
+        assert not (ROOT / rel).exists(), rel
 
 
 # ── /api/files/ids ─────────────────────────────────────────────────────────
@@ -153,9 +183,8 @@ def test_the_cdf_downloads(hub_app):
 
 # ── a JSON body that is not an object ──────────────────────────────────────
 
-@pytest.mark.parametrize("path", ["/api/reprocess", "/api/reprocess/preview", "/api/export-lims", "/api/analysis",
-                                  "/api/best-fit", "/api/export-pdf", "/api/export-comparison",
-                                  "/api/export-analysis-report", "/api/export-analysis-reports-zip",
+@pytest.mark.parametrize("path", ["/api/reprocess", "/api/export-lims", "/api/analysis",
+                                  "/api/best-fit", "/api/export-analysis-report", "/api/export-analysis-reports-zip",
                                   "/api/qbench-skip-item", "/api/qbench-upload"])
 @pytest.mark.parametrize("raw", [b"[1]", b'"x"', b"5", b"true"])
 def test_a_json_body_that_is_not_an_object_is_a_400_not_a_500(hub_app, path, raw):

@@ -141,7 +141,7 @@ def test_the_same_get_without_the_header_is_activity(tmp_path):
 def test_a_post_with_the_background_header_is_still_activity(tmp_path):
     with booted(tmp_path) as (port, _proc, _data, _home):
         time.sleep(1.2)
-        post(port, "/api/reprocess/preview", {"query": "", "instrument": "gc1"}, headers=BG)
+        post(port, "/api/notifications/dismiss-all", {}, headers=BG)
         _, body = get(port, "/healthz")
         assert body["idle_seconds"] < 1 and body["active_sessions"] == 1
 

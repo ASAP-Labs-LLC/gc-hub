@@ -86,9 +86,9 @@ def test_instruments_blueprint(tmp_path):
         pw = setup_admin(port, data)
         c = Client(port, pw)
 
-        # ── the page
-        html = get_text(port, "/instruments/classic", timeout=10)   # v3.1: the 2A2 page moved
-        assert "instruments.js" in html and "instruments_logic.js" in html
+        # ── the page (v6.0.0: the 2A2 page is gone; its address opens the new one)
+        html = get_text(port, "/instruments/classic", timeout=10)
+        assert 'data-testid="instruments-page"' in html and "instruments.js" not in html
 
         # ── list and detail
         code, body = c.get("/api/instruments")

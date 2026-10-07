@@ -627,19 +627,22 @@ class CrossSiteTests(unittest.TestCase):
 
 
 class UiShapeTests(unittest.TestCase):
-    def test_admin_input_is_not_autofilled(self):
-        html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
-        import re
-        tag = re.search(r'<input[^>]*id="qb-api-admin"[^>]*>', html).group(0)
-        self.assertIn('autocomplete="new-password"', tag)
+    """v6.0.0: the classic Settings modal is gone; Settings · QBench is the
+    one place the API key is entered (through the page's admin unlock)."""
 
-    def test_save_request_has_timeout_and_no_noop(self):
-        js = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
-        start = js.index("async function saveQbApiCredentials")
-        fn = js[start:js.index("\n}\n", start)]
-        self.assertIn("AbortController", fn)
-        self.assertIn("signal", fn)
-        self.assertNotIn("body.client_secret = ''", fn)
+    def test_the_secret_input_is_not_autofilled(self):
+        import re
+        html = (ROOT / "templates" / "settings.html").read_text(encoding="utf-8")
+        tag = re.search(r'<input[^>]*id="qb-secret"[^>]*>', html).group(0)
+        self.assertIn('autocomplete="new-password"', tag)
+        self.assertIn('type="password"', tag)
+
+    def test_the_save_goes_through_the_admin_unlock_and_clears_the_secret(self):
+        js = (ROOT / "static" / "js" / "settings_page.js").read_text(encoding="utf-8")
+        start = js.index("async function saveQb(")
+        fn = js[start:js.index("\n    }\n", start)]
+        self.assertIn("GCShell.adminPost('/api/qbench-api-credentials'", fn)
+        self.assertIn("$('qb-secret').value = ''", fn)
 
 
 if __name__ == "__main__":

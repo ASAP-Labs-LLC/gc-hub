@@ -1,10 +1,9 @@
-"""v4.0 lane E in a real browser, on the classic main page and Hub admin:
+"""v4.0 lane E in a real browser, on the shell pages and Hub admin:
 
-* the "running now" indicator follows a history dry run started elsewhere:
-  it appears with its progress, then its outcome, without a reload;
-* the GC strip changes on a heartbeat, without a reload;
-* the sample list: each row's injection time, day headings, "No injection
-  time" last, the Newest run / Lab ID switch (remembered), full lab IDs;
+* the "running now" indicator (the sidebar footer; on the classic main page
+  until v6.0.0) follows a history dry run started elsewhere: it appears with
+  its progress, then its outcome, without a reload; Dismiss is remembered;
+* "N of M GCs live" changes on a heartbeat, without a reload;
 * Hub admin: unlock once and everything loads; Load CDFs from a folder can
   start (its instrument list is filled) and renders in its own card; the way
   home is visible.
@@ -92,11 +91,11 @@ def test_running_now_follows_a_dry_run_then_shows_its_outcome(tmp_path):
         drv = _driver()
         browser_sign_in(drv, port)
         try:
-            drv.get(f"http://127.0.0.1:{port}/classic")
-            assert _wait(lambda: _js(drv, "return document.querySelectorAll("
-                                          "'#dash-file-list li[data-uid]').length") > 0)
+            # v6.0.0: the classic page is gone; the shell's sidebar has the same pill
+            drv.get(f"http://127.0.0.1:{port}/instruments")
+            assert _wait(lambda: _js(drv, "return !!window.GCLive && !!document.getElementById('running-now');"))
+            time.sleep(1)                                  # the first poll
             assert _indicator(drv) == ""                  # nothing running: no pill
-            assert _js(drv, "return !!document.getElementById('status-scan-info');") is False
             _js(drv, "window.__sameDocument = true;")
 
             code, body = post(port, "/api/admin/import-history/dry-run",
@@ -143,118 +142,12 @@ def test_running_now_follows_a_dry_run_then_shows_its_outcome(tmp_path):
             drv.find_element("css selector", "#running-now-popover .rn-dismiss").click()
             assert _wait(lambda: _indicator(drv) == "")
             drv.refresh()
-            assert _wait(lambda: _js(drv, "return document.querySelectorAll("
-                                          "'#dash-file-list li[data-uid]').length") > 0)
+            assert _wait(lambda: _js(drv, "return !!window.GCLive && !!document.getElementById('running-now');"))
             time.sleep(4)                                  # a poll or two
             assert _indicator(drv) == ""
         finally:
             stall.close()
             drv.quit()
-
-
-def test_the_gc_strip_follows_heartbeats_and_the_list_order(tmp_path):
-    hub = build_hub(tmp_path)
-    token = ingest_api.mint_token("gc1", db=hub.db)
-    # a run whose CDF had no injection time (the hub used the file's time)
-    nt = store.samples.insert_received("gc1", "NO-TIME-1", "2026-09-26 10:00:00", "mtime",
-                                       cdf_sha256=None, cdf_path=None, status="final",
-                                       db=hub.db)
-    with booted(tmp_path) as (port, _proc, _data, _home):
-        drv = _driver()
-        browser_sign_in(drv, port)
-        try:
-            drv.get(f"http://127.0.0.1:{port}/classic")
-            strip = lambda: _js(drv, "const b = document.getElementById('gc-strip');"  # noqa: E731
-                                     "return b.hidden ? '' : b.textContent;")
-            assert _wait(lambda: strip() == "\u25cb0 of 2 GCs live"), strip()
-            _js(drv, "window.__sameDocument = true;")
-
-            code, _ = _heartbeat(port, token)
-            assert code == 200
-            assert _wait(lambda: strip() == "\u25cb1 of 2 GCs live"), strip()
-            assert _js(drv, "return window.__sameDocument === true;")
-
-            # click: each GC with its status and a link to its page
-            drv.find_element("id", "gc-strip").click()
-            rows_ = lambda: _js(drv, """return Array.from(document.querySelectorAll(
-                '#gc-strip-popover .gc-row')).map(li => [li.dataset.instrument,
-                li.textContent, li.querySelector('a').getAttribute('href')]);""")
-            assert _wait(lambda: len(rows_()) == 2), rows_()
-            by_id = {r[0]: r for r in rows_()}
-            assert "Live" in by_id["gc1"][1] and by_id["gc1"][2] == "/instruments/gc1"
-            assert "Never checked in" in by_id["gc2"][1] and "GC-2" in by_id["gc2"][1]
-
-            # review blocker: with no new answer, the age keeps going (it used to
-            # freeze at "Not seen for 1 min"): stop polling, move the clock on 3 min
-            _js(drv, "GCLive.stop(); const t0 = Date.now(); Date.now = () => t0 + 180000;")
-            assert _wait(lambda: strip() == "\u25cb0 of 2 GCs live", timeout=25), strip()
-            drv.find_element("id", "gc-strip").click()
-            drv.find_element("id", "gc-strip").click()
-            assert _wait(lambda: "Not seen for 3 min" in {r[0]: r for r in rows_()}["gc1"][1]), rows_()
-            drv.refresh()
-
-            # the toolbar fits: nothing pushed off-screen at 1366 or 1440 px (review #6)
-            for width in (1366, 1440):
-                drv.set_window_size(width, 900)
-                assert _wait(lambda: _js(drv, "return !document.getElementById('gc-strip').hidden;"))
-                over = _js(drv, """const t = document.getElementById('toolbar');
-                    return Array.from(t.children).filter(c => c.offsetParent !== null
-                        && c.getBoundingClientRect().right > t.clientWidth + 1).map(c => c.id);""")
-                assert over == [], (width, over)
-            drv.set_window_size(1600, 1000)
-
-            # ── the sample list ──
-            rows = lambda: _js(drv, """return Array.from(document.querySelectorAll(
-                '#dash-file-list li')).map(li => li.classList.contains('list-day')
-                ? ['day', li.textContent] : [li.dataset.sampleId,
-                   (li.querySelector('.file-item-name') || {}).textContent || '',
-                   (li.querySelector('.file-item-time') || {}).textContent || '']);""")
-            assert _wait(lambda: any(r[0] == str(nt) for r in rows())), rows()
-            r = rows()
-            days = [x[1] for x in r if x[0] == "day"]
-            assert days[-1] == "No injection time", days
-            assert r[-1][0] == str(nt) and r[-1][2] == "file 2026-09-26 10:00"
-            final = [x for x in r if x[0] == str(hub.ids["final"])][0]
-            assert final[2] == "14:23"          # under its day heading: the time only (review #2)
-            assert _js(drv, f"return document.querySelector('#dash-file-list li[data-sample-id="
-                            f"\"{hub.ids['final']}\"] .file-item-time').title;") == \
-                "Injected 2026-09-25 14:23:00"
-            # newest first: injection times descend within each day
-            day, per_day = None, {}
-            for x in r:
-                if x[0] == "day":
-                    day = x[1]
-                elif not x[2].startswith("file"):
-                    per_day.setdefault(day, []).append(x[2])
-            for d, times in per_day.items():
-                assert times == sorted(times, reverse=True), (d, times)
-
-            # full lab IDs: the name is never cut (no ellipsis, nothing hidden)
-            cut = _js(drv, """return Array.from(document.querySelectorAll(
-                '#dash-file-list .file-item-name')).filter(e => e.scrollWidth > e.clientWidth + 1)
-                .map(e => e.textContent);""")
-            assert cut == [], cut
-
-            # Lab ID: natural numeric order, no headings, remembered per browser
-            drv.find_element("css selector", "#sample-sort button[data-sort='lab']").click()
-            names = lambda: [x[1] for x in rows() if x[0] != "day"]  # noqa: E731
-            assert _wait(lambda: not any(x[0] == "day" for x in rows()))
-            n = names()
-            lab = [x.split(" (")[0] for x in n]
-            # no headings in Lab ID order: each row says its date again
-            assert final_time_in_lab_mode(drv, hub.ids["final"]) == "2026-09-25 14:23"
-            assert lab.index("39999") < lab.index("40298") < lab.index("40304") < lab.index("50001"), n
-            drv.refresh()
-            assert _wait(lambda: len(names()) > 3 and not any(x[0] == "day" for x in rows()))
-            assert _js(drv, "return document.querySelector(\"#sample-sort button[data-sort='lab']\")"
-                            ".getAttribute('aria-pressed');") == "true"
-        finally:
-            drv.quit()
-
-
-def final_time_in_lab_mode(drv, sid):
-    return _js(drv, f"return document.querySelector('#dash-file-list li[data-sample-id="
-                    f"\"{sid}\"] .file-item-time').textContent;")
 
 
 def test_hub_admin_unlocks_once_and_starts_a_folder_load(tmp_path):

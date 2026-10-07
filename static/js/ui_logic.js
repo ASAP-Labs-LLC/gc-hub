@@ -289,11 +289,12 @@
         return { live: true, text: 'Live since ' + at };
     }
 
-    // Ids the hub's page addresses use: such an instrument opens on the classic page.
+    // Ids the hub's page addresses use: such an instrument has no page of its
+    // own (v6.0.0: the classic Instruments page that could open it is gone).
     const RESERVED_IDS = ['activity', 'classic', 'new', 'setup'];
     const UNREACHABLE_IDS = ['activity', 'classic'];
     function instrumentHref(id) {
-        if (UNREACHABLE_IDS.includes(id)) return '/instruments/classic?instrument=' + encodeURIComponent(id);
+        if (UNREACHABLE_IDS.includes(id)) return '/instruments';
         return '/instruments/' + encodeURIComponent(id);
     }
 

@@ -203,15 +203,15 @@ class PackageTests(unittest.TestCase):
                      "store.py", "pipeline.py", "exports.py", "methods/d2887.py",
                      "jobs/load_folder.py", "jobs/import_history.py", "tools/import_history.py",
                      "instruments_api.py", "instrument_admin.py", "standards.py",
-                     "templates/instruments.html", "tools/parity_report.py", "agent/agent_main.py",
+                     "templates/instruments_home.html", "tools/parity_report.py", "agent/agent_main.py",
                      "agent/gc_agent/core.py", "agent/requirements-agent.txt",
                      "hub_control.py", "tray/hub_tray.pyw", "tray/gc_tray/__init__.py",
                      "tray/gc_tray/logic.py", "tray/gc_tray/ui.py", "tray/tray.example.json",
                      "tray/gc_tray/client.py", "tray/gc_tray/controller.py",
                      "tray/gc_tray/winsys.py", "tray/gc_tray/main.py",
-                     "templates/index.html", "templates/calibration.html",
+                     "templates/samples.html", "templates/calibration.html",
                      "templates/hub_admin.html", "static/js/hub_admin.js",
-                     "static/js/app.js", "static/css/style.css", "static/css/badge.css",
+                     "static/js/samples_page.js", "static/css/samples.css", "static/css/badge.css",
                      # phases 3+4: the bullets engine, comments, their UI modules
                      "analysis_core.py", "comments.py", "comments_api.py",
                      "static/js/comments.js", "static/js/report_payload.js",
@@ -226,7 +226,7 @@ class PackageTests(unittest.TestCase):
         refs = set()
         for tpl in sorted((self.src / "templates").glob("*.html")):
             refs |= set(re.findall(r"filename='([^']+)'", tpl.read_text(encoding="utf-8")))
-        self.assertTrue({"js/app.js", "js/comments.js", "js/ladder.js"} <= refs, refs)
+        self.assertTrue({"js/samples_page.js", "js/comments.js", "js/ladder.js"} <= refs, refs)
         missing = sorted(r for r in refs if f"static/{r}" not in rel)
         self.assertEqual(missing, [])
 
@@ -411,7 +411,7 @@ class PackageGitCheckoutTests(unittest.TestCase):
 
     def test_tracked_runtime_files_ship(self):
         rel = self._rel()
-        for must in ("app.py", "requirements.txt", "VERSION", "templates/index.html"):
+        for must in ("app.py", "requirements.txt", "VERSION", "templates/samples.html"):
             self.assertIn(must, rel)
         missing = sorted(m for m in runtime_closure(self.src) if m not in rel)
         self.assertEqual(missing, [])

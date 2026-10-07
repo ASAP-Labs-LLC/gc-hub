@@ -269,8 +269,8 @@ class RestartRouteTests(unittest.TestCase):
             with booted(Path(t)) as (port, proc, data, home):
                 _, body = post(port, "/api/restart", {"dry_run": True})
                 self.assertEqual((body["mode"], body["tag"]), ("restart", None))
-                # The Settings modal carries the Restart button and its helpers.
-                html = get_text(port, "/classic")
+                # Admin · Server carries the Restart button and its helpers (v5.0)
+                html = get_text(port, "/admin/hub")
                 self.assertIn('id="btn-restart"', html)
                 self.assertIn("js/restart.js", html)
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/static/js/restart.js",

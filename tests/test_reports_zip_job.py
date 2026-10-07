@@ -137,52 +137,7 @@ def test_unknown_jobs_are_404(hub_app):
     assert _fetch(port, f"{ZIP}/nope/download")[0] == 404
 
 
-# ── the page ────────────────────────────────────────────────────────────────
-
-def _driver():
-    webdriver = pytest.importorskip("selenium.webdriver")
-    from selenium.webdriver.chrome.options import Options
-    opts = Options()
-    for arg in ("--headless=new", "--no-sandbox", "--disable-gpu", "--window-size=1400,1000",
-                "--disable-dev-shm-usage"):
-        opts.add_argument(arg)
-    try:
-        return webdriver.Chrome(options=opts)
-    except Exception as exc:  # noqa: BLE001 - no Chrome / driver here
-        pytest.skip(f"headless Chrome unavailable: {exc}")
-
-
-def test_the_page_polls_the_job_then_fetches_the_zip(hub_app):
-    """Export to PC with two queued reports: the page starts the job, polls it,
-    then follows the one-time link (captured here instead of navigating)."""
-    from bootapp import browser_sign_in
-    port, hub, _data = hub_app
-    drv = _driver()
-    try:
-        browser_sign_in(drv, port)
-        drv.get(f"http://127.0.0.1:{port}/classic")
-        deadline = time.time() + 30
-        while drv.execute_script("return typeof exportToPC") != "function":
-            assert time.time() < deadline
-            time.sleep(0.2)
-        drv.execute_script("""
-            window.__clicked = [];
-            HTMLAnchorElement.prototype.click = function () { window.__clicked.push(this.href); };
-            state.analysisQueue = [
-              {sample_id: arguments[0], lab_id: 'A', sample_name: 'report', standard_name: 'Diesel'},
-              {sample_id: arguments[0], lab_id: 'B', sample_name: 'again', standard_name: 'Diesel'}];
-            window.__done = exportToPC();
-        """, hub.ids["final"])
-        deadline = time.time() + 180
-        while not drv.execute_script("return window.__clicked.length"):
-            assert time.time() < deadline, drv.execute_script("return document.body.innerText")[-2000:]
-            time.sleep(0.2)
-        href = drv.execute_script("return window.__clicked[0]")
-        assert href.startswith(f"http://127.0.0.1:{port}{ZIP}/") and href.endswith("/download"), href
-        path = href[len(f"http://127.0.0.1:{port}"):]
-        code, _headers, raw = _fetch(port, path)
-        assert code == 200, raw[:300]
-        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            assert len(zf.namelist()) == 2      # both reports (same sample, two doc names)
-    finally:
-        drv.quit()
+# The page side (start the job, poll it, follow the one-time link) is the
+# report queue's Download all: tests/test_ui_compare_smoke.py drives it in a
+# browser and tests/js/report_zip.test.js its wording (v6.0.0: the classic
+# page's Export to PC is gone).

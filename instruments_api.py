@@ -11,7 +11,7 @@ are ``{error, ...}`` with 400/404/409 (``instrument_admin.AdminError``).
 Routes::
 
     GET  /instruments                                        the page (v4.0 design)
-    GET  /instruments/classic                                the 2A2 page (this release only)
+    GET  /instruments/classic[?instrument=<id>]              v6.0.0: 302 to /instruments[/<id>]
     GET  /instruments/<id>                                   one instrument (v4.0 design)
     GET  /setup[?instrument=|new=1]                          the setup guide (v4.0)
     GET  /api/instruments/activity[?limit=]                  the Activity feed (v4.0)
@@ -64,7 +64,7 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, jsonify, redirect, render_template, request
 
 import admin_auth
 import ingest_api
@@ -219,10 +219,20 @@ def _summary(row: dict, conf: dict, db, counts: dict, agents: dict) -> dict:
     return out
 
 
-# ── pages (v4.0: the new design; the 2A2 page stays at /instruments/classic) ──
+# ── pages (v4.0: the new design; v6.0.0 removed the 2A2 page) ────────────
 
 def _page(template: str, **extra):
     return render_template(template, app_version=version.APP_VERSION, **extra)
+
+
+def _instrument_url(iid) -> str:
+    """``/instruments/<iid>`` when that page can open it, else ``/instruments``
+    (an unknown id, or one a hub route shadows: ``ia.UNREACHABLE_IDS``)."""
+    from urllib.parse import quote
+    if (isinstance(iid, str) and iid and iid not in ia.UNREACHABLE_IDS
+            and store.instruments.get(iid, db=_db()) is not None):
+        return "/instruments/" + quote(iid, safe="")
+    return "/instruments"
 
 
 @bp.route("/instruments", methods=["GET"])
@@ -232,7 +242,9 @@ def instruments_page():
 
 @bp.route("/instruments/classic", methods=["GET"])
 def instruments_classic_page():
-    return render_template("instruments.html", app_version=version.APP_VERSION)
+    """v6.0.0: the 2A2 page is gone; an old bookmark (``?instrument=<id>``)
+    lands on that instrument's page, else the Instruments page."""
+    return redirect(_instrument_url(request.args.get("instrument")), code=302)
 
 
 @bp.route("/instruments/<iid>", methods=["GET"])
@@ -240,10 +252,9 @@ def instrument_detail_page(iid):
     if store.instruments.get(iid, db=_db()) is None:
         return _page("instrument_missing.html", nav="instruments", instrument_id=iid), 404
     if iid in ia.UNREACHABLE_IDS:
-        # /api/instruments/<iid> is shadowed by a hub route for this id (made
-        # before the id was reserved): the classic page can still manage it
-        from flask import redirect
-        return redirect(f"/instruments/classic?instrument={iid}")
+        # /api/instruments/<iid> (or this page) is shadowed by a hub route for
+        # this id, made before the id was reserved: the list is all there is
+        return redirect("/instruments", code=302)
     return _page("instrument_detail.html", nav="instruments", instrument_id=iid)
 
 

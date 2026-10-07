@@ -1,8 +1,7 @@
-"""v2.0.0 RC: a headless-Chrome smoke of the main page with two instruments
-that hold the same lab ID. Each row names its instrument, the toolbar's
-instrument select filters the list (and is remembered by the browser), a
-review note shows as a badge, and the Re-process modal starts on the list's
-instrument.
+"""v2.0.0 RC: a headless-Chrome smoke of the Samples page (the classic main
+page until v6.0.0) with two instruments that hold the same lab ID. Each row
+names its instrument, the instrument chips filter the list (the filter is in
+the address, so a reload keeps it), and a review note shows on its row.
 
 Skipped when selenium or a Chrome/chromedriver can't be started. Plotly is
 stubbed before the page loads, in case its CDN is unreachable (the real
@@ -69,13 +68,18 @@ def _wait(pred, timeout=20.0):
 
 
 def _rows(drv):
-    """``[(name, instrument badge text, status badge text)]`` of the dashboard list."""
+    """``[(sample id, lab text, instrument tag, review text)]`` of the list."""
     return drv.execute_script("""
-        return Array.from(document.querySelectorAll('#dash-file-list li[data-uid]')).map(li => [
-            (li.querySelector('.file-item-name') || {}).textContent || '',
-            (li.querySelector('.instrument-badge') || {}).textContent || '',
-            (li.querySelector('.status-badge') || {}).textContent || '']);
+        return [...document.querySelectorAll('[data-testid=sample-row]')].map(r => [
+            Number(r.dataset.sampleId),
+            (r.querySelector('.lab') || {}).textContent || '',
+            (r.querySelector('.l1 .tag') || {}).textContent || '',
+            (r.querySelector('[data-testid=row-review]') || {}).textContent || '']);
     """)
+
+
+def _ready(drv):
+    return drv.execute_script("return !!(window.GCSamples && GCSamples.ready);")
 
 
 def test_two_instruments_same_lab_id_are_distinguishable_and_filterable(tmp_path):
@@ -93,51 +97,40 @@ def test_two_instruments_same_lab_id_are_distinguishable_and_filterable(tmp_path
         drv = _driver()
         browser_sign_in(drv, port)
         try:
-            drv.get(f"http://127.0.0.1:{port}/classic")
-            assert _wait(lambda: len(_rows(drv)) >= 8), _rows(drv)
+            drv.get(f"http://127.0.0.1:{port}/samples")
+            assert _wait(lambda: _ready(drv) and len(_rows(drv)) >= 8), _rows(drv)
             # the instrument names arrive from /api/instruments
-            assert _wait(lambda: any(r[1] == "GC-2 FID" for r in _rows(drv))), _rows(drv)
+            assert _wait(lambda: any(r[2] == "GC-2 FID" for r in _rows(drv))), _rows(drv)
             rows = _rows(drv)
-            twins = {r[1] for r in rows if r[0].startswith("40304")}
+            twins = {r[2] for r in rows if r[1].startswith("40304")}
             assert {gc1_name, "GC-2 FID"} <= twins, rows
-            assert all(r[1] for r in rows), rows                # every row has a badge
-            assert any(r[2] == "Review" for r in rows), rows      # the review note shows
+            assert all(r[2] for r in rows), rows                # every row names its GC
+            final = [r for r in rows if r[0] == hub.ids["final"]][0]
+            assert "blank arrived late" in final[3], final      # the review note shows
 
-            # the select lists All + each instrument
-            opts = drv.execute_script(
-                "return Array.from(document.querySelectorAll('#instrument-filter option'))"
-                ".map(o => [o.value, o.textContent]);")
-            assert opts[0] == ["", "All instruments"] and ["gc2", "GC-2 FID"] in opts, opts
+            # the chips: All + each instrument
+            chips = drv.execute_script("return [...document.querySelectorAll('#inst-chips .chip')]"
+                                       ".map(c => c.textContent);")
+            assert chips[0] == "All instruments" and "GC-2 FID" in chips, chips
 
             # filter to gc2: only gc2's samples, the twin among them
-            drv.execute_script("const s = document.getElementById('instrument-filter');"
-                               "s.value = 'gc2'; s.dispatchEvent(new Event('change'));")
-            assert _wait(lambda: _rows(drv) and all(r[1] == "GC-2 FID" for r in _rows(drv))), \
+            drv.execute_script("document.querySelector('[data-testid=chip-inst-gc2]').click();")
+            assert _wait(lambda: "instrument=gc2" in drv.current_url)
+            assert _wait(lambda: _rows(drv) and all(r[2] == "GC-2 FID" for r in _rows(drv))), \
                 _rows(drv)
-            assert any(r[0].startswith("40304") for r in _rows(drv))
-            ids = drv.execute_script("return Array.from(document.querySelectorAll("
-                                     "'#dash-file-list li[data-uid]')).map(li => li.dataset.sampleId);")
-            assert str(twin) in ids and str(hub.ids["final"]) not in ids
+            ids = [r[0] for r in _rows(drv)]
+            assert twin in ids and hub.ids["final"] not in ids
 
-            # the Re-process modal resolves lab IDs on the list's instrument
-            drv.execute_script("openReprocessModal();")
-            assert drv.execute_script(
-                "return document.getElementById('reprocess-instrument').value;") == "gc2"
-
-            # remembered by this browser
-            drv.get(f"http://127.0.0.1:{port}/classic")
-            assert _wait(lambda: drv.execute_script(
-                "return document.getElementById('instrument-filter').value;") == "gc2")
-            assert _wait(lambda: _rows(drv) and all(r[1] == "GC-2 FID" for r in _rows(drv))), \
+            # the filter is in the address: a reload keeps it
+            drv.refresh()
+            assert _wait(lambda: _ready(drv) and drv.execute_script(
+                "return document.querySelector('[data-testid=chip-inst-gc2]').getAttribute('aria-pressed');")
+                == "true")
+            assert _wait(lambda: _rows(drv) and all(r[2] == "GC-2 FID" for r in _rows(drv))), \
                 _rows(drv)
 
             # back to All: both instruments again
-            drv.execute_script("const s = document.getElementById('instrument-filter');"
-                               "s.value = ''; s.dispatchEvent(new Event('change'));")
-            assert _wait(lambda: {gc1_name, "GC-2 FID"} <= {r[1] for r in _rows(drv)}), _rows(drv)
-            # with more than one instrument and no filter, the modal makes you choose
-            drv.execute_script("openReprocessModal();")
-            assert drv.execute_script(
-                "return document.getElementById('reprocess-instrument').value;") == ""
+            drv.execute_script("document.querySelector('[data-testid=chip-inst-all]').click();")
+            assert _wait(lambda: {gc1_name, "GC-2 FID"} <= {r[2] for r in _rows(drv)}), _rows(drv)
         finally:
             drv.quit()

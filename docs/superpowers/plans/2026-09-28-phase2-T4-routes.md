@@ -76,8 +76,8 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/api/rebuild-db` | POST | removed | — | 404 |
 | `/api/library/reindex-times` | POST | removed | — | 404 |
 | `/api/reprocess` | POST | migrated | session | `{sample_ids:[int], use_current_blank?, use_current_corrections?, missing?:[str]}` or `{query, instrument}` (a lab-ID selection **requires** `instrument`, else 400) → `{status:'queued', count, sample_ids, job_ids, refused:[{sample_id, error}]}`; 404 if any id is unknown; result-only samples are refused; each queued via `pipeline.request_reprocess` |
-| `/api/reprocess/preview` | POST | migrated | session | `{query, instrument}` (400 without `instrument`) → `{matched:[lab_id], missing:[str], sample_ids:[int], instrument}` (latest injection per lab ID) |
-| `/api/reprocess/status` | GET | migrated | session | query `sample_ids=1,2,3` → `{phase:'processing'\|'done'\|'idle', total, processed, errors, pending, samples:[{sample_id, status, current_revision, error}]}` |
+| `/api/reprocess/preview` | POST | removed | — | v6.0.0: 404 (only the classic page's reprocess modal used it; `/api/reprocess` `{query, instrument}` resolves lab IDs the same way) |
+| `/api/reprocess/status` | GET | removed | — | v6.0.0: 404 (the classic page's reprocess toast; reprocess progress is a task in `/api/live`) |
 | `/api/export-lims` | POST | migrated | session | `{sample_ids:[int]}` → `{exported:[{sample_id, revision, seq}], refused:[{sample_id, error}]}`; 200 if any exported, **409** if every one is refused by the gate (`pipeline.export_to_lims`: a new revision `export-lims` + its export row, one txn); 404 if any id is unknown; 400 if none given |
 | `/api/qbench-upload` | POST | migrated | session | `{queue:[{sample_id, standard_name, sample_name?, conclusion?, bullets?, overlay_standards?, ranges?}], username?, password?, …}`; 404 any unknown id; **409** `{refused:[…]}` (nothing queued) if any sample fails the gate; the server resolves the CDF and builds the PDF; `pdf_path`/`sample_path` from the client are ignored; after a successful upload `samples.qbench_revision`/`qbench_uploaded_at` are set to the revision the PDF was built from (gate re-checked in the thread) |
 | `/api/analysis` | POST | migrated | session | `sample_path` → `sample_id`; the ladder is the current revision's `calibration_used` anchors (else the gc1 context's) |
@@ -85,8 +85,8 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/api/export-analysis-reports-zip` | POST | migrated | session | items: `sample_path` → `sample_id`; unknown ids skipped. v3.0.1: → 202 `{job}` at once (the ZIP is built on a thread by `download_jobs`: N PDFs outlasted Cloudflare's 100 s); 400 no/bad items; 409 two builds already running; every item skipped = a failed job |
 | `/api/export-analysis-reports-zip/<job_id>` | GET | new | session | v3.0.1: the report ZIP job `{job: {id, state, done, total, result: {written, skipped}, error, download}}` (only the signed-in name that started it; 404 unknown/expired) |
 | `/api/export-analysis-reports-zip/<job_id>/download` | GET | new | session | v3.0.1: the finished ZIP (attachment, `Cache-Control: no-store`), streamed once then deleted; 404 unknown/unfinished/fetched; expires 10 minutes after the build |
-| `/api/export-pdf` | POST | migrated | session | `{sample_id}`; 404 unknown |
-| `/api/export-comparison` | POST | migrated | session | `{sample_ids:[int]}` (was `sample_paths`) |
+| `/api/export-pdf` | POST | removed | — | v6.0.0: 404 (the classic page's chromatogram PDF) |
+| `/api/export-comparison` | POST | removed | — | v6.0.0: 404 (Comparison Export; Ryan does not use it, dropped from the new design in v5.0.0) |
 | `/api/best-fit` | POST | migrated | session | `{sample_id}` → the live classification (`label, best_standard, score, ranking, mix`) plus `recorded:{best_fit, fit_score, revision}` from the stored revision; refreshes `sample_cache` |
 | `/api/comparison-standard` | POST | unchanged | session | T5 review: admin (`password`), `{sample_id, name}` only (`source_path` → 400); the standards folder is fixed under the data folder |
 | `/api/settings` | GET, POST | unchanged | session | GET shows the gc1 row's `calibration_cdf` and the fixed standards/export folders; POST (JSON only) changes only `settings.OPERATOR_KEYS`, and `settings.ADMIN_KEYS` with the admin `password` (403 without); any other changed key → 400 (T5 review C1) |
@@ -146,7 +146,7 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/api/comment-presets` | GET | new | session | phase 4 `comments_api`: → `{presets:[{id, text, sort}]}` (active, in order) |
 | `/api/admin/comment-presets` | POST | new | session | phase 4 `comments_api` (admin password): `{password, action: list\|create\|update\|reorder\|deactivate\|activate, text?, id?, ids?}` → `{presets, preset?}` (create 201; ≤ 200 chars, ≤ 50 active; reorder names every preset once) |
 | `/instruments` | GET | new | session | 2A2 `instruments_api` blueprint: the Instruments page; v3.1: the new design (card grid, Add a GC, Activity feed; `templates/instruments_home.html`) |
-| `/instruments/classic` | GET | new | session | v3.1 `instruments_api`: the 2A2 page (`templates/instruments.html`), kept for this release |
+| `/instruments/classic` | GET | new | session | v6.0.0: 302 to `/instruments/<?instrument>` when that page can open it, else `/instruments` (the 2A2 page is gone; old bookmarks) |
 | `/instruments/<iid>` | GET | new | session | v3.1 `instruments_api`: one instrument in the new design (setup checklist, Agent, Calibration, Correction factors, Results file, Methods, Backfill, Conflicts) over the same `/api/` routes; 404 for an unknown id |
 | `/setup` | GET | new | session | v3.1 `instruments_api`: the GC setup guide (`?instrument=<id>`, `?new=1` starts at step 1) |
 | `/api/instruments/activity` | GET | new | session | v3.1 `instruments_api`: the Activity feed, `?limit=` (default 30, 1–200; 400 if not a number) → `{entries:[{key, kind, at, instrument_id, instrument_name, by, sample_id, lab_id, injection_dt, detail}]}` newest first (`instrument_activity.feed`: `instrument_events` + samples received, corrections saved, reports, results CSV writes, agent check-ins) |
@@ -183,11 +183,11 @@ routes also need the admin password in the body, as before. `—` = removed.
 | `/healthz` | GET | unchanged | open | |
 | `/` | GET | migrated | session | v5.0.0: the Samples page (`templates/samples.html`, lane S); `?open=settings\|help` (the old user-menu links) → 302 `/settings` / `/help` |
 | `/samples` | GET | new | session | v5.0.0: the Samples page; filters, search and sort in the query (`instrument, status, q, sort, notsent`) |
-| `/classic` | GET | new | session | v5.0.0: the classic main page (`templates/index.html`), kept for this release only |
-| `/classic/lab/<lab_id>` | GET | new | session | v5.0.0 `sample_links`: the classic page with the lab ID's newest run selected (as `/lab/<lab_id>` was in v4.0); 404 friendly page |
-| `/classic/samples/<int:sample_id>` | GET | new | session | v5.0.0 `sample_links`: the classic page, that run selected, Dashboard tab; 404 friendly page |
-| `/classic/samples/<int:sample_id>/compare` | GET | new | session | v5.0.0 `sample_links`: as above, Analysis tab; `?standard=<name>` |
-| `/classic/samples/<int:sample_id>/data` | GET | new | session | v5.0.0 `sample_links`: as above, Distillation Data tab |
+| `/classic` | GET | new | session | v6.0.0: 302 to `/` with the query kept (the classic main page is gone; old bookmarks) |
+| `/classic/lab/<lab_id>` | GET | new | session | v6.0.0 `sample_links`: 302 to `/lab/<lab_id>` (re-quoted) |
+| `/classic/samples/<int:sample_id>` | GET | new | session | v6.0.0 `sample_links`: 302 to `/samples/<id>` (query kept) |
+| `/classic/samples/<int:sample_id>/compare` | GET | new | session | v6.0.0 `sample_links`: 302 to `/samples/<id>/compare` (`?standard=` kept) |
+| `/classic/samples/<int:sample_id>/data` | GET | new | session | v6.0.0 `sample_links`: 302 to `/samples/<id>/data` |
 | `/calibration` | GET | unchanged | session | |
 | `/lab/<lab_id>` | GET | new | session | v3.1 `sample_links` (sendable links): the lab ID's newest run (latest `injection_dt`, final runs first, any instrument; exact then case-insensitive match; decoded once); v5.0.0: 302 to `/samples/<id>`, whose Overview lists the other runs; 404 friendly "No GC result for lab ID … yet" page |
 | `/samples/<int:sample_id>` | GET | new | session | v3.1 `sample_links`; v5.0.0: the Samples page, that run, Overview; 404 friendly page |

@@ -193,7 +193,7 @@ def test_open_paths(env):
 @pytest.mark.parametrize("path,cls", [
     ("/healthz", "open"), ("/login", "open"), ("/api/login", "open"),
     ("/api/login/card", "open"), ("/api/login/admin", "open"), ("/api/logout", "open"),
-    ("/static/js/app.js", "open"), ("/favicon.ico", "open"), ("/api/ingest", "open"),
+    ("/static/js/shell.js", "open"), ("/favicon.ico", "open"), ("/api/ingest", "open"),
     ("/api/agent/heartbeat", "open"), ("/api/agent/results", "open"),
     ("/api/agent/package", "open"), ("/api/agent/package.zip", "open"),
     ("/api/agents", "session"), ("/api/agent/other", "session"), ("/api/ingestx", "session"),

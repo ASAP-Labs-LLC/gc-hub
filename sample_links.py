@@ -10,9 +10,11 @@ Pages (session). v5.0.0: the Samples page (``templates/samples.html``;
     GET /samples/<id>/compare[?standard=<n>]  one run, Compare (standard picked)
     GET /samples/<id>/data                    one run, Data
 
-The classic page keeps its links for this release under ``/classic``:
-``/classic/lab/<lab_id>`` and ``/classic/samples/<id>[/compare|/data]``
-(``static/js/deeplink.js`` selects the sample and the tab).
+v6.0.0 removed the classic page; its old links redirect (302, so bookmarks
+keep working) to the same view on the Samples page::
+
+    GET /classic/lab/<lab_id>                       → /lab/<lab_id>
+    GET /classic/samples/<id>[/compare|/data][?…]   → /samples/<id>[/compare|/data][?…]
 
 An unknown lab ID or sample id gets a friendly 404 page ("No GC result for
 lab ID … yet", with a link to search). COA Reviewer and other apps link to
@@ -35,7 +37,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from flask import Blueprint, current_app, jsonify, redirect, render_template
+from urllib.parse import quote
+
+from flask import Blueprint, current_app, jsonify, redirect, render_template, request
 
 import paths
 import store
@@ -87,11 +91,6 @@ def resolve(lab_id: str, *, db) -> Optional[dict]:
                   "instrument_name": names[r["instrument_id"]],
                   "injection_dt": r["injection_dt"], "status": r["status"]} for r in runs],
     }
-
-
-def _classic_page():
-    """The classic main page (app.py's ``classic_page`` view), at this URL."""
-    return current_app.view_functions["classic_page"]()
 
 
 def _samples_page():
@@ -153,31 +152,28 @@ def sample_data_page(sample_id: int):
     return _sample_page(sample_id)
 
 
-# ── the classic page's links, kept for v5.0.0 (deeplink.js reads them) ────
+# ── v6.0.0: the classic page's old links, redirected to the Samples page ──
+
+def _with_query(path: str) -> str:
+    qs = request.query_string.decode("latin-1")
+    return path + (f"?{qs}" if qs else "")
+
 
 @bp.route("/classic/lab/<lab_id>", methods=["GET"])
 def classic_lab_page(lab_id: str):
-    if resolve(lab_id, db=_db()) is None:
-        return _not_found(lab_id=lab_id)
-    return _classic_page()
-
-
-def _classic_sample(sample_id: int):
-    if not _known(sample_id):
-        return _not_found(sample_id=sample_id)
-    return _classic_page()
+    return redirect("/lab/" + quote(lab_id, safe=""), code=302)
 
 
 @bp.route("/classic/samples/<int:sample_id>", methods=["GET"])
 def classic_sample_page(sample_id: int):
-    return _classic_sample(sample_id)
+    return redirect(_with_query(f"/samples/{sample_id}"), code=302)
 
 
 @bp.route("/classic/samples/<int:sample_id>/compare", methods=["GET"])
 def classic_sample_compare_page(sample_id: int):
-    return _classic_sample(sample_id)
+    return redirect(_with_query(f"/samples/{sample_id}/compare"), code=302)
 
 
 @bp.route("/classic/samples/<int:sample_id>/data", methods=["GET"])
 def classic_sample_data_page(sample_id: int):
-    return _classic_sample(sample_id)
+    return redirect(_with_query(f"/samples/{sample_id}/data"), code=302)

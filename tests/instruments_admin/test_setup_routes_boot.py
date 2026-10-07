@@ -1,6 +1,6 @@
 """v3.1 in the booted app: the new pages (/instruments, /instruments/<id>,
-/setup; the old page at /instruments/classic), ``GET /api/instruments/<id>/setup``
-and ``GET /api/instruments/activity`` (session), the setup summary on
+/setup; the old page's address /instruments/classic redirects since v6.0.0),
+``GET /api/instruments/<id>/setup`` and ``GET /api/instruments/activity`` (session), the setup summary on
 ``/api/instruments``, and events written by the admin routes with
 ``by`` = ``web_auth.actor()``."""
 from __future__ import annotations
@@ -15,7 +15,7 @@ import pytest
 
 pytest.importorskip("flask")
 
-from bootapp import TEST_USER, booted, get, get_text, post, setup_admin  # noqa: E402
+from bootapp import TEST_USER, booted, cookie_header, get, get_text, post, setup_admin  # noqa: E402
 
 ACTOR = f"{TEST_USER} (127.0.0.1)"
 
@@ -26,6 +26,19 @@ def _prepare(tmp: Path):
     return hub
 
 
+def _location(port, path):
+    """(status, Location) of a signed-in GET, without following a redirect."""
+    import http.client
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+    try:
+        c.request("GET", path, headers=cookie_header(port))
+        r = c.getresponse()
+        r.read()
+        return r.status, r.getheader("Location")
+    finally:
+        c.close()
+
+
 def _status(port, path, **kw):
     try:
         get_text(port, path, timeout=15, **kw)
@@ -34,7 +47,7 @@ def _status(port, path, **kw):
         return e.code
 
 
-def test_the_new_pages_and_the_classic_page(tmp_path):
+def test_the_new_pages_and_the_old_classic_address(tmp_path):
     import store
     hub = _prepare(tmp_path)
     store.instruments.upsert({"id": "activity", "name": "Old GC"}, db=hub.db)
@@ -46,21 +59,28 @@ def test_the_new_pages_and_the_classic_page(tmp_path):
         first = home.index("<script")
         assert "js/session.js" in home[first:first + 200]
 
-        classic = get_text(port, "/instruments/classic", timeout=15)
-        assert "instruments.js" in classic and 'id="inst-list"' in classic
+        # v6.0.0: the 2A2 page is gone; an old bookmark lands on the new pages
+        code, loc = _location(port, "/instruments/classic")
+        assert code == 302 and loc == "/instruments"
+        code, loc = _location(port, "/instruments/classic?instrument=gc1")
+        assert code == 302 and loc == "/instruments/gc1"
+        for odd in ("nope", "activity", "%2F%2Fevil.example"):
+            code, loc = _location(port, f"/instruments/classic?instrument={odd}")
+            assert code == 302 and loc == "/instruments", odd
 
         detail = get_text(port, "/instruments/gc1", timeout=15)
         assert 'data-testid="instrument-detail-page"' in detail and 'data-instrument="gc1"' in detail
         assert _status(port, "/instruments/nope") == 404
-        # an instrument made before "activity" was reserved opens on the classic page
-        html = get_text(port, "/instruments/activity", timeout=15)
-        assert 'id="inst-list"' in html
+        # an instrument made before "activity" was reserved: its page can't
+        # open (the API path is a hub route), so the list, never a loop
+        code, loc = _location(port, "/instruments/activity")
+        assert code == 302 and loc == "/instruments"
 
         guide = get_text(port, "/setup?instrument=gc1", timeout=15)
         assert 'data-testid="setup-page"' in guide
         assert 'data-testid="setup-page"' in get_text(port, "/setup?new=1", timeout=15)
 
-        # the shell: nav links go to the classic pages that aren't redesigned yet
+        # the shell: nav links
         for href in ('href="/"', 'href="/admin/hub"', 'href="/instruments"'):
             assert href in home
         assert 'id="app-version"' in home

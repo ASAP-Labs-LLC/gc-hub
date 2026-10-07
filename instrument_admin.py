@@ -53,8 +53,9 @@ import store
 log = logging.getLogger("instrument_admin")
 
 ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
-# Ids a page URL uses (/instruments/classic, /api/instruments/activity): an
-# instrument with one of these ids could never be opened.
+# Ids a page URL uses (/instruments/classic, an old bookmark since v6.0.0;
+# /api/instruments/activity): an instrument with one of these ids could never
+# be opened.
 RESERVED_IDS = frozenset({"activity", "classic", "new", "setup"})
 # ...of which these can't be opened at /instruments/<id> (the page or its API is shadowed)
 UNREACHABLE_IDS = frozenset({"activity", "classic"})
@@ -122,8 +123,8 @@ def reserved_id_warnings(*, db: store.Db = None) -> list:
     for r in store.instruments.list(db=db):
         if r["id"] in RESERVED_IDS:
             out.append(f"Instrument {r['name']} has the id \"{r['id']}\", which is now reserved by the hub's "
-                       f"pages, so /instruments/{r['id']} does not open it. Manage it on the "
-                       f"classic page: /instruments/classic?instrument={r['id']}.")
+                       f"pages, so /instruments/{r['id']} does not open it. Its runs still "
+                       f"process; to manage it on the pages, add the GC again under another id.")
     return out
 
 

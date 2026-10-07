@@ -362,9 +362,8 @@ def test_the_real_app_log_has_no_forged_line_from_a_percent_encoded_path(hub):
 # A JSON body that is not an object ("str", 123, [1]) on an operator route was
 # read with ``body.get(...)`` and answered the generic 500 (and an ERROR
 # traceback in app.log): a client mistake must be a 400 that says so.
-NON_OBJECT_ROUTES = ("/api/reprocess", "/api/reprocess/preview", "/api/analysis",
-                     "/api/best-fit", "/api/export-lims", "/api/export-pdf",
-                     "/api/export-comparison", "/api/export-analysis-report",
+NON_OBJECT_ROUTES = ("/api/reprocess", "/api/analysis",
+                     "/api/best-fit", "/api/export-lims", "/api/export-analysis-report",
                      "/api/export-analysis-reports-zip", "/api/qbench-skip-item",
                      "/api/restart")
 
@@ -421,9 +420,9 @@ def test_a_large_sample_ids_list_is_answered_quickly(hub):
 
 
 @pytest.mark.parametrize("instrument", [5, ["gc1"], {"a": 1}])
-def test_reprocess_preview_with_a_non_string_instrument_is_a_400(hub, instrument):
+def test_reprocess_by_lab_id_with_a_non_string_instrument_is_a_400(hub, instrument):
     port, _data = hub
-    code, _h, raw = _raw(port, "POST", "/api/reprocess/preview",
+    code, _h, raw = _raw(port, "POST", "/api/reprocess",
                          json.dumps({"query": "1-3", "instrument": instrument}).encode(),
                          {"Content-Type": "application/json"})
     assert code == 400, (code, raw[:300])

@@ -5,8 +5,8 @@ See docs/superpowers/specs/2026-09-25-phase1-deploy-infrastructure-design.md
 polls GET /healthz on a scratch port before switching traffic to a release;
 it must answer 200 with {"status": "ok", "version": <tag>} with no auth and
 no outbound calls, and must not itself count as activity. Neither may an open
-tab's background polling (notifications, restart-wait, scan/reprocess
-progress) — only a real user route may.
+tab's background polling (live, notifications, restart-wait) — only a
+real user route may.
 """
 import contextlib
 import sys
@@ -28,10 +28,10 @@ try:
 except Exception:
     HAVE_DEPS = False
 
-# Endpoints app.js hits on a timer, never from a click: loadNotifications()
-# polls every 30s for the life of a tab, and _waitForServerAndReload /
-# _pollReprocessStatus poll every 1-2s while a restart/reprocess is in
-# flight (the scan-status poll went with the scan routes in phase 2 T4). api_qbench_upload_status is the
+# Endpoints a page hits on a timer, never from a click: /api/live and the
+# notifications for the life of a tab, /api/server-status from tabs of older
+# pages while a restart is in flight (the scan-status poll went with the scan
+# routes in phase 2 T4; the reprocess-status poll with the classic page, v6.0.0). api_qbench_upload_status is the
 # one-shot "reconnect to an in-progress upload" check init() makes on every
 # page load, alongside other init calls — but it (like the rest) is the app
 # checking on itself, not a person doing something, so it is excluded too.
@@ -39,7 +39,6 @@ POLLING_ENDPOINTS = (
     "/api/live",                    # v3.1: every open tab, every 3 s (static/js/live.js)
     "/api/notifications",
     "/api/server-status",
-    "/api/reprocess/status",
     "/api/qbench-upload-status",
 )
 
