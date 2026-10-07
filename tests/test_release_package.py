@@ -615,8 +615,9 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("concurrency:", _top(self.wf))
         self.assertIn("github.ref", _top(self.wf))
         self.assertEqual(set(self.jobs), {"test", "windows-install"})
-        for name, job in self.jobs.items():
-            self.assertRegex(job, r"timeout-minutes: 20\b", name)
+        # the suite with v6's browser tests takes 16-20 minutes on CI
+        self.assertRegex(self.jobs["test"], r"timeout-minutes: 40\b")
+        self.assertRegex(self.jobs["windows-install"], r"timeout-minutes: 20\b")
 
     def test_test_job(self):
         job = self.jobs["test"]
