@@ -55,6 +55,18 @@
         }
         return el;
     }
+    /** A 16px stroke icon (no text node, so a button's textContent is its label). */
+    function svgIcon(name) {
+        const NS = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('viewBox', '0 0 16 16');
+        svg.setAttribute('aria-hidden', 'true');
+        svg.setAttribute('class', 'ico-svg');
+        const path = document.createElementNS(NS, 'path');
+        path.setAttribute('d', name === 'check' ? 'M3.5 8.5l3 3 6-7' : 'M8 3.5v9M3.5 8h9');
+        svg.appendChild(path);
+        return svg;
+    }
     function safe(s) {           // Plotly renders pseudo-HTML in labels and names
         return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
@@ -354,20 +366,36 @@
         d.conclForm = h('div', { className: 'cmp-concl-form', hidden: true },
             d.conclArea, d.conclCut,
             h('div', { className: 'row' },
-                h('span', { className: 'caption cmp-concl-hint', text: 'A preset goes in at the cursor.' }),
                 d.conclCount,
                 h('span', { className: 'spacer' }),
                 h('button', { type: 'button', className: 'btn btn-sm btn-ghost', text: 'Cancel',
                               onclick: () => { v.editing = false; renderConclusion(v); } }),
                 h('button', { type: 'button', className: 'btn btn-sm btn-primary', text: 'Save',
                               'data-testid': 'compare-conclusion-save', onclick: () => saveConclusion(v) })));
-        // conclusion presets: a menu of phrases inserted into the conclusion
-        d.presetBtn = h('button', { type: 'button', className: 'btn btn-sm btn-ghost', hidden: true,
-                                    'aria-haspopup': 'menu', 'aria-expanded': 'false',
-                                    'data-testid': 'compare-preset-menu', onclick: () => togglePresetMenu(v) },
-            'Insert preset');
-        d.presetMenu = h('div', { className: 'menu cmp-menu cmp-preset-menu', role: 'menu', hidden: true,
-                                  'aria-label': 'Conclusion presets', 'data-testid': 'compare-presets' });
+        // conclusion presets (v6.0.1): a tray of chips under the editor, never a
+        // menu over the text it edits. The header's "Add preset" opens the editor
+        // on the tray; a chip adds its text at the cursor (Undo takes it back), and
+        // a preset already in the conclusion shows a check.
+        d.presetBtn = h('button', { type: 'button', className: 'btn btn-sm', hidden: true,
+                                    'data-testid': 'compare-preset-menu', onclick: () => openPresets(v) },
+            svgIcon('plus'), 'Add preset');
+        d.presetFilter = h('input', { type: 'search', className: 'cmp-presets-filter', hidden: true,
+                                      placeholder: 'Filter presets', 'aria-label': 'Filter presets',
+                                      oninput: () => renderPresetChips(v) });
+        d.presetStatus = h('span', { className: 'caption cmp-presets-status', role: 'status', 'aria-live': 'polite' });
+        d.presetList = h('div', { className: 'cmp-presets-list' });
+        d.presetEmpty = h('p', { className: 'caption cmp-presets-empty', hidden: true });
+        d.presetTray = h('div', { className: 'cmp-presets', role: 'group', hidden: true,
+                                  'aria-labelledby': 'cmp-presets-h', 'data-testid': 'compare-presets' },
+            h('div', { className: 'cmp-presets-head' },
+                h('span', { className: 'cmp-presets-title', id: 'cmp-presets-h', text: 'Presets' }),
+                d.presetStatus, h('span', { className: 'spacer' }), d.presetFilter),
+            d.presetList, d.presetEmpty);
+        d.conclForm.insertBefore(d.presetTray, d.conclForm.lastChild);
+        // the cursor is kept across a click on a chip (the click blurs the editor)
+        const keepSel = () => { v.presetSel = { start: d.conclArea.selectionStart, end: d.conclArea.selectionEnd }; };
+        for (const ev of ['keyup', 'mouseup', 'select', 'blur']) d.conclArea.addEventListener(ev, keepSel);
+        d.conclArea.addEventListener('input', () => { keepSel(); renderPresetChips(v); });
         // the sample's earlier notes (comments from before v6): read-only
         d.notesList = h('ul', { className: 'cmp-notes-list', 'data-testid': 'compare-notes-list' });
         d.notes = h('div', { className: 'cmp-notes', hidden: true, 'data-testid': 'compare-notes' },
@@ -380,7 +408,7 @@
                                         'aria-labelledby': 'cmp-concl-h' },
             h('div', { className: 'cmp-sec-head' }, h('h3', { id: 'cmp-concl-h', text: 'Conclusion' }),
                 h('span', { className: 'spacer' }), d.conclUse,
-                h('span', { className: 'cmp-preset' }, d.presetBtn, d.presetMenu), d.conclEdit),
+                d.presetBtn, d.conclEdit),
             d.conclText, d.conclNote, d.conclForm, d.notes);
 
         const main = h('div', { className: 'cmp-main' }, d.trendCard, d.diffCard);
@@ -429,7 +457,6 @@
             if (!d.pop.hidden) { closePop(v); return; }
             if (v.annotating) { setAnnotate(v, false); return; }
             if (!d.annotMenu.hidden) { toggleAnnotMenu(v, false); return; }
-            if (!d.presetMenu.hidden) { togglePresetMenu(v, false); d.presetBtn.focus(); return; }
             if (v.drawerOpen && !document.querySelector('dialog[open]')) setDrawer(v, false);
         };
         document.addEventListener('keydown', onKey);
@@ -437,9 +464,6 @@
         const onDocClick = (e) => {
             if (!d.annotMenu.hidden && !d.annotMenu.contains(e.target) && !d.annotMenuBtn.contains(e.target)) {
                 toggleAnnotMenu(v, false);
-            }
-            if (!d.presetMenu.hidden && !d.presetMenu.contains(e.target) && !d.presetBtn.contains(e.target)) {
-                togglePresetMenu(v, false);
             }
         };
         document.addEventListener('click', onDocClick, true);
@@ -791,9 +815,11 @@
         d.conclUse.hidden = v.editing || !edited;
         d.conclNote.hidden = v.editing || !edited;
         d.conclNote.textContent = edited ? 'Edited. Reports and the queue use your text.' : '';
-        d.presetBtn.hidden = !(v.presets && v.presets.length);
+        const hasPresets = !!(v.presets && v.presets.length);
+        d.presetBtn.hidden = v.editing || !hasPresets;
         d.presetBtn.disabled = !v.result && !edited;
-        if (d.presetBtn.disabled && !d.presetMenu.hidden) togglePresetMenu(v, false);
+        d.presetTray.hidden = !(v.editing && hasPresets);
+        if (!v.editing) setPresetStatus(v, null);
     }
 
     function editConclusion(v) {
@@ -804,7 +830,9 @@
         v.dom.conclCut.textContent = v.dom.conclCut.hidden ? ''
             : `The conclusion was cut to the ${L.CONCLUSION_MAX.toLocaleString('en-US')}-character limit.`;
         syncCount(v);
+        v.presetSel = null;
         renderConclusion(v);
+        renderPresetChips(v);
         v.dom.conclArea.focus();
     }
 
@@ -830,28 +858,81 @@
         if (!v.alive) return;
         v.presets = presets;
         const d = v.dom;
-        d.presetMenu.textContent = '';
-        d.presetMenu.appendChild(h('div', { className: 'menu-head', text: 'Insert into the conclusion' }));
-        for (const p of presets) {
-            d.presetMenu.appendChild(h('button', {
-                type: 'button', role: 'menuitem', className: 'menu-item cmp-preset-item',
-                'data-testid': 'compare-preset',
-                onclick: () => { togglePresetMenu(v, false); insertIntoConclusion(v, p.text); } }, p.text));
-        }
-        d.presetMenu.appendChild(h('p', { className: 'menu-foot',
-            text: 'An admin edits these in Hub admin, Conclusion presets.' }));
+        d.presetFilter.hidden = presets.length <= 6;
+        renderPresetChips(v);
         renderConclusion(v);
     }
 
-    function togglePresetMenu(v, force) {
+    /** The chips, filtered, each marked when its text is already in the
+        conclusion (a click then shows it in the editor) or would pass the
+        limit (a click says so). The text of a chip is the preset's, exactly. */
+    function renderPresetChips(v) {
         const d = v.dom;
-        const open = force === undefined ? d.presetMenu.hidden : !!force;
-        d.presetMenu.hidden = !open;
-        d.presetBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
-        if (open) {
-            const first = d.presetMenu.querySelector('button');
-            if (first) setTimeout(() => first.focus(), 0);
+        const q = d.presetFilter.value.trim().toLowerCase();
+        const text = d.conclArea.value;
+        const norm = (s) => String(s).replace(/\s+/g, ' ').trim().toLowerCase();
+        const have = norm(text);
+        d.presetList.textContent = '';
+        let shown = 0;
+        for (const p of v.presets || []) {
+            if (q && !p.text.toLowerCase().includes(q)) continue;
+            shown++;
+            const inIt = have.includes(norm(p.text));
+            const tooLong = !inIt && !L.insertPreset(text, p.text, v.presetSel || null);
+            const chip = h('button', {
+                type: 'button', className: 'cmp-chip' + (inIt ? ' is-in' : '') + (tooLong ? ' is-full' : ''),
+                'data-testid': 'compare-preset', title: inIt ? 'In the conclusion: click to show it'
+                    : tooLong ? 'Too long to fit the 1,500-character limit' : p.text,
+                'aria-disabled': tooLong ? 'true' : null,
+                onmousedown: (e) => e.preventDefault(),     // keep the editor's cursor
+                onclick: () => (inIt ? showInConclusion(v, p.text) : insertIntoConclusion(v, p.text)) },
+                svgIcon(inIt ? 'check' : 'plus'), h('span', { className: 'cmp-chip-text', text: p.text }));
+            d.presetList.appendChild(chip);
         }
+        d.presetEmpty.hidden = shown > 0 || !(v.presets && v.presets.length);
+        d.presetEmpty.textContent = q ? `No preset matches “${d.presetFilter.value.trim()}”.` : '';
+    }
+
+    function openPresets(v) {
+        const d = v.dom;
+        if (!v.editing) editConclusion(v);
+        if (!v.editing) return;
+        d.conclForm.scrollIntoView({ block: 'nearest' });   // the tray and Save in view
+        const first = d.presetFilter.hidden ? d.presetList.querySelector('button') : d.presetFilter;
+        if (first) first.focus({ preventScroll: true });
+    }
+
+    /** Select a preset's text where it already is in the conclusion. */
+    function showInConclusion(v, text) {
+        const d = v.dom;
+        const i = d.conclArea.value.toLowerCase().indexOf(String(text).trim().toLowerCase());
+        d.conclArea.focus();
+        if (i >= 0) { try { d.conclArea.setSelectionRange(i, i + String(text).trim().length); } catch (_e) { /* */ } }
+    }
+
+    function setPresetStatus(v, info) {
+        const d = v.dom;
+        d.presetStatus.textContent = '';
+        v.presetUndo = info;
+        if (!info) return;
+        const short = info.text.length > 48 ? info.text.slice(0, 47) + '…' : info.text;
+        d.presetStatus.append(`Added “${short}”`,
+            h('button', { type: 'button', className: 'cmp-presets-undo', text: 'Undo',
+                          'data-testid': 'compare-preset-undo', onmousedown: (e) => e.preventDefault(),
+                          onclick: () => undoPreset(v) }));
+    }
+
+    function undoPreset(v) {
+        const d = v.dom;
+        const u = v.presetUndo;
+        if (!u || d.conclArea.value !== u.after) { setPresetStatus(v, null); return; }
+        d.conclArea.value = u.before;
+        syncCount(v);
+        d.conclArea.focus();
+        try { d.conclArea.setSelectionRange(u.sel.start, u.sel.end); } catch (_e) { /* */ }
+        v.presetSel = u.sel;
+        setPresetStatus(v, null);
+        renderPresetChips(v);
     }
 
     /** Put `text` into the conclusion: at the cursor while editing, else the
@@ -864,8 +945,11 @@
             return false;
         }
         let sel = null;
-        if (v.editing) sel = { start: d.conclArea.selectionStart, end: d.conclArea.selectionEnd };
-        else editConclusion(v);
+        if (v.editing) {
+            sel = document.activeElement === d.conclArea
+                ? { start: d.conclArea.selectionStart, end: d.conclArea.selectionEnd }
+                : (v.presetSel || null);
+        } else editConclusion(v);
         const out = L.insertPreset(d.conclArea.value, text, sel);
         if (!out) {
             const max = L.CONCLUSION_MAX.toLocaleString('en-US');
@@ -874,11 +958,16 @@
             d.conclArea.focus();
             return false;
         }
+        const before = d.conclArea.value;
         d.conclArea.value = out.text;
         d.conclCut.hidden = true;
         syncCount(v);
         d.conclArea.focus();
         try { d.conclArea.setSelectionRange(out.caret, out.caret); } catch (_e) { /* */ }
+        v.presetSel = { start: out.caret, end: out.caret };
+        setPresetStatus(v, { text: String(text).trim(), before, after: out.text,
+                             sel: sel || { start: before.length, end: before.length } });
+        renderPresetChips(v);
         return true;
     }
 
@@ -905,6 +994,7 @@
         d.conclCut.textContent = `The pasted text was cut to fit the ${L.CONCLUSION_MAX.toLocaleString('en-US')}-character limit.`;
         d.conclCut.hidden = false;
         syncCount(v);
+        renderPresetChips(v);
     }
 
     function renderNotes(v) {

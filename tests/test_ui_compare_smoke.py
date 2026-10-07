@@ -455,23 +455,40 @@ def test_conclusion_presets_insert_into_the_conclusion_and_earlier_notes_show_un
     sid = env["sid"]
     generated = js(drv, "return document.querySelector('[data-testid=compare-conclusion-text]').textContent")
     assert generated
-    # Insert preset: a menu by Edit; a pick opens the editor with the preset appended
+    # Add preset (v6.0.1): opens the editor with the presets tray under it, never
+    # a menu over the text; a chip appends its text and the tray stays
     btn = "document.querySelector('[data-testid=compare-preset-menu]')"
+    tray = "document.querySelector('[data-testid=compare-presets]')"
     assert wait(lambda: js(drv, f"return !{btn}.hidden && !{btn}.disabled"))
+    assert js(drv, f"return {tray}.hidden")
     js(drv, f"{btn}.click()")
-    assert js(drv, "return !document.querySelector('[data-testid=compare-presets]').hidden")
+    assert js(drv, f"return !{tray}.hidden")
+    assert js(drv, f"return {btn}.hidden")                       # the editor is open: no header button
+    assert js(drv, "return document.activeElement.dataset.testid") == "compare-preset"
     presets = js(drv, "return Array.from(document.querySelectorAll('[data-testid=compare-preset]'))"
                       ".map(b => b.textContent)")
     assert "Re-run requested." in presets, presets
-    frame(drv, "preset menu")
-    shot(drv, "v6-preset-menu.png")
+    frame(drv, "preset tray")
+    shot(drv, "v6-preset-tray.png")
     js(drv, "Array.from(document.querySelectorAll('[data-testid=compare-preset]'))"
             ".find(b => b.textContent === 'Re-run requested.').click()")
-    assert js(drv, "return document.querySelector('[data-testid=compare-presets]').hidden")
+    assert js(drv, f"return !{tray}.hidden")
     area = "document.querySelector('[data-testid=compare-conclusion-input]')"
     assert js(drv, f"return {area}.offsetParent") is not None
     assert js(drv, f"return {area}.value") == generated + " Re-run requested."
     assert js(drv, f"return document.activeElement === {area} && {area}.selectionStart === {area}.value.length")
+    # the chip now shows it is in the conclusion; a click on it adds nothing again
+    rerun = ("Array.from(document.querySelectorAll('[data-testid=compare-preset]'))"
+             ".find(b => b.textContent === 'Re-run requested.')")
+    assert js(drv, f"return {rerun}.classList.contains('is-in')")
+    js(drv, f"{rerun}.click()")
+    assert js(drv, f"return {area}.value") == generated + " Re-run requested."
+    # Undo takes the insert back, and the chip is a plain one again
+    js(drv, "document.querySelector('[data-testid=compare-preset-undo]').click()")
+    assert js(drv, f"return {area}.value") == generated
+    assert not js(drv, f"return {rerun}.classList.contains('is-in')")
+    js(drv, f"{rerun}.click()")
+    assert js(drv, f"return {area}.value") == generated + " Re-run requested."
     # a second preset while editing goes in at the cursor
     js(drv, f"{area}.setSelectionRange(0, 0)")
     js(drv, f"{btn}.click()")
@@ -525,12 +542,12 @@ def test_conclusion_limit_counter_paste_and_refused_preset(env):
     n = js(drv, f"return {area}.value.length")
     assert js(drv, f"return {count}.textContent") == f"{n:,} / 1,500"
     # typing updates the counter; near the limit it takes the warning colour
+    normal = js(drv, f"return getComputedStyle({count}).color")
     js(drv, f"{area}.value = 'x'.repeat(1400); {area}.dispatchEvent(new Event('input'))")
     assert js(drv, f"return {count}.textContent") == "1,400 / 1,500"
     assert js(drv, f"return {count}.classList.contains('is-near')")
     warn = js(drv, "return getComputedStyle(document.documentElement).getPropertyValue('--warn-text').trim()")
-    assert warn and js(drv, f"return getComputedStyle({count}).color") != \
-        js(drv, "return getComputedStyle(document.querySelector('.cmp-concl-hint')).color")
+    assert warn and js(drv, f"return getComputedStyle({count}).color") != normal
     frame(drv, "counter near the limit")
     # a paste past the limit is cut to fit, with the notice
     js(drv, f"{area}.focus(); {area}.setSelectionRange(1400, 1400);"
@@ -543,10 +560,11 @@ def test_conclusion_limit_counter_paste_and_refused_preset(env):
     assert js(drv, f"return !{cut}.hidden && {cut}.textContent") == \
         "The pasted text was cut to fit the 1,500-character limit."
     frame(drv, "paste cut")
-    # a preset that does not fit is refused, the text unchanged
-    btn = "document.querySelector('[data-testid=compare-preset-menu]')"
-    assert wait(lambda: js(drv, f"return !{btn}.hidden"))
-    js(drv, f"{btn}.click(); document.querySelector('[data-testid=compare-preset]').click()")
+    # a preset that does not fit is marked in the tray, and refused, the text unchanged
+    chip = "document.querySelector('[data-testid=compare-preset]')"
+    assert wait(lambda: js(drv, "return !document.querySelector('[data-testid=compare-presets]').hidden"))
+    assert js(drv, f"return {chip}.classList.contains('is-full') && {chip}.getAttribute('aria-disabled')") == "true"
+    js(drv, f"{chip}.click()")
     assert js(drv, f"return {area}.value.length") == 1500
     msg = wait(lambda: js(drv, "return document.getElementById('toast').textContent"))
     assert "longer than 1,500 characters" in msg, msg

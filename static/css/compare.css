@@ -96,13 +96,51 @@
     width: 100%; height: auto; min-height: 96px; padding: var(--s2) var(--s3); line-height: 1.5; resize: vertical;
 }
 
-/* v6: conclusion presets (a menu by Edit), the hint under the editor, the
+/* v6.0.1: conclusion presets are a tray under the editor (never a menu over
+   the text it edits): wrapped chips, a filter past six, a check on the ones
+   already in the conclusion, Undo after an insert. Then the counter, the
    sample's earlier notes under the conclusion, and the marked regions listed
    in the Annotate menu */
-.cmp-preset { position: relative; display: inline-flex; }
-.cmp-preset-menu { width: 300px; max-height: min(60vh, 420px); overflow-y: auto; }
-.cmp-preset-menu .menu-item { align-items: flex-start; white-space: normal; overflow-wrap: anywhere; font-size: var(--fs-sm); line-height: 1.4; }
-.cmp-concl-hint { margin: 0; }
+.cmp-sec-head .btn .ico-svg, .cmp-chip .ico-svg {
+    width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.75;
+    stroke-linecap: round; stroke-linejoin: round;
+}
+.cmp-sec-head .btn { gap: 6px; }
+.cmp-presets {
+    margin-top: var(--s2); padding: var(--s3); border: 1px solid var(--border-light);
+    border-radius: var(--radius-md); background: var(--bg-sunken);
+}
+.cmp-presets-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s1) var(--s2); margin-bottom: var(--s2); min-height: 28px; }
+.cmp-presets-head .spacer { flex: 1; }
+.cmp-presets-title { font-size: var(--fs-sm); font-weight: 620; color: var(--text); }
+.cmp-presets-status { margin: 0; color: var(--text-muted-sunken); display: inline-flex; align-items: baseline; gap: var(--s2); min-width: 0; }
+.cmp-presets-undo {
+    border: 0; background: none; padding: 0; font: inherit; font-weight: 600; color: var(--text);
+    text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+.gc .cmp-presets-filter { width: 200px; max-width: 100%; height: 30px; padding: 0 var(--s2); font-size: var(--fs-sm); background: var(--bg-card); }
+.cmp-presets-list { display: flex; flex-wrap: wrap; gap: var(--s2); max-height: 216px; overflow: hidden auto; padding: 3px; margin: -3px; }
+.cmp-chip {
+    display: inline-flex; align-items: flex-start; gap: 6px; max-width: 100%; min-height: 32px;
+    padding: 6px var(--s3) 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-lg);
+    background: var(--bg-card); color: var(--text); font: inherit; font-size: var(--fs-sm); line-height: 1.35;
+    text-align: left; cursor: pointer; transition: border-color var(--t-fast) var(--ease-std), background var(--t-fast) var(--ease-std);
+}
+.cmp-chip .ico-svg { margin-top: 2px; color: var(--text-muted); }
+.cmp-chip:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+.cmp-chip:hover .ico-svg { color: var(--text); }
+.cmp-chip-text { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.cmp-chip.is-in { border-style: dashed; background: transparent; color: var(--text-muted-sunken); }
+.cmp-chip.is-in .ico-svg { color: var(--pill-final-fg); }
+.cmp-chip.is-full { background: transparent; border-color: var(--border-light); color: var(--text-muted-sunken); cursor: not-allowed; }
+.cmp-chip.is-full:hover { background: transparent; border-color: var(--border-light); }
+.cmp-presets-empty { margin: 0; }
+@media (max-width: 759px) {
+    .cmp-chip { min-height: 44px; align-items: center; }
+    .cmp-chip .ico-svg { margin-top: 0; }
+    .gc .cmp-presets-filter { width: 100%; height: 40px; font-size: 16px; }
+    .cmp-presets-list { max-height: none; }
+}
 .cmp-concl-count { margin: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cmp-concl-count.is-near { color: var(--warn-text); }
 .cmp-concl-count.is-full { color: var(--warn-text); font-weight: 600; }
