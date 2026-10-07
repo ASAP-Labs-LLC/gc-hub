@@ -36,6 +36,53 @@ for _p in (ROOT, TESTS, TESTS / "golden"):
 
 import report_layout as rl  # noqa: E402
 
+_DEFAULT_CANDIDATES = rl._font_candidates
+
+
+def _vera_only():
+    return [c for c in _DEFAULT_CANDIDATES() if os.path.basename(c[0]) == "Vera.ttf"]
+
+
+@pytest.fixture(params=["default", "vera"])
+def face(request):
+    """Every page-count test runs in the face this machine would pick (Segoe
+    UI on ASAPSV1, Arial on a Mac or Windows CI, DejaVu Sans on Linux) and
+    in reportlab's own Bitstream Vera, which is always there and the widest
+    of them: the plan must fit in each without the shrink."""
+    if request.param == "vera":
+        if not _vera_only():
+            pytest.skip("reportlab's Vera is not installed")
+        rl._font_candidates = _vera_only
+    rl._FONTS.clear()
+    try:
+        yield rl.fonts()
+    finally:
+        rl._font_candidates = _DEFAULT_CANDIDATES
+        rl._FONTS.clear()
+
+
+def largest_fitting_step(plan: "rl.Plan", **content) -> float:
+    """The largest type step at which this content's text fits beside the
+    usual minimum charts with nothing shortened (what the plan must pick)."""
+    for fs in rl.TYPE_STEPS:
+        trial = rl.Plan(trend_h=0, diff_h=0, fs=fs)
+        h = rl._text_height(trial, title=rl.display_title(content["doc_name"]),
+                            subtitle=rl.subtitle_text(content["std_name"]),
+                            lab_id=content["lab_id"], std_name=content["std_name"],
+                            rows=rl.finding_rows(content["bullets_text"]),
+                            conclusion=content["conclusion"],
+                            region_lines=content.get("region_lines", []),
+                            note_lines=content.get("note_lines", []),
+                            footer_lines=content["footer_lines"])
+        if rl.BODY_H - h >= sum(rl.CHART_MIN):
+            return fs
+    return rl.TYPE_STEPS[-1]
+
+
+def _is_wide_face(face) -> bool:
+    name = os.path.basename(str(face.get("file") or "")).lower()
+    return name.startswith(("segoe", "arial"))
+
 PARAMS_LINE = (
     "Parameters: baseline quantile 0.25 · window 251 pts · smoothing 20 pts · thresholds "
     "marginal ≥120, moderate ≥450, significant ≥1800 · x-max 6.5 min · min width 0.05 min · "
@@ -139,7 +186,7 @@ WORST_STD = "Ultra Low Sulfur Diesel Reference Standard, Lot 2026-09 (B), re-cer
 WORST_LAB = "40304-LONG-LAB-ID-2026-09-30-REINJ-07"
 
 
-def test_a_normal_report_is_one_page_and_prints_everything():
+def test_a_normal_report_is_one_page_and_prints_everything(face):
     regions = ["Narrow mark (C10, 1.90–2.10 min; CD, 2026-09-29)"]
     notes = ["Sample appears to be gasoline. (RB, 2026-09-29)"]
     concl = conclusion_of(300)
@@ -169,16 +216,24 @@ def test_the_kept_conclusion_length_is_the_hubs_cap():
     assert rl.CONCLUSION_KEEP == comments.CONCLUSION_MAX
 
 
-def test_a_1500_character_conclusion_prints_whole_at_the_readable_size():
+def test_a_1500_character_conclusion_prints_whole_at_the_readable_size(face):
+    """Whole, at the largest type step that fits (the body size itself in
+    the app's faces, Segoe UI and Arial), on one page without the shrink."""
     concl = conclusion_of(rl.CONCLUSION_KEEP)
-    plan, page, pages, text = render(bullets=NORMAL_BULLETS, conclusion=concl,
-                                     notes=["Sample appears to be gasoline. (RB, 2026-09-29)"])
+    notes = ["Sample appears to be gasoline. (RB, 2026-09-29)"]
+    plan, page, pages, text = render(bullets=NORMAL_BULLETS, conclusion=concl, notes=notes)
     assert pages == 1 and pages_without_shrink(page) == 1
-    assert plan.conclusion_chars is None and plan.fs == rl.TYPE_STEPS[0]
+    assert plan.conclusion_chars is None and plan.shortened == []
+    assert plan.fs == largest_fitting_step(
+        plan, doc_name="GC Analysis", lab_id="40304", std_name="Base",
+        bullets_text=NORMAL_BULLETS, conclusion=concl, note_lines=notes,
+        footer_lines=[PARAMS_LINE, "Ranges: Gas C5–C11, Oil C20–C44"])
+    if _is_wide_face(face):
+        assert plan.fs == rl.TYPE_STEPS[0]
     assert flat(concl) in text
 
 
-def test_every_section_at_its_worst_is_still_one_page():
+def test_every_section_at_its_worst_is_still_one_page(face):
     """1,500-character conclusion, 41 findings, 50 marked regions and 50
     notes of 500 characters, 40 ranges, a 300-character document name, long lab ID and
     standard name, a logo: one page, the conclusion whole, every parameter
@@ -205,10 +260,10 @@ def test_every_section_at_its_worst_is_still_one_page():
         assert flat(part.replace("Parameters: ", "")) in text, part
     assert "Range number 00 with a long label xx C5–C8" in text and "more" in text
     assert "GC hub v6.0.0" in text
-    assert plan.shortened
+    assert plan.shortened and not any("does not fit" in x for x in plan.shortened)
 
 
-def test_long_unbroken_tokens_wrap_and_stay_on_one_page():
+def test_long_unbroken_tokens_wrap_and_stay_on_one_page(face):
     token = "X" * 400
     path = "\\\\ASAPServer\\Labsharedrive\\" + "very_long_folder_name_" * 12 + "result.CDF"
     concl = conclusion_of(1000) + " " + token
@@ -217,10 +272,11 @@ def test_long_unbroken_tokens_wrap_and_stay_on_one_page():
         conclusion=concl, notes=[path + " (RB, 2026-09-29)"] * 3,
         regions=[path + " (C8–C10, 1.30–2.10 min; RB, 2026-09-29)"] * 3)
     assert pages == 1 and pages_without_shrink(page) == 1, plan
+    assert not any("does not fit" in x for x in plan.shortened)
     assert text.replace(" ", "").count("X" * 400) == 1      # broken across lines, all there
 
 
-def test_every_interpolated_string_is_escaped():
+def test_every_interpolated_string_is_escaped(face):
     _plan, page, pages, _text = render(
         doc_name="<i>Doc</i>", lab_id="<b>40304</b>", std_name="<script>x</script>",
         bullets="• <img src=evil> (C5–C11): HIGHER than <script>x</script> — moderate",
@@ -240,6 +296,24 @@ def test_the_plan_is_deterministic():
               region_lines=worst_regions(), note_lines=worst_notes(),
               footer_lines=[PARAMS_LINE, "Ranges: none"])
     assert rl.plan(**kw) == rl.plan(**kw)
+
+
+def test_section_labels_fit_their_column(face):
+    """A section's title never wraps (the measurement counts one line)."""
+    for label in rl.SECTION_LABELS:
+        assert rl.line_width(label, rl.TYPE_STEPS[0], bold=True) <= rl.LABEL_W - 8, label
+
+
+def test_a_long_list_of_short_rows_is_measured_exactly(face):
+    """Many short rows (8 findings, 12 marked regions, 12 notes): what is
+    listed fits without the shrink and nothing more would have."""
+    bullets = "\n".join(f"• R{i} (C{i}–C{i + 2}): HIGHER than Base — marginal (max +130 at 2.0{i} min)"
+                        for i in range(8))
+    regions = [f"Region {i} (C8–C10, 1.30–2.10 min; RB, 2026-09-29)" for i in range(12)]
+    notes = [f"Note {i} (RB, 2026-09-29)" for i in range(12)]
+    plan, page, pages, _text = render(bullets=bullets, conclusion=conclusion_of(200),
+                                      regions=regions, notes=notes)
+    assert pages == 1 and pages_without_shrink(page) == 1, plan
 
 
 def test_finding_rows_keep_the_line_whole():

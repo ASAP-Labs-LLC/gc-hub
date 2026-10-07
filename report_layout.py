@@ -22,7 +22,8 @@ One page, deterministically
 2. if the text does not fit beside the smallest charts, sets the text in the
    next smaller type size (``TYPE_STEPS``);
 3. still too long: shortens the footer's ranges line (the ranges are also
-   on the charts and in the findings) to ``RANGES_CHARS``, "…, and N more";
+   on the charts and in the findings) to ``RANGES_CHARS``, "…, and N more",
+   and lets the charts go down to ``CHART_FLOOR``;
 4. then lists as many of the conclusion's notes as fit (in their order) and
    one line "N more notes are in the GC hub";
 5. then as many marked regions as fit, "N more marked regions are in the
@@ -37,7 +38,19 @@ One page, deterministically
 
 With the conclusion at its cap, every section at its worst and the
 smallest type, one finding and the footer still fit beside the smallest
-charts (``tests/test_report_one_page.py``).
+charts, in every face ``fonts`` may pick (Segoe UI, Arial, DejaVu Sans,
+Bitstream Vera: ``tests/test_report_one_page.py`` renders each). The header
+keeps that bound: the title is cut at 90 characters, the lab ID at
+``LAB_ID_CHARS`` and the standard's name in the subtitle at
+``STD_NAME_CHARS``.
+
+The measurement follows xhtml2pdf's own layout: the same font file and
+size, the same column widths, the line height xhtml2pdf uses (``LINE``
+ems; every line, the first too), a finding's bold head measured in the bold
+face, and words wider than their column broken exactly where ``breakable``
+breaks them. What is left between that and the page is a small documented
+margin (``MEASURE_MARGIN``, ``SLACK``): cell borders, half-points of
+padding and xhtml2pdf's rounding, a few points on a full page.
 
 A word too long for its column (a pasted path, an ID with no spaces) is
 broken across lines, as a browser with ``overflow-wrap: anywhere`` would.
@@ -60,7 +73,8 @@ PAGE_W, PAGE_H = 612.0, 792.0             # US Letter
 MARGIN_X, MARGIN_TOP, MARGIN_BOTTOM = 36.0, 32.0, 28.0
 BODY_W = PAGE_W - 2 * MARGIN_X            # 540
 BODY_H = PAGE_H - MARGIN_TOP - MARGIN_BOTTOM
-LABEL_W = 84.0                            # the section-title column
+LABEL_W = 92.0                            # the section-title column (its last 8pt the gap);
+SECTION_LABELS = ("Findings", "Marked regions", "Conclusion")   # each on one line in it
 KEY_W = 200.0                             # a chart's legend
 TITLE_W = BODY_W - 192.0                  # the title column (the lab ID takes 180 + gap)
 LOGO_W = 74.0                             # a logo and its gap, when there is one
@@ -71,10 +85,20 @@ IMG_PX_PER_PT = 1 / 0.75                  # xhtml2pdf reads an <img> width in CS
 
 CHART_MAX = (284.0, 178.0)                # trend, difference
 CHART_MIN = (150.0, 96.0)
+CHART_FLOOR = (112.0, 72.0)               # the smallest, once the type is at its smallest
 TYPE_STEPS = (8.5, 7.8, 7.2, 6.8)         # body type, largest first
 FOOT_FS = 6.5
 LINE = 1.38                               # line height, in ems
-SLACK = 18.0                              # points kept back from the measurement
+SLACK = 10.0                              # points kept back: the model is within ~6pt of xhtml2pdf
+MEASURE_MARGIN = 1.0                      # no proportional margin: the model is exact to a few points
+# xhtml2pdf's layout, measured (constant across faces and sizes):
+PARA = 2.0                                # the space xhtml2pdf adds to every paragraph
+ROW = 4.0 + 2.0 + PARA                    # a section row: 4pt above, 2pt below, the paragraph space
+SECTION = 4.0                             # between two sections (the 0.75pt rule and its space)
+FOOT_LINE = 1.35                          # the footer's line height (``.foot td``)
+FOOT_TOP = 10.0 + 4.0                     # the footer: its margin, the first row's extra padding
+LAB_ID_CHARS = 40                         # the header's lab ID, at most (real ones are ~5-12)
+STD_NAME_CHARS = 120                      # the standard's name in the subtitle, at most
 RANGES_CHARS = 300                        # the footer's ranges line, when shortened
 CONCLUSION_KEEP = 1500                    # the conclusion cap: always printed whole
 
@@ -189,27 +213,31 @@ def line_width(text: str, size: float, bold: bool = False) -> float:
     return _width(str(text), f["bold"] if bold else f["regular"], size)
 
 
-def line_count(text: str, width: float, size: float, bold: bool = False) -> int:
-    """Lines *text* takes in a column *width* points wide (word wrap; a word
-    wider than the column breaks, as xhtml2pdf breaks it)."""
+def line_count(text: str, width: float, size: float, bold: bool = False,
+               head: str = "") -> int:
+    """Lines *text* takes in a column *width* points wide, as xhtml2pdf sets
+    it: words wider than the column first broken where ``breakable`` breaks
+    them (the page prints that text), then a greedy word wrap. *head*: a
+    bold run before the text on its first line (a finding's range)."""
     f = fonts()
     font = f["bold"] if bold else f["regular"]
+    text = breakable(text, width, size, bold)
+    words_head = [(w, f["bold"]) for w in str(head).split()]
     total = 0
-    for para in str(text).split("\n"):
-        words = para.split()
+    for i, para in enumerate(str(text).split("\n")):
+        words = (words_head if i == 0 else []) + [(w, font) for w in para.split()]
         if not words:
             total += 1
             continue
         lines, cur = 1, 0.0
-        space = _width(" ", font, size)
-        for w in words:
-            ww = _width(w, font, size)
-            if ww > width:                         # a long token wraps on its own
+        for w, wfont in words:
+            ww = _width(w, wfont, size)
+            if ww > width:                         # only a word breakable could not split
                 extra = math.ceil(ww / width)
                 lines += extra if cur else extra - 1
                 cur = ww - (extra - 1) * width
                 continue
-            need = ww if cur == 0 else cur + space + ww
+            need = ww if cur == 0 else cur + _width(" ", wfont, size) + ww
             if need <= width:
                 cur = need
             else:
@@ -354,12 +382,13 @@ def _ranges_short(line: str, limit: int | None) -> str:
     return f"{shown}, and {left} more" if left else shown
 
 
-def _list_h(lines: list[str], shown: int | None, fs: float, gap: float) -> float:
-    """A listed block's height: its shown lines, plus the "N more" line."""
+def _rows_h(lines: list[str], shown: int | None, fs: float, more_extra: float = 0.0) -> float:
+    """Section rows, one per line (and the "N more" row): each its text's
+    lines plus ``ROW`` (the cell's padding and xhtml2pdf's paragraph space)."""
     view = lines if shown is None else lines[:shown]
-    h = sum(_block_h(line_count(x, TEXT_W, fs), fs) + gap for x in view)
+    h = sum(_block_h(line_count(x, TEXT_W, fs), fs) + ROW for x in view)
     if len(view) < len(lines):
-        h += _block_h(1, fs) + gap
+        h += _block_h(1, fs) + ROW + more_extra
     return h
 
 
@@ -367,45 +396,51 @@ def _text_height(plan: Plan, *, title: str, subtitle: str, lab_id: str, std_name
                  rows: list[dict], conclusion: str, region_lines: list[str],
                  note_lines: list[str], footer_lines: list[str],
                  has_logo: bool = False) -> float:
+    """The page's height without the two chart images, modelled on the
+    page's own CSS (see ``_css``) and xhtml2pdf's layout of it."""
     fs = plan.fs
     h = 0.0
     title_w = TITLE_W - (LOGO_W if has_logo else 0)
-    # header: title + subtitle at left (wraps), lab ID + date at right
+    # header: title + subtitle at left (wraps), lab ID + date at right, the rule
     left = _block_h(line_count(title, title_w, 15, True), 15) + \
         _block_h(line_count(subtitle, title_w, 8), 8)
-    right = 9 + _block_h(line_count(lab_id or "", 180, 13, True), 13) + 12
+    right = 9 + _block_h(line_count(display_lab_id(lab_id), 176, 13, True), 13) + 12
     h += max(left, right, 42) + 12 + 1.5
     # chart chrome (title rows and gaps), both charts; a long caption wraps
     for verb in ("against", "minus"):
         cap = "Difference  " + chart_caption(lab_id, std_name, verb)
         h += _block_h(line_count(cap, BODY_W - KEY_W, fs), fs) + 26
-    # findings
+    # findings: one row each (a bold head, then the text beside the severity tag)
     shown = rows if plan.findings_shown is None else rows[:plan.findings_shown]
-    fh = 0.0
     for r in shown or [{"text": NO_DEVIATION_FALLBACK}]:
-        fh += _block_h(line_count(r["text"], FINDING_W, fs), fs) + 6
+        h += _block_h(line_count(r.get("rest", r["text"]), FINDING_W, fs,
+                                 head=r.get("head", "")), fs) + ROW
     if plan.findings_shown is not None and plan.findings_shown < len(rows):
-        fh += _block_h(1, fs) + 6
-    h += fh + 8
+        h += _block_h(1, fs) + ROW
+    h += SECTION
     # marked regions (their own section, between the findings and the conclusion)
     if region_lines:
-        h += _list_h(region_lines, plan.regions_shown, fs, 6) + 8
-    # conclusion, then its notes (a heading and the lines, a step smaller)
+        h += _rows_h(region_lines, plan.regions_shown, fs) + SECTION
+    # the conclusion's row, then its notes' row (a heading and the lines, a step smaller)
     concl = _shorten(conclusion, plan.conclusion_chars, CONCLUSION_TAIL)
-    h += _block_h(line_count(concl or "No conclusion available.", TEXT_W, fs), fs) + 14
+    h += _block_h(line_count(concl or "No conclusion available.", TEXT_W, fs), fs) + ROW
     if note_lines:
         nfs = plan.note_fs
-        h += 8 + _block_h(1, nfs) + _list_h(note_lines, plan.notes_shown, nfs, 1.5)
-    # footer
-    foot = 0.0
+        view = note_lines if plan.notes_shown is None else note_lines[:plan.notes_shown]
+        h += ROW + _block_h(1, nfs) + 1 + PARA
+        h += sum(_block_h(line_count(x, TEXT_W, nfs), nfs) + 1.5 + PARA for x in view)
+        if len(view) < len(note_lines):
+            h += _block_h(1, nfs) + 1.5 + PARA
+    # footer: 10pt above, the first row's 5pt top padding, then rows of 1pt+1pt
+    foot = FOOT_TOP
     for line in footer_lines:
         head, rest = _footer_parts(line)
         if head == "Ranges":
             rest = _ranges_short(rest, plan.ranges_chars)
-        foot += _block_h(line_count(rest, TEXT_W, FOOT_FS), FOOT_FS) + 2
-    foot += _block_h(1, FOOT_FS) + 2
-    h += foot + 14
-    return h * 1.03 + SLACK
+        foot += line_count(rest, TEXT_W, FOOT_FS) * FOOT_FS * FOOT_LINE + 2 + PARA
+    foot += FOOT_FS * FOOT_LINE + 2 + PARA
+    h += foot
+    return h * MEASURE_MARGIN + SLACK
 
 
 def split_comments(comments: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -429,10 +464,13 @@ def plan(*, doc_name: str, lab_id: str, std_name: str, bullets_text: str,
               conclusion=conclusion or "", region_lines=region_lines, note_lines=note_lines,
               footer_lines=list(footer_lines or []), has_logo=has_logo)
     ratio = CHART_MAX[1] / CHART_MAX[0]
-    min_charts = CHART_MIN[0] + CHART_MIN[1]
+    floor = {"charts": CHART_MIN}
+
+    def min_charts() -> float:
+        return floor["charts"][0] + floor["charts"][1]
 
     def fits(p: Plan) -> bool:
-        return BODY_H - _text_height(p, **kw) >= min_charts
+        return BODY_H - _text_height(p, **kw) >= min_charts()
 
     def cut(p: Plan, attr: str, total: int, floor: int = 0) -> None:
         """List as many as fit (at least *floor*)."""
@@ -460,8 +498,10 @@ def plan(*, doc_name: str, lab_id: str, std_name: str, bullets_text: str,
             break
     ranges_len = max((len(_footer_parts(x)[1]) for x in kw["footer_lines"]
                       if _footer_parts(x)[0] == "Ranges"), default=0)
-    if not fits(p) and ranges_len > RANGES_CHARS:          # 3: the ranges line
+    if not fits(p) and ranges_len > RANGES_CHARS:          # 3: the ranges line,
         p.ranges_chars = RANGES_CHARS
+    if not fits(p):                                        # and smaller charts
+        floor["charts"] = CHART_FLOOR
     if not fits(p) and note_lines:                         # 4: notes
         cut(p, "notes_shown", len(note_lines))
     if not fits(p) and region_lines:                       # 5: marked regions
@@ -490,9 +530,14 @@ def plan(*, doc_name: str, lab_id: str, std_name: str, bullets_text: str,
     if p.conclusion_chars is not None:
         p.shortened.append(f"conclusion shortened to {p.conclusion_chars} of "
                            f"{len(conclusion)} characters")
-    room = max(BODY_H - _text_height(p, **kw), min_charts)
-    trend = min(CHART_MAX[0], max(CHART_MIN[0], room / (1 + ratio)))
-    diff = min(CHART_MAX[1], max(CHART_MIN[1], room - trend))
+    if not fits(p):
+        p.shortened.append("does not fit even at the smallest; the page is scaled to fit")
+    lo = floor["charts"]
+    if lo == CHART_FLOOR:
+        p.shortened.append("charts below their usual minimum")
+    room = max(BODY_H - _text_height(p, **kw), min_charts())
+    trend = min(CHART_MAX[0], max(lo[0], room / (1 + ratio)))
+    diff = min(CHART_MAX[1], max(lo[1], room - trend))
     p.trend_h, p.diff_h = round(trend), round(diff)
     return p
 
@@ -507,7 +552,11 @@ def chart_caption(sample_label: str, std_name: str, verb: str) -> str:
 
 
 def subtitle_text(std_name: str) -> str:
-    return f"GC chromatogram compared with {std_name}"
+    return f"GC chromatogram compared with {_clip(std_name, STD_NAME_CHARS)}"
+
+
+def display_lab_id(lab_id: str) -> str:
+    return _clip(lab_id or "", LAB_ID_CHARS)
 
 
 # ── HTML ──────────────────────────────────────────────────────────────────
@@ -669,7 +718,7 @@ def render_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str,
     e = _esc
     logo = (f'<td style="width:64pt; padding-right:10pt; vertical-align:middle;">'
             f'<img src="data:image/png;base64,{logo_b64}" height="44"></td>' if logo_b64 else "")
-    lab = (f'<p class="cap">Lab ID</p><p class="labid">{e(breakable(lab_id, 176, 13, True))}</p>'
+    lab = (f'<p class="cap">Lab ID</p><p class="labid">{e(breakable(display_lab_id(lab_id), 176, 13, True))}</p>'
            if lab_id else "")
     header = f"""
 <table width="100%"><tr>
