@@ -71,9 +71,9 @@ def app_port(tmp_path_factory):
 
 # ── 6: the body limit ───────────────────────────────────────────────────────
 
-def test_a_30_mb_reprocess_preview_is_413_before_the_body_is_read(app_port):
+def test_a_30_mb_reprocess_is_413_before_the_body_is_read(app_port):
     port, _data, _db = app_port
-    code, body = _raw_post(port, "/api/reprocess/preview",
+    code, body = _raw_post(port, "/api/reprocess",
                            {"Content-Type": "application/json",
                             "Content-Length": str(30 * MiB)}, b'{"query": "')
     assert code == 413, (code, body)
@@ -82,18 +82,18 @@ def test_a_30_mb_reprocess_preview_is_413_before_the_body_is_read(app_port):
 def test_a_2_mib_json_body_is_413(app_port):
     port, _data, _db = app_port
     payload = json.dumps({"query": "1" * (2 * MiB), "instrument": "gc1"}).encode()
-    code, _body = send(port, "/api/reprocess/preview", payload,
+    code, _body = send(port, "/api/reprocess", payload,
                        {"Content-Type": "application/json"})
     assert code == 413
 
 
-def test_a_small_reprocess_preview_still_works(app_port):
+def test_a_small_reprocess_still_works(app_port):
     port, _data, _db = app_port
-    code, body = send(port, "/api/reprocess/preview",
+    code, body = send(port, "/api/reprocess",
                       json.dumps({"query": "40304", "instrument": "gc1"}).encode(),
                       {"Content-Type": "application/json"})
     assert code == 200, body
-    assert body["missing"] == ["40304"]
+    assert body["status"] == "no-match" and body["missing"] == ["40304"]
 
 
 def test_ingest_still_takes_more_than_the_global_limit(app_port):

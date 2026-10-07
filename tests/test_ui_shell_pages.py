@@ -119,15 +119,17 @@ def test_the_sidebar_marks_admin_and_the_mark_goes_home():
     assert re.search(r"nav == 'admin'", sb)
 
 
-def test_the_classic_page_links_to_the_shell_pages():
-    html = _read(T / "index.html")
-    for target in ("/instruments", "/admin/hub", "/calibration"):
-        assert re.search(r'<a [^>]*href="%s"' % re.escape(target), html), target
-    assert "location.href='/instruments'" not in html and "location.href='/calibration'" not in html
+def test_the_classic_pages_are_gone():
+    """v6.0.0: the classic main page and the 2A2 Instruments page were removed
+    (their addresses redirect to the new pages)."""
+    for rel in ("templates/index.html", "templates/instruments.html", "static/js/app.js",
+                "static/js/instruments.js", "static/js/toolbar.js", "static/js/selection.js",
+                "static/css/style.css", "static/css/status.css", "static/css/instruments.css"):
+        assert not (ROOT / rel).exists(), rel
 
 
 def test_other_pages_have_a_way_home():
-    for name in ("admin_setup.html", "instruments.html", "sample_link_missing.html"):
+    for name in ("admin_setup.html", "sample_link_missing.html"):
         assert 'href="/"' in _read(T / name), name
     for name in ("instruments_home.html", "instrument_detail.html", "setup_guide.html",
                  "instrument_missing.html", "hub_admin.html", "calibration.html"):
@@ -139,9 +141,9 @@ def test_other_pages_have_a_way_home():
 def test_no_page_has_its_own_admin_password_box():
     """ONE unlock mechanism on every page (lane E2 review): no page reads a
     plain password input of its own; they use admin_unlock.js."""
-    for name in ("instruments.html", "calibration.html", "hub_admin.html", "index.html"):
-        assert 'id="admin-pw"' not in _read(T / name), name
-    for name in ("instruments.js", "calibration.js", "app.js"):
-        assert "admin-pw" not in _read(JS / name), name
-    assert "GCAdminUnlock" in _read(JS / "instruments.js")
-    assert "js/admin_unlock.js" in _read(T / "instruments.html")
+    for tpl in sorted(T.glob("*.html")):
+        assert 'id="admin-pw"' not in _read(tpl), tpl.name
+    for js in sorted(JS.glob("*.js")):
+        assert "admin-pw" not in _read(js), js.name
+    # the shell pages ask through the one unlock (_layout.html loads it)
+    assert "js/admin_unlock.js" in _read(T / "_layout.html")

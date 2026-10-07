@@ -164,11 +164,10 @@
     function renderRules() {
         const rules = window.effectiveFlagRules(settings);
         $('rules').replaceChildren(...rules.map(ruleRow));
-        $('series-colors').value = settings.series_colors || '';
     }
     async function saveFlags() {
         const rules = [...document.querySelectorAll('#rules .rule')].map(readRule);
-        const plan = S.planSave(settings, { series_colors: $('series-colors').value }, rules);
+        const plan = S.planSave(settings, {}, rules);
         if (plan.errors.sample_flag_rules) { msg('flags-msg', plan.errors.sample_flag_rules, 'err'); return; }
         const body = S.saveBody(plan, false);
         if (!body) { msg('flags-msg', 'Nothing changed.'); return; }

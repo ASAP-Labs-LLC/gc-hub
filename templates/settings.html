@@ -46,11 +46,6 @@
           <span class="msg" id="flags-msg" role="status"></span>
           <button type="button" class="btn btn-primary btn-sm" id="save-flags" data-testid="save-flags">Save flags</button>
         </div>
-        <details class="more">
-          <summary>Classic page chart colours</summary>
-          <label class="field"><span>Series colours (CSS, comma-separated; the classic page only)</span>
-            <input type="text" id="series-colors" placeholder="e.g. #58a6ff, #3fb950" spellcheck="false"></label>
-        </details>
       </div>
     </section>
 
@@ -134,5 +129,5 @@
 <script src="{{ url_for('static', filename='js/flagrules.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/qbench_api.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/settings_logic.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/settings_page.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/settings_page.js') }}?v=2"></script>
 {% endblock %}

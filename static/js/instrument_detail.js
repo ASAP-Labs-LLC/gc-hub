@@ -1,6 +1,6 @@
 // /instruments/<id> (v4.0): the setup checklist, then Agent, Calibration,
-// Correction factors, Results file, Methods, Backfill and Conflicts. The same
-// operations as the classic page, over the same routes (GET /api/instruments
+// Correction factors, Results file, Methods, Backfill and Conflicts, over the
+// existing routes (GET /api/instruments
 // /<id>[/…], /api/conflicts, and the admin POSTs through GCShell.adminPost).
 // Live: the page reloads when this instrument changes; the agent's status
 // ticks every second; the checklist refreshes when the agent checks in.
@@ -176,9 +176,9 @@
                               onclick: () => { finderOpen = !finderOpen; renderSection('calibration'); } })),
         ];
         if (finderOpen) out.push(calibrationFinder(inst));
-        // not ported yet: comparison standards are tagged by instrument on the classic page
-        out.push(h('p', { className: 'caption' }, 'Comparison standards are tagged by instrument on the ',
-            h('a', { className: 'link', href: '/instruments/classic?instrument=' + enc(inst.id), text: 'classic Instruments page' }), '.'));
+        // comparison standards are tagged by instrument in Settings (v5.0)
+        out.push(h('p', { className: 'caption' }, 'Comparison standards are tagged by instrument in ',
+            h('a', { className: 'link', href: '/settings#standards', text: 'Settings · Comparison standards' }), '.'));
         return out;
     }
 

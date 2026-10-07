@@ -1,10 +1,11 @@
 """The Dashboard's D86 fallback for a v1 row (no stored uncorrected D86, so
 "Corrected D86" off converts the stored D2887 in the browser) must give the
-numbers ``distill.compute`` would: the App. X4 cuts from app.js
-``convertToD86`` and 40%/60% by the same midpoint rule
+numbers ``distill.compute`` would: the App. X4 cuts from results_logic.js
+``convertToD86`` (the Samples page's Results card; the classic page's app.js
+copy went in v6.0.0) and 40%/60% by the same midpoint rule
 (``distill.x4_midpoints``: the midpoint of the 30/50 and 50/70 conversions,
-rounded like Python's ``round(x, 2)``). Node runs the real app.js and
-distill_view.js code on random D2887 rows; skipped without node.
+rounded like Python's ``round(x, 2)``). Node runs the real results_logic.js
+and distill_view.js code on random D2887 rows; skipped without node.
 """
 from __future__ import annotations
 
@@ -29,22 +30,14 @@ LABELS = ["IBP", "5%", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "
 D2887_COLS = distill.CSV_HEADER[2:15]
 D86_COLS = distill.CSV_HEADER[15:28]
 
-# Pull CONVERSION_COEFF/REL, round2 and convertToD86 out of app.js (it is not
-# a module) and run the Dashboard's fallback through DistillView.dashboardD86.
+# The Samples page's fallback: results_logic's convertToD86 (GCResults, the
+# one App. X4 conversion in the browser since v6.0.0 removed app.js's copy)
+# through DistillView.dashboardD86 (samples_logic.resultRows calls it so).
 RUNNER = r"""
 const fs = require('fs');
 const root = process.argv[1], casesFile = process.argv[2];
 global.DistillView = require(root + '/static/js/distill_view.js');
-const src = fs.readFileSync(root + '/static/js/app.js', 'utf8');
-const pick = (re) => { const m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
-const code = [
-  pick(/const CONVERSION_COEFF = \{[\s\S]*?\};/),
-  pick(/const CONVERSION_REL = \{[\s\S]*?\};/),
-  pick(/function round2\(v\) \{[\s\S]*?\n\}/),
-  pick(/function convertToD86\(d2887\) \{[\s\S]*?\n\}/),
-  'return convertToD86;',
-].join('\n');
-const convertToD86 = new Function(code)();
+const convertToD86 = require(root + '/static/js/results_logic.js').convertToD86;
 const cases = JSON.parse(fs.readFileSync(casesFile, 'utf8'));
 const out = cases.map((d2887) => {
   const r = DistillView.dashboardD86({ d86: {}, d86_uncorrected: null, d2887 }, false, convertToD86);

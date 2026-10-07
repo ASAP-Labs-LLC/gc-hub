@@ -871,16 +871,12 @@ def _admin_json_body():
 # Paths that are machines checking on the app, not a person using it. Counting
 # them as activity would keep the idle timer from ever advancing: the updater
 # polls /healthz continuously, static assets load on every page view, and
-# these are the endpoints app.js hits on its own timers for the life of an
-# open tab (not from a click): /api/live every 3 s (30 s hidden; live.js, v4.0),
-# /api/notifications when the live count changes (every 30 s in tabs still
-# running an older app.js); /healthz every 2s while waiting
-# for a restart (_waitForServerAndReload; /api/server-status, which it used
-# to poll, stays excluded for tabs still running an older app.js);
-# /api/reprocess/status while a reprocess runs (_pollReprocessStatus: when
-# GCLive reports one of its samples, every 1.5 s in older tabs);
-# /api/qbench-upload-status once on load to
-# reconnect to an in-progress upload. Excluding /static/ covers page assets;
+# these are the endpoints the pages hit on their own timers for the life of
+# an open tab (not from a click): /api/live every 3 s (30 s hidden; live.js,
+# v4.0), /api/notifications when the live count changes; /healthz while
+# waiting for a restart (/api/server-status, which older pages polled, stays
+# excluded); /api/qbench-upload-status once on load to reconnect to an
+# in-progress upload. Excluding /static/ covers page assets;
 # excluding paths ending in /stream covers the SSE routes' *reconnects* —
 # before_request fires once per connection attempt, not per keep-alive byte
 # sent over an already-open one, so a stream that free-runs for hours without
@@ -889,7 +885,6 @@ _NON_ACTIVITY_PATHS = {
     "/healthz",
     "/api/notifications",
     "/api/server-status",
-    "/api/reprocess/status",
     "/api/qbench-upload-status",
     # v4.0 live updates: every open tab polls it every 3 s (30 s hidden)
     "/api/live",
@@ -1153,65 +1148,6 @@ from analysis_core import (  # noqa: E402
 # ===================================================================== #
 #  PDF / report helpers
 # ===================================================================== #
-
-def _make_chromatogram_figure(
-    t: np.ndarray, y: np.ndarray, title: str
-) -> "go.Figure":
-    """Build a Plotly chromatogram figure."""
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=t.tolist(), y=y.tolist(), mode="lines", name=title))
-    fig.update_layout(
-        title=title,
-        xaxis_title="Time (min)",
-        yaxis_title="Intensity",
-        template="plotly_white",
-    )
-    return fig
-
-
-def _figure_to_png_bytes(fig: "go.Figure", width: int = 1200, height: int = 500) -> bytes:
-    """Render a Plotly figure to PNG bytes via kaleido."""
-    return pio.to_image(fig, format="png", width=width, height=height)
-
-
-def _generate_chromatogram_pdf(cdf_path: Path, title: Optional[str] = None) -> bytes:
-    """Generate a single-page chromatogram PDF for *cdf_path* (``title``
-    defaults to the CDF's own name and time)."""
-    t, y = distill.gc_xy_from_cdf(cdf_path)
-    if title is None:
-        sample, inj_dt = distill.cdf_metadata(cdf_path)
-        title = f"{sample} - {inj_dt.strftime('%Y-%m-%d %H:%M')}"
-    fig = _make_chromatogram_figure(t, y, title)
-    return pio.to_image(fig, format="pdf", width=1200, height=600)
-
-
-def _generate_comparison_html(
-    sample_path: Path, standard_paths: list[Path], sample_name: Optional[str] = None
-) -> str:
-    """Generate an HTML page with overlaid chromatograms (sample vs standards)."""
-    fig = go.Figure()
-    t_s, y_s = distill.gc_xy_from_cdf(sample_path)
-    if sample_name is None:
-        sample_name, _ = distill.cdf_metadata(sample_path)
-    fig.add_trace(go.Scatter(
-        x=t_s.tolist(), y=y_s.tolist(), mode="lines",
-        name=f"Sample: {sample_name}",
-    ))
-    for std_path in standard_paths:
-        t_std, y_std = distill.gc_xy_from_cdf(std_path)
-        std_name, _ = distill.cdf_metadata(std_path)
-        fig.add_trace(go.Scatter(
-            x=t_std.tolist(), y=y_std.tolist(), mode="lines",
-            name=f"Std: {std_name}",
-        ))
-    fig.update_layout(
-        title=f"Comparison: {sample_name}",
-        xaxis_title="Time (min)",
-        yaxis_title="Intensity",
-        template="plotly_white",
-    )
-    return pio.to_html(fig, full_html=True)
-
 
 def _comment_line(c: dict, ladder) -> str:
     """One comment as printed in a report (plain text; the HTML escapes it):
@@ -2390,54 +2326,6 @@ def api_reprocess():
                     "job_ids": job_ids, "refused": refused})
 
 
-@app.route("/api/reprocess/status", methods=["GET"])
-def api_reprocess_status():
-    """Progress of the reprocess of ``?sample_ids=1,2,3`` for the toast:
-    ``pending`` = their queued/running process jobs; once none is left the
-    phase is ``done`` with ``processed`` (final, last run succeeded) and
-    ``errors``. Without ids: ``idle`` (even with no store yet: it is polled)."""
-    try:
-        ids = _sample_ids(_list_arg(request.args.get("sample_ids")))
-    except ValueError as exc:
-        return _error(str(exc))
-    if not ids:
-        return jsonify({"phase": "idle", "total": 0, "processed": 0, "errors": 0,
-                        "pending": 0, "samples": []})
-    _data, db = _hub()
-    samples = [_sample_or_404(sid, db) for sid in ids]
-    busy = {j["sample_id"] for state in ("queued", "running")
-            for j in store.jobs.list(state=state, kind=pipeline.PROCESS, db=db)}
-    pending = processed = errors = 0
-    out = []
-    for s in samples:
-        failed = s["status"] == "error" or (s["error"] or "").startswith("last reprocess failed")
-        if s["id"] in busy:
-            pending += 1
-        elif failed:
-            errors += 1
-        elif s["status"] == "final":
-            processed += 1
-        out.append({"sample_id": s["id"], "status": s["status"],
-                    "current_revision": s["current_revision"], "error": s["error"]})
-    return jsonify({"phase": "processing" if pending else "done", "total": len(samples),
-                    "processed": processed, "errors": errors, "pending": pending,
-                    "samples": out})
-
-
-@app.route("/api/reprocess/preview", methods=["POST"])
-def api_reprocess_preview():
-    """Expand a reprocess query (single IDs, lists, integer ranges) against one
-    instrument's samples and return which lab IDs match (with the sample ids
-    that would be queued) and which are missing, so the modal can preview
-    before the user confirms. ``instrument`` is required."""
-    _data, db = _hub()
-    body = _json_object()
-    try:
-        return jsonify(_resolve_lab_query(str(body.get("query") or ""), body.get("instrument"), db))
-    except ValueError as exc:
-        return _error(str(exc))
-
-
 # ── Live updates (v4.0; live.py, static/js/live.js) ──────────────────
 @app.route("/api/live", methods=["GET"])
 def api_live():
@@ -2808,101 +2696,6 @@ def api_export_lims():
             "warning", f"Export to LIMS: {len(refused)} of {len(ids)} sample(s) refused — "
                        f"{refused[0]['error']}")
     return jsonify({"exported": exported, "refused": refused}), (200 if exported else 409)
-
-
-@app.route("/api/export-pdf", methods=["POST"])
-def api_export_pdf():
-    body = _json_object(force=True)
-    if body.get("sample_id") is None:
-        return _error("sample_id is required")
-    data, db = _hub()
-    s = _sample_or_404(body["sample_id"], db)
-    p = _revision_cdf(s, store.get_revision(s["id"], db=db) if s["current_revision"] else None, data)
-    try:
-        if go is None or pio is None:
-            return _error("Plotly/kaleido not installed for PDF generation", 500)
-
-        pdf_bytes = _generate_chromatogram_pdf(p, title=_sample_title(s))
-        filename = f"{_safe_filename(s['lab_id'])}_chromatogram.pdf"
-
-        return send_file(
-            io.BytesIO(pdf_bytes),
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name=filename,
-        )
-    except Exception as exc:
-        return _route_failure(exc)
-
-
-def _sample_title(s: dict) -> str:
-    return f"{s['lab_id']} - {str(s['injection_dt'])[:16]}"
-
-
-@app.route("/api/export-comparison", methods=["POST"])
-def api_export_comparison():
-    body = _json_object(force=True)
-    try:
-        ids = _sample_ids(body.get("sample_ids"))
-    except ValueError as exc:
-        return _error(str(exc))
-    if not ids:
-        return _error("sample_ids is required")
-    data, db = _hub()
-    samples = [_sample_or_404(sid, db) for sid in ids]
-    try:
-        if go is None or pio is None:
-            return _error("Plotly/kaleido not installed", 500)
-
-        conf = settings_mod.load_settings()
-        comp_dir = _standards_dir(conf)
-        standard_paths = []
-        if comp_dir.is_dir():
-            for fp in comp_dir.iterdir():
-                if fp.suffix.lower() == ".cdf" and fp.is_file():
-                    standard_paths.append(fp)
-
-        export_dir = Path(conf.get("export_folder", str(paths.default_export_dir())))
-        export_dir.mkdir(parents=True, exist_ok=True)
-
-        generated_files: list[str] = []
-        for s in samples:
-            try:
-                p = _revision_cdf(s, store.get_revision(s["id"], db=db) if s["current_revision"]
-                                  else None, data)
-            except SampleNotFound:
-                continue
-            sample_name = s["lab_id"]
-            html_content = _generate_comparison_html(p, standard_paths, sample_name=sample_name)
-
-            out_file = export_dir / f"{_safe_filename(sample_name)}_comparison.html"
-            out_file.write_text(html_content, encoding="utf-8")
-            generated_files.append(str(out_file))
-
-            # Also generate PDF for each
-            try:
-                fig = go.Figure()
-                t_s, y_s = distill.gc_xy_from_cdf(p)
-                fig.add_trace(go.Scatter(x=t_s.tolist(), y=y_s.tolist(), mode="lines", name=sample_name))
-                for std_p in standard_paths:
-                    t_st, y_st = distill.gc_xy_from_cdf(std_p)
-                    std_nm, _ = distill.cdf_metadata(std_p)
-                    fig.add_trace(go.Scatter(x=t_st.tolist(), y=y_st.tolist(), mode="lines", name=std_nm))
-                fig.update_layout(
-                    title=f"Comparison: {sample_name}",
-                    xaxis_title="Time (min)", yaxis_title="Intensity",
-                    template="plotly_white",
-                )
-                pdf_bytes = pio.to_image(fig, format="pdf", width=1200, height=600)
-                pdf_file = export_dir / f"{_safe_filename(sample_name)}_comparison.pdf"
-                pdf_file.write_bytes(pdf_bytes)
-                generated_files.append(str(pdf_file))
-            except Exception as exc:
-                LOGGER.warning("PDF generation failed for %s: %s", sample_name, exc)
-
-        return jsonify({"status": "ok", "files": generated_files})
-    except Exception as exc:
-        return _route_failure(exc)
 
 
 #: The request fields a report is built from. ``bullets`` is deliberately not
@@ -3892,15 +3685,10 @@ def samples_list_page():
 
 @app.route("/classic")
 def classic_page():
-    """The classic main page (``templates/index.html``), kept for v5.0.0 only."""
-    from flask import render_template
-    try:
-        return render_template("index.html", app_version=version.APP_VERSION)
-    except Exception:
-        return (
-            "<h1>GC Viewer &amp; Distillation Parser</h1>"
-            "<p>API is running. Place <code>index.html</code> in <code>templates/</code>.</p>"
-        )
+    """v6.0.0: the classic main page is gone; an old bookmark lands on the
+    Samples page (``/``) with its query (``?q=``, ``?sample=``) kept."""
+    qs = request.query_string.decode("latin-1")
+    return redirect("/" + (f"?{qs}" if qs else ""), code=302)
 
 
 @app.route("/calibration")

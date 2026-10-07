@@ -305,21 +305,17 @@ def test_step_7_asks_for_the_results_file_first_and_live_updates_keep_what_is_ty
             drv.quit()
 
 
-def test_the_user_menu_opens_settings_and_help_on_the_classic_page(tmp_path):
+def test_the_old_open_links_go_to_the_settings_and_help_pages(tmp_path):
+    """The user menu's old ``/?open=settings|help`` (and the classic page's
+    ``/classic?open=``, v6.0.0) land on the Settings and Help pages."""
     ui_setup_demo.build(tmp_path)
     with booted(tmp_path) as (port, _proc, _data, _home):
         drv = _driver()
         browser_sign_in(drv, port)
         try:
             for what in ("settings", "help"):
-                # v5.0.0: the classic page is at /classic, and ?open= still opens its modals there
-                drv.get(f"http://127.0.0.1:{port}/classic?open={what}")
-                assert _wait(lambda: _js(drv, f"return document.getElementById('modal-{what}')"
-                                              ".classList.contains('open');"), timeout=30), what
-                # the address no longer says ?open=, so a reload doesn't reopen it
-                assert "open=" not in drv.current_url
-                # the old /?open= link goes to the new Settings / Help page
-                drv.get(f"http://127.0.0.1:{port}/?open={what}")
-                assert _wait(lambda: drv.current_url.endswith(f"/{what}")), drv.current_url
+                for path in (f"/?open={what}", f"/classic?open={what}"):
+                    drv.get(f"http://127.0.0.1:{port}{path}")
+                    assert _wait(lambda: drv.current_url.endswith(f"/{what}")), (path, drv.current_url)
         finally:
             drv.quit()

@@ -41,6 +41,7 @@ import ui_setup_demo  # noqa: E402
 from bootapp import booted, browser_sign_in, get, post, setup_admin  # noqa: E402
 from test_ui_setup_pages_smoke import SIZES, THEMES, _driver, _errors, _js, _open, _wait  # noqa: E402
 from test_ui_shell_admin_smoke import _frame_checks  # noqa: E402
+from ui_wait import click_when_ready  # noqa: E402
 
 SHOTS = os.environ.get("GC_UI_SHOTS")
 KEY = ["IBP", "T10", "T50", "T90", "FBP"]
@@ -176,10 +177,18 @@ def test_results_table_filters_overlay_and_csv(tmp_path):
                                           ".getAttribute('aria-pressed');") == "true")
             _open_results(drv, port)
 
-            # tick two runs: their curves on one chart
-            boxes = drv.find_elements("css selector", "#tbody input[type=checkbox]:not([disabled])")
-            boxes[0].click()
-            boxes[1].click()
+            # tick two runs: their curves on one chart. The table re-renders on
+            # its own (the /api/table join, a live update), so tick by sample id,
+            # finding and clicking in one retried step, and wait for each pick to
+            # land in the page's state (never click an element found earlier)
+            ids = _wait(lambda: _js(drv, "return Array.from(document.querySelectorAll("
+                                         "'#tbody tr[data-sample-id] input[type=checkbox]:not([disabled])'))"
+                                         ".slice(0, 2).map(cb => cb.closest('tr').dataset.sampleId);"))
+            assert ids and len(ids) == 2, ids
+            for sid in ids:
+                assert click_when_ready(drv, f'#tbody tr[data-sample-id="{sid}"] input[type=checkbox]')
+                assert _wait(lambda: _js(drv, "return window.GCResultsPage.state.selected.map(String)"
+                                              ".includes(arguments[0]);", sid)), sid
             assert _wait(lambda: _js(drv, "return document.querySelectorAll('#picked li').length;") == 2)
             assert not _js(drv, "return document.getElementById('overlay').hidden;")
             assert _wait(lambda: _js(drv, "const c = document.getElementById('chart');"

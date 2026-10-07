@@ -8,8 +8,8 @@ first, then case-insensitive; the URL is decoded once, by the server),
 signed-out link lands back on itself after sign-in.
 
 In process, on a bare Flask app wired the way app.py wires it (gate, the
-blueprint, a stand-in ``index`` view for the classic page), never ``import
-app``. LabCore is ``tests/labcore_stub.py``.
+blueprint, a stand-in view for the Samples page), never ``import app``.
+v6.0.0: the classic page's old links redirect to the same view here. LabCore is ``tests/labcore_stub.py``.
 """
 from __future__ import annotations
 
@@ -39,7 +39,6 @@ import store  # noqa: E402
 import web_auth  # noqa: E402
 from labcore_stub import LabCoreStub  # noqa: E402
 
-CLASSIC = "<p>the classic page</p>"
 SAMPLES = "<p>the Samples page</p>"
 LAN = {"REMOTE_ADDR": "10.0.0.25"}
 
@@ -54,11 +53,7 @@ def make_app():
     app.before_request(web_auth.gate)
     app.context_processor(web_auth.template_context)
 
-    # v5.0.0: stand-ins for app.py's classic page and the new Samples page
-    @app.route("/classic")
-    def classic_page():
-        return CLASSIC
-
+    # a stand-in for app.py's Samples page
     @app.route("/samples")
     def samples_list_page():
         return SAMPLES
@@ -222,12 +217,19 @@ def test_the_lab_page_lands_on_the_samples_page(env):
     assert r.status_code == 404
 
 
-def test_the_classic_lab_page_opens_the_classic_page(env):
+def test_an_old_classic_lab_link_redirects_to_the_lab_link(env):
+    """v6.0.0: the classic page is gone; its bookmarks keep working."""
     signed_in(env)
     add(env["db"], "40329", "2026-09-28 10:00:00")
     r = get(env, "/classic/lab/40329")
-    assert r.status_code == 200 and r.get_data(as_text=True) == CLASSIC
-    assert get(env, "/classic/lab/99999").status_code == 404
+    assert r.status_code == 302 and r.headers["Location"] == "/lab/40329"
+    # re-quoted (every character but letters, digits and _.-~): the target
+    # is always one path segment on this hub
+    r = get(env, "/classic/lab/a%20b%3Fc%23d")
+    assert r.status_code == 302 and r.headers["Location"] == "/lab/a%20b%3Fc%23d"
+    # an unknown lab ID: the friendly page, one hop later
+    r = get(env, "/classic/lab/99999")
+    assert r.status_code == 302 and get(env, r.headers["Location"]).status_code == 404
 
 
 def test_an_unknown_lab_id_gets_a_friendly_page(env):
@@ -258,19 +260,20 @@ def test_sample_pages_open_the_samples_page(env, suffix):
     assert r.status_code == 200 and r.get_data(as_text=True) == SAMPLES
 
 
-@pytest.mark.parametrize("suffix", ["", "/compare", "/compare?standard=Diesel", "/data"])
-def test_classic_sample_pages_open_the_classic_page(env, suffix):
+@pytest.mark.parametrize("suffix", ["", "/compare", "/compare?standard=Diesel%20B", "/data"])
+def test_old_classic_sample_links_redirect_to_the_samples_page(env, suffix):
+    """v6.0.0: same run, same view, query kept (``?standard=``)."""
     signed_in(env)
     sid = add(env["db"], "40329", "2026-09-28 10:00:00")
     r = get(env, f"/classic/samples/{sid}{suffix}")
-    assert r.status_code == 200 and r.get_data(as_text=True) == CLASSIC
+    assert r.status_code == 302 and r.headers["Location"] == f"/samples/{sid}{suffix}"
+    assert get(env, r.headers["Location"]).get_data(as_text=True) == SAMPLES
 
 
-@pytest.mark.parametrize("prefix", ["", "/classic"])
 @pytest.mark.parametrize("suffix", ["", "/compare", "/data"])
-def test_an_unknown_sample_gets_the_friendly_page(env, prefix, suffix):
+def test_an_unknown_sample_gets_the_friendly_page(env, suffix):
     signed_in(env)
-    r = get(env, f"{prefix}/samples/424242{suffix}")
+    r = get(env, f"/samples/424242{suffix}")
     assert r.status_code == 404
     html = r.get_data(as_text=True)
     assert "No GC result" in html and "424242" in html

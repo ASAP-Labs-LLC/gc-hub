@@ -8,13 +8,14 @@ trace. A gc2 sample must never be labelled with gc1's calibration (what
 The hub from ``hub_boot`` is given a gc2 sample with two revisions whose
 anchors differ from gc1's (and from each other). Covers the trace route
 (current and ``?revision=``), then, in headless Chrome with a recording
-Plotly stub: the dashboard chromatogram, the Chromatogram tab overlay and the
-annotation modal's description. Browser tests skip without selenium/Chrome.
+Plotly stub, the Samples page's chromatogram (v6.0.0: the classic page's
+Dashboard, Chromatogram overlay and annotation modal are gone; Compare's
+annotation names its region from the run's ladder in
+``tests/test_ui_compare_smoke.py``). Browser tests skip without selenium/Chrome.
 """
 from __future__ import annotations
 
 import json
-import re
 import sys
 import time
 from pathlib import Path
@@ -122,11 +123,16 @@ def test_calibration_route_is_gc1s_and_differs(hub_app):
     assert body.get("carbon_numbers") != r2[1]
 
 
-def test_app_js_has_no_gc1_only_carbon_fallback():
-    src = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
-    assert "i + 5" not in src
-    assert "state.calibration" not in src
-    assert "'/api/calibration'" not in src
+def test_the_pages_have_no_gc1_only_carbon_fallback():
+    """The run's own ladder (``cal_times``/``cal_carbons``), never gc1's
+    ``/api/calibration`` (v6.0.0: the classic page's app.js is gone; these
+    are the pages that label carbons now)."""
+    for name in ("samples_page.js", "samples_logic.js", "compare_view.js", "compare_logic.js",
+                 "ladder.js"):
+        src = (ROOT / "static" / "js" / name).read_text(encoding="utf-8")
+        assert "i + 5" not in src, name
+        assert "state.calibration" not in src, name
+        assert "'/api/calibration'" not in src and '"/api/calibration"' not in src, name
 
 
 # ── headless Chrome ─────────────────────────────────────────────────────────
@@ -168,9 +174,7 @@ def page(hub_app):
     drv = _driver()
     browser_sign_in(drv, port)
     try:
-        drv.get(f"http://127.0.0.1:{port}/classic")
-        assert _wait(lambda: drv.execute_script("return state.files.length") >= 5)
-        yield drv, hub, ladders
+        yield drv, hub, ladders, port
     finally:
         drv.quit()
 
@@ -182,63 +186,19 @@ def _labels(drv, div_id):
         ".filter(a => /^C\\d+$/.test(a.text)).map(a => a.text);", div_id)
 
 
-def _file(drv, sid):
-    return drv.execute_script("return state.files.find(f => f.sample_id === arguments[0])", sid)
-
-
-def test_dashboard_labels_each_sample_with_its_own_ladder(page):
-    drv, hub, (gc1, _r1, r2) = page
+def test_the_overview_chart_labels_each_sample_with_its_own_ladder(page):
+    """The Samples page's chromatogram (v6.0.0: the classic Dashboard's is
+    gone): a gc2 run's carbon marks are its own revision's, never gc1's."""
+    drv, hub, (gc1, _r1, r2), port = page
     for key, ladder in (("held", r2), ("final", gc1), ("held", r2)):
-        drv.execute_script("window.__done = false; loadDashboardData(state.files.find("
-                           "f => f.sample_id === arguments[0])).then(() => window.__done = true);",
-                           hub.ids[key])
-        assert _wait(lambda: drv.execute_script("return window.__done"))
+        drv.get(f"http://127.0.0.1:{port}/samples/{hub.ids[key]}")
         want = [f"C{c}" for c in ladder[1]]
-        assert _wait(lambda: _labels(drv, "dash-chrom-plot") == want), \
-            (key, _labels(drv, "dash-chrom-plot"), want)
+        other = {f"C{c}" for c in (gc1 if ladder is r2 else r2)[1]} - set(want)
 
-
-def test_chromatogram_overlay_uses_the_first_traces_ladder_and_says_so(page):
-    drv, hub, (gc1, _r1, r2) = page
-    drv.execute_script("state.traces.length = 0;")
-    for key in ("held", "final"):
-        drv.execute_script("window.__done = false; addChromatogramTrace(state.files.find("
-                           "f => f.sample_id === arguments[0])).then(() => window.__done = true);",
-                           hub.ids[key])
-        assert _wait(lambda: drv.execute_script("return window.__done"))
-    assert _labels(drv, "chrom-plot") == [f"C{c}" for c in r2[1]]
-    title = drv.execute_script("return document.getElementById('chrom-plot').layout.title.text")
-    assert "50001" in title and "carbon" in title.lower(), title
-
-    # only gc1 visible: gc1's ladder, and no note
-    drv.execute_script("state.traces[0].visible = false; renderChromatogramChart();")
-    assert _labels(drv, "chrom-plot") == [f"C{c}" for c in gc1[1]]
-    title = drv.execute_script("return document.getElementById('chrom-plot').layout.title.text")
-    assert title == "Chromatogram Overlay"
-    drv.execute_script("state.traces.length = 0; renderChromatogramChart();")
-
-
-def test_annotation_modal_describes_the_span_with_the_samples_ladder(page):
-    drv, hub, (gc1, _r1, r2) = page
-    sid = hub.ids["held"]
-    drv.execute_script("""
-        const f = state.files.find(x => x.sample_id === arguments[0]);
-        state.selectedFile = f; state.selectedSample = f;
-        state.selectedStandard = state.comparisonStandards[0];
-        updateAnalysisOverlay();
-        window.__done = false; runAnalysis().then(() => window.__done = true);
-    """, sid)
-    assert _wait(lambda: drv.execute_script("return window.__done"), timeout=60)
-    assert drv.execute_script("return state._renderedAnalysisSampleId") == sid
-    assert drv.execute_script("return state.analysisResult.cal_carbons") == r2[1]
-    t0, t1 = gc1[0][0], gc1[0][2]
-    drv.execute_script(
-        "setupAnnotationHandler(); if (!annotationMode) toggleAnnotationMode();"
-        "const d = document.getElementById('analysis-trend-plot');"
-        "(d.__handlers.plotly_selected || []).forEach(f => f({range: {x: [arguments[0], "
-        "arguments[1]]}}));", t0, t1)
-    desc = drv.execute_script("return document.getElementById('annotation-region-desc').textContent")
-    want = f"C{r2[1][0]}–C{r2[1][2]}"
-    assert want in desc, desc
-    assert not re.search(rf"\bC{gc1[1][0]}\b", desc), desc
-    drv.execute_script("document.getElementById('btn-annotation-cancel').click();")
+        def ok():
+            got = _labels(drv, "chrom")
+            # the marks may be thinned to fit; every one is this run's own
+            return got and got[0] == want[0] and set(got) <= set(want) and not set(got) & other
+        assert _wait(ok), (key, _labels(drv, "chrom"), want)
+        assert drv.execute_script("return document.getElementById('chrom-note').textContent") \
+            == "Carbon marks from this run\u2019s calibration"

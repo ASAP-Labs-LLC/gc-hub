@@ -1,8 +1,9 @@
-"""v3.1 live updates, in a real browser: with the main page open, an agent
-sends a CDF through the agent API and its row appears (and becomes final)
-without a reload; the Refresh button is gone; the "Live · updated …"
-indicator runs; on the classic Instruments page a heartbeat redraws the
-agent's status without a reload.
+"""v3.1 live updates, in a real browser: with the Samples page open, an agent
+sends a CDF through the agent API and its row appears (and leaves Queued)
+without a reload, each run once; a change to one run redraws that run and
+keeps the open one open; on the instrument's page a heartbeat redraws the
+agent's status without a reload. (Until v6.0.0 this drove the classic page
+and the classic Instruments page.)
 
 Skipped when selenium or a Chrome/chromedriver can't be started. Plotly is
 stubbed before the page loads, in case its CDN is unreachable.
@@ -71,30 +72,26 @@ def _wait(pred, timeout=30.0):
 
 
 def _rows(drv):
-    """``{sample id: (name, status badge text)}`` of the dashboard list."""
+    """``{sample id: (lab text, status group)}`` of the Samples page's list."""
     return {int(k): tuple(v) for k, v in drv.execute_script("""
         const out = {};
-        document.querySelectorAll('#dash-file-list li[data-uid]').forEach(li => {
-            out[li.dataset.sampleId] = [
-                (li.querySelector('.file-item-name') || {}).textContent || '',
-                (li.querySelector('.status-badge') || {}).textContent || ''];
+        document.querySelectorAll('[data-testid=sample-row]').forEach(r => {
+            out[r.dataset.sampleId] = [(r.querySelector('.lab') || {}).textContent || '',
+                                       r.dataset.status || ''];
         });
         return out;""").items()}
 
 
 def _no_duplicates(drv) -> bool:
-    """Every list holds each sample once (a merge never duplicates a row)."""
+    """The list holds each run once (a live merge never duplicates a row)."""
     return drv.execute_script("""
-        return ['dash-file-list', 'chrom-file-list', 'dcurve-file-list', 'analysis-sample-list']
-            .every(id => {
-                const uids = Array.from(document.querySelectorAll('#' + id + ' li[data-uid]'))
-                    .map(li => li.dataset.uid);
-                return uids.length > 0 && new Set(uids).size === uids.length;
-            });""")
+        const ids = [...document.querySelectorAll('[data-testid=sample-row]')].map(r => r.dataset.sampleId);
+        return ids.length > 0 && new Set(ids).size === ids.length;""")
 
 
-def _detail(drv) -> str:
-    return drv.execute_script("return document.getElementById('detail').textContent;")
+def _agent(drv) -> str:
+    return drv.execute_script("const s = document.getElementById('agent');"
+                              "return s ? s.textContent : '';")
 
 
 def _ingest(port, token, body: bytes, filename: str):
@@ -122,15 +119,11 @@ def test_an_ingested_cdf_appears_without_a_reload(tmp_path):
         drv = _driver()
         browser_sign_in(drv, port)
         try:
-            drv.get(f"http://127.0.0.1:{port}/classic")
+            drv.get(f"http://127.0.0.1:{port}/samples")
+            assert _wait(lambda: drv.execute_script("return !!(window.GCSamples && GCSamples.ready);"))
             assert _wait(lambda: len(_rows(drv)) >= 8), _rows(drv)
-            # the Refresh button (and its Ctrl+R) is gone
+            # no Refresh button: the page follows /api/live
             assert drv.execute_script("return document.getElementById('btn-refresh');") is None
-            # the indicator says the page is live
-            assert _wait(lambda: drv.execute_script(
-                "return document.getElementById('live-indicator').textContent;")
-                .startswith("Live · updated")), drv.execute_script(
-                "return document.getElementById('live-indicator').textContent;")
             drv.execute_script("window.__sameDocument = true;")
 
             code, res = _ingest(port, token, new_cdf, "77777.CDF")
@@ -139,43 +132,34 @@ def test_an_ingested_cdf_appears_without_a_reload(tmp_path):
             assert _wait(lambda: sid in _rows(drv)), _rows(drv)
             assert _rows(drv)[sid][0].startswith("77777")
             # processed by the Worker: the row changes in place (no reload)
-            assert _wait(lambda: _rows(drv)[sid][1] != "Queued", timeout=40), _rows(drv)[sid]
+            assert _wait(lambda: _rows(drv)[sid][1] not in ("", "processing"), timeout=40), _rows(drv)[sid]
             assert drv.execute_script("return window.__sameDocument === true;")
             assert _no_duplicates(drv)
 
-            # a change to one row redraws only that row; the selection survives it
-            final, rerun = hub.ids["final"], hub.ids["rerun"]
-            drv.execute_script(f"""
-                state.selectedFile = state.files.find(f => f.sample_id === {final});
-                renderAllFileLists();
-                for (const id of [{final}, {rerun}]) {{
-                    document.querySelector('#dash-file-list li[data-sample-id="' + id + '"]')
-                        .__mark = true;
-                }}""")
+            # a change to one run: the open run stays open, each run listed once
+            final = hub.ids["final"]
+            drv.get(f"http://127.0.0.1:{port}/samples/{final}")
+            assert _wait(lambda: drv.execute_script("return !!(window.GCSamples && GCSamples.ready);"))
+            assert _wait(lambda: final in _rows(drv))
+            drv.execute_script("window.__sameDocument = true;")
+            import store
+            rev = store.samples.get(final, db=hub.db)["current_revision"]
             code, body = post(port, "/api/reprocess", {"sample_ids": [final]})
             assert code == 200 and body["count"] == 1, body
-            assert _wait(lambda: not drv.execute_script(
-                f"return !!document.querySelector('#dash-file-list li[data-sample-id=\"{final}\"]')"
-                ".__mark;"), timeout=40)
-            assert drv.execute_script(          # the other row's element was left alone
-                f"return !!document.querySelector('#dash-file-list li[data-sample-id=\"{rerun}\"]')"
-                ".__mark;")
-            assert drv.execute_script(          # still selected, highlighted once
-                "return Array.from(document.querySelectorAll('#dash-file-list li.selected'))"
-                ".map(li => li.dataset.sampleId);") == [str(final)]
-            assert drv.execute_script("return state.selectedFile.sample_id;") == final
+            assert _wait(lambda: store.samples.get(final, db=hub.db)["current_revision"] != rev, timeout=40)
+            time.sleep(4)                                   # the live poll that reports it
+            assert _rows(drv).get(final, ("", ""))[1] == "final", _rows(drv)
+            assert drv.execute_script("return location.pathname;") == f"/samples/{final}"
             assert _no_duplicates(drv)
             assert drv.execute_script("return window.__sameDocument === true;")
 
-            # the classic Instruments page: a heartbeat redraws the agent's status
-            drv.get(f"http://127.0.0.1:{port}/instruments/classic?instrument=gc1")   # v3.1: the 2A2 page moved
-            assert _wait(lambda: "Agent version" in _detail(drv))
+            # the instrument's page: a heartbeat redraws the agent's status
+            drv.get(f"http://127.0.0.1:{port}/instruments/gc1")
+            assert _wait(lambda: "Agent version" in _agent(drv)), _agent(drv)
             drv.execute_script("window.__sameDocument = true;")
             code, _ = _heartbeat(port, token, version="v8.8.8")
             assert code == 200
-            assert _wait(lambda: "v8.8.8" in _detail(drv)), _detail(drv)
-            assert _wait(lambda: "ago)" in drv.execute_script(
-                "return document.querySelector('[data-live=\"last-seen\"]').textContent;"))
+            assert _wait(lambda: "v8.8.8" in _agent(drv)), _agent(drv)
             assert drv.execute_script("return window.__sameDocument === true;")
         finally:
             drv.quit()

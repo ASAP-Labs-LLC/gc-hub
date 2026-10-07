@@ -193,7 +193,7 @@ def test_open_paths(env):
 @pytest.mark.parametrize("path,cls", [
     ("/healthz", "open"), ("/login", "open"), ("/api/login", "open"),
     ("/api/login/card", "open"), ("/api/login/admin", "open"), ("/api/logout", "open"),
-    ("/static/js/app.js", "open"), ("/favicon.ico", "open"), ("/api/ingest", "open"),
+    ("/static/js/shell.js", "open"), ("/favicon.ico", "open"), ("/api/ingest", "open"),
     ("/api/agent/heartbeat", "open"), ("/api/agent/results", "open"),
     ("/api/agent/package", "open"), ("/api/agent/package.zip", "open"),
     ("/api/agents", "session"), ("/api/agent/other", "session"), ("/api/ingestx", "session"),
@@ -657,10 +657,12 @@ def test_active_sessions_list_has_no_token_hashes(env):
     assert "token_hash" not in rows[0] and set(rows[0]) >= {"id", "method", "ip", "last_seen"}
 
 
-def test_no_redirect_loop_when_the_proxy_names_no_scheme(env):
+def test_no_redirect_loop_when_the_proxy_names_no_scheme(env, caplog):
     """Only an explicit http from the proxy is redirected; with no scheme
     header the request is served as not-https (no loop), and sign-in through
-    it is refused rather than setting a cookie without Secure."""
+    it is refused rather than setting a cookie without Secure. The refusal
+    says what was missing and leaves a WARNING in app.log naming it."""
+    caplog.set_level("WARNING", logger="web_auth")
     c = env["client"]
     h = {"Host": "gc.asaplabs.net", "CF-Connecting-IP": "203.0.113.9", "CF-Ray": "x"}
     r = c.get("/instruments", headers=h, environ_base=LOCAL)
@@ -668,14 +670,17 @@ def test_no_redirect_loop_when_the_proxy_names_no_scheme(env):
     r = post(c, "/api/login", {"username": "ryan c", "password": "labpass-1"}, environ=LOCAL,
              headers=h)
     assert r.status_code == 403 and env["stub"].requests == []
-    assert r.get_json()["error"] == HTTPS_MESSAGE
+    assert r.get_json()["error"].startswith(HTTPS_MESSAGE + ".")
+    assert "X-Forwarded-Proto" in r.get_json()["error"]
+    warned = [r.getMessage() for r in caplog.records if r.name == "web_auth"]
+    assert any("no X-Forwarded-Proto or CF-Visitor" in m and "203.0.113.9" in m for m in warned), warned
     # what a browser sends: its Origin is https, which the hub (taking the
     # request for http) would otherwise call cross-site
     for path in ("/api/login", "/api/login/card"):
         r = post(c, path, {"username": "ryan c", "password": "labpass-1", "code": "CARD-1"},
                  environ=LOCAL, headers=dict(h, Origin="https://gc.asaplabs.net",
                                              **{"Sec-Fetch-Site": "same-origin"}))
-        assert r.status_code == 403 and r.get_json()["error"] == HTTPS_MESSAGE, path
+        assert r.status_code == 403 and r.get_json()["error"].startswith(HTTPS_MESSAGE + "."), path
     assert env["stub"].requests == []
     ok = dict(h, **{"CF-Visitor": '{"scheme":"https"}'})
     r = post(c, "/api/login", {"username": "ryan c", "password": "labpass-1"}, environ=LOCAL,

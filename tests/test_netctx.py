@@ -227,7 +227,7 @@ def test_cross_site_refusal_names_the_https_address_when_the_proxy_named_no_sche
     h = dict(NO_SCHEME, Origin="https://gc.asaplabs.net", **{"Sec-Fetch-Site": "same-origin"})
     with ctx(LOOPBACK, h, method="POST"):
         assert netctx.is_cross_site()
-        assert netctx.cross_site_refusal() == HTTPS_MESSAGE
+        assert netctx.cross_site_refusal().startswith(HTTPS_MESSAGE + ".")
 
 
 def test_cross_site_refusal_for_a_real_other_site_is_unchanged():
@@ -253,7 +253,53 @@ def test_cross_site_refusal_is_none_when_same_origin():
 
 def test_https_refusal_message_uses_the_requests_host():
     with ctx(LOOPBACK, NO_SCHEME, method="POST"):
+        assert netctx.https_refusal_message().startswith(HTTPS_MESSAGE + ".")
+    with ctx(LOOPBACK, {"Host": "gc.asaplabs.net", "CF-Ray": "x", "X-Forwarded-Proto": "http"},
+             method="POST"):
         assert netctx.https_refusal_message() == HTTPS_MESSAGE
+
+
+def test_https_refusal_message_says_the_scheme_header_is_missing_and_what_to_check():
+    """v3.0.0 carry-over: through the tunnel with no X-Forwarded-Proto or
+    CF-Visitor, the person may well be on https already. The message says the
+    hub could not tell, which headers it expected and where to look."""
+    with ctx(LOOPBACK, NO_SCHEME, method="POST"):
+        msg = netctx.https_refusal_message()
+        assert netctx.scheme_problem() == "missing"
+    assert msg.startswith(HTTPS_MESSAGE + ". ")
+    assert "X-Forwarded-Proto" in msg and "CF-Visitor" in msg
+    assert "cloudflared" in msg
+
+
+def test_an_untrusted_proxy_claiming_https_is_named_with_trusted_proxies():
+    """A cloudflared on another machine not in ``trusted_proxies``: its
+    https header is (rightly) ignored, so the browser's https Origin looks
+    cross-site. Still refused, but the message says why and what to add."""
+    h = dict(NO_SCHEME, Origin="https://gc.asaplabs.net", **{"X-Forwarded-Proto": "https"})
+    proxy = {"REMOTE_ADDR": "10.0.0.7"}
+    with ctx(proxy, h, method="POST"):
+        assert netctx.is_cross_site() and not netctx.is_https()
+        assert netctx.scheme_problem() == "untrusted"
+        msg = netctx.cross_site_refusal()
+    assert msg.startswith(HTTPS_MESSAGE + ". ")
+    assert "10.0.0.7" in msg and "trusted_proxies" in msg and "settings.json" in msg
+
+
+def test_untrusted_proxy_hint_needs_an_https_claim_and_a_same_host_origin(tmp_path):
+    proxy = {"REMOTE_ADDR": "10.0.0.7"}
+    # no https claim: a LAN client with odd headers, plain cross-site
+    with ctx(proxy, dict(NO_SCHEME, Origin="https://gc.asaplabs.net"), method="POST"):
+        assert netctx.scheme_problem() is None
+        assert netctx.cross_site_refusal() == "Cross-site request refused"
+    # another site's Origin: plain cross-site even with the claim
+    h = dict(NO_SCHEME, Origin="https://evil.example", **{"X-Forwarded-Proto": "https"})
+    with ctx(proxy, h, method="POST"):
+        assert netctx.cross_site_refusal() == "Cross-site request refused"
+    # once trusted, the same request is same-origin https
+    _trust(tmp_path, ["10.0.0.0/24"])
+    h = dict(NO_SCHEME, Origin="https://gc.asaplabs.net", **{"X-Forwarded-Proto": "https"})
+    with ctx(proxy, h, method="POST"):
+        assert netctx.scheme_problem() is None and netctx.cross_site_refusal() is None
 
 
 # ── throttle keys and the https redirect ────────────────────────────────────

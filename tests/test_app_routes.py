@@ -32,9 +32,7 @@ EXPECTED_ROUTES = {
     "/api/comparison-standards",
     "/api/export-analysis-report",
     "/api/export-analysis-reports-zip",
-    "/api/export-comparison",
     "/api/export-lims",
-    "/api/export-pdf",
     "/api/files",
     "/api/live",
     "/api/notifications",
@@ -49,8 +47,6 @@ EXPECTED_ROUTES = {
     "/api/qbench-upload-status",
     "/api/qbench-upload/stream",
     "/api/reprocess",
-    "/api/reprocess/preview",
-    "/api/reprocess/status",
     "/api/restart",
     "/api/samples/<int:sample_id>/distillation-curve",
     "/api/samples/<int:sample_id>/metadata",
@@ -114,8 +110,11 @@ class RouteSurfaceTests(unittest.TestCase):
     def test_calibration_page_route_present(self) -> None:
         self.assertIn("/calibration", _route_methods())
 
-    def test_reprocess_preview_is_post(self) -> None:
-        self.assertIn("POST", _route_methods().get("/api/reprocess/preview", set()))
+    def test_the_classic_only_routes_are_gone(self) -> None:
+        """v6.0.0: removed with the classic page."""
+        for path in ("/api/reprocess/preview", "/api/reprocess/status", "/api/export-pdf",
+                     "/api/export-comparison"):
+            self.assertNotIn(path, _route_methods())
 
     def test_notification_routes_present(self) -> None:
         methods = _route_methods()

@@ -84,7 +84,8 @@ def test_start_warns_about_an_instrument_with_a_reserved_id(tmp_path):
     _stop_all(rt)
     warn = [m for lvl, m in notes if lvl == "warning" and "reserved" in m]
     assert len(warn) == 1 and "Old GC" in warn[0] and "classic" in warn[0]
-    assert "/instruments/classic?instrument=classic" in warn[0]
+    assert "/instruments/classic" not in warn[0].split("does not open it")[1]   # v6.0.0: no classic page
+    assert "add the GC again under another id" in warn[0]
 
 
 def test_final_sample_is_flushed_without_waiting_for_the_export_interval(tmp_path):

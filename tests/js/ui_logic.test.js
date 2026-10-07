@@ -226,8 +226,8 @@ module.exports = (t) => {
 
     // ── where an instrument's page is (a reserved id can't use /instruments/<id>)
     t.eq(U.instrumentHref('gc2'), '/instruments/gc2');
-    t.eq(U.instrumentHref('classic'), '/instruments/classic?instrument=classic');
-    t.eq(U.instrumentHref('activity'), '/instruments/classic?instrument=activity');
+    t.eq(U.instrumentHref('classic'), '/instruments');
+    t.eq(U.instrumentHref('activity'), '/instruments');
     t.eq(U.instrumentHref('a b'), '/instruments/a%20b');
     t.eq(U.RESERVED_IDS.includes('setup'), true);
 

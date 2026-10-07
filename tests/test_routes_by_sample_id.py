@@ -261,6 +261,9 @@ def test_table_shows_the_samples_corrected_injection_time(tmp_path):
     ("POST", "/api/library/reindex-times"), ("POST", "/api/files/refresh"),
     ("GET", "/api/trace?path=x"), ("GET", "/api/distillation-curve?path=x"),
     ("GET", "/api/metadata/some/file.CDF"),
+    # v6.0.0: the classic page's own routes went with it
+    ("POST", "/api/export-pdf"), ("POST", "/api/export-comparison"),
+    ("POST", "/api/reprocess/preview"), ("GET", "/api/reprocess/status?sample_ids=1"),
 ])
 def test_removed_routes_answer_json_404(hub_app, method, path):
     port, _hub, _ = hub_app
@@ -323,36 +326,26 @@ def test_reprocess_by_sample_ids(hub_app):
     assert job["payload"]["sample_id"] == hub.ids["final"]
     assert job["payload"]["reason"] == "reprocess"
     # the app's own Worker (hub.start) runs it; no worker in the test
-    status = f"/api/reprocess/status?sample_ids={hub.ids['final']}"
-    assert get(port, status)[1]["phase"] in ("processing", "done")
-    assert wait_for(lambda: get(port, status)[1]["phase"] == "done", timeout=30)
-    code, st = get(port, status)
-    assert st["phase"] == "done" and st["processed"] == 1 and st["errors"] == 0
-    assert st["samples"][0]["current_revision"] == 2
-    assert get(port, "/api/reprocess/status")[1]["phase"] == "idle"
-    assert get(port, f"/api/reprocess/status?sample_ids={UNKNOWN}")[0] == 404
+    assert wait_for(lambda: hub.sample("final")["current_revision"] == 2, timeout=30)
+    assert wait_for(lambda: store.jobs.get(body["job_ids"][0], db=hub.db)["state"] == "done", timeout=30)
+    assert hub.sample("final")["status"] == "final" and not hub.sample("final")["error"]
 
 
 def test_reprocess_lab_id_selection_needs_an_instrument(hub_app):
+    # (v6.0.0: the classic preview route is gone; the lab-ID mode of
+    # /api/reprocess resolves the same way: tests/test_reprocess_query.py)
     port, hub, _ = hub_app
-    code, body = post(port, "/api/reprocess/preview", {"query": "40299 to 40304"})
-    assert code == 400 and "instrument" in body["error"]
     code, body = post(port, "/api/reprocess", {"query": "40304"})
     assert code == 400 and "instrument" in body["error"]
-    code, body = post(port, "/api/reprocess/preview",
-                      {"query": "40299 to 40301, 40304", "instrument": "gc1"})
-    assert code == 200, body
-    assert body["matched"] == ["40299", "40304"]
-    assert body["missing"] == ["40300", "40301"]
-    # the latest injection of each lab ID
-    assert body["sample_ids"] == [hub.ids["backfill"], hub.ids["rerun"]]
-    assert post(port, "/api/reprocess/preview", {"query": "1", "instrument": "nope"})[0] == 404
+    assert post(port, "/api/reprocess", {"query": "1", "instrument": "nope"})[0] == 404
+    code, body = post(port, "/api/reprocess", {"query": "40300 to 40301", "instrument": "gc1"})
+    assert code == 200 and body == {"status": "no-match", "missing": ["40300", "40301"]}, body
 
 
 def test_reprocess_missing_ids_reach_the_notification_tray(hub_app):
     # (moved from the retired in-process test_reprocess_preview.py)
     port, hub, _ = hub_app
-    code, body = post(port, "/api/reprocess/preview", {"query": "1 to 99999999", "instrument": "gc1"})
+    code, body = post(port, "/api/reprocess", {"query": "1 to 99999999", "instrument": "gc1"})
     assert code == 400 and "too large" in body["error"]
     post(port, "/api/notifications/dismiss-all", {})
     code, body = post(port, "/api/reprocess", {"sample_ids": [], "missing": ["34564", "34999"]})
@@ -385,13 +378,10 @@ def test_analysis_and_best_fit_by_sample_id(hub_app):
 
 def test_report_routes_take_sample_ids(hub_app):
     port, hub, _ = hub_app
-    for path, body in (("/api/export-analysis-report", {"sample_id": UNKNOWN, "standard_name": "Diesel"}),
-                       ("/api/export-pdf", {"sample_id": UNKNOWN}),
-                       ("/api/export-comparison", {"sample_ids": [UNKNOWN]})):
-        assert post(port, path, body)[0] == 404, path
-    for path in ("/api/export-analysis-report", "/api/export-pdf", "/api/export-comparison"):
-        assert post(port, path, {"sample_path": "/x.CDF", "path": "/x.CDF",
-                                 "sample_paths": ["/x.CDF"]})[0] == 400, path
+    path = "/api/export-analysis-report"
+    assert post(port, path, {"sample_id": UNKNOWN, "standard_name": "Diesel"})[0] == 404
+    assert post(port, path, {"sample_path": "/x.CDF", "path": "/x.CDF",
+                             "sample_paths": ["/x.CDF"]})[0] == 400
 
 
 def test_comparison_standard_from_a_sample(hub_app):
@@ -530,12 +520,6 @@ def test_out_of_range_body_ids_are_json_400(hub_app, path, body):
     assert _is_json_error(code, resp, 400), (code, resp)
 
 
-def test_out_of_range_status_ids_are_json_400(hub_app):
-    port, _hub, _ = hub_app
-    code, body = get(port, f"/api/reprocess/status?sample_ids={HUGE}")
-    assert _is_json_error(code, body, 400), (code, body)
-
-
 def test_qbench_refuses_a_result_only_sample(hub_app):
     port, hub, _ = hub_app
     code, body = post(port, "/api/qbench-upload",
@@ -606,17 +590,6 @@ def test_comparison_standard_names_cannot_escape_the_folder(hub_app, name):
     assert (hub.standards / "Diesel.CDF").is_file()
 
 
-def test_export_comparison_sanitises_the_lab_id_in_file_names(hub_app):
-    port, hub, _ = hub_app
-    code, body = post(port, "/api/export-comparison", {"sample_ids": [hub.ids["slashed"]]})
-    assert code == 200, body
-    export_dir = hub.data / "exports"
-    for f in body["files"]:
-        p = Path(f).resolve()
-        assert p.parent == export_dir.resolve(), f
-        assert "/" not in p.name and ".." not in p.name.replace("_comparison", "")
-
-
 def test_an_unreadable_cdf_is_not_reread_on_every_list_request(hub_app):
     port, hub, store = hub_app
     from bootapp import wait_for
@@ -651,17 +624,18 @@ def test_server_search_with_filters(hub_app):
 
 
 def test_index_has_no_scan_controls_and_loads_the_sample_helpers(hub_app):
-    import urllib.request
+    # v6.0.0: the home page is the Samples page (the classic page is gone)
     port, _hub, _ = hub_app
-    html = get_text(port, "/classic")
+    html = get_text(port, "/")
     for gone in ('id="btn-scan"', 'id="btn-stop"', 'id="btn-rebuild-db"', 'id="btn-reindex-times"',
-                 'id="modal-log"'):
+                 'id="modal-log"', "js/app.js"):
         assert gone not in html, gone
-    assert html.index("js/samples.js") < html.index("js/app.js")
-    js = get_text(port, "/static/js/app.js")
-    for gone in ("/api/scan", "/api/rebuild-db", "/api/library/reindex-times", "/api/files/refresh",
-                 "/api/trace?", "/api/distillation-curve?", "sample_path", "pdf_path"):
-        assert gone not in js, gone
+    assert html.index("js/samples.js") < html.index("js/samples_page.js")
+    for name in ("samples_page.js", "samples_logic.js", "samples.js"):
+        js = get_text(port, f"/static/js/{name}")
+        for gone in ("/api/scan", "/api/rebuild-db", "/api/library/reindex-times", "/api/files/refresh",
+                     "/api/trace?", "/api/distillation-curve?", "sample_path", "pdf_path"):
+            assert gone not in js, (name, gone)
 
 
 # ── no store ────────────────────────────────────────────────────────────────
