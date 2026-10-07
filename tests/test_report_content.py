@@ -86,6 +86,8 @@ def test_every_path_answered(harness):
     assert r["direct"]["status"] == 200 and r["zip"]["status"] == 200
     assert r["qbench"]["status"] == 200, r["qbench"]
     assert set(harness["pdf_text"]) == {"direct", "zip", "qbench"}
+    # v6.0: a report is always exactly one Letter page
+    assert harness["pdf_pages"] == {"direct": 1, "zip": 1, "qbench": 1}
 
 
 def test_a_qbench_upload_publishes_the_sample_live(harness):

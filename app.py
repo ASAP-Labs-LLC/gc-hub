@@ -1139,6 +1139,7 @@ def _auto_restart_loop() -> None:
 # ===================================================================== #
 
 import analysis_core  # noqa: E402  (analysis numerics live there)
+import report_layout  # noqa: E402  (v6.0: the one-page report layout)
 from analysis_core import (  # noqa: E402
     analyze_pair,
     compute_trend_line,
@@ -1254,215 +1255,125 @@ def _report_footer_lines(content: dict) -> list[str]:
     return [params_line, ranges_line]
 
 
+def _report_comment_lines(comments: list[dict], ladder) -> list[str]:
+    """The report's comments as printed, one line each (``_comment_line``)."""
+    return [_comment_line(c, ladder) for c in (comments or [])]
+
+
 def _report_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str,
                  datetime_str: str, img1_b64: str, img2_b64: str, logo_b64: str,
                  bullets_text: str, conclusion: str, comments: list[dict], ladder,
-                 footer_lines: list[str]) -> str:
-    """The analysis report page (1:1 with the old desktop template). Every
-    interpolated string is escaped: bullets, conclusion, lab ID, standard and
-    document names, range labels, comments."""
-    e = _esc
-    blocks = []
-    bullet_items: list[str] = []
-    for line in (bullets_text or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("•"):
-            bullet_items.append(line.lstrip("•").strip())
-            continue
-        if bullet_items:
-            blocks.append(bullet_items)
-            bullet_items = []
-        blocks.append(line)
-    if bullet_items:
-        blocks.append(bullet_items)
-    parts = []
-    for b in blocks:
-        if isinstance(b, list):
-            lis = "".join(f'<li style="margin-bottom:5px; color:#2c2c2c;">{e(x)}</li>' for x in b)
-            parts.append(f'<ul style="margin:0; padding-left:20px; font-size:9pt;">{lis}</ul>')
-        else:
-            parts.append(f'<p style="margin:0 0 4px 0; font-size:9pt; color:#2c2c2c;">{e(b)}</p>')
-    bullets_html = "".join(parts) or (
-        '<p style="color:#888888; font-style:italic; margin:0; font-size:9pt;">'
-        f"{e(analysis_core.NO_DEVIATION)}</p>")
+                 footer_lines: list[str], plan=None, spikes_marked: bool = False) -> str:
+    """The analysis report page (v6.0: one Letter page in the app's look,
+    ``report_layout``). Every interpolated string is escaped: bullets,
+    conclusion, lab ID, standard and document names, range labels,
+    comments. *plan* is ``report_layout.plan`` for this content (computed
+    here when not given)."""
+    comment_lines = _report_comment_lines(comments, ladder)
+    if plan is None:
+        plan = report_layout.plan(
+            doc_name=doc_name, lab_id=lab_id, std_name=std_name, bullets_text=bullets_text,
+            conclusion=conclusion, comment_lines=comment_lines, footer_lines=footer_lines,
+            has_logo=bool(logo_b64))
+    return report_layout.render_html(
+        doc_name=doc_name, lab_id=lab_id, std_name=std_name, date_display=date_display,
+        datetime_str=datetime_str, img1_b64=img1_b64, img2_b64=img2_b64, logo_b64=logo_b64,
+        bullets_text=bullets_text, conclusion=conclusion, comment_lines=comment_lines,
+        footer_lines=footer_lines, app_version=version.APP_VERSION, plan_=plan,
+        sample_label=lab_id, spikes_marked=spikes_marked,
+        no_deviation=analysis_core.NO_DEVIATION)
 
-    comments_section = ""
-    if comments:
-        lis = "".join(f'<li style="margin-bottom:4px; color:#2c2c2c;">{e(_comment_line(c, ladder))}</li>'
-                      for c in comments)
-        comments_section = f"""
-<!-- COMMENTS -->
-<table width="100%" cellspacing="0" cellpadding="0" style="margin-top:6px;">
-<tr><td style="background-color:#555555; padding:3px 10px; color:#ffffff; font-size:9pt; font-weight:bold; letter-spacing:0.5px;">
-  Comments
-</td></tr>
-</table>
-<table width="100%" cellspacing="0" cellpadding="0" style="margin-top:0;">
-<tr>
-  <td width="4" style="background-color:#888888;"></td>
-  <td style="background-color:#f8f8f8; padding:6px 12px 8px 12px; border:1px solid #e8e8e8; border-left:none;">
-    <ul style="margin:0; padding-left:20px; font-size:9pt;">{lis}</ul>
-  </td>
-</tr>
-</table>
-"""
 
-    logo_cell_html = (f'<img src="data:image/png;base64,{logo_b64}" height="56">' if logo_b64
-                      else '<span style="color:#1c1c1c;">&#8203;</span>')
-    lab_id_html = (
-        f'<span style="font-size:9pt; font-weight:bold; color:#1c1c1c;">Lab ID:&nbsp;{e(lab_id)}</span><br>'
-        if lab_id else "")
-    conc_html = (e(conclusion).replace("\n", "<br>") if conclusion
-                 else '<em style="color:#888888;">No conclusion available.</em>')
-    footer_html = "<br>".join(e(x) for x in footer_lines)
-    return f"""<!DOCTYPE HTML>
-<html><head><meta charset="utf-8"></head>
-<body style="font-family:'Segoe UI',Arial,sans-serif; color:#2c2c2c; background:#ffffff; margin:0; padding:0;">
+# The report charts in the app's chart style (tokens.css, light: compare_view.js).
+_RC = dict(ink="#0f172a", ref="#a8b0bc", grid="#eef0f3", axis="#64748b", tick="#cbd2da",
+           band="rgba(15,23,42,0.05)", band_edge="rgba(15,23,42,0.16)", band_text="#5b6678",
+           above_fill="#fecaca", below_fill="#bfdbfe", card="#ffffff")
+_REPORT_PX_PER_PT = 2          # figure px per printed point (fonts and lines below are in px)
 
-<!-- HEADER -->
-<table width="100%" cellspacing="0" cellpadding="0"
-       style="border-bottom:3px solid #c0392b;">
-<tr>
-  <td width="140" style="padding:8px 10px 8px 12px; vertical-align:middle;">{logo_cell_html}</td>
-  <td style="padding:8px 6px; text-align:center; vertical-align:middle;">
-    <div style="font-size:13pt; font-weight:bold; color:#1c1c1c; letter-spacing:0.5px;">{e(doc_name)}</div>
-  </td>
-  <td width="140" style="padding:8px 12px 8px 6px; text-align:right; vertical-align:middle;">
-    {lab_id_html}
-    <span style="font-size:8pt; color:#555555;">{e(date_display)}</span>
-  </td>
-</tr>
-</table>
 
-<!-- TREND PLOT -->
-<table width="100%" cellspacing="0" cellpadding="0" style="margin-top:8px;">
-<tr><td style="background-color:#c0392b; padding:3px 10px; color:#ffffff; font-size:9pt; font-weight:bold; letter-spacing:0.5px;">
-  GC Trend Analysis &mdash; Sample vs {e(std_name)}
-</td></tr>
-</table>
-<table width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #dddddd; background-color:#ffffff; margin-top:0;">
-<tr><td style="text-align:center; padding:1px;">
-  <img src="data:image/png;base64,{img1_b64}" width="810" height="260">
-</td></tr>
-</table>
-
-<!-- DIFFERENCE PLOT -->
-<table width="100%" cellspacing="0" cellpadding="0" style="margin-top:6px;">
-<tr><td style="background-color:#c0392b; padding:3px 10px; color:#ffffff; font-size:9pt; font-weight:bold; letter-spacing:0.5px;">
-  Difference Plot &mdash; Sample &minus; {e(std_name)}
-</td></tr>
-</table>
-<table width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #dddddd; background-color:#ffffff; margin-top:0;">
-<tr><td style="text-align:center; padding:1px;">
-  <img src="data:image/png;base64,{img2_b64}" width="810" height="240">
-</td></tr>
-</table>
-
-<!-- DEVIATION ANALYSIS -->
-<table width="100%" cellspacing="0" cellpadding="0" style="margin-top:6px;">
-<tr><td style="background-color:#c0392b; padding:3px 10px; color:#ffffff; font-size:9pt; font-weight:bold; letter-spacing:0.5px;">
-  Deviation Analysis
-</td></tr>
-</table>
-<table width="100%" cellspacing="0" cellpadding="0" style="margin-top:0;">
-<tr>
-  <td width="4" style="background-color:#c0392b;"></td>
-  <td style="background-color:#f8f8f8; padding:6px 12px 8px 12px; border:1px solid #e8e8e8; border-left:none;">
-    {bullets_html}
-  </td>
-</tr>
-</table>
-{comments_section}
-<!-- CONCLUSION -->
-<table width="100%" cellspacing="0" cellpadding="0" style="margin-top:6px;">
-<tr><td style="background-color:#555555; padding:3px 10px; color:#ffffff; font-size:9pt; font-weight:bold; letter-spacing:0.5px;">
-  Conclusion
-</td></tr>
-</table>
-<table width="100%" cellspacing="0" cellpadding="0" style="margin-top:0;">
-<tr>
-  <td width="4" style="background-color:#888888;"></td>
-  <td style="background-color:#f3f3f3; padding:6px 12px 8px 12px; font-size:8.5pt; font-style:italic; color:#333333; border:1px solid #e0e0e0; border-left:none;">
-    {conc_html}
-  </td>
-</tr>
-</table>
-
-<!-- FOOTER -->
-<table width="100%" cellspacing="0" cellpadding="0" style="margin-top:8px; border-top:1px solid #cccccc;">
-<tr><td style="padding-top:4px; text-align:center; font-size:7pt; color:#999999;">
-  {footer_html}<br>
-  Generated by GC hub {e(version.APP_VERSION)} &middot; {e(datetime_str)}
-</td></tr>
-</table>
-
-</body></html>"""
+def _carbon_ticks(times, carbons) -> tuple[list, list]:
+    """The trend's top axis (``compare_logic.carbonTicks``): the ladder,
+    thinned to even carbons over 14 ticks and every fourth over 15."""
+    pairs = [(float(t), int(c)) for t, c in zip(times or [], carbons or [])]
+    if len(pairs) > 14:
+        pairs = [p for p in pairs if p[1] % 2 == 0]
+    if len(pairs) > 15:
+        pairs = [p for p in pairs if p[1] % 4 == 0]
+    return [p[0] for p in pairs], [f"C{p[1]}" for p in pairs]
 
 
 def _report_figures(content: dict, sample_name: str, overlay_standards: list,
                     conf: dict) -> tuple:
-    """The report's two charts (chromatogram overlay, difference) from the
-    report content: range boxes from its windows, the x-axis from its
-    parameters, ±threshold lines and the counted spikes on the difference."""
+    """The report's two charts (trend, difference) from the report content,
+    drawn like the Compare view: the standard a light area, the sample an ink
+    line, range bands from its windows (the very windows the bullets used),
+    carbon numbers on the trend's top axis from the report's ladder, the
+    difference filled above/below with ±threshold lines and the counted
+    spikes. Sized by the caller (``to_image(width, height)``) at
+    ``_REPORT_PX_PER_PT`` px per printed point."""
     s = content["series"]
     p = content["params_used"]
+    c = _RC
+    k = _REPORT_PX_PER_PT
     t_common = np.asarray(s["t"], dtype=float)
     std_raw, smp_raw = np.asarray(s["standard"]), np.asarray(s["sample"])
     diff = np.asarray(s["diff"], dtype=float)
     std_name = content["standard_name"]
     x_max_min = float(p["x_max_min"])
     cal_times, cal_carbons = content["ladder"]
+    x_range = [float(t_common[0]), x_max_min]
+    font = report_layout.chart_font_family()
 
-    cal_shapes: list[dict] = []
-    cal_annotations: list[dict] = []
-    for ci, peak_time in enumerate(cal_times):
-        tval = float(peak_time)
-        cal_shapes.append(dict(type="line", x0=tval, y0=0, x1=tval, y1=1, xref="x", yref="paper",
-                               line=dict(color="#e3b341", dash="dot", width=1), layer="below"))
-        lbl = f"C{cal_carbons[ci]}" if ci < len(cal_carbons) else f"#{ci + 1}"
-        cal_annotations.append(dict(x=tval, y=1.03, xref="x", yref="paper", text=f"<b>{lbl}</b>",
-                                    showarrow=False, font=dict(color="#e3b341", size=14),
-                                    xanchor="center", yanchor="bottom"))
-
-    # Range boxes from the report's windows: the very windows the bullets used.
-    range_shapes: list[dict] = []
-    range_annotations: list[dict] = []
-    _rgba = analysis_core.range_color_rgba
+    bands: list[dict] = []
+    band_labels: list[dict] = []
+    # A band's label only where it fits inside the band without touching the
+    # previous one: the full label, else just its carbons, else none (the
+    # ranges are named in the findings and the footer).
+    plot_w_pt = report_layout.BODY_W - 40          # the plot area: margins l=34, r=6
+    span_min = max(x_range[1] - x_range[0], 1e-9)
+    label_end = -1e9
     for w in content["windows"]:
         if not w["evaluable"]:
             continue
-        color = w.get("color") or "#f0a500"
-        range_shapes.append(dict(
-            type="rect", x0=w["t0"], x1=w["t1"], y0=0, y1=1, xref="x", yref="paper",
-            fillcolor=_rgba(color, 0.12), line=dict(color=_rgba(color, 0.55), width=1, dash="dash"),
-            layer="below"))
-        range_annotations.append(dict(
-            x=(w["t0"] + w["t1"]) / 2, y=0.98, xref="x", yref="paper",
-            text=f"<b>{_esc(w['label'])} C{w['c_start']}–C{w['c_end']}</b>", showarrow=False,
-            font=dict(color="#555555", size=18), xanchor="center", yanchor="top",
-            bgcolor="rgba(255,255,255,0.75)", borderpad=2))
+        bands.append(dict(type="rect", x0=w["t0"], x1=w["t1"], y0=0, y1=1, xref="x",
+                          yref="paper", fillcolor=c["band"], layer="below",
+                          line=dict(color=c["band_edge"], width=0.6 * k)))
+        x0_pt = (max(w["t0"], x_range[0]) - x_range[0]) / span_min * plot_w_pt
+        x1_pt = (min(w["t1"], x_range[1]) - x_range[0]) / span_min * plot_w_pt
+        carbons = f"C{w['c_start']}–C{w['c_end']}"
+        for text in (f"{w['label']} {carbons}", carbons):
+            need = report_layout.line_width(text, 6.5) + 6
+            if x1_pt - x0_pt >= need and x0_pt >= label_end:
+                band_labels.append(dict(
+                    x=w["t0"], xref="x", xanchor="left", xshift=3 * k, y=1, yref="paper",
+                    yanchor="top", yshift=-2 * k, showarrow=False, text=_esc(text),
+                    font=dict(size=6.5 * k, color=c["band_text"])))
+                label_end = x0_pt + need
+                break
 
-    all_shapes = range_shapes + cal_shapes
-    all_annotations = range_annotations + cal_annotations
+    axis = dict(gridcolor=c["grid"], gridwidth=0.5 * k, linecolor=c["tick"], linewidth=0.75 * k,
+                tickcolor=c["tick"], tickwidth=0.75 * k, ticklen=2.5 * k, ticks="outside",
+                showline=True, zeroline=False, tickfont=dict(color=c["axis"], size=6.5 * k))
+    xaxis = dict(axis, range=x_range,
+                 title=dict(text="Retention time (min)", standoff=2 * k,
+                            font=dict(size=6.5 * k, color=c["axis"])))
 
-    PLOT_BG, BG, FG = "#f7f7f7", "#ffffff", "#2c2c2c"
-    AXIS = dict(title_font=dict(color=FG, size=22), tickfont=dict(color=FG, size=16),
-                linecolor="#cccccc", gridcolor="rgba(0,0,0,0.08)", zeroline=False)
-    legend = dict(orientation="h", x=0.5, xanchor="center", y=1.18, yanchor="bottom",
-                  font=dict(size=14), bgcolor="rgba(255,255,255,0.9)", bordercolor="#cccccc",
-                  borderwidth=1)
-    hover = "Time: %{x:.2f} min<br>Intensity: %{y:.0f}<extra></extra>"
+    def layout(**extra):
+        base = dict(template="none", paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
+                    font=dict(family=font, color=c["axis"], size=6.5 * k), showlegend=False,
+                    xaxis=xaxis, yaxis=dict(axis, tickformat="~s"))
+        base.update(extra)
+        return base
 
+    # Trend: the standard a light area behind, the sample an ink line on top.
     fig1 = go.Figure()
-    fig1.add_trace(go.Scatter(x=t_common.tolist(), y=std_raw.tolist(),
-                              name=f"Standard: {_esc(std_name)}", mode="lines",
-                              line=dict(color="#888888", width=1), hovertemplate=hover))
-    fig1.add_trace(go.Scatter(x=t_common.tolist(), y=smp_raw.tolist(),
-                              name=f"Sample: {_esc(sample_name)}", mode="lines",
-                              line=dict(color="#c0392b", width=1), hovertemplate=hover))
-    _ov_colors = ["#3498db", "#27ae60", "#8e44ad", "#e67e22", "#16a085"]
+    fig1.add_trace(go.Scatter(x=t_common.tolist(), y=std_raw.tolist(), mode="lines",
+                              name=f"Standard: {_esc(std_name)}", fill="tozeroy",
+                              fillcolor="rgba(168,176,188,0.35)",
+                              line=dict(color=c["ref"], width=0.6 * k)))
+    fig1.add_trace(go.Scatter(x=t_common.tolist(), y=smp_raw.tolist(), mode="lines",
+                              name=f"Sample: {_esc(sample_name)}",
+                              line=dict(color=c["ink"], width=0.9 * k)))
     comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
     for oi, ov_name in enumerate(overlay_standards or []):
         try:
@@ -1479,20 +1390,27 @@ def _report_figures(content: dict, sample_name: str, overlay_standards: list,
                 _tr = distill.gc_trace_from_cdf(ov_path)
                 ox, oy = _tr.x, _tr.y
             oy_i = np.interp(t_common, np.array(ox, dtype=float), np.array(oy, dtype=float))
+            # monochrome, told apart by dash (as on Results)
             fig1.add_trace(go.Scatter(
                 x=t_common.tolist(), y=oy_i.tolist(), name=_esc(ov_path.stem), mode="lines",
-                line=dict(color=_ov_colors[oi % len(_ov_colors)], width=1, dash="dot"),
-                hovertemplate=hover))
+                line=dict(color=c["axis"], width=0.75 * k,
+                          dash=("dot", "dash", "dashdot", "longdash")[oi % 4])))
         except Exception:
             LOGGER.warning("Could not load overlay standard %s", ov_name)
-    fig1.update_layout(
-        template="none", paper_bgcolor=BG, plot_bgcolor=PLOT_BG, font=dict(color=FG, size=18),
-        margin=dict(l=80, r=80, t=150, b=60), legend=legend,
-        shapes=all_shapes, annotations=all_annotations,
-        xaxis=dict(AXIS, title="Time (min)", range=[float(t_common[0]), x_max_min]),
-        yaxis=dict(AXIS, title="Intensity"))
+    tick_vals, tick_text = _carbon_ticks(cal_times, cal_carbons)
+    trend_layout = layout(shapes=bands, annotations=band_labels,
+                          margin=dict(l=34 * k, r=6 * k, t=(14 if tick_vals else 6) * k, b=24 * k))
+    if tick_vals:
+        fig1.add_trace(go.Scatter(x=[tick_vals[0]], y=[None], xaxis="x2", mode="lines",
+                                  hoverinfo="skip", showlegend=False))
+        trend_layout["xaxis2"] = dict(
+            overlaying="x", side="top", matches="x", range=x_range, tickvals=tick_vals,
+            ticktext=tick_text, tickfont=dict(size=6 * k, color=c["axis"]), ticks="outside",
+            ticklen=2.5 * k, tickcolor=c["tick"], tickwidth=0.75 * k, showgrid=False,
+            showline=False, zeroline=False)
+    fig1.update_layout(**trend_layout)
 
-    # Difference: ±thresholds (dotted) and the spikes the report counted.
+    # Difference: above / below fills, the ink line, ±thresholds, the counted spikes.
     shown = t_common <= x_max_min
     spikes = content.get("spikes") or []
     span = max([float(np.max(np.abs(diff[shown]))) if shown.any() else 0.0,
@@ -1500,43 +1418,52 @@ def _report_figures(content: dict, sample_name: str, overlay_standards: list,
     y_lim = span * 1.15 or 1.0
     fig2 = go.Figure()
     fig2.add_trace(go.Scatter(x=t_common.tolist(), y=np.where(diff > 0, diff, 0.0).tolist(),
-                              fill="tozeroy", fillcolor="rgba(192,57,43,0.12)", line=dict(width=0),
-                              showlegend=False, hoverinfo="skip"))
+                              fill="tozeroy", fillcolor=c["above_fill"], mode="lines",
+                              line=dict(width=0), showlegend=False, hoverinfo="skip"))
     fig2.add_trace(go.Scatter(x=t_common.tolist(), y=np.where(diff < 0, diff, 0.0).tolist(),
-                              fill="tozeroy", fillcolor="rgba(52,152,219,0.12)", line=dict(width=0),
-                              showlegend=False, hoverinfo="skip"))
-    fig2.add_trace(go.Scatter(x=t_common.tolist(), y=diff.tolist(),
-                              name="Difference (sample − std)", mode="lines",
-                              line=dict(color="#c0392b", width=1.5),
-                              hovertemplate="Time: %{x:.2f} min<br>Diff: %{y:.0f}<extra></extra>"))
+                              fill="tozeroy", fillcolor=c["below_fill"], mode="lines",
+                              line=dict(width=0), showlegend=False, hoverinfo="skip"))
+    fig2.add_trace(go.Scatter(x=t_common.tolist(), y=diff.tolist(), mode="lines",
+                              name="Difference (sample − std)",
+                              line=dict(color=c["ink"], width=0.8 * k)))
     if spikes:
         fig2.add_trace(go.Scatter(
             x=[x["t"] for x in spikes], y=[x["value"] for x in spikes], mode="markers",
             name="Counted spikes (raw difference)",
             marker=dict(symbol=["triangle-up" if x["sign"] > 0 else "triangle-down" for x in spikes],
-                        size=14, color="#1c1c1c", line=dict(color="#ffffff", width=1))))
-    thr_shapes = [dict(type="line", xref="paper", x0=0, x1=1, yref="y", y0=0, y1=0,
-                       line=dict(color="#aaaaaa", width=1, dash="dash"))]
-    thr_annotations = []
-    for level, name, color in ((p["thresh_marginal"], "marginal", "#888888"),
-                               (p["thresh_moderate"], "moderate", "#e67e22"),
-                               (p["thresh_significant"], "significant", "#c0392b")):
+                        size=5 * k, color=c["ink"], line=dict(color="#ffffff", width=0.5 * k))))
+    thr_shapes, thr_ann = [], []
+    for level, name, dash in ((p["thresh_marginal"], "marginal", "dot"),
+                              (p["thresh_moderate"], "moderate", "dash"),
+                              (p["thresh_significant"], "significant", "dash")):
         for sgn in (1, -1):
             thr_shapes.append(dict(type="line", xref="paper", x0=0, x1=1, yref="y",
-                                   y0=sgn * level, y1=sgn * level,
-                                   line=dict(color=color, width=1, dash="dot")))
+                                   y0=sgn * level, y1=sgn * level, layer="below", opacity=0.6,
+                                   line=dict(color=c["axis"], width=0.6 * k, dash=dash)))
         if level <= y_lim:
-            thr_annotations.append(dict(x=1.0, xref="paper", y=level, yref="y",
-                                        text=f"{name} ±{level:g}", showarrow=False,
-                                        xanchor="left", font=dict(color=color, size=12)))
-    fig2.update_layout(
-        template="none", paper_bgcolor=BG, plot_bgcolor=PLOT_BG, font=dict(color=FG, size=18),
-        margin=dict(l=80, r=150, t=130, b=60), legend=legend,
-        shapes=range_shapes + cal_shapes + thr_shapes,
-        annotations=all_annotations + thr_annotations,
-        xaxis=dict(AXIS, title="Time (min)", range=[float(t_common[0]), x_max_min]),
-        yaxis=dict(AXIS, title="Difference (sample − std)", range=[-y_lim, y_lim]))
+            thr_ann.append(dict(xref="paper", x=1, xanchor="right", y=level, yref="y",
+                                yanchor="bottom", showarrow=False, text=f"{name} ±{level:g}",
+                                font=dict(size=6 * k, color=c["axis"])))
+    diff_layout = layout(shapes=[dict(b, line=dict(width=0)) for b in bands] + thr_shapes,
+                         annotations=thr_ann, margin=dict(l=34 * k, r=6 * k, t=4 * k, b=24 * k))
+    diff_layout["yaxis"] = dict(axis, range=[-y_lim, y_lim], tickformat="+~s", zeroline=True,
+                                zerolinecolor=c["tick"], zerolinewidth=0.75 * k)
+    fig2.update_layout(**diff_layout)
     return fig1, fig2
+
+
+def _render_report_charts(content: dict, sample_name: str, overlay_standards: list,
+                          conf: dict, plan) -> tuple[bytes, bytes]:
+    """The two chart PNGs at the plan's printed size (2x for print)."""
+    fig1, fig2 = _report_figures(content, sample_name, overlay_standards, conf)
+    k = _REPORT_PX_PER_PT
+    w = round(plan.width * k)
+    try:
+        return (fig1.to_image(format="png", width=w, height=round(plan.trend_h * k), scale=2),
+                fig2.to_image(format="png", width=w, height=round(plan.diff_h * k), scale=2))
+    except Exception as exc:
+        LOGGER.error("Chart render failed: %s", exc)
+        raise RuntimeError(f"Could not render Plotly charts: {exc}") from exc
 
 
 def _generate_analysis_report_pdf(params: dict, content: dict, comments: list[dict]) -> bytes:
@@ -1545,22 +1472,14 @@ def _generate_analysis_report_pdf(params: dict, content: dict, comments: list[di
     request's presentation fields (``doc_name``, ``lab_id`` — set by the
     server from the sample —, ``overlay_standards`` and an operator-edited
     ``conclusion``) and *comments* (``[{text, initials, created_at, t0,
-    t1}]``, rendered and escaped). Two Plotly charts rendered as PNG in the
-    old desktop template, converted with xhtml2pdf."""
+    t1}]``, rendered and escaped). Always one Letter page
+    (``report_layout.plan`` sizes the charts and shortens what cannot fit):
+    two Plotly charts rendered as PNG in the page, converted with
+    xhtml2pdf."""
     doc_name = str(params.get("doc_name") or "GC Analysis")
     lab_id = str(params.get("lab_id") or "")
     conclusion = str(params.get("conclusion") or "").strip() or content["conclusion_generated"]
     conf = settings_mod.load_settings()
-
-    fig1, fig2 = _report_figures(content, lab_id or "Sample",
-                                 params.get("overlay_standards") or [], conf)
-    PLOT_W, PLOT_H, PLOT_H2 = 1400, 520, 480
-    try:
-        png1_bytes = fig1.to_image(format="png", width=PLOT_W, height=PLOT_H, scale=2)
-        png2_bytes = fig2.to_image(format="png", width=PLOT_W, height=PLOT_H2, scale=2)
-    except Exception as exc:
-        LOGGER.error("Chart render failed: %s", exc)
-        raise RuntimeError(f"Could not render Plotly charts: {exc}") from exc
 
     logo_b64 = ""
     logo_path = conf.get("analysis_report_logo", "").strip()
@@ -1570,38 +1489,48 @@ def _generate_analysis_report_pdf(params: dict, content: dict, comments: list[di
         except Exception:
             pass
 
+    footer_lines = _report_footer_lines(content)
+    plan = report_layout.plan(
+        doc_name=doc_name, lab_id=lab_id, std_name=content["standard_name"],
+        bullets_text=content["text"], conclusion=conclusion,
+        comment_lines=_report_comment_lines(comments, content["ladder"]),
+        footer_lines=footer_lines, has_logo=bool(logo_b64))
+    if plan.notes:
+        LOGGER.info("Report for %s shortened to fit one page: %s", lab_id or "a sample",
+                    "; ".join(plan.notes))
+    png1_bytes, png2_bytes = _render_report_charts(
+        content, lab_id or "Sample", params.get("overlay_standards") or [], conf, plan)
+    now = datetime.now()
     page = _report_html(
         doc_name=doc_name, lab_id=lab_id, std_name=content["standard_name"],
-        date_display=datetime.now().strftime("%B %d, %Y"),
-        datetime_str=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        date_display=now.strftime("%B %d, %Y").replace(" 0", " "),
+        datetime_str=now.strftime("%Y-%m-%d %H:%M"),
         img1_b64=base64.b64encode(png1_bytes).decode("ascii"),
         img2_b64=base64.b64encode(png2_bytes).decode("ascii"),
         logo_b64=logo_b64, bullets_text=content["text"], conclusion=conclusion,
-        comments=comments or [], ladder=content["ladder"],
-        footer_lines=_report_footer_lines(content))
+        comments=comments or [], ladder=content["ladder"], footer_lines=footer_lines,
+        plan=plan, spikes_marked=bool(content.get("spikes")))
 
-    # xhtml2pdf (replaces QPrinter from the desktop app): US Letter, 12 mm margins.
+    # xhtml2pdf (replaces QPrinter from the desktop app): US Letter, one page.
     if xhtml2pdf_pisa is not None:
+        report_layout.fonts()
         pdf_buffer = io.BytesIO()
-        body = page.split('<body', 1)[1].split('>', 1)[1].rsplit('</body>', 1)[0]
-        styled_html = f"""<!DOCTYPE HTML>
-<html><head><meta charset="utf-8">
-<style>
-@page {{
-    size: letter;
-    margin: 12mm;
-}}
-</style>
-</head>
-<body style="font-family:'Segoe UI',Arial,sans-serif; color:#2c2c2c; background:#ffffff; margin:0; padding:0;">
-{body}
-</body></html>"""
-        status = xhtml2pdf_pisa.CreatePDF(styled_html, dest=pdf_buffer)
+        status = xhtml2pdf_pisa.CreatePDF(page, dest=pdf_buffer)
         if not status.err:
-            return pdf_buffer.getvalue()
+            pdf = pdf_buffer.getvalue()
+            try:
+                pages = report_layout.page_count(pdf)
+            except Exception:
+                pages = 1
+            if pages != 1:
+                LOGGER.warning("The report for %s came out %d pages; it should be one",
+                               lab_id or "a sample", pages)
+            return pdf
         LOGGER.warning("xhtml2pdf conversion had errors, falling back to PNG")
 
     LOGGER.warning("xhtml2pdf not available, falling back to kaleido single-chart PDF")
+    fig1, _fig2 = _report_figures(content, lab_id or "Sample",
+                                  params.get("overlay_standards") or [], conf)
     try:
         return pio.to_image(fig1, format="pdf", width=1920, height=1080, scale=2)
     except Exception:

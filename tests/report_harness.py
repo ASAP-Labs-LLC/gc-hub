@@ -62,7 +62,12 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
 
     log_rows: list[dict] = []
     fake = types.ModuleType("comments")
-    fake.for_report = lambda sid, db: [dict(c) for c in COMMENTS]
+    # GC_HARNESS_COMMENTS: a JSON file of comments to report instead (the
+    # one-page worst case, tests/test_report_one_page.py)
+    comments = COMMENTS
+    if os.environ.get("GC_HARNESS_COMMENTS"):
+        comments = json.loads(Path(os.environ["GC_HARNESS_COMMENTS"]).read_text(encoding="utf-8"))
+    fake.for_report = lambda sid, db: [dict(c) for c in comments]
 
     # Phase 4's exact signature (comments.log_report): keyword-only, so a
     # call that doesn't match it raises TypeError and the tests see no row.
@@ -185,6 +190,7 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
         k: " ".join(" ".join((p.extract_text() or "") for p in
                              pypdf.PdfReader(io.BytesIO(v)).pages).split())
         for k, v in pdfs.items()}
+    out["pdf_pages"] = {k: len(pypdf.PdfReader(io.BytesIO(v)).pages) for k, v in pdfs.items()}
     out["records"] = records
     out["htmls"] = htmls
     out["log_rows"] = log_rows
