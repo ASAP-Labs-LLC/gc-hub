@@ -209,7 +209,9 @@ PAGE_CSS = [ROOT / "static" / "css" / "admin.css", ROOT / "static" / "css" / "ca
             ROOT / "static" / "css" / "compare.css", ROOT / "static" / "css" / "report_queue.css",
             # v5.0 lane R
             ROOT / "static" / "css" / "results.css", ROOT / "static" / "css" / "settings.css",
-            ROOT / "static" / "css" / "controls.css", ROOT / "static" / "css" / "notifications.css"]
+            ROOT / "static" / "css" / "controls.css", ROOT / "static" / "css" / "notifications.css",
+            # v6.0 lane L5: phones and tablets
+            ROOT / "static" / "css" / "mobile.css"]
 CHECKED_FG = {p[0] for p in PAIRS}
 
 

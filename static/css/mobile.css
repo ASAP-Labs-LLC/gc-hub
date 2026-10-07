@@ -1,0 +1,330 @@
+/* mobile.css (v6.0 lane L5): the GC hub on phones (360–430px) and tablets
+   (768–1024px), in the same look: the same tokens, hairlines, pill buttons
+   and monochrome ink. Loaded last by _layout.html so these media queries win;
+   nothing here applies at 1100px and wider, so the desktop is unchanged.
+
+   Three widths, each a deliberate layout rather than a squeeze:
+   * phone, below 760px: the sidebar becomes a drawer behind a menu button,
+     the top bar carries the page title, the report queue and the global
+     status (Live dot, bell) on one row and the page's own actions on a
+     second; sheets and dialogs rise from the bottom edge at full width;
+     every control is at least 44px tall; safe-area insets are respected.
+   * narrow, below 900px (phones and tablets held upright): the Samples list
+     and a sample take turns in one pane, with a "Samples" back button
+     (mobile.js, driven by the page's own router).
+   * tablet, below 1100px: the icon rail stays (and with it the global
+     status), wide fields and grids fold to fit, and on a touch screen the
+     controls grow to 44px.
+   Tables scroll sideways inside their own card with the first column held,
+   never the page. Colours are checked tokens only (tests/test_ui_contrast.py). */
+
+/* the phone-only controls, off everywhere else */
+.tb-menu, .tb-status, .tb-back, .sb-close, .sb-scrim { display: none; }
+
+/* ═════ tablet and phone: below 1100px ════════════════════════════════════ */
+@media (max-width: 1099.98px) {
+    /* the top bar never pushes the page sideways */
+    .topbar { min-width: 0; }
+    .topbar > h1, .topbar > .crumbs { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .topbar .picker { display: inline-flex; align-items: center; gap: var(--s2); min-width: 0; flex: 0 1 auto; }
+    .gc .topbar .picker select { min-width: 0; max-width: 100%; width: 100%; text-overflow: ellipsis; }
+
+    /* Samples, two panes: a narrower list and a header that stacks */
+    .samples { --list-w: 300px; }
+    .d-head { grid-template-columns: minmax(0, 1fr); }
+    .d-actions { flex-wrap: wrap; }
+    .d-title h1 { font-size: var(--fs-xl); }
+
+    /* Instruments: cards never wider than the column */
+    .inst-grid { grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); }
+
+    /* Results filters fold onto their own lines */
+    .gc .filters .search { flex: 1 1 220px; }
+    .gc .filters .search input { width: 100%; }
+
+    /* Calibration: chart over the peak list */
+    .cal { height: auto; min-height: 0; }
+    .cal-grid { grid-template-columns: minmax(0, 1fr); }
+    .cal-chart { min-height: 360px; }
+}
+
+/* touch screens below 1100px: every control a finger can hit (44px) */
+@media (max-width: 1099.98px) and (pointer: coarse) {
+    .btn, .btn-sm, .rq-btn, .chip, .chips-sm .chip { height: auto; min-height: 44px; }
+    .icon-btn, .more-btn { width: 44px; height: 44px; }
+    .nav-item { height: 44px; }
+    .seg button, .seg.views a { min-height: 40px; }
+    .gc input[type="text"], .gc input[type="password"], .gc input[type="search"], .gc input[type="number"],
+    .gc input[type="datetime-local"], .gc input:not([type]), .gc select { height: 44px; }
+    .s-search { height: 44px; }
+    .menu a, .menu button.menu-item { min-height: 44px; }
+    button.switch { width: 44px; height: 26px; }
+    button.switch::after { width: 22px; height: 22px; }
+    button.switch[aria-checked="true"]::after { transform: translateX(18px); }
+    label.switch { min-height: 44px; }
+}
+
+/* ═════ narrow: below 900px — Samples, one pane at a time ═════════════════ */
+@media (max-width: 899.98px) {
+    /* the page scrolls as a document; mobile.js keeps the list's place */
+    .samples { display: block; height: auto; min-height: 0; }
+    .s-list { border-right: 0; }
+    .s-rows { overflow: visible; flex: none; padding-bottom: calc(var(--badge-room) + 96px + env(safe-area-inset-bottom)); }
+    .s-rows .day { top: var(--topbar-now, var(--topbar-h)); z-index: 2; }
+    .s-detail { overflow: visible; padding: var(--s4) var(--s5) calc(var(--badge-room) + var(--s7) + env(safe-area-inset-bottom)); }
+    html.s-detail-open .samples .s-list { display: none; }
+    html:not(.s-detail-open) .samples .s-detail { display: none; }
+
+    /* the way back to the list: in the top bar, where the title was */
+    html.s-detail-open .topbar > .tb-back { display: inline-flex; }
+    html.s-detail-open .topbar > .tb-title { display: none; }
+    .tb-back {
+        align-items: center; gap: 2px; height: 44px; padding: 0 var(--s3) 0 var(--s1); margin-left: calc(-1 * var(--s1));
+        border: 0; border-radius: var(--radius-pill); background: transparent; color: var(--text);
+        font: inherit; font-size: var(--fs-lg); font-weight: 620; cursor: pointer; min-width: 0;
+    }
+    .tb-back:hover { background: var(--bg-hover); }
+    .tb-back svg { width: 22px; height: 22px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+    /* the bulk bar floats over the page, above the version badge */
+    .samples .bulk {
+        position: fixed; left: calc(var(--rail-w) + var(--s3)); right: var(--s3); transform: none; width: auto;
+        bottom: calc(var(--badge-room) + env(safe-area-inset-bottom));
+    }
+    :root[data-sidebar="full"] .samples .bulk { left: calc(var(--sidebar-w) + var(--s3)); }
+
+    /* the views fill the row: three equal tabs */
+    .d-views { flex-wrap: wrap; }
+    .seg.views { flex: 1 1 280px; }
+    .seg.views a { flex: 1; justify-content: center; }
+    .chart { height: 320px; }
+
+    .ov-main, .data-main, .data-side { grid-template-columns: minmax(0, 1fr); }
+
+    /* Admin and Settings: the section list becomes a strip under the top bar */
+    .adm, .set-frame { flex-direction: column; align-items: stretch; }
+    .adm-nav, .set-nav {
+        display: flex; position: sticky; top: var(--topbar-now, var(--topbar-h)); z-index: 15; flex: none;
+        flex-direction: row; gap: var(--s1); width: 100%; overflow-x: auto; scrollbar-width: none;
+        padding: var(--s2) var(--s4); background: var(--bg); border-bottom: 1px solid var(--border-light);
+    }
+    .adm-nav::-webkit-scrollbar, .set-nav::-webkit-scrollbar { display: none; }
+    .adm-nav a, .set-nav a { flex: none; }
+    @media (pointer: coarse) { .adm-nav a, .set-nav a { height: 44px; } }
+    .adm-sec, .sec { scroll-margin-top: calc(var(--topbar-now, var(--topbar-h)) + 60px); }
+
+    /* Data: the first column holds while the numbers scroll */
+    .num-tbl th:first-child, .num-tbl td:first-child {
+        position: sticky; left: 0; z-index: 1; background: var(--bg-card); box-shadow: inset -1px 0 0 var(--border-light);
+    }
+}
+
+/* ═════ phone: below 760px ════════════════════════════════════════════════ */
+@media (max-width: 759.98px) {
+    /* ── the frame ──────────────────────────────────────────────────────── */
+    .app { display: block; }
+    .main-col { min-height: 100vh; min-height: 100dvh; }
+    .content { padding: var(--s4) max(var(--s4), env(safe-area-inset-right)) calc(var(--badge-room) + var(--s6) + env(safe-area-inset-bottom)) max(var(--s4), env(safe-area-inset-left)); }
+    .gc input, .gc select, .gc textarea { font-size: 16px; }   /* iOS zooms into anything smaller */
+    :where(.gc p, .gc .caption, .gc li) { overflow-wrap: break-word; }   /* a long path or ID wraps, never widens the page */
+
+    /* ── the top bar: title, report queue and status; the page's actions below ── */
+    .topbar {
+        height: auto; min-height: calc(var(--topbar-h) + env(safe-area-inset-top));
+        flex-wrap: wrap; row-gap: 0; column-gap: var(--s1);
+        padding: env(safe-area-inset-top) max(var(--s4), env(safe-area-inset-right)) 0 max(var(--s4), env(safe-area-inset-left));
+    }
+    .topbar > .tb-menu { margin-left: calc(-1 * var(--s3)); }
+    .topbar > .tb-status { margin-right: calc(-1 * var(--s3)); }
+    .topbar > * { order: 6; }
+    .topbar::after { content: ""; order: 5; flex: 0 0 100%; height: 0; }
+    .topbar > .tb-menu { order: 0; display: inline-grid; color: var(--text); }
+    .topbar > h1, .topbar > .crumbs {
+        order: 1; flex: 1 1 0; min-width: 0; min-height: var(--topbar-h); display: flex; align-items: center;
+    }
+    .topbar > h1 { font-size: var(--fs-lg); }
+    .topbar > .crumbs { font-size: var(--fs-md); gap: var(--s1); }
+    .topbar > .crumbs > * { flex: none; }
+    .topbar > .crumbs > b { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .topbar > .tb-back { order: 1; flex: 0 1 auto; margin-right: auto; }
+    .topbar > .spacer, .topbar > .tb-actions:empty { display: none; }
+    .topbar > .rq-btn { order: 2; margin-left: 0; padding: 0 var(--s2); }
+    .rq-btn .rq-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    .topbar > .tb-status { order: 3; display: inline-flex; align-items: center; }
+    /* the second row: the page's actions, left to right, wrapping if they must */
+    .topbar > :not(.tb-menu):not(h1):not(.crumbs):not(.tb-back):not(.spacer):not(.rq-btn):not(.tb-status) {
+        margin-bottom: var(--s2); max-width: 100%;
+    }
+    .topbar > .picker, .topbar > .adm-unlock { flex: 1 1 100%; }
+    .topbar > .picker select { flex: 1; }
+    .adm-unlock { justify-content: flex-start; }
+    .adm-unlock-form { display: flex; gap: var(--s2); flex: 1; min-width: 0; }
+    .gc .adm-unlock-form input { width: auto; flex: 1; min-width: 0; }
+    .topbar > .seg { flex: 0 1 auto; }
+
+    /* the status mirror (mobile.js keeps it in step with the sidebar footer) */
+    .tb-live { position: relative; }
+    .tb-live .live-dot { width: 10px; height: 10px; }
+    .tb-live .tb-working { position: absolute; right: 7px; top: 7px; width: 9px; height: 9px; }
+    .tb-bell .bell-count { top: 5px; right: 4px; }
+
+    /* ── the sidebar as a drawer ────────────────────────────────────────── */
+    .sb-scrim {
+        display: block; position: fixed; inset: 0; z-index: 85;
+        background: color-mix(in srgb, var(--ink) 38%, transparent);
+    }
+    :root[data-theme="dark"] .sb-scrim { background: color-mix(in srgb, var(--bg) 72%, transparent); }
+    .sb-scrim[hidden] { display: none; }
+    #sidebar {
+        --drawer-w: min(300px, 86vw);
+        position: fixed; top: 0; bottom: 0; left: calc(-1 * var(--drawer-w) - 24px); z-index: 90;
+        width: var(--drawer-w); flex: none; height: 100%; visibility: hidden; overflow-y: auto; overscroll-behavior: contain;
+        padding: calc(var(--s3) + env(safe-area-inset-top)) var(--s3) calc(var(--s3) + env(safe-area-inset-bottom)) calc(var(--s3) + env(safe-area-inset-left));
+        box-shadow: var(--e3); border-right: 1px solid var(--border-light);
+        transition: left var(--t-base, 200ms) var(--ease-out), visibility 0s linear var(--t-base, 200ms);
+    }
+    html.nav-open #sidebar { left: 0; visibility: visible; transition: left var(--t-base, 200ms) var(--ease-out), visibility 0s; }
+    html.nav-open, html.nav-open body { overflow: hidden; }
+    /* always the full sidebar in the drawer, whatever the rail setting */
+    #sidebar .sb-label { display: inline; }
+    #sidebar .nav-meta { display: inline; }
+    #sidebar .sb-recent { display: block; }
+    #sidebar .sb-head { flex-direction: row; }
+    #sidebar .nav-item { justify-content: flex-start; padding: 0 var(--s3); height: 44px; }
+    #sidebar .live-row { flex-direction: row; padding: 0 var(--s2); min-height: 44px; }
+    #sidebar .user-chip { justify-content: flex-start; padding: var(--s2); min-height: 48px; }
+    #sidebar .user-chip .chev { display: inline-block; }
+    #sidebar #sb-toggle { display: none; }
+    #sidebar .sb-close { display: inline-grid; }
+    #sidebar .sb-recent li a { min-height: 44px; align-items: center; }
+    #sidebar .menu { width: auto; right: 0; }
+    #sidebar .sb-running-pop { width: auto; right: 0; }
+    /* the notifications panel opens from the drawer's bell or the top bar's: a bottom sheet */
+    #sidebar .notes-panel {
+        position: fixed; visibility: visible; left: max(var(--s2), env(safe-area-inset-left)); right: max(var(--s2), env(safe-area-inset-right));
+        bottom: calc(var(--s2) + env(safe-area-inset-bottom)); top: auto; width: auto; max-width: none; max-height: min(75vh, 75dvh); z-index: 95;
+    }
+    .gc .notes li.note { grid-template-columns: 14px minmax(0, 1fr) 44px; }
+    .note-dismiss { width: 44px; height: 44px; }
+    .note-body { grid-template-columns: minmax(0, 1fr); }
+
+    /* ── controls: 44px for a finger ─────────────────────────────────────── */
+    .btn, .btn-sm, .rq-btn, .chip, .chips-sm .chip { height: auto; min-height: 44px; }
+    .icon-btn, .more-btn { width: 44px; height: 44px; }
+    .seg button { min-height: 40px; padding: 0 var(--s3); }
+    .seg.views a { min-height: 40px; }
+    .seg.views { flex-basis: 100%; }
+    .gc input[type="text"], .gc input[type="password"], .gc input[type="search"], .gc input[type="number"],
+    .gc input[type="datetime-local"], .gc input:not([type]), .gc select { height: 44px; }
+    .s-search { height: 44px; }
+    .gc .s-search input { height: 40px; }
+    .menu a, .menu button.menu-item { min-height: 44px; }
+    button.switch { width: 44px; height: 26px; }
+    button.switch::after { width: 22px; height: 22px; }
+    button.switch[aria-checked="true"]::after { transform: translateX(18px); }
+    label.switch { min-height: 44px; }
+    .unlock-chip { min-height: 44px; }
+    .unlock-chip button { min-height: 44px; padding: 0 var(--s2); }
+
+    /* ── sheets and dialogs: full width, from the bottom edge ────────────── */
+    .gc dialog.sheet, .gc dialog.sheet.rq-sheet {
+        width: 100%; max-width: 100%; margin: auto 0 0; max-height: calc(100dvh - var(--s6));
+        border-radius: var(--radius-lg) var(--radius-lg) 0 0; border-bottom: 0;
+        padding: var(--s5) max(var(--s4), env(safe-area-inset-right)) calc(var(--s4) + env(safe-area-inset-bottom)) max(var(--s4), env(safe-area-inset-left));
+        overflow-y: auto;
+    }
+    .gc dialog.sheet .actions { flex-wrap: wrap; }
+    .gc dialog.sheet .actions .btn { flex: 1 1 auto; }
+    .rq-fields { grid-template-columns: minmax(0, 1fr); }
+    .rq-list li { flex-wrap: wrap; }
+    .rq-uplist li { grid-template-columns: minmax(64px, auto) auto minmax(0, 1fr); }
+    .toast { bottom: calc(var(--badge-room) + var(--s3) + env(safe-area-inset-bottom)); }
+    #app-version { bottom: calc(6px + env(safe-area-inset-bottom)); right: calc(10px + env(safe-area-inset-right)); }
+
+    /* ── Samples ────────────────────────────────────────────────────────── */
+    .s-filters { padding: var(--s3) var(--s4) var(--s2); }
+    .s-filters .chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0 calc(-1 * var(--s4)); padding: 2px var(--s4); }
+    .s-filters .chips::-webkit-scrollbar { display: none; }
+    .s-filters .chip { flex: none; }
+    .s-search kbd { display: none; }
+    .s-rows { padding-left: var(--s2); padding-right: var(--s2); }
+    .srow { min-height: 60px; padding: 10px var(--s2); }
+    .s-detail { padding: var(--s4) var(--s4) calc(var(--badge-room) + var(--s7) + env(safe-area-inset-bottom)); }
+    .d-title h1 { font-size: var(--fs-xl); }
+    /* the header's two actions share the row with More, at any phone width */
+    .d-actions { flex-wrap: nowrap; }
+    .d-actions .btn { flex: 1 1 0; min-width: 0; padding: 0 var(--s2); gap: 6px; white-space: nowrap; }
+    .samples .bulk { left: var(--s2); right: var(--s2); padding: var(--s3); }
+    .bulk-actions .btn { flex: 1 1 calc(50% - var(--s2)); }
+    .bulk-run { grid-template-columns: minmax(0, 1fr) auto; }
+    .bulk-run .progress { grid-column: 1 / -1; }
+    .chart { height: 280px; margin: 0 0 var(--s2); }
+    .card-bar { flex-wrap: wrap; }
+    .res-tbl th, .res-tbl td { padding-right: var(--s3); }
+    .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .facts .fact { border-bottom: 1px solid var(--border-light); }
+    .side-card .kv { grid-template-columns: 72px minmax(0, 1fr); }
+    .compare-fallback select, .compare-fallback .btn { min-width: 0; width: 100%; }
+
+    /* Compare (lane C's view): the Adjust drawer covers the page instead of narrowing it */
+    html .cmp-drawer { width: 100%; top: 0; z-index: 92; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+    html.cmp-adjust-open .main-col { padding-right: 0; }
+    html.cmp-adjust-open .main-col > .topbar { margin-right: 0; }
+    .gc .cmp-picker { flex: 1 1 100%; }
+    .gc .cmp-picker select { max-width: none; flex: 1; }
+    .cmp-chart { padding: var(--s2) var(--s2) var(--s1); }
+    .cmp-chart-head, .cmp-sec-head { flex-wrap: wrap; }
+    .cmp-key { flex-wrap: wrap; white-space: normal; row-gap: 2px; min-width: 0; }
+    .cmp-pop { width: calc(100% - var(--s4)); }
+
+    /* ── Results: the table scrolls inside its card, lab ID held ────────── */
+    .table-head, .overlay { padding-left: var(--s4); padding-right: var(--s4); }
+    .tbl.results .c-sel, .tbl.results .c-st, .tbl.results td.c-lab, .tbl.results th.c-lab {
+        position: sticky; z-index: 1; background: var(--bg-card);
+    }
+    .tbl.results .c-sel { left: 0; }
+    .tbl.results .c-st { left: 36px; }
+    .tbl.results td.c-lab, .tbl.results th.c-lab { left: 60px; box-shadow: inset -1px 0 0 var(--border-light); }
+    .tbl.results tr.groups th.lead { position: sticky; left: 0; z-index: 1; background: var(--bg-card); }
+    /* the held lab ID column wraps its tags under the ID instead of growing */
+    .tbl.results td.c-lab { white-space: normal; min-width: 112px; max-width: 42vw; overflow-wrap: anywhere; }
+    .tbl.results td.c-lab .tag { margin: 2px var(--s1) 0 0; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+    .tbl.results .c-sel input { width: 20px; height: 20px; }
+    .tbl.results td { padding-top: 12px; padding-bottom: 12px; }
+
+    /* ── Settings, Admin, Instruments, Setup: one column of fields ──────── */
+    /* a section's body is one column that never grows past the screen */
+    .sec > .body, .adm-grid > .body { grid-template-columns: minmax(0, 1fr); }
+    /* a long label wraps inside its button instead of pushing the page */
+    .btn { white-space: normal; text-align: center; line-height: 1.25; padding-top: var(--s1); padding-bottom: var(--s1); }
+    .qb-form, .grid3, .adm-fields, .gstep .form { grid-template-columns: minmax(0, 1fr); }
+    .grid3 .field.wide { max-width: none; }
+    .kv { grid-template-columns: minmax(88px, 34%) minmax(0, 1fr); }
+    .adm-facts { grid-template-columns: minmax(88px, 34%) minmax(0, 1fr); }
+    .adm-main { padding: var(--s2) max(var(--s4), env(safe-area-inset-right)) calc(var(--badge-room) + var(--s7) + env(safe-area-inset-bottom)) max(var(--s4), env(safe-area-inset-left)); }
+    .row .grow { min-width: 0; flex-basis: 100%; }
+    .cuts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .lem-picker select { min-width: 0; width: 100%; }
+    .gstep { grid-template-columns: 32px minmax(0, 1fr); gap: var(--s3); padding: var(--s4); }
+    .gstep.current { padding: var(--s4); }
+    .add-std .field:first-child { width: 100%; }
+    .gc .std-tbl tr.inline input[type="text"] { width: 100%; }
+    table.counts { min-width: 0; }
+    .adm .tbl td.path { min-width: 140px; }
+    .inst-card { padding: var(--s4); }
+    .cal { padding: var(--s3) var(--s4) calc(var(--badge-room) + var(--s4) + env(safe-area-inset-bottom)); }
+    .cal-field input[type="range"] { width: 100%; }
+    .cal-field { flex: 1 1 100%; }
+}
+
+/* touch: a tapped row keeps no hover, so its status glyph stays (the checkbox shows once selecting) */
+@media (hover: none) {
+    .s-rows:not(.selecting) .srow:not(.checked):hover .lead input:not(:focus-visible) { display: none; }
+    .s-rows:not(.selecting) .srow:not(.checked):hover .lead .glyph { display: inline-block; }
+}
+
+@media (max-width: 759.98px) and (prefers-reduced-motion: reduce) {
+    #sidebar, html.nav-open #sidebar { transition: none; }
+}
+@media print { .tb-menu, .tb-status, .tb-back, .sb-scrim { display: none !important; } }
