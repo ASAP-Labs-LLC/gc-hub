@@ -58,7 +58,10 @@
 .srow.active::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; border-radius: 2px; background: var(--ink); }
 .srow.checked { background: var(--bg-active); }
 .srow .lead { grid-row: 1 / span 2; display: grid; place-items: center; width: 18px; height: 18px; }
-.srow .lead input { display: none; width: 15px; height: 15px; margin: 0; accent-color: var(--ink); cursor: pointer; }
+/* the box only shows the selection: the press lands on .lead (samples_page.js), never on the box, so the
+   browser never toggles it on its own (v6: v5's box showed the opposite of the selection after a click) */
+.srow .lead input { display: none; width: 15px; height: 15px; margin: 0; accent-color: var(--ink); pointer-events: none; }
+.srow .lead { cursor: pointer; }
 .srow:hover .lead input, .srow.checked .lead input, .s-rows.selecting .lead input, .srow .lead input:focus-visible { display: block; }
 .srow:hover .lead .glyph, .srow.checked .lead .glyph, .s-rows.selecting .lead .glyph { display: none; }
 .srow .l1 { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
@@ -128,8 +131,42 @@
 .ov-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: var(--s5); align-items: start; }
 .ov-main { display: grid; gap: var(--s5); min-width: 0; }
 .chart-card { min-width: 0; }
-.chart { height: 440px; margin: 0 var(--s2) var(--s2); }
-.chart-empty { display: grid; place-items: center; height: 100%; color: var(--text-muted); font-size: var(--fs-sm); text-align: center; padding: var(--s4); }
+.chart-wrap { position: relative; margin: 0 var(--s2) var(--s2); }
+.chart { height: 440px; }
+/* v6: the one line where the chart would be (loading, or why not, with Retry); Plotly's div is never reused for it */
+.chart-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-wrap: wrap;
+    gap: var(--s2); padding: var(--s4); text-align: center; background: var(--bg-card); }
+.chart-msg[hidden] { display: none; }
+.chart-empty { color: var(--text-muted); font-size: var(--fs-sm); }
+.chart-msg .link-btn { font-size: var(--fs-sm); }
+.chrom-mode { padding: 2px; }
+.chrom-mode button { height: 26px; font-size: var(--fs-xs); }
+.chart-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); padding: var(--s2) var(--s4) 0; }
+/* opens to the right of the button, inside the detail pane (which clips what overflows it) */
+.trace-pop { top: calc(100% + 6px); bottom: auto; left: 0; right: auto; width: min(300px, 80vw); padding: var(--s2); z-index: 30; }
+.trace-pop .tp-sec { padding: var(--s2) 0; border-bottom: 1px solid var(--border-light); }
+.trace-pop .tp-sec:last-child { border-bottom: 0; }
+.trace-pop h3 { margin: 0 var(--s2) var(--s1); font-size: var(--fs-xs); font-weight: 600; color: var(--text-muted); }
+.trace-pop .menu-item[disabled] { color: var(--text-muted); cursor: default; }
+.trace-pop .menu-item[aria-pressed="true"]::after { content: " ✓"; }
+.trace-pop .tp-stds { max-height: 200px; overflow: auto; }
+.trace-pop .tp-lab { display: flex; gap: var(--s2); padding: 0 var(--s2); }
+.gc .trace-pop .tp-lab input { flex: 1; min-width: 0; height: 32px; }
+.trace-pop .tp-out { margin: var(--s1) var(--s2) 0; font-size: var(--fs-xs); color: var(--text-muted); overflow-wrap: anywhere; }
+.trace-pop .tp-out:empty { display: none; }
+/* the legend: every trace named, with its line style; remove one, clear all */
+.trace-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3); padding: 0 var(--s4) var(--s3); font-size: var(--fs-sm); }
+.tl-list { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s3); list-style: none; margin: 0; padding: 0; }
+.tl-item { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.tl-swatch { width: 28px; height: 8px; flex: none; }
+.tl-none { display: inline-block; border-top: 2px dotted var(--border-strong); height: 0; }
+.tl-name { font-weight: 600; overflow-wrap: anywhere; }
+.tl-item.primary .tl-name { font-weight: 650; }
+.tl-sub { color: var(--text-muted); font-size: var(--fs-xs); }
+.tl-sub.tl-err { color: var(--st-error); }
+.tl-remove { width: 22px; height: 22px; border: 0; border-radius: 50%; background: none; color: var(--text-muted); font: inherit; font-size: 16px; line-height: 1; cursor: pointer; padding: 0; }
+.tl-remove:hover { background: var(--bg-hover); color: var(--text); }
+.tl-clear { font-size: var(--fs-xs); }
 .results-card { padding-bottom: var(--s3); }
 .res-tbl { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); margin-top: var(--s2); }
 .res-tbl th { text-align: right; font-weight: 500; font-size: var(--fs-xs); color: var(--text-muted); padding: 6px var(--s4) 6px var(--s2); border-bottom: 1px solid var(--border-light); }

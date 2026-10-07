@@ -18,7 +18,10 @@
    GCCompare.defaultStandard; the gc:adjust event (the Adjust drawer) hides
    the list.
    Themes: GCTheme's gc:theme event (and any data-theme change) re-themes
-   Plotly from the CSS tokens. */
+   Plotly from the CSS tokens.
+   v6: the chart draws or says why (#chrom-msg, Retry; the plot purged
+   before any message), the row's checkbox only shows S.sel, and Add trace
+   stacks other samples and comparison standards on the open sample's chart. */
 (function () {
     'use strict';
 
@@ -36,7 +39,8 @@
         files: [], total: 0, loading: false, listSeq: 0,
         instruments: [], names: {},
         standards: [], settings: null, standardsReady: null, table: null,
-        sel: L.selection(),
+        sel: L.selection(), backfillInfo: {},
+        overlay: null, ovTraces: new Map(),              // v6: the traces stacked on the chart (key -> {trace}|{error}|{loading})
         row: null, meta: null, cache: new Map(),       // sample id -> {meta, trace, curve, lab}
         detailSeq: 0, compare: null, compareFor: null, mountSeq: 0,
         corrected: loadBool(D86_KEY, false),
@@ -52,20 +56,33 @@
     }
 
     // ── fetching ────────────────────────────────────────────────────────
+    // Never throws: a network failure (the hub restarting, the tunnel down) is
+    // {ok: false, status: 0} with its words, so every caller shows it (v6:
+    // a rejected fetch used to leave the chart on "Loading…" for good).
     async function getJSON(url, background) {
         const opts = { cache: 'no-store', headers: { Accept: 'application/json' } };
-        const r = background && window.GCLive ? await window.GCLive.bgFetch(url, opts) : await fetch(url, opts);
-        const res = await window.GCSession.readJson(r);
-        return { ok: r.ok, status: r.status, body: res.body || {} };
+        try {
+            const r = background && window.GCLive ? await window.GCLive.bgFetch(url, opts) : await fetch(url, opts);
+            const res = await window.GCSession.readJson(r);
+            return { ok: r.ok, status: r.status, body: res.body || {} };
+        } catch (e) {
+            return { ok: false, status: 0, body: { error: (e && e.message) || 'no answer' } };
+        }
     }
     async function postJSON(url, body) {
-        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-                                     body: JSON.stringify(body || {}) });
-        const res = await window.GCSession.readJson(r);
-        return { ok: r.ok, status: r.status, body: res.body || {} };
+        try {
+            const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                                         body: JSON.stringify(body || {}) });
+            const res = await window.GCSession.readJson(r);
+            return { ok: r.ok, status: r.status, body: res.body || {} };
+        } catch (e) {
+            return { ok: false, status: 0, body: { error: (e && e.message) || 'no answer' } };
+        }
     }
     function errText(res, what) {
-        return (res.body && res.body.error) || (what + ' failed (HTTP ' + res.status + ').');
+        const err = res.body && res.body.error;
+        if (!res.status) return what + ' failed: the hub did not answer' + (err ? ' (' + err + ').' : '.');
+        return err || (what + ' failed (HTTP ' + res.status + ').');
     }
 
     // ── the URL ─────────────────────────────────────────────────────────
@@ -182,27 +199,43 @@
         return { groups, order: groups.flatMap(g => g.items.map(f => f.sample_id)) };
     }
 
-    function rowEl(f, underDay) {
+    /** rowStatus, with the backfill reason (why it is backfill) once the
+        instrument's live-since facts are in (v6). */
+    function statusOf(f) {
         const st = L.rowStatus(f);
+        if (f && f.backfill && !f.released && st.group === 'final') {
+            const info = S.backfillInfo[f.instrument];
+            st.reason = L.backfillReason(f, info ? Object.assign({}, info, { name: S.names[f.instrument] || f.instrument }) : null,
+                                         window.GCBackfill ? window.GCBackfill.whyText : null);
+        }
+        return st;
+    }
+
+    function rowEl(f, underDay) {
+        const st = statusOf(f);
         const id = f.sample_id;
-        const checked = S.sel.all || S.sel.ids.has(id);
+        const checked = L.isChecked(S.sel, id);
         const time = O.rowTime(f, { underDay });
+        // the box only shows the selection (S.sel): it takes no clicks of its
+        // own (samples.css), the row's .lead handles the press (v6, bug 5)
         const box = h('input', { type: 'checkbox', 'aria-label': 'Select ' + (f.display_name || f.lab_id),
                                  'data-testid': 'row-check', tabindex: '-1' });
         box.checked = checked;
+        box.defaultChecked = checked;
         const line2 = [];
+        // the action first: a long review note or reason never pushes it out of the row (v5.1.0 follow-up)
+        if (st.fix) line2.push(fixEl(st.fix, f));
         if (st.group === 'final' && !st.reason) {
             const det = L.rowDetail(f);
             if (det) line2.push(h('span', { className: 'detail', text: det }));
         } else {
             line2.push(h('span', { className: 'detail reason-' + (st.group === 'error' ? 'error' : st.group === 'held' ? 'held' : 'work'),
-                                   text: st.reason }));
+                                   title: st.reason, 'data-testid': 'row-reason', text: st.reason }));
         }
         const flags = L.flagText(f);
         if (flags) line2.push(h('span', { className: 'flag', text: '⚑ ' + flags }));
         const review = L.reviewText(f);
         if (review) line2.push(h('span', { className: 'review', title: review, 'data-testid': 'row-review', text: review }));
-        if (st.fix) line2.push(fixEl(st.fix, f));
         const tags = [h('span', { className: 'tag', text: S.names[f.instrument] || f.instrument || '' })];
         if (f.time_corrected) tags.push(h('span', { className: 'tag', title: 'Injection time corrected', text: 'time fixed' }));
         const el = h('div', {
@@ -248,12 +281,30 @@
         rows.classList.toggle('selecting', S.sel.all || S.sel.ids.size > 0);
         renderCounts();
         renderBulk();
+        loadBackfillInfo();
+    }
+
+    // why a row is backfill needs its instrument's live_since and when that
+    // was set (GET …/backfill answers both); asked once per instrument
+    function loadBackfillInfo() {
+        const want = new Set(S.files.filter(f => f.backfill && !f.released && f.instrument
+                                             && !(f.instrument in S.backfillInfo)).map(f => f.instrument));
+        for (const inst of want) {
+            S.backfillInfo[inst] = null;                  // asked; null until answered
+            getJSON('/api/instruments/' + encodeURIComponent(inst) + '/backfill?limit=1&released=false', true).then((r) => {
+                if (!r.ok) { delete S.backfillInfo[inst]; return; }
+                S.backfillInfo[inst] = { live_since: r.body.live_since || null,
+                                         live_since_set_at: r.body.live_since_set_at || null };
+                renderList();
+                if (S.row && S.row.instrument === inst) renderHeader(S.row, entry(S.row.sample_id).meta || {});
+            });
+        }
     }
 
     function refreshRowStates() {
         document.querySelectorAll('#rows .srow').forEach(el => {
             const id = Number(el.dataset.sampleId);
-            const checked = S.sel.all || S.sel.ids.has(id);
+            const checked = L.isChecked(S.sel, id);
             el.classList.toggle('checked', checked);
             el.classList.toggle('active', S.route.sampleId === id);
             el.setAttribute('aria-selected', S.route.sampleId === id ? 'true' : 'false');
@@ -274,11 +325,9 @@
             const row = box.closest('.srow');
             const id = Number(row.dataset.sampleId);
             ev.preventDefault();
-            if (ev.shiftKey) { S.sel = L.extend(S.sel, shownOrder().order, id); refreshRowStates(); return; }
-            const on = !(S.sel.all || S.sel.ids.has(id));
-            drag = { on, seen: new Set([id]) };
-            S.sel = L.paint(S.sel.all ? L.selectShown(L.clear(), shownOrder().order) : S.sel, [id], on);
-            S.sel.anchor = id;
+            const press = L.pressBox(S.sel, shownOrder().order, id, ev.shiftKey);
+            S.sel = press.sel;
+            drag = press.drag ? { on: press.drag.on, seen: new Set([id]) } : null;
             refreshRowStates();
         });
         rows.addEventListener('mouseover', (ev) => {
@@ -293,7 +342,10 @@
         });
         document.addEventListener('mouseup', () => { drag = null; });
         rows.addEventListener('click', (ev) => {
-            if (ev.target.closest('.lead') || ev.target.closest('.fix')) return;
+            // the press already changed the selection: the click must not
+            // toggle the box again (v5's bug: it then showed the opposite)
+            if (ev.target.closest('.lead')) { ev.preventDefault(); refreshRowStates(); return; }
+            if (ev.target.closest('.fix')) return;
             const row = ev.target.closest('.srow');
             if (!row) return;
             const id = Number(row.dataset.sampleId);
@@ -511,6 +563,22 @@
         return S.cache.get(id);
     }
 
+    /** A live change to a sample: its metadata, curve and runs are asked
+        again; its trace stays drawn (marked stale) until the new one is in. */
+    function invalidate(id) {
+        const e = S.cache.get(id);
+        if (!e) return;
+        S.cache.set(id, e.trace ? { trace: e.trace, traceStale: true } : {});
+    }
+
+    /** showDetail, never an unhandled rejection: what failed is said. */
+    function showDetailSafe(opts) {
+        return showDetail(opts).catch((e) => {
+            console.error('[samples] detail', e);
+            SH.toast('The sample did not open: ' + ((e && e.message) || e), 'err');
+        });
+    }
+
     async function rowOf(id, background) {
         const inList = S.files.find(f => f.sample_id === id);
         if (inList) return inList;
@@ -521,13 +589,13 @@
     function openSample(id, how) {
         const same = S.route.sampleId === id;
         go({ sampleId: id, view: S.route.view || 'overview', standard: same ? S.route.standard : null }, how);
-        showDetail();
+        showDetailSafe();
     }
 
     function setView(view, how) {
         if (S.route.sampleId == null) return;
         go({ view }, how);
-        showDetail();
+        showDetailSafe();
     }
 
     async function showDetail(opts) {
@@ -589,7 +657,7 @@
     }
 
     function renderHeader(row, meta) {
-        const st = L.rowStatus(row);
+        const st = statusOf(row);
         $('d-lab').textContent = row.display_name || row.lab_id || ('#' + row.sample_id);
         const pill = $('d-status');
         pill.className = 'pill ' + (st.group === 'processing' ? '' : st.group);
@@ -630,51 +698,365 @@
         });
     }
 
-    // ── Overview ────────────────────────────────────────────────────────
+    // ── Overview: the chromatogram (v6) ─────────────────────────────────
+    // The chart always draws or says why in one line, with a Retry. #chrom
+    // holds Plotly only: a message goes in #chrom-msg beside it, and the plot
+    // is purged before any message (v5 replaced Plotly's DOM with "Loading…"
+    // and then Plotly.react'ed the same div, which still held the old plot's
+    // state, so the next sample drew into detached nodes: no chart at all).
+    // Overlays: other samples and comparison standards on the same axes,
+    // Overlay or Stacked, kept in sessionStorage (gc.samples.overlay).
+    const CH = { for: null, plotted: false, pending: false, seq: 0 };
+    const OVERLAY_KEY = 'gc.samples.overlay';
+
+    function loadOverlay() {
+        try { return L.overlayParse(sessionStorage.getItem(OVERLAY_KEY)); } catch (_e) { return L.overlayState(null); }
+    }
+    function saveOverlay() {
+        try { sessionStorage.setItem(OVERLAY_KEY, L.overlayStringify(S.overlay)); } catch (_e) { /* not kept */ }
+    }
+
     function tokens() {
         const cs = getComputedStyle(document.documentElement);
         const v = (n) => cs.getPropertyValue(n).trim();
         return { ink: v('--chart-ink'), axis: v('--chart-axis'), grid: v('--chart-grid'), bg: v('--bg-card'),
-                 font: v('--font') || 'sans-serif', tick: v('--chart-tick') };
+                 font: v('--font') || 'sans-serif', tick: v('--chart-tick'), ref: v('--chart-ref') };
     }
 
-    function drawChart(trace) {
+    function purgeChart() {
         const el = $('chrom');
-        if (!trace) return;
-        if (!window.Plotly) {
-            el.replaceChildren(h('div', { className: 'chart-empty', text: 'The chart library did not load (no internet access to cdn.plot.ly?). The numbers are still shown.' }));
+        if (window.Plotly && (el.data || el._fullLayout)) {
+            try { window.Plotly.purge(el); } catch (e) { console.error('[samples] purge', e); }
+        }
+        el.replaceChildren();
+        CH.plotted = false;
+        CH.for = null;
+    }
+
+    /** One line where the chart would be (and no chart): loading, or why it
+        is not drawn, with Retry. */
+    function chartMessage(text, opts) {
+        purgeChart();
+        CH.pending = false;
+        const msg = $('chrom-msg');
+        const retry = opts && opts.retry;
+        msg.replaceChildren(h('span', { className: 'chart-empty', text }),
+            ...(retry ? [h('button', { type: 'button', className: 'link-btn', 'data-testid': 'chart-retry', text: 'Retry', onclick: retry })] : []));
+        msg.setAttribute('role', retry ? 'alert' : 'status');
+        msg.hidden = false;
+        $('chrom-note').textContent = '';
+        renderLegend([], []);
+    }
+
+    /** The open sample's trace: one request at a time per sample; an answer
+        is kept, a failure never is (the next visit or Retry asks again). A
+        live update marks it stale: it stays drawn while it is asked again. */
+    function sampleTrace(id, background) {
+        const e = entry(id);
+        if (e.trace && !e.traceStale) return Promise.resolve({ trace: e.trace });
+        if (e.traceLoad) return e.traceLoad;
+        const load = getJSON('/api/samples/' + id + '/trace', background).then((r) => {
+            const cur = entry(id);                       // a live reset may have replaced the entry
+            if (cur.traceLoad === load) cur.traceLoad = null;
+            if (r.ok && Array.isArray(r.body.x)) {
+                cur.trace = r.body;
+                cur.traceStale = false;
+                return { trace: r.body };
+            }
+            return cur.trace ? { trace: cur.trace } : { error: r };
+        });
+        e.traceLoad = load;
+        return load;
+    }
+
+    async function renderChart(id, background) {
+        const mine = ++CH.seq;
+        if (entry(id).trace) drawChart();                 // what we have, at once (a stale one too)
+        else if (!(CH.for === id && CH.plotted)) chartMessage('Loading the chromatogram…');
+        const res = await sampleTrace(id, background);
+        if (mine !== CH.seq || S.route.sampleId !== id || S.route.view !== 'overview') return;
+        if (res.error) {
+            chartMessage(L.chartReason(res.error), { retry: () => renderChart(id, false) });
             return;
         }
-        if (el.querySelector('.chart-empty')) el.replaceChildren();
+        drawChart();
+        loadOverlayTraces();
+    }
+
+    function primaryLabel() {
+        return S.row ? (S.row.display_name || S.row.lab_id || '#' + S.row.sample_id) : '';
+    }
+
+    function overlayTraceFor(it) {
+        if (it.kind === 'sample') {
+            const e = S.cache.get(it.id);
+            if (e && e.trace) return { trace: e.trace };
+        }
+        return S.ovTraces.get(L.overlayKey(it)) || null;
+    }
+
+    function loadOverlayTraces() {
+        for (const it of L.overlayShown(S.overlay, S.route.sampleId)) {
+            const key = L.overlayKey(it);
+            const have = overlayTraceFor(it);
+            if (have && (have.trace || have.loading)) continue;       // a failure is asked again
+            S.ovTraces.set(key, { loading: true });
+            const url = it.kind === 'standard'
+                ? '/api/comparison-standards/' + encodeURIComponent(it.name) + '/trace'
+                : '/api/samples/' + it.id + '/trace';
+            getJSON(url, true).then((r) => {
+                S.ovTraces.set(key, r.ok && Array.isArray(r.body.x) ? { trace: r.body } : { error: r });
+                drawChart();
+            });
+        }
+    }
+
+    function drawChart() {
+        const id = S.route.sampleId;
+        if (id == null || S.route.view !== 'overview') return;
+        const e = entry(id);
+        if (!e.trace) return;                             // renderChart says why
+        const el = $('chrom');
+        if (!window.Plotly) {
+            chartMessage('The chart library did not load (no internet access to cdn.plot.ly?). The numbers are still shown.',
+                         { retry: () => location.reload() });
+            return;
+        }
+        // hidden or not laid out yet: Plotly would draw at a default size; the ResizeObserver draws it once it has one
+        if (!el.clientWidth) { CH.pending = true; return; }
+        CH.pending = false;
         const c = tokens();
+        const list = [{ key: 's:' + id, label: primaryLabel(), sub: '', kind: 'sample', x: e.trace.x, y: e.trace.y }];
+        const waiting = [];
+        for (const it of L.overlayShown(S.overlay, id)) {
+            const got = overlayTraceFor(it);
+            const key = L.overlayKey(it);
+            if (got && got.trace) list.push({ key, label: it.label, sub: it.sub || '', kind: it.kind, x: got.trace.x, y: got.trace.y });
+            else waiting.push({ key, label: it.label, kind: it.kind, state: got && got.error ? L.chartReason(got.error) : 'Loading…' });
+        }
+        const built = L.overlayTraces(list, S.overlay.mode, c);
+        const stacked = S.overlay.mode === 'stacked' && list.length > 1;
         const layout = L.chartLayout(c);
-        const xs = trace.x || [];
-        const ticks = L.carbonTicks(trace.cal_times, trace.cal_carbons, c, 12, xs.length ? xs[xs.length - 1] - xs[0] : 0);
-        // ladder.js: the same pairs the classic overlay labels, restyled monochrome
+        const xs = e.trace.x || [];
+        // carbon marks: the open sample's own ladder (ladder.js's pairs, monochrome)
+        const ticks = L.carbonTicks(e.trace.cal_times, e.trace.cal_carbons, c, 12, xs.length ? xs[xs.length - 1] - xs[0] : 0);
         layout.shapes = ticks.shapes;
         layout.annotations = ticks.annotations;
         layout.margin.t = ticks.annotations.length ? 34 : 12;
-        const data = [{ x: trace.x, y: trace.y, type: 'scattergl', mode: 'lines', hoverinfo: 'x+y',
-                        line: { color: c.ink, width: 1.5 }, name: S.row ? (S.row.display_name || S.row.lab_id) : '' }];
-        window.Plotly.react(el, data, layout, L.CHART_CONFIG);
-        $('chrom-note').textContent = ticks.annotations.length ? 'Carbon marks from this run’s calibration' : 'No calibration ladder for this run';
+        layout.uirevision = 's' + id + ':' + S.overlay.mode;   // adding a trace keeps the zoom; a new sample resets it
+        if (stacked) {
+            layout.yaxis.showticklabels = false;
+            layout.yaxis.title = { text: 'Stacked: each trace lifted', font: { color: c.axis, size: 11 } };
+        }
+        if (el.data && !el.querySelector('.plot-container')) purgeChart();   // never react into a wiped div
+        $('chrom-msg').hidden = true;
+        window.Plotly.react(el, built.data, layout, L.CHART_CONFIG);
+        CH.plotted = true;
+        CH.for = id;
+        $('chrom-note').textContent = !ticks.annotations.length ? 'No calibration ladder for this run'
+            : list.length > 1 || waiting.length ? 'Carbon marks from ' + primaryLabel() + '’s calibration'
+                : 'Carbon marks from this run’s calibration';
+        renderLegend(built.legend, waiting);
+    }
+
+    // ── the legend: every trace named, remove one, clear all ────────────
+    function swatch(color, dash) {
+        const NS = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('viewBox', '0 0 28 8');
+        svg.setAttribute('class', 'tl-swatch');
+        svg.setAttribute('aria-hidden', 'true');
+        const line = document.createElementNS(NS, 'line');
+        line.setAttribute('x1', '1'); line.setAttribute('x2', '27'); line.setAttribute('y1', '4'); line.setAttribute('y2', '4');
+        line.setAttribute('stroke', color);
+        line.setAttribute('stroke-width', '2');
+        const da = L.dashArray(dash);
+        if (da) line.setAttribute('stroke-dasharray', da);
+        svg.appendChild(line);
+        return svg;
+    }
+
+    function renderLegend(items, waiting) {
+        const box = $('chrom-legend');
+        const extras = items.filter(it => !it.primary).length + waiting.length;
+        $('chrom-mode').hidden = !extras;
+        document.querySelectorAll('#chrom-mode [data-mode]').forEach(b =>
+            b.setAttribute('aria-checked', b.dataset.mode === S.overlay.mode ? 'true' : 'false'));
+        if (!extras) { box.hidden = true; box.replaceChildren(); return; }
+        const remove = (key, label) => h('button', { type: 'button', className: 'tl-remove', 'data-testid': 'trace-remove',
+            'aria-label': 'Remove ' + label + ' from the chart', title: 'Remove from the chart', text: '×',
+            onclick: () => removeOverlay(key) });
+        const lis = items.map(it => h('li', { className: 'tl-item' + (it.primary ? ' primary' : ''), 'data-key': it.key, 'data-testid': 'trace-item' },
+            swatch(it.color, it.dash),
+            h('span', { className: 'tl-name', text: it.label }),
+            it.primary ? h('span', { className: 'tl-sub', text: 'open sample' })
+                : h('span', { className: 'tl-sub', text: it.kind === 'standard' ? 'standard' : it.sub }),
+            it.primary ? null : remove(it.key, it.label)));
+        for (const w of waiting) {
+            lis.push(h('li', { className: 'tl-item waiting', 'data-key': w.key, 'data-testid': 'trace-item' },
+                h('span', { className: 'tl-swatch tl-none', 'aria-hidden': 'true' }),
+                h('span', { className: 'tl-name', text: w.label }),
+                h('span', { className: 'tl-sub' + (w.state === 'Loading…' ? '' : ' tl-err'), text: w.state }),
+                remove(w.key, w.label)));
+        }
+        box.replaceChildren(h('ul', { className: 'tl-list', 'aria-label': 'Traces on the chart' }, ...lis),
+            h('button', { type: 'button', className: 'link-btn tl-clear', 'data-testid': 'trace-clear', text: 'Clear all',
+                          onclick: clearOverlay }));
+        box.hidden = false;
+    }
+
+    // ── adding and removing traces ──────────────────────────────────────
+    function overlayItemOf(f) {
+        const when = O.rowTime(f, { underDay: false });
+        const inst = S.names[f.instrument] || f.instrument || '';
+        return { kind: 'sample', id: f.sample_id, label: f.display_name || f.lab_id || '#' + f.sample_id,
+                 sub: [inst, when && when.text].filter(Boolean).join(' · ') };
+    }
+
+    function addOverlay(items) {
+        const r = L.overlayAdd(S.overlay, items, S.route.sampleId);
+        S.overlay = r.ov;
+        saveOverlay();
+        const text = L.overlayAddText(r);
+        if (text) SH.toast(text, r.added ? undefined : 'err');
+        loadOverlayTraces();
+        drawChart();
+        return r;
+    }
+    function removeOverlay(key) {
+        S.overlay = L.overlayRemove(S.overlay, key);
+        saveOverlay();
+        drawChart();
+        if (!L.overlayShown(S.overlay, S.route.sampleId).length) $('btn-add-trace').focus();
+    }
+    function clearOverlay() {
+        S.overlay = L.overlayClear(S.overlay);
+        saveOverlay();
+        drawChart();
+        $('btn-add-trace').focus();
+    }
+    function setOverlayMode(mode) {
+        S.overlay = L.overlayMode(S.overlay, mode);
+        saveOverlay();
+        drawChart();
+    }
+
+    /** "Overlay selected": the ticked rows on the open sample's chart (with
+        none open, the first ticked one opens and the rest go on its chart). */
+    async function overlaySelected() {
+        if (S.sel.all) { SH.toast('Tick the samples to overlay (at most ' + (L.OVERLAY_MAX + 1) + ' traces), not all matching.', 'err'); return; }
+        const ids = shownOrder().order.filter(id => S.sel.ids.has(id));
+        if (!ids.length) { SH.toast('Tick the samples to overlay first.', 'err'); return; }
+        let rest = ids;
+        if (S.route.sampleId == null) {
+            go({ sampleId: ids[0], view: 'overview', standard: null }, 'push');
+            rest = ids.slice(1);
+        } else if (S.route.view !== 'overview') {
+            go({ view: 'overview' }, 'push');
+        }
+        const rows = await rowsFor(rest);
+        addOverlay(rows.map(overlayItemOf));
+        await showDetailSafe();
+    }
+
+    async function addByLabId(text, out) {
+        const lab = String(text || '').trim();
+        if (!lab) { out.textContent = 'Type a lab ID.'; return false; }
+        if (lab.includes('/')) { out.textContent = 'A lab ID with “/” can’t be looked up; tick its row in the list instead.'; return false; }
+        out.textContent = 'Looking up ' + lab + '…';
+        const r = await getJSON('/api/lab/' + encodeURIComponent(lab));
+        if (!r.ok || r.body.sample_id == null) {
+            out.textContent = r.status === 404 ? 'No GC run has lab ID ' + lab + '.' : errText(r, 'Looking up ' + lab);
+            return false;
+        }
+        const row = await rowOf(Number(r.body.sample_id), true);
+        const item = row ? overlayItemOf(row) : { kind: 'sample', id: Number(r.body.sample_id), label: lab };
+        const res = addOverlay([item]);
+        out.textContent = res.added ? '' : L.overlayAddText(res);
+        return res.added > 0;
+    }
+
+    function buildTracePop() {
+        const pop = $('add-trace-pop');
+        const n = S.sel.all ? 0 : S.sel.ids.size;
+        const out = h('p', { className: 'tp-out', role: 'status', 'data-testid': 'overlay-lab-out' });
+        const input = h('input', { type: 'search', placeholder: 'Lab ID', autocomplete: 'off', spellcheck: 'false',
+                                   'aria-label': 'Lab ID to add to the chart', 'data-testid': 'overlay-lab' });
+        const form = h('form', { className: 'tp-lab', onsubmit: async (ev) => {
+            ev.preventDefault();
+            if (await addByLabId(input.value, out)) { input.value = ''; closeTracePop(); }
+        } }, input, h('button', { type: 'submit', className: 'btn btn-sm', text: 'Add' }));
+        const have = new Set(L.overlayState(S.overlay).items.map(L.overlayKey));
+        const stds = S.standards.map(s => s && s.name).filter(Boolean);
+        pop.replaceChildren(
+            h('div', { className: 'tp-sec' },
+                h('h3', { text: 'Samples ticked in the list' }),
+                h('button', { type: 'button', className: 'menu-item', 'data-testid': 'overlay-selected', disabled: !n,
+                              text: n ? 'Overlay ' + L.plural(n, 'ticked sample') : 'Tick samples in the list to overlay them',
+                              onclick: () => { closeTracePop(); overlaySelected(); } })),
+            h('div', { className: 'tp-sec' },
+                h('h3', { text: 'Comparison standards' }),
+                stds.length ? h('div', { className: 'tp-stds' }, ...stds.map(name => h('button', {
+                    type: 'button', className: 'menu-item', 'data-testid': 'overlay-standard', 'data-name': name,
+                    'aria-pressed': have.has('std:' + name) ? 'true' : 'false', text: name,
+                    onclick: () => { addOverlay([{ kind: 'standard', name }]); closeTracePop(); } })))
+                    : h('p', { className: 'tp-out', text: 'No comparison standards yet (Settings · Comparison standards).' })),
+            h('div', { className: 'tp-sec' }, h('h3', { text: 'A sample by lab ID' }), form, out));
+        return input;
+    }
+    async function openTracePop() {
+        const pop = $('add-trace-pop');
+        await settingsAndStandards();                     // loaded at start; the standards are listed
+        const input = buildTracePop();
+        pop.hidden = false;
+        $('btn-add-trace').setAttribute('aria-expanded', 'true');
+        const first = pop.querySelector('button:not([disabled])') || input;
+        if (first) first.focus();
+    }
+    function closeTracePop() {
+        $('add-trace-pop').hidden = true;
+        $('btn-add-trace').setAttribute('aria-expanded', 'false');
+    }
+    function wireChart() {
+        const btn = $('btn-add-trace');
+        const pop = $('add-trace-pop');
+        btn.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            if (pop.hidden) openTracePop(); else closeTracePop();
+        });
+        document.addEventListener('click', (ev) => { if (!pop.hidden && !pop.contains(ev.target) && ev.target !== btn) closeTracePop(); });
+        pop.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { ev.stopPropagation(); closeTracePop(); btn.focus(); } });
+        document.querySelectorAll('#chrom-mode [data-mode]').forEach(b => b.addEventListener('click', () => setOverlayMode(b.dataset.mode)));
+        $('bulk-overlay').addEventListener('click', overlaySelected);
+        const el = $('chrom');
+        if (window.ResizeObserver) {
+            new ResizeObserver(() => {
+                if (CH.pending) drawChart();
+                else if (CH.plotted && window.Plotly && el.clientWidth) window.Plotly.Plots.resize(el);
+            }).observe(el);
+        }
     }
 
     async function renderOverview(id, seq, background) {
-        const e = entry(id);
         const row = S.row;
+        renderChart(id, background);                      // draws or says why, on its own
+        let curve = entry(id).curve || null;
+        let lab = entry(id).lab || null;
         const wants = [
-            e.trace ? null : getJSON('/api/samples/' + id + '/trace', background).then(r => { e.trace = r.ok ? r.body : { error: errText(r, 'The chromatogram') }; }),
-            e.curve || !row.current_revision ? null : loadCurve(id, row, background).then(c => { e.curve = c; }),
-            e.lab || !row.lab_id || String(row.lab_id).includes('/') ? null : getJSON('/api/lab/' + encodeURIComponent(row.lab_id), true).then(r => { e.lab = r.ok ? r.body : { runs: [] }; }),
+            curve || !row.current_revision ? null : loadCurve(id, row, background).then((c) => {
+                curve = c;
+                if (!c.error) entry(id).curve = c;          // a failure is not kept: the next visit asks again
+            }),
+            lab || !row.lab_id || String(row.lab_id).includes('/') ? null : getJSON('/api/lab/' + encodeURIComponent(row.lab_id), true).then((r) => {
+                lab = r.ok ? r.body : { runs: [] };
+                if (r.ok) entry(id).lab = lab;
+            }),
         ].filter(Boolean);
-        if (!e.trace) $('chrom').replaceChildren(h('div', { className: 'chart-empty', text: 'Loading the chromatogram…' }));
+        if (wants.length && !curve && !background) renderResults(row, null);   // a live refresh keeps what is shown
         await Promise.all(wants);
         if (seq !== S.detailSeq) return;
-        if (e.trace && e.trace.error) $('chrom').replaceChildren(h('div', { className: 'chart-empty', role: 'alert', text: e.trace.error }));
-        else drawChart(e.trace);
-        renderResults(row, e.curve);
-        renderRuns(row, e.lab);
+        renderResults(row, curve);
+        renderRuns(row, lab);
     }
 
     function renderResults(row, curve) {
@@ -701,7 +1083,8 @@
         const flags = L.flagText(row);
         body.replaceChildren(tbl,
             h('div', { className: 'switch-row' }, h('span', { text: S.corrected ? 'D86 corrected (' + inst + ' factors)' : 'D86 uncorrected' }), sw),
-            curve.fromTable ? h('p', { className: 'side-note', 'data-testid': 'results-from-table', text: 'Imported result: the numbers as stored (no curve for this run).' }) : null,
+            // (replaceChildren would print a null as the text "null": v5 showed it under the switch)
+            ...(curve.fromTable ? [h('p', { className: 'side-note', 'data-testid': 'results-from-table', text: 'Imported result: the numbers as stored (no curve for this run).' })] : []),
             h('div', { className: 'res-foot' },
                 h('div', { className: 'line' }, h('span', { className: 'k', text: 'Best fit' }),
                     h('span', { className: 'v' }, best && best.label ? best.label : '—',
@@ -949,6 +1332,7 @@
             }
             if (document.querySelector('dialog[open]') || ev.altKey || ev.ctrlKey || ev.metaKey) return;
             if (!$('view-compare').hidden && $('view-compare').contains(t)) return;       // lane C's own keys
+            if ($('add-trace-pop').contains(t)) return;                                   // the Add trace menu's buttons
             if (k === 'ArrowDown' || k === 'j' || k === 'J') { ev.preventDefault(); stepTo(1, ev.shiftKey); }
             else if (k === 'ArrowUp' || k === 'k' || k === 'K') { ev.preventDefault(); stepTo(-1, ev.shiftKey); }
             else if ((k === 'x' || k === ' ') && S.route.sampleId != null && t && (t.id === 'rows' || t === document.body)) {
@@ -994,16 +1378,17 @@
     async function onLive(update) {
         if (update.reset) {
             if (firstLive) { firstLive = false; return; }
-            S.cache.clear();
+            for (const id of Array.from(S.cache.keys())) invalidate(id);
+            S.ovTraces.clear();
             await loadList({ background: true });
-            if (S.route.sampleId != null) showDetail({ background: true });
+            if (S.route.sampleId != null) showDetailSafe({ background: true });
             return;
         }
         firstLive = false;
         if (update.day_changed) renderList();
         const changed = (update.samples || []).map(Number).filter(Boolean);
         if (!changed.length) return;
-        for (const id of changed) S.cache.delete(id);
+        for (const id of changed) invalidate(id);
         const query = listQuery();
         const parts = L.chunks(changed, 900);
         const rows = [];
@@ -1019,7 +1404,7 @@
             renderList();
             loadCounts(true);
         }
-        if (S.route.sampleId != null && changed.includes(S.route.sampleId)) showDetail({ background: true });
+        if (S.route.sampleId != null && changed.includes(S.route.sampleId)) showDetailSafe({ background: true });
     }
 
     // ── themes ──────────────────────────────────────────────────────────
@@ -1027,17 +1412,14 @@
     function rethemeChart() {
         cancelAnimationFrame(themeFrame);
         themeFrame = requestAnimationFrame(() => {
-            const id = S.route.sampleId;
-            if (id != null && S.route.view === 'overview') {
-                const e = entry(id);
-                if (e.trace && !e.trace.error) drawChart(e.trace);
-            }
+            drawChart();                      // the open sample's chart, if it is drawn, in the new tokens
         });
     }
 
     // ── start ───────────────────────────────────────────────────────────
     async function start() {
         if (!$('main') || !R || !L) return;
+        S.overlay = loadOverlay();
         if (S.route.legacy) history.replaceState(null, '', R.build(S.route));
         // the remembered order, unless the link says one
         if (!/[?&]sort=/.test(location.search)) S.route.filters.sort = O.loadSortMode();
@@ -1047,6 +1429,7 @@
         wireHeader();
         wireKeys();
         wireFilters();
+        wireChart();
         SH.onInstruments((body) => {
             S.instruments = (body.instruments || []).map(i => ({ id: i.id, name: i.name || i.id }));
             S.names = {};
@@ -1062,7 +1445,7 @@
             renderFilters(true);
             if (R.filesQuery(before.filters) !== R.filesQuery(S.route.filters)) { S.sel = L.clear(); loadList(); }
             else if (before.filters.sort !== S.route.filters.sort) renderList();
-            if (before.sampleId !== S.route.sampleId || before.view !== S.route.view) showDetail();
+            if (before.sampleId !== S.route.sampleId || before.view !== S.route.view) showDetailSafe();
             else if (S.route.view === 'compare' && S.compare && S.compare.setStandard && S.route.standard && S.route.standard !== before.standard) {
                 S.compare.setStandard(S.route.standard);
             }
@@ -1074,14 +1457,14 @@
         window.addEventListener('gc:theme', rethemeChart);
         document.addEventListener('gc:theme', rethemeChart);
         new MutationObserver(rethemeChart).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-        window.addEventListener('resize', () => { const el = $('chrom'); if (window.Plotly && el && el.data) window.Plotly.Plots.resize(el); });
+        window.addEventListener('resize', () => { const el = $('chrom'); if (window.Plotly && CH.plotted && el.clientWidth) window.Plotly.Plots.resize(el); });
         await loadList();
-        showDetail();
+        showDetailSafe();
         if (window.GCLive && typeof window.GCLive.subscribe === 'function') {
             window.GCLive.start();
             window.GCLive.subscribe((u) => { onLive(u).catch(e => console.error('[samples] live', e)); });
         }
-        window.GCSamples = { state: S, openSample, setView, setFilters, ready: true };
+        window.GCSamples = { state: S, openSample, setView, setFilters, onLive, addOverlay, ready: true };
     }
 
     document.addEventListener('DOMContentLoaded', () => { start().catch(e => { console.error(e); SH.toast('The Samples page failed to start: ' + e.message, 'err'); }); });

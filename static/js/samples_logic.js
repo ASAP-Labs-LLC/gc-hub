@@ -10,7 +10,10 @@
      - bulk work in chunks through the existing endpoints, as one task with
        progress and Stop, and the confirmation naming the count and filter;
      - the Results card (Recovery | D86 | D2887), the Data table, the
-       revision history, carbon ticks and the monochrome Plotly template. */
+       revision history, carbon ticks and the monochrome Plotly template;
+     - v6: the checkbox press (pressBox/isChecked), why a chart is not drawn
+       (chartReason), the backfill reason, and stacking chromatograms (the
+       overlay set, its styles and the Overlay/Stacked traces). */
 (function (root) {
     'use strict';
 
@@ -404,11 +407,202 @@
         return out;
     }
 
+    // ── v6: the row's checkbox ──────────────────────────────────────────
+    /** Is *id* selected? The one rule every render (row, box, bulk bar) uses. */
+    function isChecked(s, id) { return !!(s && (s.all || s.ids.has(id))); }
+
+    /** A press (mousedown) on a row's checkbox → {sel, drag}. Shift extends
+        from the anchor (no drag); otherwise the row flips, "all matching"
+        first becoming the rows shown, and a drag from here paints that state
+        (drag.on). The box itself never toggles: it only shows isChecked. */
+    function pressBox(s, order, id, shift) {
+        if (shift) return { sel: extend(s, order, id), drag: null };
+        const on = !isChecked(s, id);
+        const n = paint(s.all ? selectShown(clear(), order) : s, [id], on);
+        n.anchor = id;
+        return { sel: n, drag: { on } };
+    }
+
+    // ── v6: why the chart is not drawn ──────────────────────────────────
+    /** One line for a trace request that failed ({status, body}): a
+        result-only import (no CDF), a missing file, the hub out of reach,
+        else the server's own words. */
+    function chartReason(res) {
+        const status = Number(res && res.status) || 0;
+        const err = res && res.body && res.body.error ? String(res.body.error) : '';
+        if (status === 404 && /result-only/i.test(err)) return 'No chromatogram: this result was imported from v1 without its CDF.';
+        if (status === 404 && /CDF is missing/i.test(err)) return 'No chromatogram: the stored CDF file is missing on the hub.';
+        if (status === 404 && /standard/i.test(err)) return err;
+        if (!status) return 'The chromatogram did not load: the hub did not answer' + (err ? ' (' + err + ')' : '') + '.';
+        return 'The chromatogram did not load: ' + (err || 'HTTP ' + status) + (/[.!?]$/.test(err) ? '' : '.');
+    }
+
+    /** The row's backfill reason: "Backfill · not released", plus why it is
+        backfill (backfill_logic.whyText) once the instrument's live-since
+        facts are known. ``why`` is GCBackfill.whyText (injected for tests). */
+    function backfillReason(r, info, why) {
+        const base = 'Backfill · not released';
+        if (!info || typeof why !== 'function') return base;
+        const w = why(r, info);
+        return w ? base + ' · ' + w : base;
+    }
+
+    // ── v6: stacking chromatograms (the classic overlay, on the new page) ─
+    const OVERLAY_MAX = 7;                      // traces besides the open sample
+    const OVERLAY_MODES = ['overlay', 'stacked'];
+
+    function overlayKey(item) {
+        if (!item) return '';
+        return item.kind === 'standard' ? 'std:' + item.name : 's:' + Number(item.id);
+    }
+    function _cleanItem(it) {
+        if (!it || typeof it !== 'object') return null;
+        if (it.kind === 'standard') {
+            const name = String(it.name || '').trim();
+            return name ? { kind: 'standard', name, label: String(it.label || name) } : null;
+        }
+        const id = Number(it.id);
+        if (!Number.isInteger(id) || id <= 0) return null;
+        return { kind: 'sample', id, label: String(it.label || ('#' + id)), sub: it.sub ? String(it.sub) : '' };
+    }
+    /** {mode, items} from anything (sessionStorage junk → empty overlay). */
+    function overlayState(raw) {
+        const r = raw && typeof raw === 'object' ? raw : {};
+        const mode = OVERLAY_MODES.includes(r.mode) ? r.mode : 'overlay';
+        const items = [];
+        const seen = new Set();
+        for (const it of (Array.isArray(r.items) ? r.items : [])) {
+            const c = _cleanItem(it);
+            if (!c || seen.has(overlayKey(c)) || items.length >= OVERLAY_MAX) continue;
+            seen.add(overlayKey(c));
+            items.push(c);
+        }
+        return { mode, items };
+    }
+    function overlayParse(text) {
+        try { return overlayState(JSON.parse(String(text || ''))); } catch (_e) { return overlayState(null); }
+    }
+    function overlayStringify(ov) { return JSON.stringify(overlayState(ov)); }
+
+    /** Add items (in order) → {ov, added, skipped: [{item, why}]}: never the
+        open sample, never twice, at most OVERLAY_MAX. */
+    function overlayAdd(ov, items, primaryId) {
+        const cur = overlayState(ov);
+        const out = { mode: cur.mode, items: cur.items.slice() };
+        const have = new Set(out.items.map(overlayKey));
+        const skipped = [];
+        let added = 0;
+        for (const raw of (items || [])) {
+            const it = _cleanItem(raw);
+            if (!it) continue;
+            const key = overlayKey(it);
+            if (it.kind === 'sample' && primaryId != null && it.id === Number(primaryId)) { skipped.push({ item: it, why: 'open' }); continue; }
+            if (have.has(key)) { skipped.push({ item: it, why: 'already' }); continue; }
+            if (out.items.length >= OVERLAY_MAX) { skipped.push({ item: it, why: 'full' }); continue; }
+            have.add(key);
+            out.items.push(it);
+            added++;
+        }
+        return { ov: out, added, skipped };
+    }
+    function overlayRemove(ov, key) {
+        const cur = overlayState(ov);
+        return { mode: cur.mode, items: cur.items.filter(it => overlayKey(it) !== key) };
+    }
+    function overlayClear(ov) { return { mode: overlayState(ov).mode, items: [] }; }
+    function overlayMode(ov, mode) {
+        const cur = overlayState(ov);
+        return { mode: OVERLAY_MODES.includes(mode) ? mode : cur.mode, items: cur.items };
+    }
+    /** The items drawn beside the open sample (the open one itself left out). */
+    function overlayShown(ov, primaryId) {
+        return overlayState(ov).items.filter(it => !(it.kind === 'sample' && it.id === Number(primaryId)));
+    }
+    /** What a toast says after adding. */
+    function overlayAddText(r) {
+        const parts = [];
+        if (r.added) parts.push('Added ' + plural(r.added, 'trace') + ' to the chart');
+        const full = r.skipped.filter(s => s.why === 'full').length;
+        const dup = r.skipped.filter(s => s.why === 'already').length;
+        if (full) parts.push(number(full) + ' not added: the chart holds ' + (OVERLAY_MAX + 1) + ' traces');
+        if (dup && !r.added && !full) parts.push(dup === 1 ? 'Already on the chart' : 'Already on the chart: ' + number(dup));
+        if (!parts.length && r.skipped.some(s => s.why === 'open')) parts.push('That is the sample open now');
+        return parts.join(' · ');
+    }
+
+    /** Line styles, monochrome first: the open sample is solid ink; other
+        samples step through ink/axis × dash; standards are the reference
+        grey (as in Compare) with their own dashes. */
+    const SAMPLE_STYLES = [['ink', 'solid'], ['ink', 'dash'], ['axis', 'solid'], ['ink', 'dot'], ['axis', 'dash'],
+                           ['ink', 'dashdot'], ['axis', 'dot'], ['ink', 'longdash']];
+    const STANDARD_STYLES = [['ref', 'solid'], ['ref', 'dash'], ['ref', 'dot'], ['ref', 'dashdot'], ['ref', 'longdash']];
+    function traceStyles(kinds, colours) {
+        let s = 0;
+        let d = 0;
+        return (kinds || []).map((k) => {
+            const [tok, dash] = k === 'standard' ? STANDARD_STYLES[d++ % STANDARD_STYLES.length]
+                : SAMPLE_STYLES[s++ % SAMPLE_STYLES.length];
+            return { color: (colours && colours[tok]) || (colours && colours.ink) || '#000', dash };
+        });
+    }
+
+    /** Plotly reads trace names as its own HTML subset: show them as text. */
+    function plotlyText(s) {
+        return String(s === null || s === undefined ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function _range(ys) {
+        let lo = Infinity;
+        let hi = -Infinity;
+        for (const v of (ys || [])) {
+            if (v === null || v === undefined || v === '') continue;
+            const n = Number(v);
+            if (!Number.isFinite(n)) continue;
+            if (n < lo) lo = n;
+            if (n > hi) hi = n;
+        }
+        return lo === Infinity ? { lo: 0, hi: 0 } : { lo, hi };
+    }
+
+    /** The chart's traces: list = [{key, label, kind, x, y}] (the open sample
+        first). Overlay: as measured. Stacked: each trace's baseline (its
+        lowest point) lifted by a step of 1.08 × the tallest trace's height,
+        the open sample at the bottom. → {data, legend, step}. */
+    function overlayTraces(list, mode, colours) {
+        const items = (list || []).filter(t => t && Array.isArray(t.x) && Array.isArray(t.y));
+        const styles = traceStyles(items.map(t => t.kind === 'standard' ? 'standard' : 'sample'), colours);
+        const stacked = mode === 'stacked' && items.length > 1;
+        const ranges = items.map(t => _range(t.y));
+        const tallest = Math.max(0, ...ranges.map(r => r.hi - r.lo));
+        const step = stacked ? (tallest > 0 ? tallest * 1.08 : 1) : 0;
+        const data = items.map((t, i) => {
+            const name = plotlyText(t.label);
+            const y = stacked ? t.y.map(v => (v === null || v === undefined ? v : Number(v) - ranges[i].lo + i * step)) : t.y;
+            return {
+                x: t.x, y, type: 'scatter', mode: 'lines', name,
+                line: { color: styles[i].color, width: i === 0 ? 1.5 : 1.25, dash: styles[i].dash },
+                hovertemplate: stacked ? '%{x:.3f} min<extra>' + name + '</extra>'
+                    : '%{x:.3f} min · %{y:.4~g}<extra>' + name + '</extra>',
+            };
+        });
+        const legend = items.map((t, i) => ({ key: t.key, label: t.label, sub: t.sub || '', kind: t.kind,
+                                              primary: i === 0, color: styles[i].color, dash: styles[i].dash }));
+        return { data, legend, step };
+    }
+
+    /** SVG stroke-dasharray for a Plotly dash name (the legend's swatch). */
+    function dashArray(dash) {
+        return { solid: '', dash: '6 4', dot: '1.5 3', dashdot: '6 3 1.5 3', longdash: '11 4', longdashdot: '11 3 1.5 3' }[dash] || '';
+    }
+
     const api = {
         number, plural, fmt, rowStatus, rowDetail, flagText, reviewText, injectedText,
         selection, selectedIds, toggle, extend, paint, selectShown, selectAllMatching, clear, keepOnly, bulkBar,
         CHUNK, BULK_LIMIT, chunks, runChunks, outcomeText, filterText, confirmText, countsText,
         resultRows, dataRows, dataTableText, curveFromTable, historyItems, carbonTicks, CHART_CONFIG, chartLayout, step, queueItem,
+        isChecked, pressBox, chartReason, backfillReason,
+        OVERLAY_MAX, overlayKey, overlayState, overlayParse, overlayStringify, overlayAdd, overlayRemove, overlayClear,
+        overlayMode, overlayShown, overlayAddText, traceStyles, plotlyText, overlayTraces, dashArray,
     };
     root.SamplesLogic = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
