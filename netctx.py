@@ -17,7 +17,9 @@ sending them is just a LAN client with odd headers.
   else ``remote_addr``.
 * ``is_https()``    — the request is TLS, or a trusted proxy says https
   (``X-Forwarded-Proto``, else ``CF-Visitor``); ``forwarded_scheme()`` is
-  what the proxy said (None when it said nothing: never guessed).
+  what the proxy said (None when it said nothing: never guessed);
+  ``scheme_problem()`` says why a maybe-https request isn't taken for https
+  (no scheme header, or an untrusted proxy), for the refusal's wording only.
 * ``is_proxied()``  — "through Cloudflare": a trusted proxy peer that sent
   any of ``CF-Connecting-IP``, ``CF-Ray``, ``CF-Visitor``, ``CDN-Loop``,
   ``X-Forwarded-For``, ``Forwarded``, ``X-Forwarded-Proto``.
@@ -156,13 +158,10 @@ def client_ip(req=None) -> Optional[str]:
     return addr
 
 
-def forwarded_scheme(req=None) -> Optional[str]:
-    """The scheme a trusted proxy says the client used: ``X-Forwarded-Proto``
-    (first value), else Cloudflare's ``CF-Visitor: {"scheme": ...}``; None when
-    the peer isn't a trusted proxy or says nothing usable (never guessed)."""
-    req = _req(req)
-    if not is_trusted_proxy(req.remote_addr):
-        return None
+def _claimed_scheme(req) -> Optional[str]:
+    """What ``X-Forwarded-Proto`` (else ``CF-Visitor``) says, whoever sent
+    it. Believed only from a trusted proxy (``forwarded_scheme``); from anyone
+    else it only words a refusal (``scheme_problem``)."""
     proto = (req.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
     if proto in ("http", "https"):
         return proto
@@ -175,6 +174,16 @@ def forwarded_scheme(req=None) -> Optional[str]:
         if isinstance(scheme, str) and scheme.lower() in ("http", "https"):
             return scheme.lower()
     return None
+
+
+def forwarded_scheme(req=None) -> Optional[str]:
+    """The scheme a trusted proxy says the client used: ``X-Forwarded-Proto``
+    (first value), else Cloudflare's ``CF-Visitor: {"scheme": ...}``; None when
+    the peer isn't a trusted proxy or says nothing usable (never guessed)."""
+    req = _req(req)
+    if not is_trusted_proxy(req.remote_addr):
+        return None
+    return _claimed_scheme(req)
 
 
 def is_https(req=None) -> bool:
@@ -247,19 +256,53 @@ def is_cross_site(req=None) -> bool:
 CROSS_SITE_MESSAGE = "Cross-site request refused"
 
 
+def scheme_problem(req=None) -> Optional[str]:
+    """Why a request that may well be https is not taken for https, or None:
+
+    * ``"missing"`` — through a trusted proxy that sent no usable
+      ``X-Forwarded-Proto`` or ``CF-Visitor`` (cloudflared not passing them);
+    * ``"untrusted"`` — a peer that is not a trusted proxy sent forwarding
+      headers claiming https (a cloudflared on another machine missing from
+      ``settings.json`` ``trusted_proxies``): rightly ignored.
+
+    Wording only: no decision is made from it."""
+    req = _req(req)
+    if is_https(req):
+        return None
+    if is_proxied(req):
+        return "missing" if forwarded_scheme(req) is None else None
+    if (_has_proxy_headers(req) and not is_trusted_proxy(req.remote_addr)
+            and _claimed_scheme(req) == "https"):
+        return "untrusted"
+    return None
+
+
 def https_refusal_message(req=None) -> str:
     """What to tell someone who reached the hub through the proxy without an
-    https scheme header: ``Sign in over https: open https://<Host>``."""
+    https scheme the hub believes: ``Sign in over https: open https://<Host>``,
+    plus, when the person may already be on https, what the hub was missing
+    and what to check on the server (``scheme_problem``)."""
     req = _req(req)
     name = hostname(req.host) or "gc.asaplabs.net"
-    return f"Sign in over https: open https://{name}"
+    base = f"Sign in over https: open https://{name}"
+    problem = scheme_problem(req)
+    if problem == "missing":
+        return (f"{base}. If you already did, the tunnel did not tell the hub: no "
+                f"X-Forwarded-Proto or CF-Visitor header reached it. Check the cloudflared "
+                f"tunnel on the server (it must forward those headers to the hub).")
+    if problem == "untrusted":
+        peer = log_safe(req.remote_addr or "?")
+        return (f"{base}. If you already did, the proxy at {peer} is not a trusted proxy, so "
+                f"the hub ignored its https header. Add {peer} to trusted_proxies in the hub's "
+                f"settings.json on the server.")
+    return base
 
 
 def _only_the_scheme_differs(req) -> bool:
-    """Through a trusted proxy that named no scheme (so the hub takes the
-    request for http) and the browser's ``Origin`` is exactly
-    ``https://<this Host>``: not another site, just a missing header."""
-    if not is_proxied(req) or is_https(req) or forwarded_scheme(req) is not None:
+    """The hub takes the request for http but the browser's ``Origin`` is
+    exactly ``https://<this Host>``: not another site, just a missing (or
+    untrusted) scheme header (``scheme_problem``)."""
+    if scheme_problem(req) is None:
         return False
     site = req.headers.get("Sec-Fetch-Site")
     if site is not None and site.strip().lower() not in ALLOWED_FETCH_SITES:
@@ -280,8 +323,9 @@ def _only_the_scheme_differs(req) -> bool:
 def cross_site_refusal(req=None) -> Optional[str]:
     """The cross-site guard's answer: None when the request may proceed, else
     the message for its 403. A request through Cloudflare without an https
-    scheme header whose ``Origin`` is this host over https is told to use
-    https (``https_refusal_message``), not "Cross-site request refused"."""
+    scheme header (or through an untrusted proxy claiming https) whose
+    ``Origin`` is this host over https is told to use https and what to check
+    (``https_refusal_message``), not "Cross-site request refused"."""
     req = _req(req)
     if not is_cross_site(req):
         return None

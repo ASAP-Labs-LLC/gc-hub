@@ -215,7 +215,8 @@ def test_what_the_tunnel_never_allows(hub):
     code, _, body = call(port, "POST", "/api/login", {"username": "jane doe",
                                                       "password": "labpass-2"},
                          headers=no_scheme)
-    assert code == 403 and body["error"] == "Sign in over https: open https://gc.asaplabs.net"
+    assert code == 403 and body["error"].startswith("Sign in over https: open https://gc.asaplabs.net.")
+    assert "X-Forwarded-Proto" in body["error"] and "cloudflared" in body["error"]
     # a spoofed CF-Connecting-IP from a LAN host is ignored: covered in process
     # (test_netctx); here, a forged sign-in cookie is just signed out
     code, _, _ = call(port, "GET", "/api/files", cookie="__Host-gc_session=forged")

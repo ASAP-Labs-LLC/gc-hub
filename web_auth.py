@@ -43,7 +43,10 @@ https carry HSTS (``max-age=31536000``).
   password revokes every ``admin`` session.
 * Through Cloudflare a sign-in over plain http is refused (403, "Sign in over https:
   open https://<host>"; also what the cross-site guard says when the proxy
-  named no scheme and the browser's Origin is this host over https).
+  named no scheme and the browser's Origin is this host over https). When no
+  ``X-Forwarded-Proto``/``CF-Visitor`` arrived (or an untrusted proxy sent
+  one) the message adds what the hub was missing and what to check on the
+  server (``netctx.scheme_problem``), and app.log gets a WARNING naming it.
 * LabCore unreachable (``LabCoreUnavailable``) is 503 with
   ``labcore_unavailable: true``, and is not a failure for the throttle.
 
@@ -589,8 +592,18 @@ def _body():
     return admin_auth._json_body()     # JSON only, 64 KiB, an object
 
 
+_SCHEME_PROBLEM_LOG = {
+    "missing": "through the proxy with no X-Forwarded-Proto or CF-Visitor header "
+               "(check that cloudflared forwards them)",
+}
+
+
 def _refuse_plain_http_through_tunnel():
     if netctx.is_proxied() and not netctx.is_https():
+        problem = netctx.scheme_problem()
+        log.warning("sign-in refused from %s (Host %s): %s", netctx.client_ip(),
+                    netctx.log_safe(request.host),
+                    _SCHEME_PROBLEM_LOG.get(problem, "through the proxy over http"))
         return _err(netctx.https_refusal_message(), 403)
     return None
 
