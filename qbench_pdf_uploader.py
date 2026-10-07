@@ -15,6 +15,11 @@ Design notes:
     cached binary path stored in _driver_path.
   - Every blocking step emits a log message BEFORE it starts, so the dialog
     always shows exactly where the process is.
+  - Everything goes through ``logging`` (the hub's app.log), never print():
+    stdout is not kept where the hub runs as a service.
+  - v6.0.0: when attach_pdf_to_sample() returns False, ``last_failure()``
+    (per thread) is one plain line saying why, for the report queue; the
+    full detail (and any traceback) is logged.
 """
 from __future__ import annotations
 
@@ -24,7 +29,6 @@ import sys
 import tempfile
 import time
 import threading
-import traceback
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -55,6 +59,14 @@ except ImportError as _e:
 CREDENTIALS_FILE = r"\\ASAPServer\Labsharedrive\ASAP Lab Results\qbenchlogin.txt"
 QBENCH_BASE      = "https://asaplabs.qbench.net"
 
+# How long the REST lookup (lab ID -> QBench sample id) may take.
+API_LOOKUP_TIMEOUT_S = 25
+
+
+class CredentialsFileError(Exception):
+    """The saved QBench sign-in file can't be used; the message says why, plainly."""
+
+
 logger = logging.getLogger(__name__)
 
 # Suppress noisy debug output from Selenium and urllib3 — only show warnings+
@@ -72,30 +84,117 @@ _driver_lock = threading.Lock()
 # Cached ChromeDriver path (resolved once)
 _driver_path: Optional[str] = None
 
+# Per thread: why this thread's last attach_pdf_to_sample() returned False
+_state = threading.local()
+
+# Set by cancel_upload() so a browser killed on purpose reads "Stopped"
+_cancelled = threading.Event()
+
+FAILURE_MAX = 240
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _emit(msg: str, cb: Optional[Callable[[str], None]] = None) -> None:
-    """Print to terminal AND forward to the UI callback."""
-    print(f"[QBench] {msg}", flush=True)
-    logger.info("[QBench] %s", msg)
+def failure_line(text, limit: int = FAILURE_MAX) -> str:
+    """One plain line for the operator: the first non-empty line of *text*,
+    spaces collapsed, at most *limit* characters (never a stack trace)."""
+    if text is None:
+        return ""
+    for raw in str(text).splitlines():
+        line = " ".join(raw.split())
+        if line:
+            return line if len(line) <= limit else line[: limit - 1] + "\u2026"
+    return ""
+
+
+def last_failure() -> str:
+    """Why this thread's last attach_pdf_to_sample() returned False ('' after
+    a success, or before any call)."""
+    return getattr(_state, "failure", "")
+
+
+def _set_failure(reason: str) -> None:
+    _state.failure = failure_line(reason)
+
+
+def _exc_text(exc: BaseException) -> str:
+    """A Selenium exception's own message (without the 'Message: ' prefix and
+    the driver's stack trace), else str(exc), else the class name."""
+    msg = getattr(exc, "msg", None) or str(exc) or ""
+    if msg.startswith("Message: "):
+        msg = msg[len("Message: "):]
+    return failure_line(msg) or type(exc).__name__
+
+
+def _emit(msg: str, cb: Optional[Callable[[str], None]] = None,
+          level: int = logging.INFO) -> None:
+    """Log (app.log) AND forward to the UI callback."""
+    logger.log(level, "[QBench] %s", msg)
     if cb:
         try:
             cb(msg)
-        except Exception as _exc:
-            print(f"[QBench] callback error: {_exc}", flush=True)
+        except Exception:
+            logger.exception("[QBench] progress callback failed")
+
+
+def _fail(reason: str, cb: Optional[Callable[[str], None]] = None) -> bool:
+    """Record why this upload failed (``last_failure()``), log it and tell
+    the UI; returns False, for ``return _fail(...)``."""
+    _set_failure(reason)
+    _emit(f"FAILED: {last_failure()}", cb, level=logging.WARNING)
+    return False
+
+
+def _os_reason(exc: OSError) -> str:
+    text = exc.strerror or str(exc) or type(exc).__name__
+    win = getattr(exc, "winerror", None)
+    return f"{text} (Windows error {win})" if win else text
+
+
+def read_credentials_file(path: str) -> tuple[str, str]:
+    """``(username, password)`` from a qbenchlogin.txt (line 1, line 2).
+
+    A UTF-8 byte-order mark (Notepad's "UTF-8 with BOM") is dropped, and a
+    file that is not UTF-8 is read as Windows-1252. Raises
+    ``CredentialsFileError`` with a plain sentence when the file can't be
+    read, is empty, or lacks a line."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise CredentialsFileError(
+            f"Can't read the saved QBench sign-in file {path}: {_os_reason(exc)}") from exc
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("cp1252", errors="replace")
+    lines = [ln.strip() for ln in text.splitlines()]
+    user = lines[0] if lines else ""
+    pw = lines[1] if len(lines) > 1 else ""
+    if not user and not pw:
+        raise CredentialsFileError(f"The saved QBench sign-in file {path} is empty.")
+    if not user:
+        raise CredentialsFileError(
+            f"The saved QBench sign-in file {path} has no username on line 1.")
+    if not pw:
+        raise CredentialsFileError(
+            f"The saved QBench sign-in file {path} has no password on line 2.")
+    return user, pw
+
+
+def credentials_file() -> str:
+    """The saved sign-in file: ``QBENCH_LOGIN_FILE`` when set, else the share's."""
+    return os.environ.get("QBENCH_LOGIN_FILE") or CREDENTIALS_FILE
 
 
 def _get_credentials() -> tuple[str, str]:
-    _emit(f"Reading credentials from {CREDENTIALS_FILE}")
-    with open(CREDENTIALS_FILE, "r") as fh:
-        lines = fh.readlines()
-    if len(lines) < 2:
-        raise ValueError("qbenchlogin.txt must have username on line 1, password on line 2")
+    path = credentials_file()
+    _emit(f"Reading credentials from {path}")
+    creds = read_credentials_file(path)
     _emit("Credentials loaded OK")
-    return lines[0].strip(), lines[1].strip()
+    return creds
 
 
 def _resolve_chromedriver() -> Optional[str]:
@@ -111,10 +210,10 @@ def _resolve_chromedriver() -> Optional[str]:
         exe = os.path.join(os.path.dirname(raw), "chromedriver.exe")
         if os.path.exists(exe):
             _driver_path = exe
-            print(f"[QBench] ChromeDriver cached at {exe}", flush=True)
+            logger.info("[QBench] ChromeDriver cached at %s", exe)
             return exe
     except Exception as e:
-        print(f"[QBench] webdriver-manager failed: {e}", flush=True)
+        logger.warning("[QBench] webdriver-manager failed: %s", e)
 
     # Try chromedriver-autoinstaller
     try:
@@ -122,13 +221,13 @@ def _resolve_chromedriver() -> Optional[str]:
         p = chromedriver_autoinstaller.install()
         if p and os.path.exists(str(p)):
             _driver_path = str(p)
-            print(f"[QBench] chromedriver-autoinstaller path: {_driver_path}", flush=True)
+            logger.info("[QBench] chromedriver-autoinstaller path: %s", _driver_path)
             return _driver_path
     except Exception as e:
-        print(f"[QBench] chromedriver-autoinstaller failed: {e}", flush=True)
+        logger.warning("[QBench] chromedriver-autoinstaller failed: %s", e)
 
-    # Fall back to PATH
-    print("[QBench] Will rely on chromedriver in PATH", flush=True)
+    # Fall back to PATH (Selenium Manager finds or downloads a driver)
+    logger.info("[QBench] Will rely on chromedriver in PATH / Selenium Manager")
     return None
 
 
@@ -150,9 +249,8 @@ def _make_driver(headless: bool = True) -> object:
     # Log browser version for debugging version-mismatch issues
     try:
         caps = driver.capabilities
-        print(f"[QBench] Chrome {caps.get('browserVersion','?')}  "
-              f"ChromeDriver {caps.get('chrome',{}).get('chromedriverVersion','?').split()[0]}",
-              flush=True)
+        logger.info("[QBench] Chrome %s  ChromeDriver %s", caps.get('browserVersion', '?'),
+                    caps.get('chrome', {}).get('chromedriverVersion', '?').split()[0])
     except Exception:
         pass
     return driver
@@ -220,11 +318,11 @@ def _login(driver, username: str, password: str,
             ]
             for phrase in _lockout_phrases:
                 if phrase in _body:
-                    _emit(f"LOGIN LOCKOUT detected: '{phrase}'", cb)
+                    _emit(f"LOGIN LOCKOUT detected: '{phrase}'", cb, level=logging.WARNING)
                     raise LoginFailedError(f"Account locked: {phrase}")
             for phrase in _bad_cred_phrases:
                 if phrase in _body:
-                    _emit(f"LOGIN FAILED: '{phrase}'", cb)
+                    _emit(f"LOGIN FAILED: '{phrase}'", cb, level=logging.WARNING)
                     raise LoginFailedError(f"Bad credentials: {phrase}")
         except LoginFailedError:
             raise
@@ -233,7 +331,7 @@ def _login(driver, username: str, password: str,
 
     if not _login_ok:
         # Login button never disappeared — capture diagnostics
-        _emit("LOGIN TIMEOUT: login button still visible after 50 s", cb)
+        _emit("LOGIN TIMEOUT: login button still visible after 50 s", cb, level=logging.WARNING)
         _emit(f"  Current URL: {driver.current_url}", cb)
         try:
             _diag = Path(tempfile.gettempdir()) / "qbench_login_fail.png"
@@ -257,11 +355,14 @@ def _api_lookup(
     client_secret: Optional[str] = None,
 ) -> Optional[int]:
     """Resolve a Lab ID to its numeric QBench sample ID via the REST API.
-    Runs with a 20-second hard timeout via a thread."""
+    Runs with a hard timeout (API_LOOKUP_TIMEOUT_S) via a thread. On None,
+    ``_state.lookup_problem`` says why ('' when QBench simply has no such
+    sample)."""
     _emit(f"API: looking up Lab ID '{lab_id}'…", cb)
 
     result: list[Optional[int]] = [None]
     error:  list[Optional[str]] = [None]
+    _state.lookup_problem = ""
 
     def _call():
         try:
@@ -281,17 +382,21 @@ def _api_lookup(
             else:
                 _emit(f"API: no sample found for '{lab_id}'", cb)
         except Exception as exc:
-            error[0] = str(exc)
-            _emit(f"API error: {exc}", cb)
+            error[0] = _exc_text(exc)
+            logger.warning("[QBench] API lookup of %r failed", lab_id, exc_info=True)
+            _emit(f"API error: {error[0]}", cb)
 
     t = threading.Thread(target=_call, daemon=True)
     t.start()
-    t.join(timeout=25)  # 25-second hard timeout
+    t.join(timeout=API_LOOKUP_TIMEOUT_S)
 
     if t.is_alive():
-        _emit("API call timed out after 25 s — QBench API may be unreachable", cb)
+        _state.lookup_problem = (f"The QBench API did not answer within {API_LOOKUP_TIMEOUT_S:g} s "
+                                 f"(looking up lab ID '{lab_id}').")
+        _emit(_state.lookup_problem, cb)
         return None
     if error[0]:
+        _state.lookup_problem = f"QBench API: {error[0]}"
         _emit(f"API call failed: {error[0]}", cb)
         return None
     return result[0]
@@ -303,22 +408,23 @@ def _api_lookup(
 
 def cancel_upload() -> None:
     """Immediately kill the active WebDriver session (safe to call from any thread)."""
+    _cancelled.set()
     with _driver_lock:
         drv = _active_driver
     if drv:
         try:
-            print("[QBench] cancel_upload(): quitting active driver…", flush=True)
+            logger.info("[QBench] cancel_upload(): quitting active driver…")
             drv.quit()
         except Exception as e:
-            print(f"[QBench] driver.quit() raised: {e}", flush=True)
+            logger.warning("[QBench] driver.quit() raised: %s", e)
 
 
 def prime_chromedriver() -> bool:
     """Resolve (and cache) the ChromeDriver path NOW, before the first upload.
     Call this from the GUI so the user sees progress; returns True on success."""
-    print("[QBench] Priming ChromeDriver…", flush=True)
+    logger.info("[QBench] Priming ChromeDriver…")
     p = _resolve_chromedriver()
-    print(f"[QBench] ChromeDriver ready: {p or '(PATH fallback)'}", flush=True)
+    logger.info("[QBench] ChromeDriver ready: %s", p or "(PATH fallback)")
     return True
 
 
@@ -341,10 +447,11 @@ def _verify_attachment(
         # Strip extension for a looser match (QBench may rename slightly)
         stem = Path(filename).stem
         found = stem.lower() in src.lower()
-        print(f"[QBench] Verify (same session): '{stem}' {'FOUND' if found else 'NOT found'} on page", flush=True)
+        logger.info("[QBench] Verify (same session): '%s' %s on page", stem,
+                    "FOUND" if found else "NOT found")
         return found
     except Exception as exc:
-        print(f"[QBench] Verify (same session) failed: {exc}", flush=True)
+        logger.warning("[QBench] Verify (same session) failed: %s", exc)
         return False
 
 
@@ -382,10 +489,11 @@ def _verify_attachment_fresh(
         src = drv.page_source or ""
         stem = Path(filename).stem
         found = stem.lower() in src.lower()
-        print(f"[QBench] Verify (fresh): '{stem}' {'FOUND' if found else 'NOT found'} on page", flush=True)
+        logger.info("[QBench] Verify (fresh): '%s' %s on page", stem,
+                    "FOUND" if found else "NOT found")
         return found
     except Exception as exc:
-        print(f"[QBench] Verify (fresh) failed: {exc}", flush=True)
+        logger.warning("[QBench] Verify (fresh) failed: %s", exc)
         return False
     finally:
         if drv:
@@ -413,7 +521,7 @@ def attach_pdf_to_sample(
 ) -> bool:
     """Attach *pdf_path* to the QBench sample identified by *lab_id*.
 
-    Every major step emits a log message to the terminal AND to the UI via
+    Every major step emits a log message to app.log AND to the UI via
     progress_callback BEFORE the blocking operation starts, so the user can
     always see exactly where the process is.
 
@@ -424,19 +532,26 @@ def attach_pdf_to_sample(
     username/password  : credentials; falls back to CREDENTIALS_FILE.
     progress_callback  : called with each status string → drives dialog log.
     step_callback      : called with step index (0-based) → drives progress bar.
+
+    Returns False with ``last_failure()`` saying why (one line); raises
+    ``LoginFailedError`` when QBench refuses the sign-in.
     """
     global _active_driver
 
+    _set_failure("")
+    _cancelled.clear()
     if not _SELENIUM_OK:
-        _emit(f"Selenium not installed: {_SELENIUM_IMPORT_ERROR}", progress_callback)
-        return False
+        return _fail(f"Selenium is not installed on the hub: {_SELENIUM_IMPORT_ERROR}",
+                     progress_callback)
 
     pdf_path = Path(pdf_path)
     cb       = progress_callback
     step     = 0
+    stage    = "Starting"
 
     def _step(msg: str) -> None:
-        nonlocal step
+        nonlocal step, stage
+        stage = msg
         _emit(msg, cb)
         if step_callback:
             try:
@@ -445,23 +560,22 @@ def attach_pdf_to_sample(
                 pass
         step += 1
 
-    print(f"[QBench] → {lab_id}  {pdf_path.name}", flush=True)
+    logger.info("[QBench] → %s  %s", lab_id, pdf_path.name)
 
     sample_id: Optional[int] = None
     sample_url: str = ""
 
     # Step 0 ── PDF confirmed ──────────────────────────────────────────
     if not pdf_path.exists():
-        _emit(f"ERROR: PDF not found at {pdf_path}", cb)
-        return False
+        return _fail(f"The report PDF was not found at {pdf_path}.", cb)
     _step(f"PDF confirmed: {pdf_path.name} ({pdf_path.stat().st_size // 1024} KB)")
 
     # Step 1 ── API lookup → sample ID ────────────────────────────────
     _step(f"Looking up '{lab_id}' via QBench API…")
     sample_id = _api_lookup(lab_id, cb, client_id=client_id, client_secret=client_secret)
     if sample_id is None:
-        _emit(f"FAILED: No QBench sample found for '{lab_id}'", cb)
-        return False
+        return _fail(getattr(_state, "lookup_problem", "")
+                     or f"QBench has no sample with lab ID '{lab_id}'.", cb)
 
     # Step 2 ── Credentials ───────────────────────────────────────────
     if not username or not password:
@@ -469,9 +583,12 @@ def attach_pdf_to_sample(
             _u, _pw = _get_credentials()
             username = username or _u
             password = password or _pw
+        except CredentialsFileError as exc:
+            return _fail(str(exc), cb)
         except Exception as exc:
-            _emit(f"FAILED: Cannot read credentials — {exc}", cb)
-            return False
+            logger.exception("[QBench] reading %s failed", credentials_file())
+            return _fail(f"Can't read the saved QBench sign-in file {credentials_file()}: "
+                         f"{_exc_text(exc)}", cb)
 
     # Step 3 ── Start browser ──────────────────────────────────────────
     _step("Starting Chrome…")
@@ -540,8 +657,8 @@ def attach_pdf_to_sample(
             file_input.send_keys(str(pdf_path.resolve()))
             time.sleep(2)
         except TimeoutException:
-            _emit("ERROR: No <input type='file'> found on page", cb)
-            return False
+            return _fail("QBench did not answer in time: no file input on the attachments page "
+                         f"(at: {stage})", cb)
 
         # Step 9 ── Tick 'Show in Report' / 'Include in Report' ────────
         _step("Enabling 'Show in Report'…")
@@ -584,7 +701,7 @@ def attach_pdf_to_sample(
                 except NoSuchElementException:
                     pass
         if not _found:
-            _emit("WARNING: 'Show in Report' checkbox not found", cb)
+            _emit("WARNING: 'Show in Report' checkbox not found", cb, level=logging.WARNING)
 
         # Step 10 ── Save ─────────────────────────────────────────────
         _step(f"Saving — '{pdf_path.name}' → '{lab_id}' (sample {sample_id})")
@@ -596,6 +713,7 @@ def attach_pdf_to_sample(
             "//button[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'save')"
             " and not(contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'cancel'))]",
         ]
+        _saved = False
         for _xp in _save_xpaths:
             try:
                 btn = WebDriverWait(driver, 5).until(
@@ -603,9 +721,12 @@ def attach_pdf_to_sample(
                 )
                 driver.execute_script("arguments[0].click();", btn)
                 time.sleep(4)
+                _saved = True
                 break
             except (TimeoutException, NoSuchElementException, WebDriverException):
                 pass
+        if not _saved:
+            _emit("WARNING: no Save button found on the upload form", cb, level=logging.WARNING)
 
         # Step 11 ── Verify upload by checking the attachments page ────
         _verified = _verify_attachment(driver, sample_url, pdf_path.name, cb)
@@ -613,6 +734,9 @@ def attach_pdf_to_sample(
             _step(f"Verified: '{pdf_path.name}' found on attachments page")
         else:
             _step("Could not confirm attachment on page (may still have uploaded)")
+            logger.warning("[QBench] %s: '%s' not seen on the attachments page after saving",
+                           lab_id, pdf_path.name)
+        _set_failure("")
         return True  # save was attempted; verification is informational
 
     except LoginFailedError:
@@ -620,40 +744,53 @@ def attach_pdf_to_sample(
         # credential re-prompt handling — don't swallow them here.
         raise
     except WebDriverException as exc:
-        # Raised when driver.quit() is called by cancel_upload() or Chrome crash
-        _msg = str(exc).strip() or "(empty — Chrome process likely crashed)"
-        _step(f"Browser session ended: {_msg}")
-        print(f"[QBench] WebDriverException: {_msg}", flush=True)
+        # A wait that ran out (TimeoutException: its message is empty),
+        # Chrome that can't start (driver is None), cancel_upload()'s quit(),
+        # or a crash. The whole message and stack go to the log.
+        logger.warning("[QBench] %s: browser error at '%s': %s", lab_id, stage, str(exc),
+                       exc_info=True)
+        if _cancelled.is_set():
+            reason = "Stopped by the operator."
+        elif isinstance(exc, TimeoutException):
+            reason = f"QBench did not answer in time (at: {stage})"
+        elif driver is None:
+            reason = f"Chrome could not start: {_exc_text(exc)}"
+        else:
+            reason = f"The browser session ended: {_exc_text(exc)} (at: {stage})"
+        _step(f"Browser error: {reason}")
 
         # ── Post-crash verification: open a fresh browser, check if the
         #    file actually landed on QBench before reporting failure. ──
-        if sample_id is not None:
+        if sample_id is not None and driver is not None and not _cancelled.is_set():
             _step("Verifying upload despite browser error...")
             _ok = _verify_attachment_fresh(sample_url, pdf_path.name, headless, username, password, cb)
             if _ok:
                 _step(f"Verified: '{pdf_path.name}' IS on QBench despite the error")
+                _set_failure("")
                 return True
 
-        return False
+        return _fail(reason, cb)
     except Exception as exc:
-        _step(f"UNEXPECTED ERROR: {exc}")
-        traceback.print_exc()
+        logger.exception("[QBench] %s: unexpected error at '%s'", lab_id, stage)
+        reason = f"Unexpected error: {type(exc).__name__}: {_exc_text(exc)} (at: {stage})"
+        _step(f"UNEXPECTED ERROR: {reason}")
 
-        if sample_id is not None:
+        if sample_id is not None and driver is not None:
             _step("Verifying upload despite error...")
             _ok = _verify_attachment_fresh(sample_url, pdf_path.name, headless, username, password, cb)
             if _ok:
                 _step(f"Verified: '{pdf_path.name}' IS on QBench despite the error")
+                _set_failure("")
                 return True
 
-        return False
+        return _fail(reason, cb)
     finally:
         with _driver_lock:
             _active_driver = None
         if driver:
             try:
                 driver.quit()
-                print("[QBench] Browser closed", flush=True)
+                logger.info("[QBench] Browser closed")
             except Exception:
                 pass
-        print(f"[QBench] Done with {lab_id}\n", flush=True)
+        logger.info("[QBench] Done with %s", lab_id)

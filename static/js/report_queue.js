@@ -26,6 +26,15 @@
     const MAX_ITEMS = 500;
 
     // ── pure: items and the store ───────────────────────────────────────────
+    /** One plain line for a failure: the first non-empty line, spaces
+        collapsed, at most 240 characters (never a stack trace). */
+    const FAILURE_MAX = 240;
+    function failureLine(msg) {
+        if (msg === null || msg === undefined) return '';
+        const first = String(msg).split(/\r?\n/).map(l => l.replace(/\s+/g, ' ').trim()).find(Boolean) || '';
+        return first.length > FAILURE_MAX ? first.slice(0, FAILURE_MAX - 1) + '…' : first;
+    }
+
     function toId(v) {
         const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
         return Number.isInteger(n) ? n : null;
@@ -52,11 +61,17 @@
             sent_at: raw.sent_at || null,
         };
         if (Array.isArray(raw.ranges)) item.ranges = payloadLib.rangesForPayload(raw.ranges);
+        // v6.0.0: a report whose upload failed keeps the reason (one line) until
+        // it is retried, re-added or removed; only then does the key exist
+        const err = raw.upload_error;
+        if (!item.sent_at && err && typeof err === 'object' && typeof err.msg === 'string') {
+            item.upload_error = { msg: failureLine(err.msg) || 'Failed', at: err.at || null };
+        }
         // key order: id, sample_id, lab_id, sample_name, standard_name,
-        // conclusion, params, ranges, overlay_standards, added_at, sent_at
+        // conclusion, params, ranges, overlay_standards, added_at, sent_at, upload_error
         const ordered = {};
         for (const k of ['id', 'sample_id', 'lab_id', 'sample_name', 'standard_name', 'conclusion',
-                         'params', 'ranges', 'overlay_standards', 'added_at', 'sent_at']) {
+                         'params', 'ranges', 'overlay_standards', 'added_at', 'sent_at', 'upload_error']) {
             if (k in item) ordered[k] = item[k];
         }
         return ordered;
@@ -94,7 +109,7 @@
             }
         }
         function add(raw, now) {
-            const item = normalizeItem(Object.assign({}, raw, { sent_at: null }), now);
+            const item = normalizeItem(Object.assign({}, raw, { sent_at: null, upload_error: null }), now);
             if (!item) return null;
             const list = read();
             const i = list.findIndex(x => x.id === item.id);
@@ -106,7 +121,7 @@
             const list = read();
             let n = 0;
             for (const raw of raws || []) {
-                const item = normalizeItem(Object.assign({}, raw, { sent_at: null }), now);
+                const item = normalizeItem(Object.assign({}, raw, { sent_at: null, upload_error: null }), now);
                 if (!item) continue;
                 const i = list.findIndex(x => x.id === item.id);
                 if (i >= 0) list[i] = item; else list.push(item);
@@ -122,16 +137,58 @@
             write(next);
             return true;
         }
+        function without(x, extra) {
+            const out = Object.assign({}, x, extra);
+            delete out.upload_error;
+            return out;
+        }
         function markSent(ids, at) {
             const set = new Set(ids || []);
             const when = at || new Date().toISOString();
-            write(read().map(x => (set.has(x.id) ? Object.assign({}, x, { sent_at: when }) : x)));
+            write(read().map(x => (set.has(x.id) ? without(x, { sent_at: when }) : x)));
+        }
+        /** Back to unsent with the reason it failed ({id: reason}): the sheet
+            offers Retry, and Upload sends it again. Never marked sent. */
+        function markFailed(reasons, at) {
+            const map = reasons || {};
+            const when = at || new Date().toISOString();
+            write(read().map(x => (Object.prototype.hasOwnProperty.call(map, x.id)
+                ? Object.assign({}, x, { sent_at: null,
+                    upload_error: { msg: failureLine(map[x.id]) || 'Failed', at: when } })
+                : x)));
+        }
+        /** Back to unsent with no error (skipped by the operator). */
+        function markUnsent(ids) {
+            const set = new Set(ids || []);
+            write(read().map(x => (set.has(x.id) ? without(x, { sent_at: null }) : x)));
+        }
+        /** Apply reconcile()'s answer to the reports this tab handed to the hub
+            (sent_at set); a report re-added since then is a new one and kept. */
+        function applyOutcome(outcome, at) {
+            const o = outcome || {};
+            const inFlight = new Set(read().filter(x => x.sent_at).map(x => x.id));
+            const key = sid => 's' + sid;
+            const failed = {};
+            for (const f of o.failed || []) if (inFlight.has(key(f.sample_id))) failed[key(f.sample_id)] = f.msg;
+            const back = (o.unsent || []).map(key).filter(id => inFlight.has(id));
+            if (!Object.keys(failed).length && !back.length) return 0;
+            const when = at || new Date().toISOString();
+            const backSet = new Set(back);
+            write(read().map(x => {
+                if (Object.prototype.hasOwnProperty.call(failed, x.id)) {
+                    return Object.assign({}, x, { sent_at: null,
+                        upload_error: { msg: failureLine(failed[x.id]) || 'Failed', at: when } });
+                }
+                return backSet.has(x.id) ? without(x, { sent_at: null }) : x;
+            }));
+            return Object.keys(failed).length + back.length;
         }
         return {
             items: read,
             count: () => read().length,
             unsent: () => read().filter(x => !x.sent_at),
-            add, addMany, remove, markSent,
+            failed: () => read().filter(x => !x.sent_at && x.upload_error),
+            add, addMany, remove, markSent, markFailed, markUnsent, applyOutcome,
             clear: () => write([]),
             onChange: (fn) => { listeners.push(fn); },
         };
@@ -182,8 +239,61 @@
         }
     }
 
+    /** The run's rows → each queued report's state now: ``sent`` (uploaded),
+        ``failed`` ([{sample_id, msg}]: offer Retry) and ``unsent`` (skipped).
+        The newest row for a sample wins (a retry appended to a running upload
+        adds a row). While the run is going only a final answer counts; once it
+        has ended (``finished``), anything not uploaded failed. */
+    const ENDED_EARLY = 'Not uploaded: the upload ended before this report was sent.';
+    /** sample_id → the run's newest row for it. */
+    function latestRows(rows) {
+        const latest = new Map();
+        for (const r of Array.isArray(rows) ? rows : []) {
+            if (!r || r.sample_id === null || r.sample_id === undefined) continue;
+            const sid = Number(r.sample_id);
+            if (!Number.isInteger(sid)) continue;
+            const prev = latest.get(sid);
+            if (!prev || Number(r.idx) >= Number(prev.idx)) latest.set(sid, r);
+        }
+        return latest;
+    }
+
+    function reconcile(rows, finished) {
+        const latest = latestRows(rows);
+        const out = { sent: [], failed: [], unsent: [] };
+        const ordered = [...latest.entries()].sort((a, b) => Number(a[1].idx) - Number(b[1].idx));
+        for (const [sid, r] of ordered) {
+            const st = r.status;
+            if (st === 'ok') out.sent.push(sid);
+            else if (st === 'skipped') out.unsent.push(sid);
+            else if (st === 'failed' || st === 'error') {
+                out.failed.push({ sample_id: sid, msg: failureLine(r.msg) || statusText(st) });
+            } else if (finished) {
+                const msg = st === 'login_failed' ? failureLine(r.msg) : '';
+                out.failed.push({ sample_id: sid, msg: msg || ENDED_EARLY });
+            }
+        }
+        return out;
+    }
+
+    function retryText(n) { return `Retry failed (${n})`; }
+
+    /** What the sheet says when the hub refuses to start an upload; a
+        credentials problem (``need_password``) is said exactly as the hub
+        names it, and the sheet offers the password box. */
+    function startRefusal(body, status) {
+        const b = body || {};
+        if (b.need_password) return { needPassword: true, text: failureLine(b.error) || 'Enter the QBench password.' };
+        const refused = Array.isArray(b.refused) ? b.refused : [];
+        const text = refused.length
+            ? 'Not uploaded: ' + refused.map(r => `${r.lab_id || r.sample_id} (${r.error})`).join('; ')
+            : 'Not uploaded: ' + (failureLine(b.error) || ('HTTP ' + status));
+        return { needPassword: false, text };
+    }
+
     const pure = { STORAGE_KEY, UPLOAD_KEY, normalizeItem, payloads, createStore, buttonText,
-        addedText, statusText, isFinished, progress, overallView };
+        addedText, statusText, isFinished, progress, overallView, failureLine, latestRows, reconcile,
+        retryText, startRefusal };
     if (typeof module !== 'undefined' && module.exports) module.exports = pure;
     if (typeof document === 'undefined') return;
 
@@ -222,7 +332,7 @@
 
     // The upload's start only queues the work on the hub (the PDFs are built on its
     // thread), so a minute without an answer means the hub is not answering.
-    const timeouts = { start: 60000, watch: 60000, watchEvery: 5000 };
+    const timeouts = { start: 60000, watch: 60000, watchEvery: 5000, quietStream: 20000 };
 
     async function postJson(url, body, timeoutMs) {
         const ctl = timeoutMs && typeof AbortController === 'function' ? new AbortController() : null;
@@ -316,10 +426,14 @@
 
         el.user = h('input', { type: 'text', id: 'rq-qb-user', autocomplete: 'username', spellcheck: 'false' });
         el.pass = h('input', { type: 'password', id: 'rq-qb-pass', autocomplete: 'current-password' });
+        // v6.0.0: when the saved sign-in can't be used, this line says why
+        // (the hub's own words) and asks for the password instead
+        el.signinNote = h('p', { className: 'caption', 'data-testid': 'rq-signin-note',
+                                 text: 'Leave the password empty to use the saved QBench sign-in.' });
         el.signin = h('form', { className: 'rq-signin', 'data-testid': 'rq-signin', hidden: true,
                                 onsubmit: (e) => { e.preventDefault(); startUpload(); } },
             h('h3', { text: 'QBench sign-in' }),
-            h('p', { className: 'caption', text: 'Leave the password empty to use the saved QBench sign-in.' }),
+            el.signinNote,
             h('div', { className: 'rq-fields' },
                 h('label', { className: 'field' }, h('span', { text: 'Username' }), el.user),
                 h('label', { className: 'field' }, h('span', { text: 'Password' }), el.pass)));
@@ -347,6 +461,9 @@
                                   text: 'Upload to QBench', onclick: onUpload });
         el.stop = h('button', { type: 'button', className: 'btn btn-sm btn-danger', 'data-testid': 'rq-stop',
                                 text: 'Stop', onclick: stopUpload, hidden: true });
+        // v6.0.0: send the failed reports again, the queue kept as it is
+        el.retryFailed = h('button', { type: 'button', className: 'btn btn-sm', 'data-testid': 'rq-retry-failed',
+                                       hidden: true, onclick: () => retry(store.failed().map(x => x.id)) });
 
         sheet = h('dialog', { className: 'sheet rq-sheet', id: 'report-queue-sheet',
                               'data-testid': 'report-queue-sheet', 'aria-labelledby': 'rq-title' },
@@ -358,7 +475,7 @@
             h('p', { className: 'rq-intro', text: 'Each report is built with the standard and settings it was added with. The queue is kept in this browser tab.' }),
             el.list, el.empty, el.signin, el.reauth, el.progress, el.msg,
             h('div', { className: 'actions' }, el.clear, h('span', { className: 'spacer' }), el.close,
-              el.download, el.stop, el.upload));
+              el.download, el.stop, el.retryFailed, el.upload));
         document.body.appendChild(sheet);
         sheet.addEventListener('close', () => { el.msg.textContent = ''; });
         return sheet;
@@ -370,19 +487,39 @@
         const unsent = items.filter(x => !x.sent_at);
         el.count.textContent = items.length ? `${items.length} report${items.length === 1 ? '' : 's'}` : '';
         el.list.textContent = '';
+        const rowFor = latestRows(up.states);
+        const failedN = items.filter(x => !x.sent_at && x.upload_error).length;
+        const retryOff = busy.upload || !!up.watching;
         for (const it of items) {
             const meta = ['Compared with ' + it.standard_name];
             if (it.conclusion) meta.push('edited conclusion');
-            const state = it.sent_at ? h('span', { className: 'pill', text: 'Sent to QBench' }) : null;
-            el.list.appendChild(h('li', { 'data-testid': 'rq-item', 'data-id': it.id },
+            const row = rowFor.get(Number(it.sample_id));
+            let state = null;
+            if (it.upload_error) {
+                state = h('span', { className: 'pill error', text: 'Not uploaded' });
+            } else if (it.sent_at && up.active && row && row.status !== 'ok') {
+                state = h('span', { className: 'pill held', text: statusText(row.status) });
+            } else if (it.sent_at) {
+                state = h('span', { className: 'pill final', text: 'Sent to QBench' });
+            }
+            el.list.appendChild(h('li', { 'data-testid': 'rq-item', 'data-id': it.id,
+                                          'data-state': it.upload_error ? 'failed' : (it.sent_at ? 'sent' : 'queued') },
                 h('div', { className: 'rq-main' },
                     h('b', { text: nameOf(it) }),
-                    h('span', { className: 'caption', text: meta.join(' · ') })),
+                    h('span', { className: 'caption', text: meta.join(' · ') }),
+                    it.upload_error ? h('span', { className: 'rq-reason', 'data-testid': 'rq-reason',
+                                                  text: it.upload_error.msg }) : null),
                 state,
+                it.upload_error ? h('button', { type: 'button', className: 'btn btn-sm', text: 'Retry',
+                    'aria-label': 'Retry ' + nameOf(it), 'data-testid': 'rq-retry', disabled: retryOff,
+                    onclick: () => retry([it.id]) }) : null,
                 h('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: 'Remove',
                               'aria-label': 'Remove ' + nameOf(it), 'data-testid': 'rq-remove',
                               onclick: () => { store.remove(it.id); } })));
         }
+        el.retryFailed.hidden = !failedN;
+        el.retryFailed.textContent = retryText(failedN);
+        el.retryFailed.disabled = retryOff;
         el.empty.hidden = items.length > 0;
         el.download.disabled = !items.length || busy.download;
         el.clear.disabled = !items.length;
@@ -391,7 +528,7 @@
         if (up.active) {
             el.upload.textContent = `Add ${unsent.length} to the upload`;
         } else if (signing) {
-            el.upload.textContent = `Start upload (${unsent.length})`;
+            el.upload.textContent = `Start upload (${pendingItems().length})`;
         } else {
             el.upload.textContent = unsent.length && unsent.length !== items.length
                 ? `Upload ${unsent.length} to QBench` : 'Upload to QBench';
@@ -417,16 +554,25 @@
         line.textContent = ov ? ov.text : `${p.done} of ${p.total} done`;
         line.className = 'rq-overall' + (ov ? ' tone-' + ov.tone : '');
         el.upList.textContent = '';
+        const latest = latestRows(up.states);
+        const failedIds = new Set(store.failed().map(x => x.id));
         for (const s of up.states) {
             if (!s) continue;
+            const detail = failureLine(s.msg);
             const row = h('li', { 'data-testid': 'rq-up-item', 'data-status': s.status || 'waiting' },
                 h('b', { text: s.lab_id || '?' }),
                 h('span', { className: 'rq-st', text: statusText(s.status) }),
-                h('span', { className: 'caption rq-detail', text: s.msg && s.msg !== statusText(s.status) ? s.msg : '' }));
+                h('span', { className: 'caption rq-detail', title: detail || null,
+                            text: detail && detail !== statusText(s.status) ? detail : '' }));
+            const qid = s.sample_id != null ? 's' + s.sample_id : null;
             if (up.active && !isFinished(s.status)) {
                 row.appendChild(h('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: 'Skip',
                     'aria-label': 'Skip ' + (s.lab_id || ''), 'data-testid': 'rq-skip',
                     onclick: () => skip(s.idx) }));
+            } else if (qid && failedIds.has(qid) && latest.get(Number(s.sample_id)) === s) {
+                row.appendChild(h('button', { type: 'button', className: 'btn btn-sm', text: 'Retry',
+                    'aria-label': 'Retry ' + (s.lab_id || ''), 'data-testid': 'rq-up-retry',
+                    disabled: busy.upload || !!up.watching, onclick: () => retry([qid]) }));
             }
             el.upList.appendChild(row);
         }
@@ -506,20 +652,55 @@
     async function onUpload() {
         if (up.active) { await startUpload(); return; }
         if (el.signin.hidden) {
-            el.signin.hidden = false;
-            render();
-            try {
-                const c = await getJson('/api/qbench-credentials');
-                if (c.ok && c.body.username && !el.user.value) el.user.value = c.body.username;
-            } catch (_e) { /* the fields stay empty */ }
-            (el.user.value ? el.pass : el.user).focus();
+            up.pending = null;                       // Upload sends every unsent report
+            await openSignin(null);
             return;
         }
         await startUpload();
     }
 
-    async function startUpload() {
-        const items = store.unsent();
+    /** Show the sign-in with the hub's saved-sign-in status: when it can't be
+        used, *problem* (or the hub's own) says exactly why and the password
+        box is where the cursor goes. */
+    async function openSignin(problem) {
+        el.signin.hidden = false;
+        render();
+        let why = problem;
+        try {
+            const c = await getJson('/api/qbench-credentials');
+            if (c.ok && c.body.username && !el.user.value) el.user.value = c.body.username;
+            if (!why && c.ok && c.body.problem) why = c.body.problem;
+        } catch (_e) { /* the fields stay empty */ }
+        const line = failureLine(why);
+        el.signinNote.textContent = !why ? 'Leave the password empty to use the saved QBench sign-in.'
+            : (/Enter the QBench password/.test(line) ? line : line + ' Enter the QBench password to upload.');
+        el.signinNote.className = why ? 'rq-reason' : 'caption';
+        render();
+        (el.user.value || why ? el.pass : el.user).focus();
+    }
+
+    /** The reports the sign-in's Start sends: a retry's, else every unsent one. */
+    function pendingItems() {
+        const unsent = store.unsent();
+        if (!Array.isArray(up.pending)) return unsent;
+        const ids = new Set(up.pending);
+        const picked = unsent.filter(x => ids.has(x.id));
+        return picked.length ? picked : unsent;
+    }
+
+    /** Retry: send these failed reports again, the queue left as it is (a
+        running upload takes them; otherwise a new one starts, with the saved
+        or last-used sign-in, and asks for the password only if it must). */
+    async function retry(ids) {
+        const want = new Set(ids || []);
+        const items = store.unsent().filter(x => want.has(x.id));
+        if (!items.length || busy.upload || up.watching) return;
+        up.pending = items.map(x => x.id);
+        await startUpload(items);
+    }
+
+    async function startUpload(subset) {
+        const items = Array.isArray(subset) ? subset : pendingItems();
         if (!items.length || busy.upload) return;
         busy.upload = true;
         el.upload.disabled = true;
@@ -547,22 +728,29 @@
         busy.upload = false;
         el.pass.value = '';
         if (!res.ok) {
-            const refused = Array.isArray(res.body.refused) ? res.body.refused : [];
-            el.msg.textContent = refused.length
-                ? 'Not uploaded: ' + refused.map(r => `${r.lab_id || r.sample_id} (${r.error})`).join('; ')
-                : 'Not uploaded: ' + (res.body.error || ('HTTP ' + res.status));
+            const why = startRefusal(res.body, res.status);
+            el.msg.textContent = why.text;
+            if (why.needPassword) {
+                // the saved sign-in can't be used: say why, ask for the password,
+                // and Start sends these same reports
+                up.pending = items.map(x => x.id);
+                await openSignin(why.text);
+            }
             render();
             return;
         }
         store.markSent(items.map(x => x.id));
+        up.pending = null;
+        const waitingRow = (it, idx) => ({ idx, sample_id: it.sample_id, lab_id: it.lab_id,
+                                           status: 'waiting', msg: 'Waiting' });
         if (res.body.status === 'appended') {
             items.forEach((it, i) => {
                 const idx = res.body.base_idx + i;
-                up.states[idx] = up.states[idx] || { idx, lab_id: it.lab_id, status: 'waiting', msg: 'Waiting' };
+                up.states[idx] = up.states[idx] || waitingRow(it, idx);
             });
             el.msg.textContent = `Added ${res.body.count} to the running upload.`;
         } else {
-            up.states = items.map((it, idx) => ({ idx, lab_id: it.lab_id, status: 'waiting', msg: 'Waiting' }));
+            up.states = items.map(waitingRow);
             up.overall = null;
             up.active = true;
             flag(UPLOAD_KEY, '1');
@@ -572,6 +760,13 @@
         }
         render();
         syncButton();
+    }
+
+    /** The run's rows → the queue: failed reports get their reason (and Retry),
+        skipped ones go back to unsent. ``finished``: the run has ended, so
+        anything not uploaded failed. */
+    function settle(finished) {
+        store.applyOutcome(reconcile(up.states, finished));
     }
 
     /** Queued reports that a running upload holds (by sample_id: re-injections
@@ -642,19 +837,65 @@
         up.watching = false;
     }
 
+    /** While an upload runs, a stream that has said nothing for a while (a
+        proxy buffering it, a dropped connection the browser hasn't noticed)
+        is checked against the hub's status, so the sheet never waits forever. */
+    function watchStream() {
+        if (up.watchdog) return;
+        up.watchdog = setInterval(async () => {
+            if (!up.active) { clearInterval(up.watchdog); up.watchdog = null; return; }
+            if (Date.now() - (up.lastMsg || 0) < timeouts.quietStream) return;
+            up.lastMsg = Date.now();
+            const st = await uploadStatus();
+            if (!st || !up.active) return;
+            if (Array.isArray(st.items) && st.items.length) up.states = st.items.slice();
+            if (!st.active) {
+                const ov = st.overall ? overallView(st.overall)
+                    : { text: 'The upload has ended.', tone: 'info', finished: true };
+                up.overall = ov;
+                finish(ov);
+            } else {
+                settle(false);
+            }
+            render();
+            syncButton();
+        }, timeouts.watchEvery);
+    }
+
     function connect() {
         if (up.sse) { up.sse.close(); up.sse = null; }
         const es = new EventSource('/api/qbench-upload/stream');
         up.sse = es;
+        up.lastMsg = Date.now();
+        watchStream();
         es.onmessage = (e) => {
+            up.lastMsg = Date.now();
             let d;
             try { d = JSON.parse(e.data); } catch (_e) { return; }
-            if (d.t === 'item') {
-                up.states[d.idx] = { idx: d.idx, lab_id: d.lab_id, status: d.status, msg: d.msg || '',
+            if (d.t === 'snapshot') {
+                // the stream's opening state: the rows so far and, once the
+                // run has ended, how it ended (a late client never waits)
+                if (Array.isArray(d.items)) up.states = d.items.slice();
+                if (!d.active) {
+                    const ov = d.overall ? overallView(d.overall)
+                        : { text: 'The upload has ended.', tone: 'info', finished: true };
+                    up.overall = ov;
+                    finish(ov);
+                } else {
+                    settle(false);
+                }
+            } else if (d.t === 'item') {
+                const prev = up.states[d.idx] || {};
+                up.states[d.idx] = { idx: d.idx, sample_id: d.sample_id != null ? d.sample_id : prev.sample_id,
+                                     lab_id: d.lab_id, status: d.status, msg: d.msg || '',
                                      step: d.step, steps: d.steps };
+                if (isFinished(d.status)) settle(false);
             } else if (d.t === 'items_added') {
                 for (const it of d.items || []) {
-                    if (!up.states[it.idx]) up.states[it.idx] = { idx: it.idx, lab_id: it.lab_id, status: 'waiting', msg: 'Waiting' };
+                    if (!up.states[it.idx]) {
+                        up.states[it.idx] = { idx: it.idx, sample_id: it.sample_id, lab_id: it.lab_id,
+                                              status: 'waiting', msg: 'Waiting' };
+                    }
                 }
             } else if (d.t === 'overall') {
                 const ov = overallView(d);
@@ -685,11 +926,19 @@
     }
 
     function finish(ov) {
+        const wasActive = up.active;
         up.active = false;
         up.needCreds = false;
         flag(UPLOAD_KEY, null);
         if (up.sse) { up.sse.close(); up.sse = null; }
-        toast('QBench: ' + ov.text, ov.tone === 'err' ? 'err' : undefined);
+        settle(true);
+        const failed = store.failed().length;
+        if (failed && sheet) {
+            // never a dead end: what failed says why on its row, and one click sends them again
+            el.msg.textContent = `${failed} report${failed === 1 ? ' was' : 's were'} not uploaded; each row says why. `
+                + `${retryText(failed)} sends ${failed === 1 ? 'it' : 'them'} again, the queue kept as it is.`;
+        }
+        if (wasActive) toast('QBench: ' + ov.text, ov.tone === 'err' ? 'err' : undefined);
     }
 
     /** Pick up a running upload (after a page change, or a lost stream). */
@@ -705,10 +954,13 @@
             up.states = Array.isArray(b.items) ? b.items.slice() : up.states;
             flag(UPLOAD_KEY, '1');
             connect();
-        } else if (up.active) {
-            up.active = false;
-            flag(UPLOAD_KEY, null);
         } else {
+            // ended (perhaps while this page was away, or the stream was lost):
+            // show how, and settle the reports this tab handed over
+            if (Array.isArray(b.items) && b.items.length) up.states = b.items.slice();
+            if (b.overall) up.overall = overallView(b.overall);
+            const ov = up.overall || { text: 'The upload has ended.', tone: 'info', finished: true };
+            if (up.active || store.items().some(x => x.sent_at)) finish(ov);
             flag(UPLOAD_KEY, null);
         }
         render();

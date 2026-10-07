@@ -58,6 +58,9 @@ def _jsonable(x):
 
 def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> None:
     os.environ["GC_DATA_DIR"] = data_dir
+    # a successful upload saves the typed sign-in: keep it in the data folder
+    # (the share's UNC path is a file name in the cwd on a Mac)
+    os.environ["QBENCH_LOGIN_FILE"] = str(Path(data_dir) / "qbenchlogin.txt")
     request = json.loads(Path(request_path).read_text(encoding="utf-8"))
 
     log_rows: list[dict] = []
@@ -175,7 +178,11 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
 
     current["path"] = "qbench"
     live_cursor = app.live.BUS.cursor()
-    r = client.post("/api/qbench-upload", json={"queue": [item]})
+    # v6.0.0: a fresh upload needs a sign-in and an API key up front (the
+    # uploader is faked above, so these are never used)
+    r = client.post("/api/qbench-upload", json={"queue": [item], "username": "tester",
+                                                "password": "pw", "client_id": "test-id",
+                                                "client_secret": "test-secret"})
     out["responses"]["qbench"] = {"status": r.status_code, "json": r.get_json()}
     deadline = time.time() + 180
     time.sleep(0.5)

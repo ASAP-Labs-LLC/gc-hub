@@ -61,3 +61,10 @@
 .rq-ico { --m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5'/%3E%3C/svg%3E"); }
 
 @media print { .rq-btn { display: none; } }
+
+/* v6.0.0: why a report was not uploaded (one line, the hub's own words), on its
+   queue row and in the sign-in when the saved sign-in can't be used */
+.rq-sheet .rq-reason { color: var(--pill-error-fg); font-size: var(--fs-sm); overflow-wrap: anywhere; margin: 0; }
+.rq-uplist li[data-status="failed"] .rq-detail,
+.rq-uplist li[data-status="error"] .rq-detail,
+.rq-uplist li[data-status="login_failed"] .rq-detail { white-space: normal; overflow-wrap: anywhere; color: var(--text); }

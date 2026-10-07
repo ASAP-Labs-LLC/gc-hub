@@ -262,6 +262,11 @@ _upload_item_status: list[dict] = []     # per-item last-known status (mirrors i
 _upload_skipped: set[int] = set()        # indices the user asked to skip
 _upload_credentials: dict = {}           # {username, password, client_id, client_secret}
 _upload_new_items = threading.Event()    # pulsed when new items are appended
+# v6.0.0: True while the thread will still pick up appended items. Cleared,
+# under _upload_items_lock, the moment it decides to end (or is stopped), so a
+# POST never appends to a thread on its way out (those items were never sent).
+_upload_accepting = False
+_upload_last_overall: Optional[dict] = None   # how the last run ended (snapshot/status)
 
 # Credential re-prompt mechanism: when login fails twice, the upload thread
 # pauses and waits for the user to supply new credentials via the frontend.
@@ -486,17 +491,30 @@ def _sse_stream(
     subscribers: list[queue.Queue],
     lock: threading.Lock,
     timeout: float = 0.5,
+    first: Optional[Any] = None,           # () -> Optional[str]
 ) -> Generator[str, None, None]:
-    """Yield SSE-formatted lines from a per-client queue."""
+    """Yield SSE-formatted lines from a per-client queue. ``first`` (called
+    once the client is subscribed, so nothing falls in between) gives an
+    opening message: the state so far. A client whose queue overflowed was
+    dropped by ``_publish``: its stream ends, so the browser resyncs, instead
+    of sending keep-alives forever with no more events."""
     q: queue.Queue = queue.Queue(maxsize=500)
     with lock:
         subscribers.append(q)
     try:
+        if first is not None:
+            msg = first()
+            if msg:
+                yield f"data: {msg}\n\n"
         while True:
             try:
                 msg = q.get(timeout=timeout)
                 yield f"data: {msg}\n\n"
             except queue.Empty:
+                with lock:
+                    dropped = q not in subscribers
+                if dropped:
+                    return
                 # keep-alive comment so the connection isn't dropped
                 yield ": keepalive\n\n"
     except GeneratorExit:
@@ -3027,33 +3045,84 @@ def api_export_analysis_reports_zip_download(job_id):
 _QBENCH_CREDS_FILE = r"\\ASAPServer\Labsharedrive\ASAP Lab Results\qbenchlogin.txt"
 
 
+def _qbench_login_file() -> str:
+    """The saved QBench web sign-in (username on line 1, password on line 2):
+    ``QBENCH_LOGIN_FILE`` when set (e.g. a local copy when the account the
+    hub runs as can't reach the share), else the share's file."""
+    return os.environ.get("QBENCH_LOGIN_FILE") or _QBENCH_CREDS_FILE
+
+
+def _read_qbench_credentials(log: bool = True) -> tuple[str, str, Optional[str]]:
+    """``(username, password, problem)``: *problem* is None when the saved
+    sign-in file was read, else one plain sentence saying why not
+    (can't be read and the OS's reason, empty, a line missing)."""
+    path = _qbench_login_file()
+    reader = getattr(qbench_pdf_uploader, "read_credentials_file", None)
+    if reader is None:
+        return "", "", "The QBench uploader is not available on the hub."
+    try:
+        u, p = reader(path)
+        return u, p, None
+    except Exception as exc:    # CredentialsFileError: the message is the sentence
+        if log:
+            LOGGER.warning("QBench sign-in file: %s", exc)
+        return "", "", _one_line(str(exc)) or f"Can't read the saved QBench sign-in file {path}."
+
+
 def _load_qbench_credentials() -> tuple[str, str]:
     """Load QBench username/password from the shared credentials file."""
-    try:
-        with open(_QBENCH_CREDS_FILE, "r") as fh:
-            lines = fh.readlines()
-        if len(lines) >= 2:
-            return lines[0].strip(), lines[1].strip()
-    except Exception as exc:
-        LOGGER.warning("Could not read QBench credentials: %s", exc)
-    return "", ""
+    u, p, _problem = _read_qbench_credentials()
+    return u, p
 
 
 def _save_qbench_credentials(username: str, password: str) -> None:
     """Persist credentials back to the shared file (called on first successful upload)."""
+    path = _qbench_login_file()
     try:
-        with open(_QBENCH_CREDS_FILE, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(f"{username}\n{password}\n")
-        LOGGER.info("QBench credentials saved to %s", _QBENCH_CREDS_FILE)
+        LOGGER.info("QBench credentials saved to %s", path)
     except Exception as exc:
-        LOGGER.warning("Could not save QBench credentials: %s", exc)
+        LOGGER.warning("Could not save QBench credentials to %s: %s", path, exc)
+
+
+def _one_line(text, limit: int = 240) -> str:
+    """One plain line for the report queue: the first non-empty line,
+    spaces collapsed, at most *limit* characters (never a stack trace)."""
+    for raw in str(text or "").splitlines():
+        line = " ".join(raw.split())
+        if line:
+            return line if len(line) <= limit else line[: limit - 1] + "…"
+    return ""
+
+
+def _uploader_failure() -> str:
+    """Why the uploader's last attach on this thread returned False."""
+    fn = getattr(qbench_pdf_uploader, "last_failure", None)
+    try:
+        reason = fn() if fn else ""
+    except Exception:  # noqa: BLE001 - a reason is a nicety, never a crash
+        reason = ""
+    return _one_line(reason) or "The uploader gave no reason (see app.log)."
+
+
+def _str_field(body: dict, key: str) -> str:
+    v = body.get(key)
+    return v.strip() if isinstance(v, str) else ""
 
 
 @app.route("/api/qbench-credentials", methods=["GET"])
 def api_qbench_credentials():
-    """Return saved QBench credentials (auto-fill the upload modal)."""
-    u, p = _load_qbench_credentials()
-    return jsonify({"username": u, "has_password": bool(p)})
+    """Return saved QBench credentials (auto-fill the upload modal), and
+    ``problem``: why the saved sign-in can't be used (None when it can)."""
+    u, p, problem = _read_qbench_credentials(log=False)
+    return jsonify({"username": u, "has_password": bool(p), "problem": problem})
+
+
+#: How long a new upload waits for the previous thread to end (stopping or
+#: finishing) before saying it is still stopping.
+_UPLOAD_STOPPING_WAIT_S = 20
+_UPLOAD_FINISHED = ("done", "partial", "allfailed", "cancelled")
 
 
 @app.route("/api/qbench-upload", methods=["POST"])
@@ -3098,25 +3167,20 @@ def api_qbench_upload():
     if qbench_pdf_uploader is None:
         return _error("qbench_pdf_uploader module not available", 500)
 
-    username = body.get("username", "").strip()
-    password = body.get("password", "").strip()
-    client_id = body.get("client_id", "").strip() or None
-    client_secret = body.get("client_secret", "").strip() or None
+    username = _str_field(body, "username")
+    password = _str_field(body, "password")
+    client_id = _str_field(body, "client_id") or None
+    client_secret = _str_field(body, "client_secret") or None
 
-    # Auto-load credentials from shared file if not provided by the user
-    if not username or not password:
-        auto_u, auto_p = _load_qbench_credentials()
-        if not username:
-            username = auto_u
-        if not password:
-            password = auto_p
+    global _upload_thread, _upload_task_id, _upload_accepting, _upload_last_overall
 
-    global _upload_thread, _upload_task_id
-
-    # ── If the upload thread is already running, APPEND items ─────────
-    if _upload_thread and _upload_thread.is_alive():
-        with _upload_items_lock:
-            base_idx = len(_upload_items)
+    # ── If the upload thread is running and still taking items, APPEND ─
+    # (checked and extended under the lock the thread decides to end under)
+    appended_at = None
+    with _upload_items_lock:
+        if (_upload_thread is not None and _upload_thread.is_alive()
+                and _upload_accepting and not _upload_stop.is_set()):
+            appended_at = base_idx = len(_upload_items)
             _upload_items.extend(new_queue)
             for i, item in enumerate(new_queue):
                 _upload_item_status.append({
@@ -3124,6 +3188,8 @@ def api_qbench_upload():
                     "lab_id": item.get("lab_id", "?"), "sample_id": item["sample_id"],
                     "status": "waiting", "step": 0, "steps": 1, "msg": "Waiting",
                 })
+    if appended_at is not None:
+        LOGGER.info("QBench upload: %d sample(s) added to the running upload", len(new_queue))
         _upload_new_items.set()  # wake the thread
         _upload_task_progress()  # v4.0 lane E: the task's total grows
         # Tell all SSE clients about the new items
@@ -3132,13 +3198,57 @@ def api_qbench_upload():
         _publish_json(_upload_subscribers, _upload_sub_lock, {
             "t": "items_added", "base_idx": base_idx, "count": len(new_queue),
             "total": total,
-            "items": [{"idx": base_idx + i, "lab_id": it.get("lab_id", "?")}
+            "items": [{"idx": base_idx + i, "lab_id": it.get("lab_id", "?"),
+                       "sample_id": it["sample_id"]}
                       for i, it in enumerate(new_queue)],
         })
         return jsonify({"status": "appended", "count": len(new_queue),
                         "base_idx": base_idx, "total": total})
 
     # ── Fresh upload ──────────────────────────────────────────────────
+    # A thread on its way out (finishing, or stopped) takes nothing new: let
+    # it end, then start afresh (a retry right after Stop used to vanish).
+    prev = _upload_thread
+    if prev is not None and prev.is_alive():
+        prev.join(timeout=_UPLOAD_STOPPING_WAIT_S)
+        if prev.is_alive():
+            return jsonify({"error": "The last QBench upload is still stopping. "
+                                     "Try again in a few seconds.", "busy": True}), 409
+
+    # The sign-in: typed, else the saved file, else the one this hub last
+    # used (a retry after typing it once). Missing → say why, ask for it.
+    if not username or not password:
+        auto_u, auto_p, problem = _read_qbench_credentials()
+        if not username:
+            username = auto_u
+        if not password and (not auto_u or auto_u == username):
+            password = auto_p
+        last_u, last_p = _upload_credentials.get("username"), _upload_credentials.get("password")
+        if not password and last_p and (not username or username == last_u):
+            username, password = last_u, last_p
+        if not username or not password:
+            why = problem or "The saved QBench sign-in has no password."
+            if not why.endswith((".", "!", "?")):
+                why += "."
+            LOGGER.warning("QBench upload refused for %s: no sign-in (%s)", _who(), why)
+            return jsonify({"error": f"{why} Enter the QBench password to upload.",
+                            "need_password": True}), 400
+
+    # The API key the uploader looks samples up with (the account's own store).
+    if not (client_id and client_secret):
+        try:
+            qbench_secrets.get_client_id()
+            qbench_secrets.get_client_secret()
+        except Exception as exc:  # QBenchSecretMissing, or an unreadable store
+            LOGGER.warning("QBench upload refused for %s: no QBench API key (%s)", _who(), exc)
+            return jsonify({"error": "QBench API key not set: " + _one_line(str(exc), 400),
+                            "api_key_missing": True}), 400
+
+    # Another request may have started one meanwhile (two clicks at once).
+    if _upload_thread is not None and _upload_thread is not prev and _upload_thread.is_alive():
+        return jsonify({"error": "Another QBench upload just started. Add these again "
+                                 "to join it.", "busy": True}), 409
+
     _upload_stop.clear()
     _creds_needed.clear()
     _creds_ready.clear()
@@ -3156,6 +3266,8 @@ def api_qbench_upload():
                 "lab_id": item.get("lab_id", "?"), "sample_id": item["sample_id"],
                 "status": "waiting", "step": 0, "steps": 1, "msg": "Waiting",
             })
+        _upload_accepting = True
+        _upload_last_overall = None
     _upload_credentials.update({
         "username": username, "password": password,
         "client_id": client_id, "client_secret": client_secret,
@@ -3173,6 +3285,7 @@ def api_qbench_upload():
                         (item.get("_user_name"), item.get("_author_ip")), hub_db)
 
     def _do_upload():
+      global _upload_accepting, _upload_last_overall
       login_fail_count = 0
 
       try:
@@ -3187,38 +3300,58 @@ def api_qbench_upload():
                 return len(_upload_items)
 
         def _emit_item(idx, lab_id, status, step=0, msg=""):
-            total = _get_total()
-            evt = {
-                "t": "item", "idx": idx, "total": total,
-                "lab_id": lab_id, "status": status,
-                "step": step, "steps": steps_per + 2, "msg": msg,
-            }
+            msg = _one_line(msg)        # the sheet shows one plain line; app.log has the rest
             with _upload_items_lock:
-                if idx < len(_upload_item_status):   # keep the row's sample_id (the queue matches by it)
-                    _upload_item_status[idx] = dict(evt, sample_id=_upload_item_status[idx].get("sample_id"))
+                total = len(_upload_items)
+                # the row's sample_id rides along: the queue matches rows by it
+                sid = (_upload_item_status[idx].get("sample_id")
+                       if idx < len(_upload_item_status) else None)
+                evt = {
+                    "t": "item", "idx": idx, "total": total, "sample_id": sid,
+                    "lab_id": lab_id, "status": status,
+                    "step": step, "steps": steps_per + 2, "msg": msg,
+                }
+                if idx < len(_upload_item_status):
+                    _upload_item_status[idx] = evt
             _upload_task_progress()     # v4.0 lane E
-            print(f"[UPLOAD] [{idx+1}/{total}] {lab_id}: {status} — {msg}", flush=True)
+            if status in ("failed", "error", "login_failed"):
+                LOGGER.warning("QBench upload [%d/%d] %s (sample %s): %s: %s",
+                               idx + 1, total, lab_id, sid, status, msg)
+            elif status in ("ok", "skipped", "generating"):
+                LOGGER.info("QBench upload [%d/%d] %s (sample %s): %s: %s",
+                            idx + 1, total, lab_id, sid, status, msg)
             try:
                 _publish_json(_upload_subscribers, _upload_sub_lock, evt)
-            except Exception as pub_exc:
-                print(f"[UPLOAD] SSE publish error: {pub_exc}", flush=True)
+            except Exception:
+                LOGGER.exception("QBench upload: SSE publish failed")
 
         def _emit_overall(status, msg=""):
+            global _upload_last_overall
             total = _get_total()
-            print(f"[UPLOAD] === {status}: {msg} (ok={ok_count} fail={fail_count} skip={skip_count}) ===", flush=True)
+            evt = {"t": "overall", "status": status, "msg": _one_line(msg),
+                   "ok": ok_count, "fail": fail_count, "total": total}
+            if status in _UPLOAD_FINISHED:
+                _upload_last_overall = evt
+            LOGGER.info("QBench upload %s: %s (ok=%d fail=%d skip=%d)",
+                        status, msg, ok_count, fail_count, skip_count)
             try:
-                _publish_json(_upload_subscribers, _upload_sub_lock, {
-                    "t": "overall", "status": status, "msg": msg,
-                    "ok": ok_count, "fail": fail_count, "total": total,
-                })
-            except Exception as pub_exc:
-                print(f"[UPLOAD] SSE publish error: {pub_exc}", flush=True)
+                _publish_json(_upload_subscribers, _upload_sub_lock, evt)
+            except Exception:
+                LOGGER.exception("QBench upload: SSE publish failed")
+
+        def _stopped_early(reason):
+            """Every row not finished yet: failed with *reason* (never left
+            'waiting', so the sheet can offer Retry)."""
+            with _upload_items_lock:
+                open_rows = [(i, r.get("lab_id", "?")) for i, r in enumerate(_upload_item_status)
+                             if r.get("status") not in _UPLOAD_ENDED]
+            for i, lid in open_rows:
+                _emit_item(i, lid, "failed", msg=reason)
+            return len(open_rows)
 
         with _upload_items_lock:
             total = len(_upload_items)
-        print("=" * 60, flush=True)
-        print(f"[UPLOAD] Upload thread started — {total} item(s)", flush=True)
-        print("=" * 60, flush=True)
+        LOGGER.info("QBench upload thread started: %d item(s)", total)
 
         _emit_overall("started", f"Uploading {total} item(s)")
 
@@ -3231,6 +3364,7 @@ def api_qbench_upload():
             qbench_pdf_uploader.prime_chromedriver()
             _emit_overall("primed", "ChromeDriver ready")
         except Exception as exc:
+            LOGGER.exception("QBench upload: ChromeDriver could not be prepared")
             _emit_overall("error", f"ChromeDriver failed: {exc}")
 
         processed_up_to = 0
@@ -3241,14 +3375,22 @@ def api_qbench_upload():
             if processed_up_to >= total:
                 # Wait briefly for new items to be appended
                 _upload_new_items.clear()
-                got_new = _upload_new_items.wait(timeout=3)
+                _upload_new_items.wait(timeout=3)
                 with _upload_items_lock:
                     total = len(_upload_items)
-                if processed_up_to >= total:
+                    ending = processed_up_to >= total or _upload_stop.is_set()
+                    if ending:
+                        # decided under the lock POST appends under: from
+                        # here on a POST starts a fresh run instead
+                        _upload_accepting = False
+                if ending:
                     break  # No new items arrived — done
 
             for idx in range(processed_up_to, total):
                 if _upload_stop.is_set():
+                    with _upload_items_lock:
+                        _upload_accepting = False
+                    _stopped_early("Not uploaded: the upload was stopped.")
                     _emit_overall("cancelled", "Upload cancelled")
                     return  # exit thread
 
@@ -3263,10 +3405,11 @@ def api_qbench_upload():
 
                 with _upload_items_lock:
                     item = _upload_items[idx]
-                lab_id = item.get("lab_id", "").strip()
+                lab_id = str(item.get("lab_id") or "").strip()
                 if not lab_id:
                     fail_count += 1
-                    _emit_item(idx, "?", "error", msg="No lab_id")
+                    _emit_item(idx, "?", "error",
+                               msg="This sample has no lab ID, so QBench can't be searched for it.")
                     continue
 
                 pdf_path = ""
@@ -3283,10 +3426,10 @@ def api_qbench_upload():
                     continue
                 rev_no = sample_row["current_revision"]
                 item_revs[idx] = rev_no
-                standard_name = item.get("standard_name", "").strip()
+                standard_name = str(item.get("standard_name") or "").strip()
                 if not standard_name:
                     fail_count += 1
-                    _emit_item(idx, lab_id, "error", msg="No standard")
+                    _emit_item(idx, lab_id, "error", msg="No comparison standard was chosen.")
                     continue
                 try:
                     # The same report as the direct and ZIP exports: the
@@ -3298,7 +3441,7 @@ def api_qbench_upload():
                                                                   conf, hub_db)
                     except ValueError as exc:
                         fail_count += 1
-                        _emit_item(idx, lab_id, "error", msg=str(exc))
+                        _emit_item(idx, lab_id, "error", msg=f"Report failed: {exc}")
                         continue
                     item_reports[idx] = (sample_row, content, report_params, report_bytes)
                     safe_id = _safe_filename(lab_id)
@@ -3307,12 +3450,13 @@ def api_qbench_upload():
                     pdf_path = str(out_file)
                 except Exception as exc:
                     fail_count += 1
-                    _emit_item(idx, lab_id, "error", msg=f"Report failed: {exc}")
-                    LOGGER.exception("Report generation failed for %s", lab_id)
+                    LOGGER.exception("QBench upload: the report for %s (sample %s) failed",
+                                     lab_id, sid)
+                    reason = f"Report failed: {type(exc).__name__}: {_one_line(str(exc))}"
+                    _emit_item(idx, lab_id, "error", msg=reason)
                     # Soft precheck: on very first item error, emit globally
                     if idx == 0:
-                        _emit_overall("precheck_failed",
-                                      f"First sample failed: {exc}")
+                        _emit_overall("precheck_failed", f"First report failed ({lab_id}): {reason}")
                     continue
 
                 _emit_item(idx, lab_id, "report_ok", step=1, msg="Report ready")
@@ -3332,6 +3476,13 @@ def api_qbench_upload():
 
                 def _progress_cb(msg, _idx=idx, _lid=lab_id):
                     _emit_item(_idx, _lid, "uploading", step=_current_step[0], msg=msg)
+
+                def _attach_failed(exc, _lid=lab_id, _sid=sid):
+                    """One line for an exception out of the uploader; the
+                    traceback goes to app.log."""
+                    LOGGER.error("QBench upload of %s (sample %s) raised", _lid, _sid,
+                                 exc_info=exc)
+                    return f"{type(exc).__name__}: {_one_line(str(exc)) or 'no detail'}"
 
                 try:
                     result = qbench_pdf_uploader.attach_pdf_to_sample(
@@ -3354,14 +3505,16 @@ def api_qbench_upload():
                             _creds_saved = True
                     else:
                         fail_count += 1
-                        _emit_item(idx, lab_id, "failed", msg="Upload returned false")
+                        reason = _uploader_failure()
+                        _emit_item(idx, lab_id, "failed", msg=reason)
                         # Soft precheck: first item failure
                         if idx == 0 and ok_count == 0:
                             _emit_overall("precheck_failed",
-                                          f"First sample upload failed for '{lab_id}'")
+                                          f"First report failed ({lab_id}): {reason}")
                 except qbench_pdf_uploader.LoginFailedError as login_exc:
                     login_fail_count += 1
-                    print(f"[UPLOAD] Login failure #{login_fail_count}: {login_exc}", flush=True)
+                    LOGGER.warning("QBench upload: sign-in refused (#%d) for %s: %s",
+                                   login_fail_count, lab_id, login_exc)
 
                     # Soft precheck: first sample login failure → immediate prompt
                     if idx == 0 or login_fail_count >= 2:
@@ -3375,11 +3528,14 @@ def api_qbench_upload():
                         _creds_ready.clear()
                         _creds_needed.set()
 
-                        print("[UPLOAD] Waiting for new credentials from user...", flush=True)
+                        LOGGER.info("QBench upload: waiting for new credentials from the operator")
                         got_creds = _creds_ready.wait(timeout=300)
                         _creds_needed.clear()
 
                         if _upload_stop.is_set():
+                            with _upload_items_lock:
+                                _upload_accepting = False
+                            _stopped_early("Not uploaded: the upload was stopped.")
                             _emit_overall("cancelled", "Upload cancelled")
                             return
 
@@ -3419,15 +3575,22 @@ def api_qbench_upload():
                                 else:
                                     fail_count += 1
                                     _emit_item(idx, lab_id, "failed",
-                                               msg="Upload returned false after retry")
-                            except Exception as retry_exc:
+                                               msg=_uploader_failure())
+                            except qbench_pdf_uploader.LoginFailedError as retry_login:
                                 fail_count += 1
                                 _emit_item(idx, lab_id, "failed",
-                                           msg=f"Retry failed: {retry_exc}")
+                                           msg=f"Login failed again: {retry_login}")
+                            except Exception as retry_exc:
+                                fail_count += 1
+                                _emit_item(idx, lab_id, "failed", msg=_attach_failed(retry_exc))
                         else:
-                            _emit_item(idx, lab_id, "failed",
-                                       msg="No new credentials provided — aborting")
                             fail_count += 1
+                            _emit_item(idx, lab_id, "failed",
+                                       msg="Not uploaded: no QBench password was entered within 5 minutes.")
+                            with _upload_items_lock:
+                                _upload_accepting = False
+                            fail_count += _stopped_early(
+                                "Not uploaded: the upload ended waiting for the QBench password.")
                             _emit_overall("allfailed",
                                           "Upload aborted: no credentials within 5 min")
                             return
@@ -3437,18 +3600,22 @@ def api_qbench_upload():
                                    msg=f"Login failed: {login_exc}")
                 except Exception as exc:
                     fail_count += 1
-                    _emit_item(idx, lab_id, "failed", msg=str(exc))
+                    reason = _attach_failed(exc)
+                    _emit_item(idx, lab_id, "failed", msg=reason)
                     # Soft precheck: first item error
                     if idx == 0 and ok_count == 0:
                         _emit_overall("precheck_failed",
-                                      f"First sample error: {exc}")
+                                      f"First report failed ({lab_id}): {reason}")
 
             processed_up_to = total
 
         # Final summary
         total = _get_total()
         done_count = ok_count + fail_count + skip_count
-        if ok_count == done_count - skip_count and fail_count == 0:
+        if _upload_stop.is_set():
+            fail_count += _stopped_early("Not uploaded: the upload was stopped.")
+            _emit_overall("cancelled", "Upload cancelled")
+        elif ok_count == done_count - skip_count and fail_count == 0:
             _emit_overall("done", f"All {ok_count} uploaded successfully"
                           + (f" ({skip_count} skipped)" if skip_count else ""))
         elif ok_count == 0 and fail_count > 0:
@@ -3459,20 +3626,28 @@ def api_qbench_upload():
                           + (f", {skip_count} skipped" if skip_count else ""))
 
       except Exception as fatal:
-        print(f"[UPLOAD] FATAL ERROR in upload thread: {fatal}", flush=True)
-        import traceback; traceback.print_exc()
+        LOGGER.exception("QBench upload thread failed")
+        reason = f"The upload stopped: {type(fatal).__name__}: {_one_line(str(fatal))}"
+        with _upload_items_lock:
+            _upload_accepting = False
         try:
-            _publish_json(_upload_subscribers, _upload_sub_lock, {
-                "t": "overall", "status": "allfailed",
-                "msg": f"Fatal error: {fatal}", "ok": 0, "fail": 0, "total": 0,
-            })
+            failed = _stopped_early(reason) if "_stopped_early" in locals() else 0
+            ok_n = sum(1 for r in _upload_item_status if r.get("status") == "ok")
+            evt = {"t": "overall", "status": "allfailed" if not ok_n else "partial",
+                   "msg": _one_line(reason), "ok": ok_n, "fail": failed,
+                   "total": _get_upload_total()}
+            _upload_last_overall = evt
+            _publish_json(_upload_subscribers, _upload_sub_lock, evt)
         except Exception:
-            pass
+            LOGGER.exception("QBench upload: could not report the failure")
 
     def _run_upload():
+        global _upload_accepting
         try:
             _do_upload()
         finally:
+            with _upload_items_lock:
+                _upload_accepting = False
             _upload_task_end()          # v4.0 lane E
 
     _upload_thread = threading.Thread(target=_run_upload, daemon=True)
@@ -3486,8 +3661,12 @@ def api_qbench_upload():
 
 @app.route("/api/qbench-upload/stream", methods=["GET"])
 def api_qbench_upload_stream():
+    # v6.0.0: the stream opens with a snapshot (the rows so far and, once the
+    # run has ended, how it ended), so a client that connects late, or after
+    # a short run already finished, never waits for events that were sent.
     return Response(
-        stream_with_context(_sse_stream(_upload_subscribers, _upload_sub_lock)),
+        stream_with_context(_sse_stream(_upload_subscribers, _upload_sub_lock,
+                                        first=lambda: json.dumps(_upload_snapshot("snapshot")))),
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -3499,13 +3678,27 @@ def api_qbench_upload_stream():
 
 @app.route("/api/qbench-upload-status", methods=["GET"])
 def api_qbench_upload_status():
-    """Return the current state of the upload queue (for modal re-open)."""
+    """Return the current state of the upload queue (for modal re-open):
+    ``active``, the rows (each with its ``sample_id`` and last ``msg``),
+    ``skipped`` and, once the run has ended, ``overall`` (how it ended)."""
+    return jsonify(_upload_snapshot())
+
+
+def _upload_snapshot(t: Optional[str] = None) -> dict:
     with _upload_items_lock:
-        return jsonify({
-            "active": _upload_thread is not None and _upload_thread.is_alive(),
-            "items": list(_upload_item_status),
-            "skipped": list(_upload_skipped),
-        })
+        # once the run has said how it ended it is over, even while the
+        # thread is still tidying up (else a late client would wait forever)
+        active = (_upload_thread is not None and _upload_thread.is_alive()
+                  and _upload_last_overall is None)
+        snap = {
+            "active": active,
+            "items": [dict(r) for r in _upload_item_status],
+            "skipped": sorted(_upload_skipped),
+            "overall": None if active else _upload_last_overall,
+        }
+    if t:
+        snap["t"] = t
+    return snap
 
 
 @app.route("/api/qbench-skip-item", methods=["POST"])
@@ -3537,7 +3730,8 @@ def api_qbench_skip_item():
         }
         with _upload_items_lock:
             if idx < len(_upload_item_status):
-                _upload_item_status[idx] = dict(evt, sample_id=_upload_item_status[idx].get("sample_id"))
+                evt["sample_id"] = _upload_item_status[idx].get("sample_id")
+                _upload_item_status[idx] = evt
         _upload_task_progress()         # v4.0 lane E
         _publish_json(_upload_subscribers, _upload_sub_lock, evt)
     return jsonify({"status": "ok"})
@@ -3550,17 +3744,27 @@ def _get_upload_total() -> int:
 
 @app.route("/api/qbench-cancel", methods=["POST"])
 def api_qbench_cancel():
+    global _upload_accepting
+    LOGGER.info("QBench upload stop requested by %s", _who())
     _upload_stop.set()
+    with _upload_items_lock:
+        _upload_accepting = False   # a stopping thread takes nothing new
     _creds_ready.set()  # unblock credential wait so the thread can exit
     _upload_new_items.set()  # unblock the "wait for new items" sleep
     if qbench_pdf_uploader is not None:
         try:
             qbench_pdf_uploader.cancel_upload()
         except Exception:
-            pass
-    _publish_json(_upload_subscribers, _upload_sub_lock,
-                  {"t": "overall", "status": "cancelled", "msg": "Upload cancelled",
-                   "ok": 0, "fail": 0, "total": 0})
+            LOGGER.exception("QBench upload: cancel_upload failed")
+    if _upload_thread is not None and _upload_thread.is_alive():
+        # the thread says how it ended (which reports were uploaded first)
+        _publish_json(_upload_subscribers, _upload_sub_lock,
+                      {"t": "overall", "status": "stopping", "msg": "Stopping the upload…",
+                       "ok": 0, "fail": 0, "total": _get_upload_total()})
+    else:
+        _publish_json(_upload_subscribers, _upload_sub_lock,
+                      {"t": "overall", "status": "cancelled", "msg": "Upload cancelled",
+                       "ok": 0, "fail": 0, "total": 0})
     return jsonify({"status": "cancel_requested"})
 
 

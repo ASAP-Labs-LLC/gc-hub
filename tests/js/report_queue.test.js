@@ -124,4 +124,100 @@ module.exports = (t) => {
     t.eq(Q.overallView({ status: 'precheck_failed', msg: 'No API key' }),
         { text: 'No API key', tone: 'err', finished: false });
     t.eq(Q.overallView({ status: 'running', msg: 'Signing in' }), { text: 'Signing in', tone: 'info', finished: false });
+
+    // ── v6.0.0: retry without clearing the queue ─────────────────────────
+    // a failure is one plain line: the first line, spaces collapsed, capped
+    t.eq(Q.failureLine('Chrome could not start: session not created\nStacktrace:\n0x1 0x2'),
+        'Chrome could not start: session not created');
+    t.eq(Q.failureLine('  \n  QBench API:   connection refused  \n'), 'QBench API: connection refused');
+    t.eq(Q.failureLine(''), '');
+    t.eq(Q.failureLine(null), '');
+    t.eq(Q.failureLine('x'.repeat(400)).length, 240);
+    t.eq(Q.failureLine('x'.repeat(400)).endsWith('…'), true);
+
+    // an item that failed keeps the reason, is unsent, and only then has the key
+    const fs = Q.createStore(memStorage());
+    fs.add({ sample_id: 60, lab_id: '600', standard_name: 'A' });
+    fs.add({ sample_id: 61, lab_id: '601', standard_name: 'A' });
+    fs.add({ sample_id: 62, lab_id: '602', standard_name: 'A' });
+    t.eq('upload_error' in fs.items()[0], false);
+    fs.markSent(['s60', 's61', 's62'], 'T1');                 // handed to the hub
+    fs.markFailed({ s60: 'QBench has no sample with lab ID 600' }, 'T2');
+    const f60 = fs.items()[0];
+    t.eq(f60.sent_at, null);
+    t.eq(f60.upload_error, { msg: 'QBench has no sample with lab ID 600', at: 'T2' });
+    t.eq(fs.unsent().map(i => i.id), ['s60']);
+    t.eq(fs.failed().map(i => i.id), ['s60']);
+    // the key survives the next page (normalizeItem keeps it)
+    t.eq(Q.normalizeItem(f60).upload_error, { msg: 'QBench has no sample with lab ID 600', at: 'T2' });
+    t.eq('upload_error' in Q.normalizeItem({ sample_id: 1, standard_name: 'A', upload_error: 'junk' }), false);
+    // a retry hands it to the hub again: sent, the error gone
+    fs.markSent(['s60'], 'T3');
+    t.eq(fs.items()[0].sent_at, 'T3');
+    t.eq('upload_error' in fs.items()[0], false);
+    t.eq(fs.failed(), []);
+    // re-adding a failed sample clears its error (a new report)
+    fs.markFailed({ s61: 'x' }, 'T4');
+    fs.add({ sample_id: 61, lab_id: '601', standard_name: 'B' });
+    t.eq(fs.failed(), []);
+    // back to unsent without an error (skipped)
+    fs.markUnsent(['s62']);
+    t.eq(fs.items()[2].sent_at, null);
+    t.eq('upload_error' in fs.items()[2], false);
+
+    // the run's rows → what each queued report's state is now. The newest row
+    // for a sample wins (a retry appended to a running upload adds a row).
+    const rows = [
+        { idx: 0, sample_id: 70, lab_id: '700', status: 'failed', msg: 'Upload returned false' },
+        { idx: 1, sample_id: 71, lab_id: '701', status: 'ok', msg: 'Uploaded' },
+        { idx: 2, sample_id: 72, lab_id: '702', status: 'error', msg: 'Report failed: Standard not found: X\nTraceback' },
+        { idx: 3, sample_id: 73, lab_id: '703', status: 'skipped', msg: 'Skipped by user' },
+        { idx: 4, sample_id: 74, lab_id: '704', status: 'uploading', msg: 'Step 3/10' },
+        { idx: 5, sample_id: 75, lab_id: '705', status: 'login_failed', msg: 'Login failed: Bad credentials' },
+        { idx: 6, sample_id: 70, lab_id: '700', status: 'ok', msg: 'Uploaded' },
+        { idx: 7, lab_id: '?', status: 'error', msg: 'No lab_id' },             // no sample: ignored
+    ];
+    t.eq(Q.reconcile(rows, false), {
+        sent: [71, 70],
+        failed: [{ sample_id: 72, msg: 'Report failed: Standard not found: X' }],
+        unsent: [73],
+    });
+    // once the run has ended, anything not uploaded is not sent
+    t.eq(Q.reconcile(rows, true), {
+        sent: [71, 70],
+        failed: [{ sample_id: 72, msg: 'Report failed: Standard not found: X' },
+                 { sample_id: 74, msg: 'Not uploaded: the upload ended before this report was sent.' },
+                 { sample_id: 75, msg: 'Login failed: Bad credentials' }],
+        unsent: [73],
+    });
+    t.eq(Q.reconcile(null, true), { sent: [], failed: [], unsent: [] });
+    t.eq(Q.reconcile([{ idx: 0, sample_id: 9, status: 'failed', msg: '' }], true).failed,
+        [{ sample_id: 9, msg: 'Failed' }]);
+
+    // applying it touches only the reports this tab handed to the hub
+    const as = Q.createStore(memStorage());
+    for (const sid of [70, 71, 72, 73, 74, 75]) as.add({ sample_id: sid, lab_id: String(sid), standard_name: 'A' });
+    as.markSent(['s70', 's71', 's72', 's73', 's74'], 'T1');   // s75 was re-added after the start: not in flight
+    as.applyOutcome(Q.reconcile(rows, true), 'T9');
+    const byId = Object.fromEntries(as.items().map(i => [i.id, i]));
+    t.eq(byId.s70.sent_at, 'T1');
+    t.eq(byId.s71.sent_at, 'T1');
+    t.eq(byId.s72.sent_at, null);
+    t.eq(byId.s72.upload_error, { msg: 'Report failed: Standard not found: X', at: 'T9' });
+    t.eq(byId.s73.sent_at, null);
+    t.eq('upload_error' in byId.s73, false);
+    t.eq(byId.s74.upload_error.msg, 'Not uploaded: the upload ended before this report was sent.');
+    t.eq('upload_error' in byId.s75, false);                // untouched
+    t.eq(as.failed().map(i => i.id), ['s72', 's74']);
+
+    // wording: the sheet's retry actions
+    t.eq(Q.retryText(1), 'Retry failed (1)');
+    t.eq(Q.retryText(3), 'Retry failed (3)');
+    // the credentials problem the hub names, offered with the password box
+    t.eq(Q.startRefusal({ need_password: true, error: "Can't read the saved QBench sign-in file X: denied" }),
+        { needPassword: true, text: "Can't read the saved QBench sign-in file X: denied" });
+    t.eq(Q.startRefusal({ error: 'boom' }, 500), { needPassword: false, text: 'Not uploaded: boom' });
+    t.eq(Q.startRefusal({ refused: [{ lab_id: '1', error: 'not final' }, { sample_id: 2, error: 'gone' }] }, 409),
+        { needPassword: false, text: 'Not uploaded: 1 (not final); 2 (gone)' });
+    t.eq(Q.startRefusal({}, 502), { needPassword: false, text: 'Not uploaded: HTTP 502' });
 };
