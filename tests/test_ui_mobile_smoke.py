@@ -261,7 +261,7 @@ def test_the_drawer_opens_traps_focus_and_closes(page):
     # the status dot opens it too (the global status lives in its footer)
     assert click_when_ready(drv, "#tb-live")
     assert wait_for(drv, lambda: _js(drv, "return document.documentElement.classList.contains('nav-open');"))
-    assert _shown(drv, "#live-text")
+    assert wait_for(drv, lambda: _shown(drv, "#live-text"))   # once the drawer has slid in
     # a nav link goes where it says
     assert click_when_ready(drv, "#sidebar .nav-item[data-nav='instruments']")
     assert wait_for(drv, lambda: _path(drv) == "/instruments")
