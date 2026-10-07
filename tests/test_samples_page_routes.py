@@ -151,6 +151,42 @@ def test_the_cdf_downloads(hub_app):
     assert get(port, "/api/samples/999999/cdf")[0] == 404
 
 
+# ── /api/comparison-standards/<name>/trace (v6.0.0) ──────────────────────
+
+def test_a_standards_trace_is_shaped_like_a_samples(hub_app):
+    """The Samples page stacks a comparison standard under the open sample:
+    its trace comes in the shape of ``/api/samples/<id>/trace``."""
+    import urllib.parse
+    port, hub, _ = hub_app
+    code, sample = get(port, f"/api/samples/{hub.ids['final']}/trace", timeout=10)
+    assert code == 200
+    code, std = get(port, "/api/comparison-standards/Diesel/trace", timeout=10)
+    assert code == 200, std
+    assert set(sample) <= set(std) | {"sample_id"}, (set(sample), set(std))
+    assert std["name"] == "Diesel" and std["standard"] is True and std["sample_id"] is None
+    assert len(std["x"]) == len(std["y"]) > 100
+    assert std["cal_times"] == [] and std["cal_carbons"] == []
+    # the standard is a copy of the final sample's CDF (hub_boot): the same numbers
+    assert std["x"] == sample["x"] and std["y"] == sample["y"]
+    # a name with spaces and '#' (Diesel #2) arrives decoded once
+    shutil.copy2(hub.standards / "Diesel.CDF", hub.standards / "Diesel #2.CDF")
+    code, d2 = get(port, "/api/comparison-standards/" + urllib.parse.quote("Diesel #2", safe="") + "/trace", timeout=10)
+    assert code == 200 and d2["name"] == "Diesel #2"
+
+
+def test_a_standards_trace_refuses_unknown_and_bad_names_and_needs_a_session(hub_app):
+    port, _hub, _ = hub_app
+    code, body = get(port, "/api/comparison-standards/R99/trace")
+    assert code == 404 and "not found" in body["error"]
+    for bad in (".hidden", "a%3Ab", "..%5Cgc"):
+        code, body = get(port, f"/api/comparison-standards/{bad}/trace")
+        assert code in (400, 404) and "error" in body, (bad, code, body)
+    code, body = get(port, "/api/comparison-standards/.hidden/trace")
+    assert code == 400
+    code, body = get(port, "/api/comparison-standards/Diesel/trace", auth=False)
+    assert code == 401
+
+
 # ── a JSON body that is not an object ──────────────────────────────────────
 
 @pytest.mark.parametrize("path", ["/api/reprocess", "/api/reprocess/preview", "/api/export-lims", "/api/analysis",

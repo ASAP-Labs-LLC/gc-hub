@@ -2577,6 +2577,27 @@ def _standard_file(name: str) -> Optional[Path]:
     return None
 
 
+@app.route("/api/comparison-standards/<name>/trace", methods=["GET"])
+def api_comparison_standard_trace(name: str):
+    """v6.0.0 (read-only): a comparison standard's chromatogram, shaped like
+    ``/api/samples/<id>/trace`` (``sample_id`` None, ``standard`` True and an
+    empty ladder: the Samples page stacks it under the open sample, whose
+    ladder labels the carbons). 400 for a name that can't be a standard's,
+    404 for one that isn't in the standards folder."""
+    problem = _standard_name_problem(name)
+    if problem:
+        return _error(problem)
+    p = _standard_file(name)
+    if p is None:
+        return _error(f"Standard not found: {name}", 404)
+    try:
+        t, y = distill.gc_xy_from_cdf(p)
+        return jsonify({"sample_id": None, "standard": True, "name": name, "x": t.tolist(), "y": y.tolist(),
+                        "cal_times": [], "cal_carbons": []})
+    except Exception as exc:
+        return _route_failure(exc)
+
+
 @app.route("/api/comparison-standard", methods=["POST"])
 def api_add_comparison_standard():
     """Admin: make a stored sample's CDF (``sample_id``, its current
