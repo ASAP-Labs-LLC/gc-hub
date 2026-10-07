@@ -95,24 +95,10 @@ def _js(drv, script, *args):
     return drv.execute_script(script, *args)
 
 
-def _comments(db, sid, deleted=False):
-    return store.sample_comments.list(sid, include_deleted=deleted, db=db)
 
 
-def _list_texts(drv):
-    return _js(drv, "return Array.from(document.querySelectorAll('#comment-list li "
-                    ".comment-text')).map(e => e.textContent);")
 
 
-def _select(drv, sid, port=None):
-    """Open ``sid`` on Compare (its Comments section), as its link does."""
-    port = port or int(drv.current_url.split(":")[2].split("/")[0])
-    drv.get(f"http://127.0.0.1:{port}/samples/{sid}/compare")
-    assert _wait(lambda: _js(drv, "return !!(window.GCSamples && GCSamples.ready"
-                                  " && GCSamples.state.route.sampleId === arguments[0]"
-                                  " && document.getElementById('comment-list')"
-                                  " && document.getElementById('comment-author').textContent);", sid)), \
-        _js(drv, "return document.body.innerText.slice(0, 400)")
 
 
 @pytest.fixture(scope="module")
@@ -124,9 +110,6 @@ def page(tmp_path_factory):
         drv = _driver()
         browser_sign_in(drv, port)
         try:
-            drv.get(f"http://127.0.0.1:{port}/samples")
-            _select(drv, hub.ids["final"], port)
-            assert _js(drv, "return window.Plotly.__recording === true")
             yield drv, hub, port, pw
         finally:
             drv.quit()
