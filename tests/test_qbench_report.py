@@ -85,7 +85,7 @@ def test_the_shared_analysis_reports_a_spike_in_a_saved_overlay():
                 pdf = r.read()
         text = "\n".join(p.extract_text() or "" for p in pypdf.PdfReader(io.BytesIO(pdf)).pages)
         flat = " ".join(text.split())
-        assert "Spiky (C9–C11): HIGHER than Base" in flat, flat[:2000]
+        assert "Spiky (C9–C11): higher than Base" in flat, flat[:2000]
         assert "spiky range" in flat.lower(), flat[:2000]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

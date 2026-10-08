@@ -138,7 +138,7 @@ def test_analysis_returns_the_same_items_text_and_windows(harness):
     assert body["diff"]["x_range"] == [t0, 6.5] == body["trend"]["x_range"]
     assert "report" not in body and "segments" not in body
     # the spike at 2.0 min is in the report and marked on the plot
-    assert body["text"].startswith("• Spiky <b> (C9–C11): HIGHER than Base")
+    assert body["text"].startswith("• Spiky <b> (C9–C11): higher than Base")
     assert [round(s["t"], 1) for s in body["spikes"]] == [2.0]
 
 

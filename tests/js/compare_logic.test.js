@@ -83,21 +83,21 @@ module.exports = (t) => {
     const result = {
         items: [
             { kind: 'range', label: 'Gas', c_start: 5, c_end: 11, severity: 'significant',
-              direction: 'higher', t0: 0.2, t1: 1.4, mixed: false },
+              direction: 'higher', verdict: 'higher', t0: 0.2, t1: 1.4, mixed: false },
             { kind: 'not-evaluated', label: 'Heavy', c_start: 40, c_end: 60 },
             { kind: 'outside', label: 'Outside the defined ranges', severity: 'marginal',
-              direction: 'lower', spans: [[4.2, 5.0]] },
+              direction: 'lower', verdict: 'lower', spans: [[4.2, 5.0]] },
         ],
         text: [
-            '• Gas (C5–C11, evaluated to C10): HIGHER than Std — significant (max +1180 at 0.74 min)',
+            '• Gas (C5–C11, evaluated to C10): higher than Std — significant, light end elevated (max +1180 at 0.74 min)',
             '• Heavy (C40–C60): not evaluated — outside the evaluated window (calibration, run end or x-axis limit)',
-            '• Outside the defined ranges: LOWER than Std — marginal at 4.20–5.00 min (max -140 at 4.60 min)',
+            '• Outside the defined ranges: lower than Std — marginal at 4.20–5.00 min (max -140 at 4.60 min)',
         ].join('\n'),
     };
     const v = L.findingsView(result);
     t.eq(v.rows.length, 3);
     t.eq(v.rows[0].heading, 'Gas (C5–C11, evaluated to C10)');
-    t.eq(v.rows[0].text, 'HIGHER than Std — significant (max +1180 at 0.74 min)');
+    t.eq(v.rows[0].text, 'higher than Std — significant, light end elevated (max +1180 at 0.74 min)');
     t.eq(v.rows[0].badge, 'Significant · higher');
     t.eq(v.rows[0].tone, 'dev');
     t.eq([v.rows[0].t0, v.rows[0].t1], [0.2, 1.4]);
@@ -105,7 +105,7 @@ module.exports = (t) => {
     t.eq(v.rows[1].badge, 'Not evaluated');
     t.eq(v.rows[1].tone, 'na');
     t.eq(v.rows[2].heading, 'Outside the defined ranges');
-    t.eq(v.rows[2].text.startsWith('LOWER than Std'), true);
+    t.eq(v.rows[2].text.startsWith('lower than Std'), true);
     t.eq(v.rows[2].badge, 'Marginal · lower');
     t.eq([v.rows[2].t0, v.rows[2].t1], [4.2, 5.0]);
     t.eq(v.deviating, 2);
@@ -119,14 +119,25 @@ module.exports = (t) => {
         text: 'No deviations above the marginal threshold within the defined ranges.',
         badge: 'Within', tone: 'ok', severity: null, direction: null, t0: null, t1: null }]);
     t.eq(none.deviating, 0);
-    // mixed direction
+    // mixed direction (v7: the verdict, as the bullet leads with it)
+    const mixedRow = L.findingsView({ items: [{ kind: 'range', label: 'Oil', c_start: 20, c_end: 44,
+        severity: 'moderate', direction: 'lower', verdict: 'mixed', mixed: true, t0: 4, t1: 6 }],
+        text: '• Oil (C20–C44): mixed, higher and lower than S — moderate' }).rows[0];
+    t.eq([mixedRow.badge, mixedRow.direction], ['Moderate · mixed', 'mixed']);
+    // a v6 answer (no verdict): mixed, else the direction
     t.eq(L.findingsView({ items: [{ kind: 'range', label: 'Oil', c_start: 20, c_end: 44,
-        severity: 'moderate', direction: 'lower', mixed: true, t0: 4, t1: 6 }],
-        text: '• Oil (C20–C44): mixed: LOWER than S overall — moderate' }).rows[0].badge, 'Moderate · mixed');
+        severity: 'moderate', direction: 'lower', mixed: true }],
+        text: '• Oil (C20–C44): x' }).rows[0].badge, 'Moderate · mixed');
+    // sharp peaks only: the badge says so, as the bullet does
+    const peaks = L.findingsView({ items: [{ kind: 'range', label: 'Gas', c_start: 5, c_end: 11,
+        severity: 'significant', direction: 'higher', verdict: 'higher', spike_only: true,
+        t0: 0.5, t1: 3.5 }],
+        text: '• Gas (C5–C11): sharp peaks above S — significant (1 sharp peak above the standard at 2.00 min; no broad deviation above the marginal threshold)' }).rows[0];
+    t.eq([peaks.heading, peaks.badge, peaks.direction], ['Gas (C5–C11)', 'Significant · sharp peaks', 'higher']);
     // a label with a colon in it still splits at the right place
     t.eq(L.findingsView({ items: [{ kind: 'range', label: 'A: B', c_start: 1, c_end: 2,
         severity: 'marginal', direction: 'higher' }],
-        text: '• A: B (C1–C2): HIGHER than S — marginal' }).rows[0].heading, 'A: B (C1–C2)');
+        text: '• A: B (C1–C2): higher than S — marginal' }).rows[0].heading, 'A: B (C1–C2)');
     // lines and items disagree: the lines, as plain rows (never invented text)
     const odd = L.findingsView({ items: [], text: 'line one\n\nline two' });
     t.eq(odd.rows.map(r => r.text), ['line one', 'line two']);
