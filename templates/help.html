@@ -47,6 +47,10 @@
     <p>D86 temperatures are converted from D2887 (ASTM D86 Appendix X4). <b>Corrected</b> adds that GC's
       correction factors, set on its page under Instruments; these are the numbers in the results file.
       Turned off, you see the conversion before the factors.</p>
+    <p>A corrected temperature never falls below an earlier one: if a correction factor would put, say,
+      T10 below T5, T10 is reported at the T5 value. Turned off, the plain conversion shows any such dip.
+      Results computed before v7.0.0 keep their stored numbers until they are re-processed; the run's
+      Data view says so and offers Re-process.</p>
     <p>Appendix X4 has no 40 % or 60 % equation, so those two are the midpoints of the 30/50 and 50/70
       conversions. No correction factor applies to them; hover the number to see this.</p>
     <p class="caption">These are approximations for screening, not an ASTM-certified distillation.</p>

@@ -1212,7 +1212,17 @@
                 h('tbody', {}, ...rows.map(r => h('tr', {},
                     h('td', { text: r.label }), h('td', { text: L.fmt(r.d2887, 2) }), h('td', { text: L.fmt(r.raw, 2) }),
                     h('td', { text: r.correction === null ? '—' : (r.correction === 0 ? '0' : L.fmt(r.correction, 2)) }),
-                    h('td', { className: 'rep', text: L.fmt(r.reported, 2) })))));
+                    h('td', { className: r.held ? 'rep held' : 'rep', title: r.note, text: L.fmt(r.reported, 2) + (r.held ? ' *' : '') })))));
+        }
+        // v7.0.0: say which reported cells were held at an earlier value, or
+        // that a stored series which dips predates the rule, with its fix.
+        const noteBox = $('data-d86-note');
+        const note = row.current_revision && curve && !curve.error ? L.d86TableNote(curve, L.dataRows(curve, convert())) : null;
+        if (noteBox) {
+            noteBox.hidden = !note;
+            noteBox.replaceChildren(...(note ? [h('span', { text: note.text })] : []),
+                ...(note && note.reprocess ? [' ', h('button', { type: 'button', className: 'btn btn-sm', text: 'Re-process',
+                    'data-testid': 'data-d86-reprocess', onclick: () => reprocess([id]) })] : []));
         }
         const meta = e.meta || {};
         const fact = (k, v) => h('div', { className: 'fact' }, h('span', { className: 'k', text: k }), v instanceof Node ? h('span', { className: 'v' }, v) : h('span', { className: 'v', text: v }));

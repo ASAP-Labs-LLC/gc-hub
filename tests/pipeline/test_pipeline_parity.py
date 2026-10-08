@@ -1,6 +1,7 @@
 """Parity (2A1 T2): the pipeline's results equal 2A0's golden rows (v1.0.0's
 ``process_cdf`` output) for the same conf and corrections. The numbers may
-change only through the injection-time fix, which these fixtures don't hit.
+change only through the injection-time fix, which these fixtures don't hit,
+and v7.0.0's corrected D86 that never decreases (``make_golden.v7_expected``).
 """
 from __future__ import annotations
 
@@ -83,22 +84,22 @@ def _entries(conf):
 @pytest.mark.parametrize("name", ["sample_40304_blank", "sample_40304_noblank", "sample_40305_blank"])
 def test_results_equal_the_golden_rows(hub, name):
     s, rev, export = _run_case(hub, name)
-    assert _row_strings(export["line"]) == GOLDEN[name]
+    assert _row_strings(export["line"]) == make_golden.v7_expected(GOLDEN[name])
     results = json.loads(rev["results"])
-    assert _row_strings(exports.format_line(results, "")) == GOLDEN[name]
+    assert _row_strings(exports.format_line(results, "")) == make_golden.v7_expected(GOLDEN[name])
     assert results["Source File"] == s["cdf_path"]
     assert (rev["blank_used"] is not None) == (make_golden.CASES[name][1] is not None)
 
 
 def test_no_corrections_equals_the_golden_row(hub):
     _s, _rev, export = _run_case(hub, "no_corrections", provider=NoCorrections())
-    assert _row_strings(export["line"]) == GOLDEN["no_corrections"]
+    assert _row_strings(export["line"]) == make_golden.v7_expected(GOLDEN["no_corrections"])
 
 
 @pytest.mark.parametrize("name", sorted(make_golden.BESTFIT_CASES))
 def test_bestfit_rows_equal_the_golden_rows(hub, name):
     _s, _rev, export = _run_case(hub, name)
-    assert _row_strings(export["line"]) == BESTFIT[name]
+    assert _row_strings(export["line"]) == make_golden.v7_expected(BESTFIT[name])
 
 
 @pytest.mark.skipif(not make_golden.snapshot_available(),

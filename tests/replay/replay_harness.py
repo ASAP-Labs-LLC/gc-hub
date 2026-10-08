@@ -41,6 +41,12 @@ where numbers differ, proven by re-running v1 with the hub's input:
 ``late-blank-review``    v2.0.0: a blank arriving late flags final samples;
                          Re-process with the current blank uses it (proven)
 ``auto-detect-off``      v2.0.0 "Calibration auto-detection is off"
+``d86-monotonic``        v7.0.0 "Corrected D86 never decreases": proven per
+                         column (``_d86_monotonic``): only corrected D86
+                         columns differ, each only where v1's corrected
+                         series dipped below an earlier cut, the hub's value
+                         equals its previous D86 column and the highest
+                         earlier v1 value, and the hub's series never dips
 ``calibration-filter``   v1.0.0: duplicate / out-of-order assignments are
                          dropped (v1 given the kept ones reproduces the hub)
 ``corrections-pending``  v2.0.0 "Stricter corrections": a corrections file the
@@ -838,6 +844,7 @@ DOCUMENTED = {
     "calibration-filter",  # v1.0.0: duplicate / unknown / out-of-order assignments dropped
     "corrections-pending",  # v2.0.0 "Stricter corrections": never a silent zero
     "auto-detect-off",     # v2.0.0 "Calibration auto-detection is off"
+    "d86-monotonic",       # v7.0.0 "Corrected D86 never decreases" (proven by _d86_monotonic)
     "method-excluded",     # v2.0.0 "Other methods are not processed"
     "review-method",       # v2.0.0 "... a run with no method name is held for review"
     "truncated-refused",   # v2.0.0 "Truncated CDFs are refused"
@@ -881,9 +888,62 @@ def _strip_source(line: Optional[str]) -> str:
     raise ValueError(f"cannot find the last field of {text!r}")
 
 
-def _explain_columns(diff: dict, hub_rec: dict, case: Optional[Case], item: Item) -> tuple[list, dict]:
-    """Split a column diff into documented verdicts and what's left."""
+D86_COLUMNS = [c for c in COLUMNS if c.startswith("D86 ")]    # IBP → FBP, the CSV's order
+
+
+def _d86_monotonic(left: dict, v1_row: Optional[dict], hub_row: Optional[dict]) -> list:
+    """v7.0.0 "Corrected D86 never decreases": the corrected D86 columns of
+    ``left`` (column -> (v1, hub)) this rule explains, or ``[]``. All or
+    nothing, and only with both full rows. A column is explained only when
+
+    * v1's value is below the highest earlier v1 D86 value (v1's corrected
+      series dipped there: the inversion existed);
+    * the hub's value equals the hub's previous D86 column, string for string
+      (it was held, not recomputed); and
+    * the hub's value equals that highest earlier v1 value (held at exactly
+      what v1 computed for the earlier cut: the factors and everything before
+      them agree).
+
+    Also every column where v1 dipped must be among them, and the hub's whole
+    D86 series must never dip. D2887 and every other column are untouched by
+    the rule, so they are never explained here."""
+    cols = [c for c in D86_COLUMNS if c in left]
+    if not cols or v1_row is None or hub_row is None:
+        return []
+    hub_prev, hub_best, v1_best, dips = None, None, None, []
+    for c in D86_COLUMNS:
+        hv, vv = hub_row.get(c, ""), v1_row.get(c, "")
+        if vv != "":
+            if v1_best is not None and float(vv) < v1_best:
+                dips.append(c)
+                if c not in left:
+                    return []                 # v1 dipped here but the hub did too
+                if hv == "" or hv != hub_prev or float(hv) != v1_best:
+                    return []
+            elif c in left:
+                return []                     # a difference where v1 didn't dip
+            v1_best = float(vv) if v1_best is None else max(v1_best, float(vv))
+        elif c in left:
+            return []
+        if hv != "":
+            if hub_best is not None and float(hv) < hub_best:
+                return []                     # the hub's series dips
+            hub_best = float(hv) if hub_best is None else max(hub_best, float(hv))
+            hub_prev = hv
+    return cols if sorted(dips) == sorted(cols) else []
+
+
+def _explain_columns(diff: dict, hub_rec: dict, case: Optional[Case], item: Item,
+                     v1_row: Optional[dict] = None, hub_row: Optional[dict] = None
+                     ) -> tuple[list, dict]:
+    """Split a column diff into documented verdicts and what's left. The full
+    rows (``v1_row``, ``hub_row``) are needed only for ``d86-monotonic``."""
     verdicts, left = [], dict(diff)
+    held = _d86_monotonic(left, v1_row, hub_row)
+    if held:
+        verdicts.append("d86-monotonic")
+        for c in held:
+            left.pop(c)
     if "InjectionDateTime" in left:
         v1_val, hub_val = left["InjectionDateTime"]
         if (item.expect_dt is not None and hub_val == item.expect_dt
@@ -965,14 +1025,17 @@ def compare(suite: str, config: str, items: list[Item], hub: dict, v1: dict,
                 add("UNEXPLAINED", f"only {'the hub' if hub_ok else 'v1'} produced a row; {detail}")
             continue
         diff = _row_diff(dr["row"], h["row"])
-        verdicts, left = _explain_columns(diff, h, case, it)
+        verdicts, left = _explain_columns(diff, h, case, it, dr["row"], h["row"])
         if left and proof is not None:
             # v1.0.0: duplicate / out-of-order assignments are dropped. v1
             # given only the assignments the hub keeps reproduces the hub.
             p = proof["direct"].get(name) or {}
-            if p.get("row") is not None and not _explain_columns(
-                    _row_diff(p["row"], h["row"]), h, case, it)[1]:
-                add("+".join(verdicts + ["calibration-filter"]),
+            p_verdicts, p_left = (_explain_columns(_row_diff(p["row"], h["row"]), h, case, it,
+                                                   p["row"], h["row"])
+                                  if p.get("row") is not None else ([], {"row": None}))
+            if not p_left:
+                both = verdicts + [v for v in p_verdicts if v not in verdicts]
+                add("+".join(both + ["calibration-filter"]),
                     "v1 given the assignments the hub keeps reproduces the hub", left)
                 continue
         if left:
@@ -1001,7 +1064,8 @@ def compare(suite: str, config: str, items: list[Item], hub: dict, v1: dict,
             # a Re-process with the current blank then uses it. Proven by v1
             # given that blank.
             cur_row = dict(zip(COLUMNS, next(csv.reader(io.StringIO(h["reprocess_current_line"])))))
-            late_left = _explain_columns(_row_diff(late["row"] or {}, cur_row), h, case, it)[1]
+            late_left = _explain_columns(_row_diff(late["row"] or {}, cur_row), h, case, it,
+                                         late["row"], cur_row)[1]
             if late["row"] is not None and not late_left and h.get("review_note"):
                 verdicts.append("late-blank-review")
                 again = {}
@@ -1013,7 +1077,8 @@ def compare(suite: str, config: str, items: list[Item], hub: dict, v1: dict,
         if lk["blank"] != h.get("blank"):
             same = lk["row"] is not None and not _row_diff(lk["row"], dr["row"])
             if not same:
-                add("blank-rule", f"v1 used blank {lk['blank']}, the hub chose {h.get('blank')}; "
+                # (any verdict step 1 proved, e.g. d86-monotonic, still holds)
+                add("+".join(verdicts + ["blank-rule"]), f"v1 used blank {lk['blank']}, the hub chose {h.get('blank')}; "
                                   f"v1 given the hub's blank reproduces the hub",
                     _row_diff(lk["row"] or {}, h["row"]))
                 continue
@@ -1022,7 +1087,8 @@ def compare(suite: str, config: str, items: list[Item], hub: dict, v1: dict,
                 lk["row"] is not None and _row_diff(lk["row"], dr["row"])):
             lk_diff = _row_diff(lk["row"] or {}, dr["row"] or {})
             lk_verdicts, lk_left = _explain_columns(
-                {c: (a, h["row"].get(c, "")) for c, (a, _b) in lk_diff.items()}, h, case, it)
+                {c: (a, h["row"].get(c, "")) for c, (a, _b) in lk_diff.items()}, h, case, it,
+                lk["row"], h["row"])
             if lk["row"] is None or lk_left:
                 add("UNEXPLAINED", "v1's own run differs from v1 given the same blank",
                     _row_diff(lk["row"] or {}, dr["row"] or {}))

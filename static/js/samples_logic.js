@@ -280,7 +280,12 @@
         }));
     }
 
-    /** The Data table: D2887, D86 before and after the correction, the correction. */
+    /** The Data table: D2887, D86 before and after the correction, the correction.
+        With the revision's recorded factors (curve.corrections, {cut: value})
+        the correction is the factor, and a reported cell that v7.0.0's rule
+        held at an earlier cut's value (DV.monotonicD86 of raw + factor) gets
+        `held` and a `note` saying so; without them (a v1 import) the
+        correction is reported - raw. */
     function dataRows(curve, convert) {
         const c = curve || {};
         let converted = null;
@@ -289,17 +294,75 @@
             LABELS.forEach((l) => { byLabel[l] = round2((c.d2887 || {})[_col('2887', l)]); });
             converted = DV.x4Midpoints(convert(byLabel) || {});
         }
-        return LABELS.map(l => {
+        const factors = c.corrections && typeof c.corrections === 'object' && Object.keys(c.corrections).length
+            ? c.corrections : null;
+        const rows = LABELS.map(l => {
             const raw = converted ? round2(converted[l]) : round2((c.d86_uncorrected || {})[_col('D86', l)]);
             const reported = round2((c.d86 || {})[_col('D86', l)]);
+            let correction = raw !== null && reported !== null ? round2(reported - raw) : null;
+            if (factors && raw !== null) correction = round2(Number(factors[l]) || 0);
             return {
                 label: l,
                 d2887: round2((c.d2887 || {})[_col('2887', l)]),
                 raw,
-                correction: raw !== null && reported !== null ? round2(reported - raw) : null,
+                correction,
                 reported,
+                held: false,
+                note: null,
             };
         });
+        if (factors) {
+            const sums = {};
+            rows.forEach((r) => { sums[r.label] = r.raw === null ? null : DV.pyRound2(r.raw + r.correction); });
+            const held = DV.monotonicD86(sums);
+            let best = null;            // the label whose value the series is held at
+            rows.forEach((r) => {
+                const s = sums[r.label];
+                if (s === null) return;
+                if (held[r.label] !== s && best !== null && r.reported === held[r.label]) {
+                    r.held = true;
+                    r.note = 'Held at the ' + best + ' value: raw + correction is ' + s.toFixed(2) +
+                        ', and a corrected D86 temperature never falls below an earlier one.';
+                } else if (held[r.label] === s) {
+                    if (best === null || s > sums[best]) best = r.label;
+                }
+            });
+        }
+        return rows;
+    }
+
+    /** The line under the Data table (v7.0.0), or null: {text, reprocess}.
+        A stored corrected series that dips was computed before v7.0.0 (its
+        fix is Re-process: reprocess true); otherwise the cells dataRows marked
+        `held` (marked * in the table) are named. */
+    function d86TableNote(curve, rows) {
+        const c = curve || {};
+        const values = {};
+        LABELS.forEach((l) => { values[l] = round2((c.d86 || {})[_col('D86', l)]); });
+        const dip = DV.firstDip(values);
+        if (dip && c.fromTable) {
+            // a result-only v1 import: no CDF, so nothing to re-process
+            return { reprocess: false,
+                     text: 'The reported D86 ' + dip + ' is below an earlier reported value: this run was ' +
+                         'imported from v1 as a result only, so it keeps v1’s numbers.' };
+        }
+        if (dip) {
+            return { reprocess: true,
+                     text: 'The reported D86 ' + dip + ' is below an earlier reported value: this result was ' +
+                         'computed before v7.0.0, when a correction factor could make a corrected temperature ' +
+                         'fall. Re-process to hold each corrected value at least at the one before it.' };
+        }
+        const held = (rows || []).filter((r) => r.held).map((r) => r.label);
+        if (!held.length) return null;
+        return { reprocess: false,
+                 text: '* ' + listText(held) + (held.length > 1 ? ' were' : ' was') + ' held at an earlier ' +
+                     'value: a corrected D86 temperature never falls below an earlier one. D86 raw keeps the ' +
+                     'plain conversion.' };
+    }
+
+    function listText(items) {
+        if (items.length < 2) return items.join('');
+        return items.slice(0, -1).join(', ') + ' and ' + items[items.length - 1];
     }
 
     /** The Data table as tab-separated text (Copy table). */
@@ -759,7 +822,7 @@
         number, plural, fmt, rowStatus, rowDetail, flagText, reviewText, injectedText,
         selection, selectedIds, toggle, extend, paint, selectShown, selectAllMatching, clear, keepOnly, bulkBar,
         CHUNK, BULK_LIMIT, chunks, runChunks, outcomeText, filterText, confirmText, countsText,
-        resultRows, dataRows, dataTableText, curveFromTable, historyItems, carbonTicks, CHART_CONFIG, chartLayout, step, queueItem,
+        resultRows, dataRows, d86TableNote, dataTableText, curveFromTable, historyItems, carbonTicks, CHART_CONFIG, chartLayout, step, queueItem,
         isChecked, pressBox, chartReason, backfillReason,
         OVERLAY_MAX, overlayKey, overlayState, overlayParse, overlayStringify, overlayAdd, overlayRemove, overlayClear,
         overlayMode, overlayShown, overlayAddText, traceStyles, plotlyText, overlayTraces, dashArray,

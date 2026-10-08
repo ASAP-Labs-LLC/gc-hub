@@ -592,8 +592,11 @@ wrote (in `%P%\gc1\reports\`), and exits 0 for PASS, 1 for FAIL. Read:
   `injection-time-fix` (v1's misparsed stamp), `blank-rule`,
   `auto-detect-off` and `corrections` (each claimed only when recomputing
   the way v1 did reproduces v1's row exactly; the HTML shows the largest
-  absolute difference for each), `method-excluded` (an accepted non-D2887
-  method), `not-in-hub`, `v1-short-row`.
+  absolute difference for each), `d86-monotonic` (v7.0.0: v1's corrected
+  D86 fell below an earlier cut there and the hub holds it at that earlier
+  value; claimed only when the two rows show exactly that),
+  `method-excluded` (an accepted non-D2887 method), `not-in-hub`,
+  `v1-short-row`.
 - `[FAIL]` tags, and what to do:
   - `method-not-accepted`: method names the hub doesn't process (listed
     under *methods not processed*) that haven't been accepted. Only if they

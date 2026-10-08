@@ -137,6 +137,14 @@ def _tags(diffs):
     return {d["tag"] for d in diffs}
 
 
+# Expected on every row whose numbers v1 let dip (v7.0.0): S4 and the blanks.
+EXPECTED = ("source-file", "d86-monotonic")
+
+
+def _other(report, lab_id):
+    return [d for d in _by(report, lab_id) if d["tag"] not in EXPECTED]
+
+
 # ── the tags ────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
@@ -154,9 +162,16 @@ def test_every_difference_is_tagged(scenario):
         assert sf and {d["tag"] for d in sf} == {"source-file"}, lab
 
     # The v1 misparse: 00:24:50 written as 02:45:00.
-    (fix,) = [d for d in _by(rep, "40320") if d["tag"] != "source-file"]
+    (fix,) = _other(rep, "40320")
     assert (fix["column"], fix["tag"]) == ("InjectionDateTime", "injection-time-fix")
     assert (fix["v1"], fix["hub"]) == ("2026-09-25 02:45:00", "2026-09-25 00:24:50")
+    # v7.0.0: S4's corrected T10 fell below its T5 in v1; the hub holds it at T5.
+    (held,) = [d for d in _by(rep, "40320") if d["tag"] == "d86-monotonic"]
+    assert (held["column"], held["v1"], held["hub"]) == ("D86 T10", "45.56", "54.93")
+    # ...and the three "Blank" rows' (B1, B0, B2) T10-T70, held at their T5
+    blank_held = [d for d in _by(rep, "Blank") if d["tag"] == "d86-monotonic"]
+    assert len(blank_held) == 21 and {d["hub"] for d in blank_held} == {"54.93"}
+    assert all(float(d["v1"]) < 54.93 for d in blank_held)
 
     # v1's newest-registered blank (B2) vs the hub's at-or-before blank (B1).
     s2 = [d for d in _by(rep, "40310") if d["tag"] != "source-file"]
@@ -185,9 +200,11 @@ def test_every_difference_is_tagged(scenario):
     (bad,) = [d for d in _by(rep, "40350") if d["tag"] != "source-file"]
     assert (bad["column"], bad["tag"]) == ("2887 T50", "unexplained")
 
-    # Rows that agree apart from Source File: S1 (current row), both blanks.
-    for lab in ("40304", "Blank", "Blank2"):
-        assert _tags(_by(rep, lab)) == {"source-file"}, lab
+    # Rows that agree apart from Source File: S1 (current row); the blanks and
+    # "Blank2" apart from Source File and their held D86 cells.
+    assert _tags(_by(rep, "40304")) == {"source-file"}
+    for lab in ("Blank", "Blank2"):
+        assert _tags(_by(rep, lab)) == {"source-file", "d86-monotonic"}, lab
 
     assert S["v1_rows"] == 13
     assert S["superseded_v1_rows"] == 1
@@ -197,7 +214,9 @@ def test_every_difference_is_tagged(scenario):
     # every row with a hub result whose numbers agree or are proven: all but S7
     # (unexplained) and the D7096 run (no result)
     assert S["rows_numerically_verified"] == 9
-    assert S["rows_matching"] == 5          # B1, B0, S1, "Blank2", B2: only Source File differs
+    assert S["rows_matching"] == 1          # S1: only Source File differs
+    # S4, B1, B0, B2 and "Blank2" (every other row's numbers v1 didn't let dip)
+    assert S["tags"]["d86-monotonic"]["rows"] == 5
     assert S["tags"]["unexplained"] == {"differences": 1, "rows": 1}
     assert S["tags"]["blank-rule"]["rows"] == 2
     assert S["tags"]["not-in-hub"]["rows"] == 1
@@ -237,7 +256,7 @@ def test_a_blank_rows_own_numbers_are_never_put_down_to_the_blank_rule(hub):
     b1["2887 T10"] = str(float(b1["2887 T10"]) + 0.01)
     sc.rewrite()
     rep = sc.report()
-    bad = [d for d in rep["differences"] if d["tag"] != "source-file"
+    bad = [d for d in rep["differences"] if d["tag"] not in EXPECTED
            and d["v1_injection_dt"] == b1["InjectionDateTime"]]
     assert [(d["column"], d["tag"]) for d in bad] == [("2887 T10", "unexplained")]
 

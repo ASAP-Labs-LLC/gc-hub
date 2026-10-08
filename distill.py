@@ -763,7 +763,9 @@ def _convert_to_d86(d2887: Dict[str, float]) -> Dict[str, float]:
 def x4_midpoints(d86: Dict[str, float]) -> Dict[str, float]:
     """A copy of ``d86`` with 40% and 60% filled: ASTM D86 App. X4 has no
     equations for them, so they are the linear midpoints of the (uncorrected)
-    30%/50% and 50%/70% conversions. The correction factors never touch them.
+    30%/50% and 50%/70% conversions. The correction factors never touch them
+    (in the reported series ``monotonic_d86`` may still hold one at an
+    earlier cut's corrected value).
     The Dashboard's fallback for a v1 row mirrors this rule
     (``static/js/distill_view.js`` ``x4Midpoints``)."""
     out = dict(d86)
@@ -818,6 +820,36 @@ def apply_d86_corrections(
 ) -> Dict[str, float]:
     """Return a new D86 dict with each correction value added to the matching key."""
     return {k: _round2(v + corrections.get(k, 0.0)) for k, v in d86.items()}
+
+
+# The D86 cuts in percent-recovered order (the CSV's D86 column order).
+D86_ORDER: Tuple[str, ...] = ("IBP", "5%", "10%", "20%", "30%", "40%", "50%", "60%", "70%",
+                              "80%", "90%", "95%", "FBP")
+
+
+def monotonic_d86(d86: Dict[str, float]) -> Dict[str, float]:
+    """A copy of the corrected D86 series in which no cut is below an earlier
+    one (v7.0.0): walking IBP → FBP, each value is ``max(itself, the previous
+    value)``, i.e. a later cut that would dip below an earlier one is held at
+    the earlier one's value. Correction factors are per cut, so a negative
+    factor (e.g. T10's) can push a cut below the one before it; a distillation
+    temperature can't fall as more boils off, so the reported series never
+    does. Only the **corrected** (reported) series gets this: the uncorrected
+    conversion (``d86_uncorrected``, the Corrected D86 toggle off) and D2887
+    keep the dip, so the plain math stays visible. Missing cuts are skipped.
+    Mirrored by ``static/js/distill_view.js`` ``monotonicD86``
+    (``tests/test_d86_monotonic.py``)."""
+    out = dict(d86)
+    running = None
+    for cut in D86_ORDER:
+        v = out.get(cut)
+        if v is None or v == "":
+            continue
+        if running is not None and float(v) < running:
+            out[cut] = running
+        else:
+            running = float(v)
+    return out
 
 
 def _apply_blank_and_clip(
@@ -1358,7 +1390,8 @@ def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None
     * ``row``: every ``CSV_HEADER`` column, in order, holding the values
       ``process_cdf`` writes (same rounding, ``""`` for a missing D86 cut),
       with ``Source File`` = ``""``;
-    * ``d2887``, ``d86_uncorrected`` and ``d86`` (corrected), keyed by cut;
+    * ``d2887``, ``d86_uncorrected`` and ``d86`` (corrected, then held
+      non-decreasing IBP → FBP by ``monotonic_d86``), keyed by cut;
     * ``lab_id`` and ``injection_dt`` (a naive ``datetime``);
     * ``calibration``: ``{cdf, anchors_source, anchors}``;
     * ``blank_applied``: whether a blank was actually subtracted.
@@ -1437,6 +1470,9 @@ def compute(cdf_path: Path, conf: Dict[str, str], blank_path: Path | None = None
         corrections = load_d86_corrections(corr_path) if corr_path else {}
     if corrections:
         d86 = apply_d86_corrections(d86, corrections)
+    # 5b' The reported (corrected) series never decreases (v7.0.0); the
+    # uncorrected one above keeps any dip.
+    d86 = monotonic_d86(d86)
 
     # 5c Fuel-type best fit against the comparison standards (failure-safe:
     # blank columns rather than blocking the distillation on any error)

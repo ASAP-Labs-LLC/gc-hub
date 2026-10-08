@@ -146,4 +146,41 @@ function dashboardD86Tests(t) {
     // nothing at all
     r = V.dashboardD86({}, true, convert);
     t.eq(LABELS.every((l) => r.values[l] === null), true);
+
+    // v7.0.0: a corrected 40% held at the corrected 30% (above its own
+    // uncorrected midpoint) says it was held, not "midpoint"
+    const heldStored = Object.assign({}, stored, { 'D86 T30': 120, 'D86 T40': 120 });
+    r = V.dashboardD86({ d86: heldStored, d86_uncorrected: unc, d2887 }, true, convert);
+    t.eq(r.notes['40%'], V.HELD_NOTE);
+    t.eq(r.notes['60%'], CORRECTED_60);
+    // off: the uncorrected midpoint and its usual note
+    r = V.dashboardD86({ d86: heldStored, d86_uncorrected: unc, d2887 }, false, convert);
+    t.eq(r.values['40%'], 95);
+    t.eq(/^Midpoint of the 30\/50/.test(r.notes['40%']), true);
+
+    monotonicTests(t, LABELS);
+}
+
+// v7.0.0 "Corrected D86 never decreases": monotonicD86 mirrors
+// distill.monotonic_d86 (tests/test_d86_monotonic.py runs both on random
+// series); firstDip names where a stored (pre-v7) series dips.
+function monotonicTests(t, LABELS) {
+    const s = (vals) => Object.fromEntries(LABELS.map((l, i) => [l, vals[i]]));
+    const dip = s([150, 170.5, 165.25, 180, 190, 195, 200, 205, 210, 220, 230, 240, 235]);
+    const held = V.monotonicD86(dip);
+    t.eq(held['10%'], 170.5);
+    t.eq(held.FBP, 240);
+    t.eq(held['20%'], 180);
+    t.eq(dip['10%'], 165.25);                               // a copy
+    t.eq(V.firstDip(dip), '10%');
+    t.eq(V.firstDip(held), null);
+    // a long dip: every cut held at the highest earlier one
+    t.eq(LABELS.map((l) => V.monotonicD86(s([100, 120, 110, 115, 119.99, 120, 121, 118, 125, 130, 135, 140, 145]))[l]),
+        [100, 120, 120, 120, 120, 120, 121, 121, 125, 130, 135, 140, 145]);
+    // missing values are skipped and kept
+    t.eq(V.monotonicD86({ IBP: 150, '5%': 170, '10%': null, '20%': 160, FBP: '' }),
+        { IBP: 150, '5%': 170, '10%': null, '20%': 170, FBP: '' });
+    t.eq(V.firstDip({ IBP: 150, '5%': null, '10%': 149 }), '10%');
+    t.eq(V.firstDip({}), null);
+    t.eq(V.firstDip(null), null);
 }
