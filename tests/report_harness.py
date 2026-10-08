@@ -141,6 +141,18 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
     app._report_content = rec_content
     app._report_html = rec_html
 
+    # the trend chart's range bands as drawn (x0, x1 of its rect shapes), per
+    # report, so a test can hold them to the windows /api/analysis returned
+    bands: list[list] = []
+    orig_figures = app._report_figures
+
+    def rec_figures(*a, **kw):
+        fig1, fig2 = orig_figures(*a, **kw)
+        bands.append([[float(sh.x0), float(sh.x1)] for sh in (fig1.layout.shapes or ())
+                      if sh.type == "rect"])
+        return fig1, fig2
+    app._report_figures = rec_figures
+
     pdfs: dict[str, bytes] = {}
 
     def fake_attach(lab_id, pdf_path, **kw):
@@ -208,6 +220,7 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
     out["pdf_pages"] = {k: len(pypdf.PdfReader(io.BytesIO(v)).pages) for k, v in pdfs.items()}
     out["records"] = records
     out["htmls"] = htmls
+    out["bands"] = bands
     out["log_rows"] = log_rows
     Path(out_path).write_text(json.dumps(out, default=_jsonable), encoding="utf-8")
     os._exit(0)          # skip the hub threads' shutdown

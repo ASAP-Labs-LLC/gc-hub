@@ -1,7 +1,7 @@
 // Report payload helpers: custom regions must ride along with every
 // export/queue payload so the final report can draw them.
 const { rangesForPayload, buildReportItemPayload, captureReportParams,
-        overlaysFromSettings } =
+        overlaysFromSettings, rangesText, reportDiffers, refreshItem } =
     require('../../static/js/report_payload.js');
 
 module.exports = (t) => {
@@ -100,4 +100,46 @@ module.exports = (t) => {
     t.eq(legacy.map(r => [r.label, r.c_start, r.c_end]), [['Gas', 6, 12], ['Oil', 22, 40]]);
     t.eq(overlaysFromSettings({ analysis_range_overlays: '{bad' }).map(r => [r.label, r.c_start, r.c_end]),
         [['Gas', 5, 11], ['Oil', 20, 44]]);
+
+    // ── v7: which ranges a queue item prints (the report footer's words) ──
+    t.eq(rangesText([{ label: 'Gas', c_start: 5, c_end: 11 }, { label: ' Jet  fuel ', c_start: '18', c_end: '12' }]),
+        'Gas C5–C11, Jet fuel C12–C18');
+    t.eq(rangesText([]), '');                      // an explicit [] = no ranges
+    t.eq(rangesText(undefined), null);             // never captured: the hub's saved defaults
+    t.eq(rangesText([{ label: '', c_start: 7, c_end: 7 }]), 'Range C7–C7');
+    const forty = 'A forty character range label, exactly!';
+    t.eq(rangesText([{ label: forty, c_start: 60, c_end: 80 }]), forty + ' C60–C80');
+
+    // reportDiffers: would the open view build another report than the item?
+    const queuedItem = { standard_name: 'Diesel', conclusion: '', params: captured,
+        ranges: [{ label: 'Gas', c_start: 5, c_end: 11, color: '#f0a50044' }] };
+    const view = JSON.parse(JSON.stringify(queuedItem));
+    t.eq(reportDiffers(queuedItem, view), false);
+    t.eq(reportDiffers(queuedItem, { ...view, ranges: [{ id: 1, label: 'Gas', c_start: '5', c_end: '11', color: '#000' }] }),
+        false);                                   // UI ids, DOM strings and colours don't count
+    t.eq(reportDiffers(queuedItem, { ...view, ranges: [] }), true);
+    t.eq(reportDiffers(queuedItem, { ...view, ranges: [...view.ranges, { label: 'Jet', c_start: 9, c_end: 16 }] }), true);
+    t.eq(reportDiffers(queuedItem, { ...view, ranges: [{ label: 'Gasoline', c_start: 5, c_end: 11 }] }), true);
+    t.eq(reportDiffers(queuedItem, { ...view, standard_name: 'Red' }), true);
+    t.eq(reportDiffers(queuedItem, { ...view, params: { ...captured, thresh_marginal: 150 } }), true);
+    t.eq(reportDiffers(queuedItem, { ...view, conclusion: 'Edited on screen.' }), true);
+    t.eq(reportDiffers({ ...queuedItem, conclusion: 'Typed in the export sheet.' }, view), false);
+    const reordered = { ...queuedItem, ranges: [{ label: 'A', c_start: 1, c_end: 2 }, { label: 'B', c_start: 3, c_end: 4 }] };
+    t.eq(reportDiffers(reordered, { ...reordered, ranges: reordered.ranges.slice().reverse() }), true);
+    t.eq(reportDiffers({ ...queuedItem, ranges: undefined }, view), true);   // saved defaults vs explicit
+    t.eq(reportDiffers(queuedItem, null), false);
+
+    // refreshItem: the view's standard, parameters, ranges and edited
+    // conclusion; the item's title and other standards kept
+    const fromSheet = { ...queuedItem, sample_id: 42, lab_id: 'AB123', sample_name: 'Custom title',
+        overlay_standards: ['x'], conclusion: 'Sheet text' };
+    const now = { sample_id: 42, lab_id: 'AB123', sample_name: 'GC Analysis', standard_name: 'Diesel',
+        conclusion: '', params: { ...captured, sigma: 50 }, overlay_standards: [],
+        ranges: [{ id: 3, label: 'Jet', c_start: 9, c_end: 16, color: '#fff' }] };
+    const r1 = refreshItem(fromSheet, now);
+    t.eq([r1.sample_name, r1.overlay_standards, r1.conclusion, r1.params.sigma], ['Custom title', ['x'], 'Sheet text', 50]);
+    t.eq(r1.ranges.map(r => r.label), ['Jet']);
+    t.eq(refreshItem(fromSheet, { ...now, conclusion: 'On screen' }).conclusion, 'On screen');
+    t.eq(refreshItem(fromSheet, { ...now, standard_name: 'Red' }).conclusion, '');   // written for another standard
+    t.eq(refreshItem(fromSheet, { ...now, ranges: [] }).ranges, []);
 };

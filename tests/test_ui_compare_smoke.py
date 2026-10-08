@@ -372,6 +372,166 @@ def test_conclusion_edit_add_to_queue_export_and_download(env):
     assert wait(lambda: js(drv, "return document.getElementById('report-queue-btn').hidden"))
 
 
+def pdf_text(drv, body):
+    """The text of the PDF the hub builds for this export body (fetched in the
+    page, so with its session), whitespace collapsed."""
+    import base64
+    import io
+
+    pypdf = pytest.importorskip("pypdf")
+    b64 = drv.execute_async_script("""
+        const done = arguments[arguments.length - 1];
+        fetch('/api/export-analysis-report', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                               body: JSON.stringify(arguments[0])})
+          .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error('HTTP ' + r.status)))
+          .then(buf => { let s = ''; const b = new Uint8Array(buf);
+                         for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+                         done(btoa(s)); })
+          .catch(e => done('ERR ' + e.message));""", body)
+    assert not b64.startswith("ERR"), b64
+    reader = pypdf.PdfReader(io.BytesIO(base64.b64decode(b64)))
+    return " ".join(" ".join((p.extract_text() or "") for p in reader.pages).split())
+
+
+def set_range(drv, i, label=None, c_start=None, c_end=None):
+    """Type into the i-th range card of the open Adjust drawer."""
+    for k, value in ((0, label), (1, c_start), (2, c_end)):
+        if value is None:
+            continue
+        js(drv, "const c = document.querySelectorAll('[data-testid=adjust-range]')[arguments[0]]"
+                ".querySelectorAll('input')[arguments[1]]; c.value = arguments[2];"
+                "c.dispatchEvent(new Event('input', {bubbles: true}));", i, k, str(value))
+
+
+def test_ranges_added_in_adjust_print_on_the_report(env):
+    """v7: every range on screen, in order and with its label, is on the
+    report: the export sheet names them, the request carries them, the PDF
+    lists them (one beyond the run as "not evaluated"), and the report's
+    bands are the windows the view drew."""
+    drv = open_page(env)
+    drv.set_script_timeout(120)
+    js(drv, "document.querySelector('[data-testid=compare-adjust-toggle]').click()")
+    n = len(analysis_calls(drv))
+    js(drv, "document.querySelector('[data-testid=adjust-add-range]').click()")
+    set_range(drv, 2, "Jet fuel cut", 12, 18)
+    js(drv, "document.querySelector('[data-testid=adjust-add-range]').click()")
+    set_range(drv, 3, "Heavy tail beyond the run", 60, 80)
+    call = settled(drv, n)
+    wait(lambda: analysis_calls(drv)[-1]["body"]["ranges"][-1]["c_end"] == 80)
+    call = analysis_calls(drv)[-1]
+    labels = ["Gas", "Oil", "Jet fuel cut", "Heavy tail beyond the run"]
+    assert [r["label"] for r in call["body"]["ranges"]] == labels
+    js(drv, "document.querySelector('[data-testid=adjust-close]').click()")
+    drawn = js(drv, "return document.querySelector('[data-testid=compare-trend]').layout.shapes"
+                    ".filter(s => s.layer === 'below').map(s => [s.x0, s.x1])")
+    windows = call["json"]["windows"]
+    assert drawn == [[w["t0"], w["t1"]] for w in windows if w["evaluable"]]
+    assert [w["evaluable"] for w in windows][-1] is False
+
+    # Export report: the sheet names every range, the request carries them
+    js(drv, "document.getElementById('h-export').click()")
+    assert wait(lambda: js(drv, "return document.querySelector('[data-testid=export-sheet]').open"))
+    line = js(drv, "return document.querySelector('[data-testid=export-params]').textContent")
+    assert "Jet fuel cut C12–C18" in line and "Heavy tail beyond the run C60–C80" in line, line
+    n = js(drv, "return window.__calls.length")
+    js(drv, "document.querySelector('[data-testid=export-download]').click()")
+    assert wait(lambda: js(drv, "return document.getElementById('toast').textContent").endswith("downloaded"), 90)
+    body = json.loads(js(drv, "return window.__calls.slice(arguments[0]).find(c => c.url === '/api/export-analysis-report').body", n))
+    assert [r["label"] for r in body["ranges"]] == labels
+    assert [(r["c_start"], r["c_end"]) for r in body["ranges"]][2:] == [(12, 18), (60, 80)]
+    # the report computes exactly the windows the view drew
+    again = js(drv, "return fetch('/api/analysis', {method: 'POST', headers: {'Content-Type': 'application/json'},"
+                    " body: JSON.stringify(arguments[0])}).then(r => GCSession.readJson(r)).then(r => r.body.windows)", body)
+    assert again == windows
+    text = pdf_text(drv, body)
+    assert "Jet fuel cut C12–C18" in text and "Heavy tail beyond the run C60–C80" in text, text[-900:]
+    assert "Heavy tail beyond the run (C60–C80): not evaluated" in text, text
+    assert text.index("Gas C5") < text.index("Oil C") < text.index("Jet fuel cut C12") \
+        < text.index("Heavy tail beyond the run C60"), text[-900:]
+
+
+def test_adjusted_ranges_survive_the_view_and_reach_every_queue_path(env):
+    """v7: the ranges on screen reach the report even when the Compare view
+    is no longer mounted (the Samples page unmounts it on Overview/Data or
+    another sample), through a bulk add, and a queue item says which ranges
+    it prints and offers an update when the open view has changed since."""
+    drv = open_page(env)
+    sid = env["sid"]
+    js(drv, "document.querySelector('[data-testid=compare-adjust-toggle]').click()")
+    n = len(analysis_calls(drv))
+    js(drv, "document.querySelector('[data-testid=adjust-add-range]').click()")
+    set_range(drv, 2, "Jet fuel cut", 12, 18)
+    settled(drv, n)
+    wait(lambda: analysis_calls(drv)[-1]["body"]["ranges"][-1]["label"] == "Jet fuel cut")
+    js(drv, "document.querySelector('[data-testid=adjust-close]').click()")
+    labels = ["Gas", "Oil", "Jet fuel cut"]
+
+    # Add to queue: the sheet names the ranges the item will print
+    js(drv, "document.getElementById('h-queue').click()")
+    wait(lambda: js(drv, "return GCReportQueue.count()") == 1)
+    js(drv, "GCReportQueue.openSheet()")
+    line = js(drv, "return document.querySelector('[data-testid=rq-ranges]').textContent")
+    assert "Gas C5–C11" in line and "Jet fuel cut C12–C18" in line, line
+    assert js(drv, "return document.querySelector('[data-testid=rq-update]')") is None
+    js(drv, "document.querySelector('[data-testid=report-queue-sheet]').close()")
+
+    # a range removed after the item was added: the item keeps what it was
+    # added with, and the sheet offers to update it from the open view
+    js(drv, "document.querySelector('[data-testid=compare-adjust-toggle]').click()")
+    n = len(analysis_calls(drv))
+    js(drv, "document.querySelectorAll('[data-testid=adjust-remove-range]')[0].click()")
+    settled(drv, n)
+    js(drv, "document.querySelector('[data-testid=adjust-close]').click()")
+    item = json.loads(js(drv, "return sessionStorage.getItem('gc.reportQueue')"))[0]
+    assert [r["label"] for r in item["ranges"]] == labels
+    js(drv, "GCReportQueue.openSheet()")
+    assert wait(lambda: js(drv, "return document.querySelector('[data-testid=rq-update]')"))
+    js(drv, "document.querySelector('[data-testid=rq-update]').click()")
+    wait(lambda: [r["label"] for r in json.loads(js(drv, "return sessionStorage.getItem('gc.reportQueue')"))[0]["ranges"]]
+         == ["Oil", "Jet fuel cut"])
+    assert js(drv, "return document.querySelector('[data-testid=rq-update]')") is None
+    line = js(drv, "return document.querySelector('[data-testid=rq-ranges]').textContent")
+    assert "Gas" not in line and "Jet fuel cut C12–C18" in line, line
+    js(drv, "document.querySelector('[data-testid=report-queue-sheet]').close()")
+
+    # the view goes (Overview/Data on the Samples page): Export report and Add
+    # to queue still use this sample's ranges, not the saved defaults
+    js(drv, "window.__h.handle.unmount()")
+    js(drv, "GCCompare.openExportSheet({sample: window.__h.sample, standards: window.__h.standards,"
+            " settings: window.__h.settings})")
+    assert wait(lambda: js(drv, "return document.querySelector('[data-testid=export-sheet]').open"))
+    line = js(drv, "return document.querySelector('[data-testid=export-params]').textContent")
+    assert "Oil C20–C44, Jet fuel cut C12–C18" in line and "Gas" not in line, line
+    js(drv, "document.querySelector('[data-testid=export-sheet]').close()")
+    # a bulk add (the Samples list) captures the same, replacing the item
+    js(drv, "GCReportQueue.addMany([GCCompare.reportItem({sample: window.__h.sample,"
+            " standards: window.__h.standards, settings: window.__h.settings})], {quiet: true})")
+    item = json.loads(js(drv, "return sessionStorage.getItem('gc.reportQueue')"))[0]
+    assert [r["label"] for r in item["ranges"]] == ["Oil", "Jet fuel cut"], item
+    # another sample with no adjustments: the saved defaults, captured now
+    other = js(drv, "return GCCompare.reportItem({sample: {sample_id: arguments[0], lab_id: '40304'},"
+                    " standards: window.__h.standards, settings: window.__h.settings})", env["hub"].ids["final"])
+    assert [r["label"] for r in other["ranges"]] == ["Gas", "Oil"]
+
+    # mounted again: the view shows the same adjustments
+    n = len(analysis_calls(drv))
+    js(drv, "window.__h.mount(arguments[0])", sid)
+    call = settled(drv, n, 60)
+    assert [r["label"] for r in call["body"]["ranges"]] == ["Oil", "Jet fuel cut"]
+    # Reset returns to the saved defaults and forgets them
+    js(drv, "document.querySelector('[data-testid=compare-adjust-toggle]').click()")
+    n = len(analysis_calls(drv))
+    js(drv, "document.querySelector('[data-testid=adjust-reset]').click()")
+    call = settled(drv, n)
+    assert [r["label"] for r in call["body"]["ranges"]] == ["Gas", "Oil"]
+    js(drv, "document.querySelector('[data-testid=adjust-close]').click()")
+    js(drv, "window.__h.handle.unmount()")
+    again = js(drv, "return GCCompare.reportItem({sample: window.__h.sample, standards: window.__h.standards,"
+                    " settings: window.__h.settings})")
+    assert [r["label"] for r in again["ranges"]] == ["Gas", "Oil"]
+    js(drv, "GCReportQueue.clear()")
+
+
 FAKE_UPLOAD = r"""
 window.__posted = [];
 window.EventSource = function (url) { this.url = url; window.__es = this; this.close = () => { this.closed = true; }; };

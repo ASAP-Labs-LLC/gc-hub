@@ -323,6 +323,44 @@ def test_copy_link_compare_and_adjust(page):
     assert _errors(drv) == []
 
 
+def test_a_range_added_in_compare_reaches_the_bulk_queue_after_the_view_closes(page):
+    """v7: Compare is unmounted on Overview, yet the run's report (Export
+    report, Add to queue, and the list's bulk "Add to report queue") uses
+    the ranges it showed, and the queue sheet names them."""
+    drv, base, hub = page
+    sid = hub.ids["final"]
+    _open(drv, base, f"/samples/{sid}/compare")
+    _js(drv, "try { GCReportQueue.clear(); sessionStorage.removeItem('gc.compare.adjust'); } catch (e) {}")
+    assert wait_for(drv, lambda: _js(drv, "return !!(GCSamples.state.compare && GCSamples.state.compare.standard())"))
+    _js(drv, "document.querySelector('[data-testid=compare-adjust-toggle]').click();")
+    assert wait_for(drv, lambda: _tid(drv, "adjust-add-range") == 1)
+    _js(drv, "document.querySelector('[data-testid=adjust-add-range]').click();")
+    _js(drv, "const c = [...document.querySelectorAll('[data-testid=adjust-range]')].pop().querySelectorAll('input');"
+             "const set = (i, v) => { c[i].value = v; c[i].dispatchEvent(new Event('input', {bubbles: true})); };"
+             "set(0, 'Jet fuel cut'); set(1, '12'); set(2, '18');")
+    assert wait_for(drv, lambda: "Jet fuel cut" in [r["label"] for r in
+                                                    _js(drv, "return GCSamples.state.compare.queueItem().ranges")])
+    _js(drv, "document.querySelector('[data-testid=adjust-close]').click();")
+    _js(drv, "document.querySelector('[data-testid=view-overview]').click();")
+    assert wait_for(drv, lambda: _js(drv, "return GCSamples.state.compare") is None)
+
+    order = wait_for(drv, lambda: _rows(drv) if sid in _rows(drv) else None)
+    _js(drv, "const r = document.querySelectorAll('[data-testid=sample-row] .lead')[arguments[0]];"
+             "r.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0}));"
+             "document.dispatchEvent(new MouseEvent('mouseup'));", order.index(sid))
+    assert wait_for(drv, lambda: _js(drv, "return GCSamples.state.sel.ids.size") == 1)
+    _js(drv, "document.querySelector('[data-testid=bulk-queue]').click();")
+    item = wait_for(drv, lambda: _js(drv, "const i = GCReportQueue.items(); return i.length && i[0];"))
+    assert item["sample_id"] == sid and [r["label"] for r in item["ranges"]][-1] == "Jet fuel cut", item
+    assert wait_for(drv, lambda: _js(drv, "const d = document.getElementById('report-queue-sheet'); return !!(d && d.open)"))
+    line = _js(drv, "return document.querySelector('[data-testid=rq-ranges]').textContent")
+    assert line.startswith("Ranges: ") and line.endswith("Jet fuel cut C12–C18"), line
+    _js(drv, "document.getElementById('report-queue-sheet').close(); GCReportQueue.clear();"
+             "sessionStorage.removeItem('gc.compare.adjust');")
+    _js(drv, "document.querySelector('[data-testid=bulk-clear]').click();")
+    assert _errors(drv) == []
+
+
 def test_the_detail_clears_the_badge_with_overlay_scrollbars(page):
     """Overlay scrollbars (Chrome on a Mac trackpad; ``--hide-scrollbars``
     here) take no width, and a release tag (``v5.0.0``) is wider than this

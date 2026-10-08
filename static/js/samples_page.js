@@ -489,6 +489,19 @@
         return C && C.defaultStandard ? C.defaultStandard(row, S.standards) : null;
     }
 
+    /** v7: a run's report as it is on screen: its Compare view's standard,
+        parameters, ranges and edited conclusion when it is open, else what
+        its view showed last in this tab, else the saved defaults, captured
+        now (GCCompare.reportItem), so the queue item says which ranges it
+        prints and the report prints them. */
+    function reportItemFor(row) {
+        const C = window.GCCompare;
+        if (!C || typeof C.reportItem !== 'function') return L.queueItem(row, defaultStandard(row));
+        const it = C.reportItem({ sample: row, standards: S.standards, settings: S.settings }) || {};
+        return Object.assign(L.queueItem(row, it.standard_name), {
+            conclusion: it.conclusion || '', params: it.params, ranges: it.ranges });
+    }
+
     async function queueRows(rows, progress) {
         const q = window.GCReportQueue;
         if (!q || typeof q.addMany !== 'function') throw new Error('The report queue is not available on this page.');
@@ -496,8 +509,8 @@
         const items = [];
         const refused = [];
         for (const f of rows) {
-            const std = defaultStandard(f);
-            if (std) items.push(L.queueItem(f, std));
+            const it = reportItemFor(f);
+            if (it.standard_name) items.push(it);
             else refused.push({ sample_id: f.sample_id, error: 'no comparison standard' });
         }
         const n = items.length ? (q.addMany(items, { quiet: true }) || 0) : 0;
@@ -511,10 +524,12 @@
         const items = [];
         const refused = [];
         for (const f of rows) {
-            const it = L.queueItem(f, defaultStandard(f));
+            const it = reportItemFor(f);
             if (!it.standard_name) { refused.push({ sample_id: f.sample_id, error: 'no comparison standard' }); continue; }
-            items.push({ sample_id: it.sample_id, standard_name: it.standard_name, lab_id: it.lab_id,
-                         doc_name: 'GC Analysis', sample_name: it.sample_name });
+            // the queue's payload: the ranges ([] = none) and parameters ride along
+            items.push(window.buildReportItemPayload ? window.buildReportItemPayload(it)
+                : { sample_id: it.sample_id, standard_name: it.standard_name, lab_id: it.lab_id,
+                    doc_name: 'GC Analysis', sample_name: it.sample_name });
         }
         if (!items.length) return { done: 0, refused, failed: 0, stopped: false, total: rows.length };
         const start = await postJSON('/api/export-analysis-reports-zip', { items });

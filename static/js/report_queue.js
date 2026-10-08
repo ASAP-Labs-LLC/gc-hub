@@ -206,6 +206,13 @@
             ` the report queue, compared with ${item.standard_name}`;
     }
 
+    /** The queue sheet's line naming the ranges an item's report prints. */
+    function rangesLine(ranges) {
+        const text = payloadLib.rangesText(ranges);
+        if (text === null) return 'Ranges: the saved defaults when it is built';
+        return 'Ranges: ' + (text || 'none');
+    }
+
     const STATUS_TEXT = {
         waiting: 'Waiting', generating: 'Building the PDF', report_ok: 'PDF ready',
         uploading: 'Uploading', ok: 'Uploaded', failed: 'Failed', error: 'Failed',
@@ -292,7 +299,7 @@
     }
 
     const pure = { STORAGE_KEY, UPLOAD_KEY, normalizeItem, payloads, createStore, buttonText,
-        addedText, statusText, isFinished, progress, overallView, failureLine, latestRows, reconcile,
+        addedText, rangesLine, statusText, isFinished, progress, overallView, failureLine, latestRows, reconcile,
         retryText, startRefusal };
     if (typeof module !== 'undefined' && module.exports) module.exports = pure;
     if (typeof document === 'undefined') return;
@@ -502,14 +509,26 @@
             } else if (it.sent_at) {
                 state = h('span', { className: 'pill final', text: 'Sent to QBench' });
             }
+            // v7: the open Compare view of this sample would report something
+            // else now (ranges, parameters, standard, an edited conclusion)
+            const current = !it.sent_at && root.GCCompare && typeof root.GCCompare.viewItem === 'function'
+                ? root.GCCompare.viewItem(it.sample_id) : null;
+            const stale = !!current && payloadLib.reportDiffers(it, current);
             el.list.appendChild(h('li', { 'data-testid': 'rq-item', 'data-id': it.id,
                                           'data-state': it.upload_error ? 'failed' : (it.sent_at ? 'sent' : 'queued') },
                 h('div', { className: 'rq-main' },
                     h('b', { text: nameOf(it) }),
                     h('span', { className: 'caption', text: meta.join(' · ') }),
+                    h('span', { className: 'caption rq-ranges', 'data-testid': 'rq-ranges',
+                                text: rangesLine(it.ranges) }),
+                    stale ? h('span', { className: 'rq-stale', 'data-testid': 'rq-stale',
+                                        text: 'The open Compare view has changed since this was added.' }) : null,
                     it.upload_error ? h('span', { className: 'rq-reason', 'data-testid': 'rq-reason',
                                                   text: it.upload_error.msg }) : null),
                 state,
+                stale ? h('button', { type: 'button', className: 'btn btn-sm', text: 'Update from current view',
+                    'aria-label': 'Update ' + nameOf(it) + ' from the open Compare view', 'data-testid': 'rq-update',
+                    onclick: () => { store.add(payloadLib.refreshItem(it, current)); } }) : null,
                 it.upload_error ? h('button', { type: 'button', className: 'btn btn-sm', text: 'Retry',
                     'aria-label': 'Retry ' + nameOf(it), 'data-testid': 'rq-retry', disabled: retryOff,
                     onclick: () => retry([it.id]) }) : null,
@@ -1013,6 +1032,8 @@
     }
 
     store.onChange(() => { render(); syncButton(); });
+    // v7: the open Compare view changed: its item's "Update from current view"
+    document.addEventListener('gc:compare-change', () => { if (sheet && sheet.open) render(); });
 
     function init() {
         const btn = $('report-queue-btn');
