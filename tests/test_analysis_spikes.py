@@ -124,7 +124,7 @@ def test_carbon_range_present_on_spike_segments():
 def test_gasoline_spike_gives_a_gas_bullet_and_the_gas_conclusion():
     """Phase 3: the adulteration fixture (a short tall spike at 2.0 min, C8,
     that the trend channel erases) must still be reported: a spike-only Gas
-    bullet and the single-range gas conclusion."""
+    bullet, and the conclusion names the sharp peak in the gas range."""
     t, ys, ystd = _flat_pair()
     _add_gaussian(ys, t, 2.0, 0.02, 3000.0)
     ranges = [{"label": "Gas", "c_start": 5, "c_end": 11, "color": "#f0a500"},
@@ -139,10 +139,12 @@ def test_gasoline_spike_gives_a_gas_bullet_and_the_gas_conclusion():
     gas = [i for i in out["items"] if i["kind"] == "range" and i["label"] == "Gas"]
     assert len(gas) == 1 and gas[0]["spike_only"] and gas[0]["direction"] == "higher"
     assert out["text"].splitlines()[0] == (
-        "• Gas (C5–C11): HIGHER than Diesel #2 — significant, sharp peaks only "
+        "• Gas (C5–C11): sharp peaks above Diesel #2 — significant "
         "(1 sharp peak above the standard at 2.00 min; "
         "no broad deviation above the marginal threshold)")
+    # v7: sharp peaks only are named as such, never as a broad elevation
     assert out["conclusion"] == (
-        "Conclusion: Compared to Diesel #2, this sample shows elevated intensity in the "
-        "gas range (C5–C11), consistent with possible gas range contamination. "
+        "Compared to Diesel #2, this sample shows no broad deviation in the defined ranges, "
+        "but an isolated sharp peak above the standard at 2.00 min (in the gas range; "
+        "+2967, significant), which may indicate a specific added component. "
         "These findings are indicative only and do not confirm specific substances.")

@@ -207,8 +207,15 @@
             default: break;
         }
         if (!it.severity) return { badge: 'Within', tone: 'ok' };
-        const dir = it.mixed ? 'mixed' : (it.direction || '');
+        const dir = it.spike_only ? 'sharp peaks' : verdictOf(it);
         return { badge: cap(it.severity) + (dir ? ' · ' + dir : ''), tone: 'dev' };
+    }
+
+    /** The direction a bullet leads with (v7 `verdict`: higher / lower /
+        mixed); a v6 answer has none: mixed, else its direction. */
+    function verdictOf(it) {
+        if (it.verdict) return it.verdict;
+        return it.mixed ? 'mixed' : (it.direction || '');
     }
 
     /** /api/analysis → {rows, deviating}. The rows' text is the server's
@@ -239,7 +246,7 @@
             }
             return { key: i + '-' + it.kind, kind: it.kind, heading, text, badge: b.badge,
                      tone: b.tone, severity: it.severity || null,
-                     direction: it.mixed ? 'mixed' : (it.direction || null), t0, t1 };
+                     direction: verdictOf(it) || null, t0, t1 };
         });
         return { rows, deviating };
     }

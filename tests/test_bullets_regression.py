@@ -73,7 +73,7 @@ def test_range_driven_report_is_bounded(ranges):
 sys.path.insert(0, str(ROOT / "tests" / "fixtures"))
 import make_diesel_pair as mk  # noqa: E402
 
-CONSISTENT = ("Conclusion: Compared to Diesel, this sample shows no significant deviation in "
+CONSISTENT = ("Compared to Diesel, this sample shows no significant deviation in "
               "the defined ranges. The chromatographic profile is consistent with the "
               "reference standard.")
 
@@ -106,7 +106,16 @@ def test_other_batches_are_clean(kw):
     out = _report(mk.batch(t, seed, **kw), mk.standard(t), t)
     assert out["spikes"] == [], out["text"]
     assert _elevated(out) == [], out["text"]
-    assert out["conclusion"] == CONSISTENT
+    if out["text"] == "No deviations above the marginal threshold.":
+        assert out["conclusion"] == CONSISTENT
+    else:
+        # v7: the conclusion says what the bullets say. One batch has a
+        # marginal run just outside the ranges (+113, 1.88–1.95 min): the
+        # bullets showed it in v6 too, the conclusion now names it as well.
+        assert [i["kind"] for i in out["items"]] == ["none", "outside"], out["text"]
+        assert out["conclusion"].startswith(
+            "Compared to Diesel, this sample shows no significant deviation in the defined "
+            "ranges. Outside the defined ranges it is slightly "), out["conclusion"]
 
 
 @pytest.mark.parametrize("frac", [0.01, 0.02, 0.05])
@@ -114,5 +123,9 @@ def test_gasoline_in_diesel_flags_gas_only(frac):
     t = mk.axis()
     out = _report(mk.with_gasoline(t, frac), mk.standard(t), t)
     assert _elevated(out) == ["Gas"], out["text"]
-    assert "elevated intensity in the gas range (C5–C11), consistent with possible gas " \
-           "range contamination" in out["conclusion"]
+    assert out["conclusion"].startswith(
+        "Compared to Diesel, this sample shows slightly elevated intensity in the gas range "
+        "(C5–C11): more light-end material than Diesel, consistent with possible light-end "
+        "(gasoline-range) contamination."), out["conclusion"]
+    assert "sharp peak" in out["conclusion"] and "above the standard" in out["conclusion"]
+    assert "lower intensity in the gas range" not in out["conclusion"]

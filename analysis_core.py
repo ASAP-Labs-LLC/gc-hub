@@ -15,6 +15,7 @@ are merged, so downstream (conclusion text, report, UI) sees one list.
 from __future__ import annotations
 
 import math
+import re
 
 import numpy as np
 
@@ -833,9 +834,29 @@ def _merge_spans(pieces: list[dict], gap: float) -> list[list[float]]:
 _SEV_RANK = {"marginal": 0, "moderate": 1, "significant": 2}
 
 
+def _max_sev(*sevs) -> str | None:
+    sevs = [s for s in sevs if s]
+    return max(sevs, key=lambda s: _SEV_RANK[s]) if sevs else None
+
+
 def _assess(pieces: list[dict], spikes: list[dict], params: dict) -> dict | None:
-    """Direction, severity, max, "also" and spans for one window (or the
-    outside), from its qualifying trend pieces and spikes; None when neither."""
+    """Direction, verdict, severity, max, "also" and spans for one window
+    (or the outside), from its qualifying trend pieces and spikes; None when
+    neither.
+
+    * ``direction`` — the dominant direction by area (trend pieces; spikes
+      only when there are none).
+    * ``also`` — trend runs the other way reaching moderate; with one the
+      range is **mixed** (``verdict`` "mixed", ``mixed`` True).
+    * ``verdict`` — "higher" / "lower" / "mixed": what the bullet leads with
+      and what the conclusion says, so the two always agree. Sharp peaks
+      never change it: they are named on their own.
+    * ``severity`` — the bullet's tag: the dominant direction's largest
+      |diff| (trend or spike), or the larger of both directions when mixed.
+    * ``broad_severity`` — the same from the trend runs only (None for
+      sharp peaks only): the conclusion's adverb.
+    * ``elevated`` — the bullet reports something higher (a higher or mixed
+      verdict, or a sharp peak above the standard)."""
     if not pieces and not spikes:
         return None
     spike_only = not pieces
@@ -852,40 +873,100 @@ def _assess(pieces: list[dict], spikes: list[dict], params: dict) -> dict | None
         dom = max(cands, key=lambda c: (c[0], -c[2]))[3]
     dom_cands = [c for c in cands if c[3] == dom] or cands
     peak_abs, peak, peak_t, _ = max(dom_cands, key=lambda c: (c[0], -c[2]))
+    dom_pieces = [p for p in pieces if p["sign"] == dom]
+    broad_dom = (severity_of(max(abs(p["peak"]) for p in dom_pieces), params) or "marginal") \
+        if dom_pieces else None
     also = None
     opp = [p for p in pieces if p["sign"] == -dom
            and abs(p["peak"]) + _EPS >= params["thresh_moderate"]]
     if opp:
         also = {"direction": "higher" if dom == -1 else "lower",
-                "severity": max((severity_of(abs(p["peak"]), params) for p in opp),
-                                key=lambda s: _SEV_RANK[s]),
+                "severity": _max_sev(*(severity_of(abs(p["peak"]), params) for p in opp)),
                 "spans": _merge_spans(opp, params["merge_gap_min"])}
+    direction = "higher" if dom == 1 else "lower"
+    mixed = also is not None
+    severity = severity_of(peak_abs, params) or "marginal"
+    if mixed:
+        severity = _max_sev(severity, also["severity"])
     return {
-        "direction": "higher" if dom == 1 else "lower",
-        "severity": severity_of(peak_abs, params) or "marginal",
+        "direction": direction,
+        "verdict": "mixed" if mixed else direction,
+        "severity": severity,
+        "broad_severity": _max_sev(broad_dom, also and also["severity"]),
+        "dominant_severity": broad_dom,
         "max_diff": round(peak, 1),
         "max_at": round(peak_t, 4),
-        "spikes": [{"t": round(s["t"], 4), "sign": s["sign"], "value": round(s["value"], 1)}
+        "spikes": [{"t": round(s["t"], 4), "sign": s["sign"], "value": round(s["value"], 1),
+                    "severity": severity_of(abs(s["value"]), params) or "marginal"}
                    for s in spikes],
         "spike_only": spike_only,
         "also": also,
-        "spans": _merge_spans([p for p in pieces if p["sign"] == dom], params["merge_gap_min"]),
-        # LOWER overall with sharp peaks above the standard: worded "mixed"
-        "mixed": (not spike_only) and dom == -1 and any(s["sign"] == 1 for s in spikes),
-        # the conclusion's "elevated": iff the bullet reports something higher
-        "elevated": (dom == 1 or any(s["sign"] == 1 for s in spikes)
-                     or bool(also and also["direction"] == "higher")),
+        "spans": _merge_spans(dom_pieces, params["merge_gap_min"]),
+        "mixed": mixed,
+        "elevated": (dom == 1 or mixed or any(s["sign"] == 1 for s in spikes)),
     }
 
 
 def _item(kind: str, **fields) -> dict:
     base = {"kind": kind, "index": None, "label": None, "c_start": None, "c_end": None,
             "t0": None, "t1": None, "clipped": False, "c_eval_start": None,
-            "c_eval_end": None, "direction": None, "severity": None, "max_diff": None,
-            "max_at": None, "frac_above": None, "spikes": [], "spike_only": False,
-            "also": None, "spans": [], "mixed": False, "elevated": False}
+            "c_eval_end": None, "direction": None, "verdict": None, "severity": None,
+            "broad_severity": None, "dominant_severity": None, "position": None,
+            "max_diff": None, "max_at": None, "frac_above": None, "spikes": [],
+            "spike_only": False, "also": None, "spans": [], "mixed": False,
+            "elevated": False}
     base.update(fields)
     return base
+
+
+# ── where a range sits in the standard's distribution ─────────────────
+#: The standard's carbon distribution when none was measured (a typical
+#: middle distillate): C at 10%, 50% and 90% of its area.
+DEFAULT_STD_PROFILE = {"c10": 10.0, "c50": 16.0, "c90": 22.0}
+#: The solvent window skipped when the standard's area is read (as
+#: ``distill.BLANK_SOLVENT_END_MIN``; the CS2 peak would swamp the light end).
+PROFILE_SOLVENT_END_MIN = 0.35
+
+
+def standard_profile(t, y_std, ladder, params: dict,
+                     solvent_end_min: float = PROFILE_SOLVENT_END_MIN) -> dict | None:
+    """The standard's carbon distribution ``{c10, c50, c90}``: the carbon
+    numbers at 10/50/90% of its area above its own floor (the 2nd
+    percentile), after the solvent window and up to ``x_max_min``. None
+    without a usable ladder or any area."""
+    if not _has_ladder(ladder):
+        return None
+    t = np.asarray(t, dtype=float)
+    y = np.asarray(y_std, dtype=float)
+    n = _extent(t, params)
+    m = np.zeros(len(t), dtype=bool)
+    m[:n] = True
+    m &= t > solvent_end_min
+    if int(m.sum()) < 3:
+        return None
+    tt, yy = t[m], y[m]
+    w = np.clip(yy - float(np.percentile(yy, 2)), 0.0, None)
+    cum = np.concatenate(([0.0], np.cumsum((w[1:] + w[:-1]) * 0.5 * np.diff(tt))))
+    total = float(cum[-1])
+    if not math.isfinite(total) or total <= 0:
+        return None
+    return {f"c{int(q * 100)}": round(ladder_time_to_carbon(float(np.interp(q * total, cum, tt)),
+                                                           ladder), 2)
+            for q in (0.1, 0.5, 0.9)}
+
+
+def range_position(c_start: float, c_end: float, profile: dict | None) -> str:
+    """"light", "middle" or "heavy": the range's middle carbon against the
+    standard's C10–C90 (``DEFAULT_STD_PROFILE`` without one). Never from the
+    label: a C5–C11 range is the light end of a diesel and the body of a
+    gasoline."""
+    p = profile or DEFAULT_STD_PROFILE
+    mid = (float(c_start) + float(c_end)) / 2.0
+    if mid < p["c10"]:
+        return "light"
+    if mid > p["c90"]:
+        return "heavy"
+    return "middle"
 
 
 def build_deviation_report(
@@ -897,10 +978,13 @@ def build_deviation_report(
     ladder,
     params: dict,
     spike_heights=None,
+    std_profile: dict | None = None,
 ) -> list[dict]:
     """The structured deviation report: one item per bullet line.
     *spike_heights* ``(sample, standard)`` enables the dominance test of
-    ``find_spikes``.
+    ``find_spikes``; *std_profile* (``standard_profile``) places each range
+    in the standard's distribution (``position``: light / middle / heavy,
+    ``DEFAULT_STD_PROFILE`` without one).
 
     Kinds: ``range`` (a deviating range), ``not-evaluated`` (its window has
     width 0), ``none`` (``within_ranges`` tells which sentence), ``outside``
@@ -952,7 +1036,10 @@ def build_deviation_report(
         frac = sum(p["width"] for p in pieces) / width if width > 0 else 0.0
         items.append(_item("range", t0=w["t0"], t1=w["t1"], clipped=w["clipped"],
                            c_eval_start=w["c_eval_start"], c_eval_end=w["c_eval_end"],
-                           frac_above=round(min(frac, 1.0), 4), **common, **a))
+                           frac_above=round(min(frac, 1.0), 4),
+                           position=range_position(w["c_eval_start"], w["c_eval_end"],
+                                                   std_profile),
+                           **common, **a))
 
     # The complement of every evaluable window, on the displayed axis.
     free: list[tuple[int, int]] = []
@@ -1016,36 +1103,54 @@ def _pct(frac: float) -> str:
     return f"{int(p + 0.5)}%"
 
 
+_POS_SHORT = {"light": "light end", "middle": "main body", "heavy": "heavy end"}
+
+
 def _assessment_text(it: dict, standard_name: str, *, spans: bool) -> str:
-    """``HIGHER than <std> — <severity> …`` for a range/outside item."""
-    up = [x for x in it["spikes"] if x["sign"] == 1]
-    if it.get("mixed"):
-        head = (f"mixed: LOWER than {standard_name} overall, with {_spike_text(up)} "
-                f"— {it['severity']}")
-        listed = [x for x in it["spikes"] if x["sign"] == -1]
-    else:
-        head = (f"{'HIGHER' if it['direction'] == 'higher' else 'LOWER'} than {standard_name} "
-                f"— {it['severity']}")
-        listed = it["spikes"]
+    """``<direction> than <std> — <severity>[, <part> elevated|reduced]
+    (…)`` for a range/outside item. The direction is the item's verdict;
+    sharp peaks only read "sharp peaks above|below <std>"."""
+    sn = standard_name
+    sev = it["severity"]
     if it["spike_only"]:
-        return (f"{head}, sharp peaks only ({_spike_text(it['spikes'])}; "
+        up = any(x["sign"] == 1 for x in it["spikes"])
+        down = any(x["sign"] == -1 for x in it["spikes"])
+        where = "above and below" if up and down else ("above" if up else "below")
+        return (f"sharp peaks {where} {sn} — {sev} ({_spike_text(it['spikes'])}; "
                 "no broad deviation above the marginal threshold)")
-    if spans and it["spans"]:
-        head += " at " + _span_text(it["spans"], 3)
-    if it["also"]:
-        head += (f"; also {it['also']['direction']} {it['also']['severity']} "
-                 + _span_text(it["also"]["spans"], 2))
-    details = [f"max {it['max_diff']:+.0f} at {it['max_at']:.2f} min"]
+    part = _POS_SHORT.get(it.get("position"))
+    details = []
+    if it["verdict"] == "mixed":
+        head = f"mixed, higher and lower than {sn} — {sev}"
+        if part:
+            head += f", {part} differs in shape"
+        mostly = f"mostly {it['direction']}, {it['dominant_severity']}"
+        if spans and it["spans"]:
+            mostly += " at " + _span_text(it["spans"], 3)
+        also = it["also"]
+        details += [mostly, f"{also['direction']} {also['severity']} at "
+                    + _span_text(also["spans"], 2)]
+    else:
+        head = f"{it['verdict']} than {sn} — {sev}"
+        if part:
+            head += f", {part} {'elevated' if it['verdict'] == 'higher' else 'reduced'}"
+        if spans and it["spans"]:
+            head += " at " + _span_text(it["spans"], 3)
+    details.append(f"max {it['max_diff']:+.0f} at {it['max_at']:.2f} min")
     if it["frac_above"] is not None:
         details.append(f"{_pct(it['frac_above'])} of range beyond the marginal threshold")
-    if listed:
-        details.append(_spike_text(listed))
+    if it["spikes"]:
+        details.append(_spike_text(it["spikes"]))
     return f"{head} ({'; '.join(details)})"
 
 
 def render_bullets(items: list[dict], standard_name: str) -> str:
     """The bullet text of a ``build_deviation_report`` result (one line per
-    item). Plain text: the report HTML escapes it."""
+    item). Plain text: the report HTML escapes it. Each deviating line is
+    ``• <head>: <direction> than <std> — <severity>…``: ``report_layout``
+    sets the head (up to the first ``(Cx–Cy…):`` or ``:``) in bold and reads
+    the severity tag from the first ``— <severity>``; Compare splits the
+    head at the item's label."""
     lines = []
     for it in items:
         kind = it["kind"]
@@ -1076,42 +1181,279 @@ def render_bullets(items: list[dict], standard_name: str) -> str:
     return "\n".join(lines)
 
 
-def deviation_conclusion(items: list[dict], ranges: list[dict], standard_name: str) -> str:
-    """The conclusion sentence from the per-range results. A range counts as
-    elevated iff it has a qualifying positive trend run or spike, whatever
-    its bullet's dominant direction."""
-    sn = standard_name
-    indicative = "These findings are indicative only and do not confirm specific substances."
-    consistent = (f"Conclusion: Compared to {sn}, this sample shows no significant deviation "
-                  "in the defined ranges. The chromatographic profile is consistent "
-                  "with the reference standard.")
-    if any(i["kind"] == "no-calibration" for i in items):
-        return (f"Conclusion: Compared to {sn}, the defined ranges could not be evaluated "
-                "because no usable calibration was available for this sample.")
-    if not ranges:
-        if any(i["kind"] == "outside" for i in items):
-            return (f"Conclusion: Compared to {sn}, this sample deviates from the reference "
-                    "standard; no ranges were defined to attribute the deviation. "
-                    + indicative)
-        return consistent
-    hits, seen = [], set()
+# ── the conclusion ─────────────────────────────────────────────────────
+# Wording rules: docs/superpowers/specs/2026-10-07-v7-conclusions.md. The
+# conclusion is built from the same items as the bullets and says the same
+# direction per range (the item's ``verdict``); it is indicative and never
+# names a substance as present.
+
+INDICATIVE = "These findings are indicative only and do not confirm specific substances."
+_ADVERB = {"significant": "significantly", "moderate": "moderately", "marginal": "slightly"}
+_ADJECTIVE = {"significant": "significant", "moderate": "moderate", "marginal": "slight"}
+_POS_LONG = {"light": "light end", "middle": "main body of the distribution",
+             "heavy": "heavy end"}
+#: Range findings written out in full; the rest share one short sentence.
+CONCLUSION_FULL_FINDINGS = 3
+CONCLUSION_SHORT_FINDINGS = 4
+#: The generated conclusion's length budget (``comments.CONCLUSION_MAX``,
+#: the cap an edited one has and the report prints whole).
+CONCLUSION_BUDGET = 1500
+_PLAIN_WORD = re.compile(r"[A-Z]?[a-z]+")
+
+
+def range_name(label) -> str:
+    """A range's label as the conclusion names it: plain words lower-cased
+    ("Gas" → "gas", "Lube oil" → "lube oil"), anything else as written
+    ("GRO", "C10-C28 DRO"); a trailing "range" is dropped (the sentence
+    adds it)."""
+    words = str(label or "").split()
+    if len(words) > 1 and words[-1].lower() == "range":
+        words = words[:-1]
+    if words and all(_PLAIN_WORD.fullmatch(w) for w in words):
+        return " ".join(w.lower() for w in words)
+    return " ".join(words)
+
+
+def _finding_text(h: dict, sn: str) -> str:
+    """One broad range finding: "<adverb> <elevated|lower> intensity in the
+    <name> range (Cx–Cy): <what that means>, consistent with <cause>"."""
+    name = f"the {h['name']} range (C{h['c_start']}–C{h['c_end']})"
+    pos = h["position"] or range_position(h["c_start"], h["c_end"], None)
+    sev = h["broad_severity"]
+    if h["verdict"] == "mixed":
+        also = h["also"]
+        return (f"{_ADJECTIVE[sev]} deviations in both directions in {name}: the "
+                f"{_POS_LONG[pos]} differs in shape from {sn} rather than only in amount "
+                f"(mostly {h['direction']}; {also['direction']} at "
+                f"{_span_text(also['spans'], 2)}), consistent with a different product "
+                "or a blend")
+    adv = _ADVERB[sev]
+    if h["verdict"] == "higher":
+        if pos == "light":
+            boiling = " (gasoline-range)" if h["c_end"] <= 12 else ""
+            what = (f"more light-end material than {sn}, consistent with possible "
+                    f"light-end{boiling} contamination")
+        elif pos == "heavy":
+            cause = ("heavier components such as lube/oil-range material"
+                     if h["c_start"] >= 20 else "heavier components (a heavier cut or blend)")
+            what = f"more heavy-end material than {sn}, consistent with {cause}"
+        else:
+            what = (f"more material in the main body of the distribution than {sn}, "
+                    "consistent with a different blend or product")
+        return f"{adv} elevated intensity in {name}: {what}"
+    if pos == "light":
+        what = (f"the light end is reduced compared with {sn}, consistent with a heavier cut "
+                "or loss of light components (weathering/evaporation)")
+    elif pos == "heavy":
+        what = (f"the heavy end is reduced compared with {sn}, consistent with a lighter cut "
+                "or dilution with a lighter product")
+    else:
+        what = (f"the main body of the distribution is reduced compared with {sn}, "
+                "consistent with dilution by a lighter or heavier product")
+    return f"{adv} lower intensity in {name}: {what}"
+
+
+def _short_finding(h: dict) -> str:
+    word = {"higher": "higher", "lower": "lower", "mixed": "higher and lower"}[h["verdict"]]
+    return (f"{_ADVERB[h['broad_severity']]} {word} in the {h['name']} range "
+            f"(C{h['c_start']}–C{h['c_end']})")
+
+
+def _together(hits: list[dict], sn: str) -> str | None:
+    """What a light-end and a heavy-end finding mean together."""
+    light = {h["verdict"] for h in hits if h["position"] == "light"}
+    heavy = {h["verdict"] for h in hits if h["position"] == "heavy"}
+    if len(light) != 1 or len(heavy) != 1 or "mixed" in light | heavy:
+        return None
+    pair = (light.pop(), heavy.pop())
+    return {
+        ("lower", "higher"): ("Together, a reduced light end and an elevated heavy end "
+                              f"indicate a heavier overall distribution than {sn}."),
+        ("higher", "lower"): ("Together, an elevated light end and a reduced heavy end "
+                              f"indicate a lighter overall distribution than {sn}."),
+        ("higher", "higher"): ("Elevated light and heavy ends together are consistent with a "
+                               "blend of a lighter and a heavier product (possible mixed "
+                               "contamination)."),
+        ("lower", "lower"): ("Reduced light and heavy ends together indicate a narrower "
+                             f"distribution than {sn}, concentrated in its main body."),
+    }[pair]
+
+
+def _range_hits(items: list[dict]) -> list[dict]:
+    """The broad range findings, one per carbon span and verdict (ranges
+    with the same span and verdict are named together: "gas / gasoline"),
+    ordered by severity (significant first), then by range order."""
+    groups: dict[tuple, dict] = {}
     for i in items:
-        key = (i["label"].lower(), i["c_start"], i["c_end"]) if i["label"] else None
-        if i["kind"] == "range" and i["elevated"] and key not in seen:
-            seen.add(key)
-            hits.append(i)
-    if not hits:
-        return consistent
-    if len(hits) == 1:
-        h = hits[0]
-        lbl = h["label"].lower()
-        return (f"Conclusion: Compared to {sn}, this sample shows elevated intensity in the "
-                f"{lbl} range (C{h['c_start']}–C{h['c_end']}), consistent with possible "
-                f"{lbl} range contamination. " + indicative)
-    parts = " and ".join(f"the {h['label'].lower()} range (C{h['c_start']}–C{h['c_end']})"
-                         for h in hits)
-    return (f"Conclusion: Compared to {sn}, this sample shows elevated intensity in "
-            f"{parts}. This pattern is consistent with mixed contamination. " + indicative)
+        if i["kind"] != "range" or i["spike_only"]:
+            continue
+        key = (i["c_start"], i["c_end"], i["verdict"])
+        name = range_name(i["label"])
+        g = groups.get(key)
+        if g is None:
+            groups[key] = dict(i, name=name, names=[name])
+        elif name.lower() not in (n.lower() for n in g["names"]):
+            g["names"].append(name)
+            g["name"] = " / ".join(g["names"])
+    return sorted(groups.values(),
+                  key=lambda h: (-_SEV_RANK[h["broad_severity"]], h["index"]))
+
+
+def _spike_clause(items: list[dict], located: bool) -> str | None:
+    """"isolated sharp peaks above the standard at … (in the gas range),
+    which may indicate specific added components[, and … below …]"."""
+    where: dict[float, list[str]] = {}
+    for it in items:
+        for s in it.get("spikes") or []:
+            if it["kind"] == "range":
+                place = range_name(it["label"])
+            else:
+                place = "outside"
+            names = where.setdefault(s["t"], [])
+            if place not in names:
+                names.append(place)
+    spikes = counted_spikes(items)
+    parts = []
+    for sign, word, meaning in ((1, "above", ("specific added components",
+                                              "a specific added component")),
+                                (-1, "below", ("specific components missing from the sample",
+                                               "a specific component missing from the sample"))):
+        group = [s for s in spikes if s["sign"] == sign]
+        if not group:
+            continue
+        one = len(group) == 1
+        text = (f"{'an isolated sharp peak' if one else 'isolated sharp peaks'} {word} the "
+                f"standard {_peak_times(group)}")
+        bits = []
+        if located:
+            places: list[str] = []
+            for s in group:
+                for p in where.get(s["t"], []):
+                    if p not in places:
+                        places.append(p)
+            inside = [p for p in places if p != "outside"]
+            if len(inside) == 1:
+                bits.append(f"in the {inside[0]} range")
+            elif 1 < len(inside) <= 3:
+                bits.append(f"in the {', '.join(inside[:-1])} and {inside[-1]} ranges")
+            elif inside:
+                bits.append(f"in {len(inside)} of the defined ranges")
+            if "outside" in places:
+                bits.append("outside the defined ranges")
+        # the largest one's size and grade (the bullet's tag may come from it)
+        top = max(group, key=lambda x: abs(x["value"]))
+        grade = (f"{'' if one else 'up to '}{top['value']:+.0f}, "
+                 f"{top.get('severity') or 'marginal'}")
+        text += f" ({' and '.join(bits)}; {grade})" if bits else f" ({grade})"
+        text += f", which may indicate {meaning[1] if one else meaning[0]}"
+        parts.append(text)
+    return ", and ".join(parts) if parts else None
+
+
+def _outside_text(o: dict, sn: str) -> str:
+    """"moderately higher than <std> at a–b min" / "different from <std> in
+    both directions (moderate), mostly higher at a–b min"."""
+    sev = o["broad_severity"]
+    spans = (" at " + _span_text(o["spans"], 3)) if o["spans"] else ""
+    if o["verdict"] == "mixed":
+        return (f"different from {sn} in both directions ({_ADJECTIVE[sev]}), mostly "
+                f"{o['direction']}{spans}")
+    return f"{_ADVERB[sev]} {o['verdict']} than {sn}{spans}"
+
+
+def deviation_conclusion(items: list[dict], ranges: list[dict], standard_name: str) -> str:
+    """The conclusion from the same items as the bullets: every range it
+    names reads in its bullet's direction (``verdict``), the broad range
+    findings ordered by severity, then what the light- and heavy-end
+    findings mean together, the deviation outside the ranges, and the sharp
+    peaks on their own. Indicative only. Within ``CONCLUSION_BUDGET``
+    characters: the first ``CONCLUSION_FULL_FINDINGS`` findings in full and
+    up to ``CONCLUSION_SHORT_FINDINGS`` more in short, fewer of each while
+    the text is too long (a standard name of hundreds of characters could
+    still exceed it; the report and Compare then shorten it as any other).
+    Wording: docs/superpowers/specs/2026-10-07-v7-conclusions.md."""
+    sn = standard_name
+    if any(i["kind"] == "no-calibration" for i in items):
+        return (f"Compared to {sn}, the defined ranges could not be evaluated "
+                "because no usable calibration was available for this sample.")
+    outside = next((i for i in items if i["kind"] == "outside"), None)
+    if not ranges:
+        if outside is None:
+            return (f"Compared to {sn}, this sample shows no significant deviation across the "
+                    "run. The chromatographic profile is consistent with the reference standard.")
+        out = []
+        if outside["spike_only"]:
+            out.append(f"Compared to {sn}, this sample shows no broad deviation across the run, "
+                       f"but {_spike_clause(items, located=False)}.")
+        else:
+            sev = outside["broad_severity"]
+            spans = _span_text(outside["spans"], 3) if outside["spans"] else ""
+            if outside["verdict"] == "mixed":
+                out.append(f"Compared to {sn}, this sample differs from it in both directions "
+                           f"across the run ({_ADJECTIVE[sev]}), mostly {outside['direction']}"
+                           + (f" at {spans}" if spans else "") + ".")
+            else:
+                out.append(f"Compared to {sn}, this sample is {_ADVERB[sev]} "
+                           f"{outside['verdict']} across the run"
+                           + (f", at {spans}" if spans else "") + ".")
+            clause = _spike_clause(items, located=False)
+            if clause:
+                out.append(f"It also shows {clause}.")
+        out.append("No ranges were defined to attribute the deviation.")
+        out.append(INDICATIVE)
+        return " ".join(out)
+
+    hits = _range_hits(items)
+    range_spikes = any(i["kind"] == "range" and i["spikes"] for i in items)
+    if not hits and outside is None and not range_spikes:
+        return (f"Compared to {sn}, this sample shows no significant deviation in the defined "
+                "ranges. The chromatographic profile is consistent with the reference standard.")
+    # the most that fits the budget: fewer findings in full, then fewer
+    # named in short, as the text grows
+    for n_full, n_short in ((CONCLUSION_FULL_FINDINGS, CONCLUSION_SHORT_FINDINGS),
+                            (3, 2), (2, 2), (1, 2), (1, 0)):
+        text = _ranges_conclusion(items, sn, hits, outside, range_spikes, n_full, n_short)
+        if len(text) <= CONCLUSION_BUDGET:
+            break
+    return text
+
+
+def _ranges_conclusion(items, sn, hits, outside, range_spikes, n_full, n_short) -> str:
+    out = []
+    spikes_said = False
+    if hits:
+        full = hits[:n_full]
+        out.append(f"Compared to {sn}, this sample shows {_finding_text(full[0], sn)}.")
+        out += [f"It also shows {_finding_text(h, sn)}." for h in full[1:]]
+        rest = hits[n_full:]
+        if rest:
+            shown = "; ".join(_short_finding(h) for h in rest[:n_short])
+            more = len(rest) - n_short
+            if more > 0 and not n_short:
+                shown = f"{more} more range{'s' if more != 1 else ''} (see the findings)"
+            elif more > 0:
+                shown += f"; and {more} more (see the findings)"
+            out.append(f"Further deviations: {shown}.")
+        together = _together(hits, sn)
+        if together:
+            out.append(together)
+    elif range_spikes:
+        out.append(f"Compared to {sn}, this sample shows no broad deviation in the defined "
+                   f"ranges, but {_spike_clause(items, located=True)}.")
+        spikes_said = True
+    else:
+        out.append(f"Compared to {sn}, this sample shows no significant deviation in the "
+                   "defined ranges.")
+    broad_outside = outside is not None and not outside["spike_only"]
+    if broad_outside:
+        out.append(f"Outside the defined ranges it is {_outside_text(outside, sn)}.")
+    if not spikes_said:
+        clause = _spike_clause(items, located=True)
+        if clause:
+            opener = "It also shows" if (hits or broad_outside) else "It shows"
+            out.append(f"{opener} {clause}.")
+    out.append(INDICATIVE)
+    return " ".join(out)
 
 
 def counted_spikes(items: list[dict]) -> list[dict]:
@@ -1135,7 +1477,7 @@ def analyze_report(
 ) -> dict:
     """Both channels + the bullets for one sample/standard pair: ``{diff,
     spike_diff, trend_sample, trend_std, windows, items, text, conclusion,
-    spikes}``. The one analysis pass behind ``/api/analysis`` and every
+    spikes, std_profile}``. The one analysis pass behind ``/api/analysis`` and every
     report export (``app._report_content``)."""
     t = np.asarray(t, dtype=float)
     ladder = (list(ladder[0]), list(ladder[1])) if ladder else ([], [])
@@ -1155,8 +1497,10 @@ def analyze_report(
     smooth = (lambda y: gaussian_filter1d(np.asarray(y, dtype=float), SPIKE_SIGMA_PTS)) \
         if gaussian_filter1d is not None else (lambda y: np.asarray(y, dtype=float))
     heights = (smooth(aligned) - pair["trend_sample"], smooth(y_std) - pair["trend_std"])
+    profile = standard_profile(t, y_std, ladder, params)
     items = build_deviation_report(t, pair["diff"], spike_diff, ranges=ranges,
-                                   ladder=ladder, params=params, spike_heights=heights)
+                                   ladder=ladder, params=params, spike_heights=heights,
+                                   std_profile=profile)
     n_ext = _extent(t, params)
     t_max = float(t[n_ext - 1]) if n_ext else float(t[0])
     windows = range_windows(ranges, ladder, float(t[0]), t_max) if ranges else []
@@ -1171,4 +1515,5 @@ def analyze_report(
         "text": render_bullets(items, standard_name),
         "conclusion": deviation_conclusion(items, ranges, standard_name),
         "spikes": counted_spikes(items),
+        "std_profile": profile,
     }
