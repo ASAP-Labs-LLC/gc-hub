@@ -139,12 +139,10 @@ def test_gasoline_spike_gives_a_gas_bullet_and_the_gas_conclusion():
     gas = [i for i in out["items"] if i["kind"] == "range" and i["label"] == "Gas"]
     assert len(gas) == 1 and gas[0]["spike_only"] and gas[0]["direction"] == "higher"
     assert out["text"].splitlines()[0] == (
-        "• Gas (C5–C11): sharp peaks above Diesel #2 — significant "
-        "(1 sharp peak above the standard at 2.00 min; "
-        "no broad deviation above the marginal threshold)")
+        "• Gas (C5–C11): 1 sharp peak above Diesel #2 — significant")
     # v7: sharp peaks only are named as such, never as a broad elevation
+    # (v8: counted in plain words, no time or size)
     assert out["conclusion"] == (
-        "Compared to Diesel #2, this sample shows no broad deviation in the defined ranges, "
-        "but an isolated sharp peak above the standard at 2.00 min (in the gas range; "
-        "+2967, significant), which may indicate a specific added component. "
-        "These findings are indicative only and do not confirm specific substances.")
+        "Compared to Diesel #2, this sample matches closely in every range. "
+        "It has 1 sharp peak above Diesel #2. This could be something added. "
+        "This is a screening result only. It does not prove what is in the sample.")

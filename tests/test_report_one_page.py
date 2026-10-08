@@ -157,12 +157,14 @@ def flat(s: str) -> str:
     return " ".join(s.replace("•", " ").split())
 
 
-NORMAL_BULLETS = ("• Gas (C5–C11): HIGHER than Base — moderate (max +562 at 2.03 min; 39% of "
-                  "range beyond the marginal threshold; 1 sharp peak above the standard at 2.03 min)\n"
-                  "• Outside the defined ranges: no deviations above the marginal threshold.")
+NORMAL_BULLETS = ("• Gas (C5–C11): higher than Base — moderate, plus 1 sharp peak\n"
+                  "• Outside the defined ranges: lower than Base — marginal")
 
 
 def worst_bullets(std: str, n: int = 41) -> str:
+    """A layout stress: each line is far longer than any v8 bullet (which
+    has no times, sizes or percentages), so the one-page plan is tested
+    against more text than the server ever writes."""
     return "\n".join(
         f"• Range number {i:02d} with a long label xx (C{5 + i}–C{8 + i}): HIGHER than {std} — "
         "significant at 1.20–1.50, 2.00–2.40 and 3.00–3.10 min; also lower moderate 4.00–4.20 "
@@ -343,7 +345,7 @@ def test_section_labels_fit_their_column(face):
 def test_a_long_list_of_short_rows_is_measured_exactly(face):
     """Many short rows (8 findings, 12 marked regions, 12 notes): what is
     listed fits without the shrink and nothing more would have."""
-    bullets = "\n".join(f"• R{i} (C{i}–C{i + 2}): HIGHER than Base — marginal (max +130 at 2.0{i} min)"
+    bullets = "\n".join(f"• R{i} (C{i}–C{i + 2}): higher than Base — marginal, plus {i} sharp peaks"
                         for i in range(8))
     regions = [f"Region {i} (C8–C10, 1.30–2.10 min; RB, 2026-09-29)" for i in range(12)]
     notes = [f"Note {i} (RB, 2026-09-29)" for i in range(12)]
@@ -353,12 +355,13 @@ def test_a_long_list_of_short_rows_is_measured_exactly(face):
 
 
 def test_finding_rows_keep_the_line_whole():
-    rows = rl.finding_rows(NORMAL_BULLETS + "\nNo deviations detected.")
+    rows = rl.finding_rows(NORMAL_BULLETS + "\nNo differences found.")
     assert [r["text"] for r in rows] == [
         flat(NORMAL_BULLETS.splitlines()[0]),
-        "Outside the defined ranges: no deviations above the marginal threshold.",
-        "No deviations detected."]
+        "Outside the defined ranges: lower than Base — marginal",
+        "No differences found."]
     assert rows[0]["head"] == "Gas (C5–C11):" and rows[0]["severity"] == "moderate"
+    assert rows[1]["head"] == "Outside the defined ranges:" and rows[1]["severity"] == "marginal"
     assert rows[0]["head"] + " " + rows[0]["rest"] == rows[0]["text"]
     assert rows[2]["head"] == "" and rows[2]["severity"] is None
 

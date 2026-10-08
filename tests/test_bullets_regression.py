@@ -73,9 +73,8 @@ def test_range_driven_report_is_bounded(ranges):
 sys.path.insert(0, str(ROOT / "tests" / "fixtures"))
 import make_diesel_pair as mk  # noqa: E402
 
-CONSISTENT = ("Compared to Diesel, this sample shows no significant deviation in "
-              "the defined ranges. The chromatographic profile is consistent with the "
-              "reference standard.")
+CONSISTENT = "This sample closely matches Diesel in every range."
+NO_DEVIATION = "No differences found."
 
 
 def _report(sample, standard, t=None, ranges=None):
@@ -93,7 +92,7 @@ def _elevated(out):
 def test_the_same_product_pair_reports_no_deviation():
     t, ys, ystd, _ = _load()
     out = _report(ys, ystd, t)
-    assert out["text"] == "No deviations above the marginal threshold.", out["text"]
+    assert out["text"] == NO_DEVIATION, out["text"]
     assert out["conclusion"] == CONSISTENT
     assert out["spikes"] == []
 
@@ -106,16 +105,18 @@ def test_other_batches_are_clean(kw):
     out = _report(mk.batch(t, seed, **kw), mk.standard(t), t)
     assert out["spikes"] == [], out["text"]
     assert _elevated(out) == [], out["text"]
-    if out["text"] == "No deviations above the marginal threshold.":
+    if out["text"] == NO_DEVIATION:
         assert out["conclusion"] == CONSISTENT
     else:
         # v7: the conclusion says what the bullets say. One batch has a
         # marginal run just outside the ranges (+113, 1.88–1.95 min): the
-        # bullets showed it in v6 too, the conclusion now names it as well.
+        # bullets showed it in v6 too, the conclusion names it as well.
         assert [i["kind"] for i in out["items"]] == ["none", "outside"], out["text"]
+        assert out["text"].startswith("No differences found in the ranges.\n"
+                                      "• Outside the defined ranges: "), out["text"]
         assert out["conclusion"].startswith(
-            "Compared to Diesel, this sample shows no significant deviation in the defined "
-            "ranges. Outside the defined ranges it is slightly "), out["conclusion"]
+            "Compared to Diesel, the ranges match closely. It also differs from Diesel "
+            "outside the ranges."), out["conclusion"]
 
 
 @pytest.mark.parametrize("frac", [0.01, 0.02, 0.05])
@@ -124,8 +125,7 @@ def test_gasoline_in_diesel_flags_gas_only(frac):
     out = _report(mk.with_gasoline(t, frac), mk.standard(t), t)
     assert _elevated(out) == ["Gas"], out["text"]
     assert out["conclusion"].startswith(
-        "Compared to Diesel, this sample shows slightly elevated intensity in the gas range "
-        "(C5–C11): more light-end material than Diesel, consistent with possible light-end "
-        "(gasoline-range) contamination."), out["conclusion"]
-    assert "sharp peak" in out["conclusion"] and "above the standard" in out["conclusion"]
-    assert "lower intensity in the gas range" not in out["conclusion"]
+        "Compared to Diesel, this sample has slightly more light material in the gas range. "
+        "This could mean a lighter fuel, such as gasoline, was mixed in."), out["conclusion"]
+    assert "sharp peak" in out["conclusion"] and "above Diesel" in out["conclusion"]
+    assert "less light material in the gas range" not in out["conclusion"]

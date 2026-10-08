@@ -89,15 +89,15 @@ module.exports = (t) => {
               direction: 'lower', verdict: 'lower', spans: [[4.2, 5.0]] },
         ],
         text: [
-            '• Gas (C5–C11, evaluated to C10): higher than Std — significant, light end elevated (max +1180 at 0.74 min)',
-            '• Heavy (C40–C60): not evaluated — outside the evaluated window (calibration, run end or x-axis limit)',
-            '• Outside the defined ranges: lower than Std — marginal at 4.20–5.00 min (max -140 at 4.60 min)',
+            '• Gas (C5–C11, partly checked): higher than Std — significant, plus 1 sharp peak',
+            '• Heavy (C40–C60): not checked, outside this run',
+            '• Outside the defined ranges: lower than Std — marginal',
         ].join('\n'),
     };
     const v = L.findingsView(result);
     t.eq(v.rows.length, 3);
-    t.eq(v.rows[0].heading, 'Gas (C5–C11, evaluated to C10)');
-    t.eq(v.rows[0].text, 'higher than Std — significant, light end elevated (max +1180 at 0.74 min)');
+    t.eq(v.rows[0].heading, 'Gas (C5–C11, partly checked)');
+    t.eq(v.rows[0].text, 'higher than Std — significant, plus 1 sharp peak');
     t.eq(v.rows[0].badge, 'Significant · higher');
     t.eq(v.rows[0].tone, 'dev');
     t.eq([v.rows[0].t0, v.rows[0].t1], [0.2, 1.4]);
@@ -114,15 +114,15 @@ module.exports = (t) => {
 
     // no deviation: one plain row, no badge severity
     const none = L.findingsView({ items: [{ kind: 'none', within_ranges: true }],
-        text: 'No deviations above the marginal threshold within the defined ranges.' });
+        text: 'No differences found in the ranges.' });
     t.eq(none.rows, [{ key: '0-none', kind: 'none', heading: null,
-        text: 'No deviations above the marginal threshold within the defined ranges.',
+        text: 'No differences found in the ranges.',
         badge: 'Within', tone: 'ok', severity: null, direction: null, t0: null, t1: null }]);
     t.eq(none.deviating, 0);
     // mixed direction (v7: the verdict, as the bullet leads with it)
     const mixedRow = L.findingsView({ items: [{ kind: 'range', label: 'Oil', c_start: 20, c_end: 44,
         severity: 'moderate', direction: 'lower', verdict: 'mixed', mixed: true, t0: 4, t1: 6 }],
-        text: '• Oil (C20–C44): mixed, higher and lower than S — moderate' }).rows[0];
+        text: '• Oil (C20–C44): both higher and lower than S — moderate' }).rows[0];
     t.eq([mixedRow.badge, mixedRow.direction], ['Moderate · mixed', 'mixed']);
     // a v6 answer (no verdict): mixed, else the direction
     t.eq(L.findingsView({ items: [{ kind: 'range', label: 'Oil', c_start: 20, c_end: 44,
@@ -132,7 +132,7 @@ module.exports = (t) => {
     const peaks = L.findingsView({ items: [{ kind: 'range', label: 'Gas', c_start: 5, c_end: 11,
         severity: 'significant', direction: 'higher', verdict: 'higher', spike_only: true,
         t0: 0.5, t1: 3.5 }],
-        text: '• Gas (C5–C11): sharp peaks above S — significant (1 sharp peak above the standard at 2.00 min; no broad deviation above the marginal threshold)' }).rows[0];
+        text: '• Gas (C5–C11): 1 sharp peak above S — significant' }).rows[0];
     t.eq([peaks.heading, peaks.badge, peaks.direction], ['Gas (C5–C11)', 'Significant · sharp peaks', 'higher']);
     // a label with a colon in it still splits at the right place
     t.eq(L.findingsView({ items: [{ kind: 'range', label: 'A: B', c_start: 1, c_end: 2,

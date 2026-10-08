@@ -509,8 +509,8 @@ def generate_conclusion(
 # as the reference the regression test compares against.)
 
 _EPS = 1e-9
-NO_DEVIATION = "No deviations above the marginal threshold."
-NO_DEVIATION_IN_RANGES = "No deviations above the marginal threshold within the defined ranges."
+NO_DEVIATION = "No differences found."
+NO_DEVIATION_IN_RANGES = "No differences found in the ranges."
 OUTSIDE_LABEL = "Outside the defined ranges"
 ACROSS_LABEL = "Across the run"
 NO_CALIBRATION_LABEL = "Calibration unavailable — ranges not evaluated"
@@ -1067,81 +1067,37 @@ def build_deviation_report(
     return items
 
 
-def _span_text(spans, limit: int) -> str:
-    shown = ", ".join(f"{a:.2f}–{b:.2f}" for a, b in spans[:limit]) + " min"
-    if len(spans) > limit:
-        shown += f", +{len(spans) - limit} more"
-    return shown
+# ── the findings and the conclusion, in plain words ───────────────────
+# v8: written for the customer, not the analyst. No retention times, no
+# signal sizes, no percentages: the charts carry those. Wording rules:
+# docs/superpowers/specs/2026-10-08-v8-plain-wording.md (the detection and
+# each range's verdict are v7's, unchanged).
+
+def _peaks_count(spikes: list[dict]) -> str:
+    """"1 sharp peak" / "3 sharp peaks"."""
+    n = len(spikes)
+    return f"{n} sharp peak{'s' if n != 1 else ''}"
 
 
-def _peak_times(group: list[dict]) -> str:
-    """"at a, b min" for ≤ 3 peaks, else "incl." the 3 largest (time order)."""
-    if len(group) <= 3:
-        return "at " + ", ".join(f"{x['t']:.2f}" for x in sorted(group, key=lambda s: s["t"])) \
-            + " min"
-    top = sorted(group, key=lambda s: -abs(s["value"]))[:3]
-    return "incl. " + ", ".join(f"{x['t']:.2f}" for x in sorted(top, key=lambda s: s["t"])) \
-        + " min"
+def _peaks_where(spikes: list[dict]) -> str:
+    up = any(x["sign"] == 1 for x in spikes)
+    down = any(x["sign"] == -1 for x in spikes)
+    return "above and below" if up and down else ("above" if up else "below")
 
 
-def _spike_text(spikes: list[dict]) -> str:
-    """"N sharp peaks above[, M below] the standard at …"."""
-    up = [x for x in spikes if x["sign"] == 1]
-    down = [x for x in spikes if x["sign"] == -1]
-    if up and down:
-        return (f"{len(up)} sharp peak{'s' if len(up) != 1 else ''} above, {len(down)} below "
-                f"the standard {_peak_times(up + down)}")
-    group, word = (up, "above") if up else (down, "below")
-    return (f"{len(group)} sharp peak{'s' if len(group) != 1 else ''} {word} the standard "
-            f"{_peak_times(group)}")
-
-
-def _pct(frac: float) -> str:
-    p = frac * 100.0
-    if 0 < p < 1:
-        return "<1%"
-    return f"{int(p + 0.5)}%"
-
-
-_POS_SHORT = {"light": "light end", "middle": "main body", "heavy": "heavy end"}
-
-
-def _assessment_text(it: dict, standard_name: str, *, spans: bool) -> str:
-    """``<direction> than <std> — <severity>[, <part> elevated|reduced]
-    (…)`` for a range/outside item. The direction is the item's verdict;
-    sharp peaks only read "sharp peaks above|below <std>"."""
+def _assessment_text(it: dict, standard_name: str) -> str:
+    """``<direction> than <std> — <severity>[, plus N sharp peaks]``."""
     sn = standard_name
     sev = it["severity"]
     if it["spike_only"]:
-        up = any(x["sign"] == 1 for x in it["spikes"])
-        down = any(x["sign"] == -1 for x in it["spikes"])
-        where = "above and below" if up and down else ("above" if up else "below")
-        return (f"sharp peaks {where} {sn} — {sev} ({_spike_text(it['spikes'])}; "
-                "no broad deviation above the marginal threshold)")
-    part = _POS_SHORT.get(it.get("position"))
-    details = []
+        return f"{_peaks_count(it['spikes'])} {_peaks_where(it['spikes'])} {sn} — {sev}"
     if it["verdict"] == "mixed":
-        head = f"mixed, higher and lower than {sn} — {sev}"
-        if part:
-            head += f", {part} differs in shape"
-        mostly = f"mostly {it['direction']}, {it['dominant_severity']}"
-        if spans and it["spans"]:
-            mostly += " at " + _span_text(it["spans"], 3)
-        also = it["also"]
-        details += [mostly, f"{also['direction']} {also['severity']} at "
-                    + _span_text(also["spans"], 2)]
+        text = f"both higher and lower than {sn} — {sev}"
     else:
-        head = f"{it['verdict']} than {sn} — {sev}"
-        if part:
-            head += f", {part} {'elevated' if it['verdict'] == 'higher' else 'reduced'}"
-        if spans and it["spans"]:
-            head += " at " + _span_text(it["spans"], 3)
-    details.append(f"max {it['max_diff']:+.0f} at {it['max_at']:.2f} min")
-    if it["frac_above"] is not None:
-        details.append(f"{_pct(it['frac_above'])} of range beyond the marginal threshold")
+        text = f"{it['verdict']} than {sn} — {sev}"
     if it["spikes"]:
-        details.append(_spike_text(it["spikes"]))
-    return f"{head} ({'; '.join(details)})"
+        text += f", plus {_peaks_count(it['spikes'])}"
+    return text
 
 
 def render_bullets(items: list[dict], standard_name: str) -> str:
@@ -1158,43 +1114,29 @@ def render_bullets(items: list[dict], standard_name: str) -> str:
             lines.append(NO_DEVIATION_IN_RANGES if it.get("within_ranges") else NO_DEVIATION)
         elif kind == "not-evaluated":
             lines.append(f"• {it['label']} (C{it['c_start']}–C{it['c_end']}): "
-                         "not evaluated — outside the evaluated window "
-                         "(calibration, run end or x-axis limit)")
+                         "not checked, outside this run")
         elif kind == "range":
-            clip = ""
-            if it["clipped"]:
-                lo = it["c_eval_start"] != it["c_start"]
-                hi = it["c_eval_end"] != it["c_end"]
-                if lo and hi:
-                    clip = f", evaluated C{it['c_eval_start']}–C{it['c_eval_end']}"
-                elif lo:
-                    clip = f", evaluated from C{it['c_eval_start']}"
-                else:
-                    clip = f", evaluated to C{it['c_eval_end']}"
-            lines.append(f"• {it['label']} (C{it['c_start']}–C{it['c_end']}{clip}): "
-                         + _assessment_text(it, standard_name, spans=False))
+            part = ", partly checked" if it["clipped"] else ""
+            lines.append(f"• {it['label']} (C{it['c_start']}–C{it['c_end']}{part}): "
+                         + _assessment_text(it, standard_name))
         elif kind == "no-calibration" and not it.get("deviates"):
-            lines.append(f"• {it['label']}: no deviations above the marginal threshold.")
+            lines.append(f"• {it['label']}: no differences found.")
         else:   # outside / no-calibration with a deviation
-            lines.append(f"• {it['label']}: "
-                         + _assessment_text(it, standard_name, spans=True))
+            lines.append(f"• {it['label']}: " + _assessment_text(it, standard_name))
     return "\n".join(lines)
 
 
 # ── the conclusion ─────────────────────────────────────────────────────
-# Wording rules: docs/superpowers/specs/2026-10-07-v7-conclusions.md. The
-# conclusion is built from the same items as the bullets and says the same
-# direction per range (the item's ``verdict``); it is indicative and never
-# names a substance as present.
+# Built from the same items as the bullets and says the same direction per
+# range (the item's ``verdict``); it is indicative and never names a
+# substance as present.
 
-INDICATIVE = "These findings are indicative only and do not confirm specific substances."
-_ADVERB = {"significant": "significantly", "moderate": "moderately", "marginal": "slightly"}
-_ADJECTIVE = {"significant": "significant", "moderate": "moderate", "marginal": "slight"}
-_POS_LONG = {"light": "light end", "middle": "main body of the distribution",
-             "heavy": "heavy end"}
-#: Range findings written out in full; the rest share one short sentence.
+INDICATIVE = "This is a screening result only. It does not prove what is in the sample."
+_MORE = {"significant": "much more", "moderate": "more", "marginal": "slightly more"}
+_LESS = {"significant": "much less", "moderate": "less", "marginal": "slightly less"}
+_OVERALL = {"significant": "much", "moderate": "", "marginal": "slightly"}
+#: Range findings written out; any more are pointed to the findings.
 CONCLUSION_FULL_FINDINGS = 3
-CONCLUSION_SHORT_FINDINGS = 4
 #: The generated conclusion's length budget (``comments.CONCLUSION_MAX``,
 #: the cap an edited one has and the report prints whole).
 CONCLUSION_BUDGET = 1500
@@ -1214,49 +1156,33 @@ def range_name(label) -> str:
     return " ".join(words)
 
 
-def _finding_text(h: dict, sn: str) -> str:
-    """One broad range finding: "<adverb> <elevated|lower> intensity in the
-    <name> range (Cx–Cy): <what that means>, consistent with <cause>"."""
-    name = f"the {h['name']} range (C{h['c_start']}–C{h['c_end']})"
+def _finding_text(h: dict) -> tuple[str, str]:
+    """One broad range finding: (what the sample has, what it could mean)."""
+    name = f"the {h['name']} range"
     pos = h["position"] or range_position(h["c_start"], h["c_end"], None)
     sev = h["broad_severity"]
     if h["verdict"] == "mixed":
-        also = h["also"]
-        return (f"{_ADJECTIVE[sev]} deviations in both directions in {name}: the "
-                f"{_POS_LONG[pos]} differs in shape from {sn} rather than only in amount "
-                f"(mostly {h['direction']}; {also['direction']} at "
-                f"{_span_text(also['spans'], 2)}), consistent with a different product "
-                "or a blend")
-    adv = _ADVERB[sev]
+        return (f"a different pattern in {name} (some parts higher, some lower)",
+                "This could be a different fuel or a blend.")
     if h["verdict"] == "higher":
+        more = _MORE[sev]
         if pos == "light":
-            boiling = " (gasoline-range)" if h["c_end"] <= 12 else ""
-            what = (f"more light-end material than {sn}, consistent with possible "
-                    f"light-end{boiling} contamination")
-        elif pos == "heavy":
-            cause = ("heavier components such as lube/oil-range material"
-                     if h["c_start"] >= 20 else "heavier components (a heavier cut or blend)")
-            what = f"more heavy-end material than {sn}, consistent with {cause}"
-        else:
-            what = (f"more material in the main body of the distribution than {sn}, "
-                    "consistent with a different blend or product")
-        return f"{adv} elevated intensity in {name}: {what}"
+            fuel = "a lighter fuel, such as gasoline," if h["c_end"] <= 12 else "a lighter fuel"
+            return (f"{more} light material in {name}",
+                    f"This could mean {fuel} was mixed in.")
+        if pos == "heavy":
+            fuel = "a heavier product, such as oil," if h["c_start"] >= 20 else "a heavier fuel"
+            return (f"{more} heavy material in {name}",
+                    f"This could mean {fuel} was mixed in.")
+        return f"{more} material in {name}", "This could be a different fuel or a blend."
+    less = _LESS[sev]
     if pos == "light":
-        what = (f"the light end is reduced compared with {sn}, consistent with a heavier cut "
-                "or loss of light components (weathering/evaporation)")
-    elif pos == "heavy":
-        what = (f"the heavy end is reduced compared with {sn}, consistent with a lighter cut "
-                "or dilution with a lighter product")
-    else:
-        what = (f"the main body of the distribution is reduced compared with {sn}, "
-                "consistent with dilution by a lighter or heavier product")
-    return f"{adv} lower intensity in {name}: {what}"
-
-
-def _short_finding(h: dict) -> str:
-    word = {"higher": "higher", "lower": "lower", "mixed": "higher and lower"}[h["verdict"]]
-    return (f"{_ADVERB[h['broad_severity']]} {word} in the {h['name']} range "
-            f"(C{h['c_start']}–C{h['c_end']})")
+        return (f"{less} light material in {name}",
+                "The lightest parts may have evaporated, or it may be a heavier fuel.")
+    if pos == "heavy":
+        return (f"{less} heavy material in {name}",
+                "This could mean a lighter fuel was mixed in.")
+    return f"{less} material in {name}", "This could mean another fuel was mixed in."
 
 
 def _together(hits: list[dict], sn: str) -> str | None:
@@ -1265,18 +1191,12 @@ def _together(hits: list[dict], sn: str) -> str | None:
     heavy = {h["verdict"] for h in hits if h["position"] == "heavy"}
     if len(light) != 1 or len(heavy) != 1 or "mixed" in light | heavy:
         return None
-    pair = (light.pop(), heavy.pop())
     return {
-        ("lower", "higher"): ("Together, a reduced light end and an elevated heavy end "
-                              f"indicate a heavier overall distribution than {sn}."),
-        ("higher", "lower"): ("Together, an elevated light end and a reduced heavy end "
-                              f"indicate a lighter overall distribution than {sn}."),
-        ("higher", "higher"): ("Elevated light and heavy ends together are consistent with a "
-                               "blend of a lighter and a heavier product (possible mixed "
-                               "contamination)."),
-        ("lower", "lower"): ("Reduced light and heavy ends together indicate a narrower "
-                             f"distribution than {sn}, concentrated in its main body."),
-    }[pair]
+        ("lower", "higher"): f"Overall, it is heavier than {sn}.",
+        ("higher", "lower"): f"Overall, it is lighter than {sn}.",
+        ("higher", "higher"): "It may be a mix of a lighter and a heavier product.",
+        ("lower", "lower"): None,
+    }[(light.pop(), heavy.pop())]
 
 
 def _range_hits(items: list[dict]) -> list[dict]:
@@ -1299,159 +1219,88 @@ def _range_hits(items: list[dict]) -> list[dict]:
                   key=lambda h: (-_SEV_RANK[h["broad_severity"]], h["index"]))
 
 
-def _spike_clause(items: list[dict], located: bool) -> str | None:
-    """"isolated sharp peaks above the standard at … (in the gas range),
-    which may indicate specific added components[, and … below …]"."""
-    where: dict[float, list[str]] = {}
-    for it in items:
-        for s in it.get("spikes") or []:
-            if it["kind"] == "range":
-                place = range_name(it["label"])
-            else:
-                place = "outside"
-            names = where.setdefault(s["t"], [])
-            if place not in names:
-                names.append(place)
+def _spike_sentences(items: list[dict], sn: str, opener: str) -> list[str]:
+    """"<opener> 2 sharp peaks above <std>. These could be something added."
+    and the same for peaks below."""
     spikes = counted_spikes(items)
-    parts = []
-    for sign, word, meaning in ((1, "above", ("specific added components",
-                                              "a specific added component")),
-                                (-1, "below", ("specific components missing from the sample",
-                                               "a specific component missing from the sample"))):
+    out = []
+    for sign, word, one, many in ((1, "above", "This could be something added.",
+                                   "These could be something added."),
+                                  (-1, "below", "This could be something missing.",
+                                   "These could be something missing.")):
         group = [s for s in spikes if s["sign"] == sign]
         if not group:
             continue
-        one = len(group) == 1
-        text = (f"{'an isolated sharp peak' if one else 'isolated sharp peaks'} {word} the "
-                f"standard {_peak_times(group)}")
-        bits = []
-        if located:
-            places: list[str] = []
-            for s in group:
-                for p in where.get(s["t"], []):
-                    if p not in places:
-                        places.append(p)
-            inside = [p for p in places if p != "outside"]
-            if len(inside) == 1:
-                bits.append(f"in the {inside[0]} range")
-            elif 1 < len(inside) <= 3:
-                bits.append(f"in the {', '.join(inside[:-1])} and {inside[-1]} ranges")
-            elif inside:
-                bits.append(f"in {len(inside)} of the defined ranges")
-            if "outside" in places:
-                bits.append("outside the defined ranges")
-        # the largest one's size and grade (the bullet's tag may come from it)
-        top = max(group, key=lambda x: abs(x["value"]))
-        grade = (f"{'' if one else 'up to '}{top['value']:+.0f}, "
-                 f"{top.get('severity') or 'marginal'}")
-        text += f" ({' and '.join(bits)}; {grade})" if bits else f" ({grade})"
-        text += f", which may indicate {meaning[1] if one else meaning[0]}"
-        parts.append(text)
-    return ", and ".join(parts) if parts else None
-
-
-def _outside_text(o: dict, sn: str) -> str:
-    """"moderately higher than <std> at a–b min" / "different from <std> in
-    both directions (moderate), mostly higher at a–b min"."""
-    sev = o["broad_severity"]
-    spans = (" at " + _span_text(o["spans"], 3)) if o["spans"] else ""
-    if o["verdict"] == "mixed":
-        return (f"different from {sn} in both directions ({_ADJECTIVE[sev]}), mostly "
-                f"{o['direction']}{spans}")
-    return f"{_ADVERB[sev]} {o['verdict']} than {sn}{spans}"
+        out.append(f"{opener} {_peaks_count(group)} {word} {sn}. "
+                   f"{one if len(group) == 1 else many}")
+        opener = "It also has"
+    return out
 
 
 def deviation_conclusion(items: list[dict], ranges: list[dict], standard_name: str) -> str:
     """The conclusion from the same items as the bullets: every range it
     names reads in its bullet's direction (``verdict``), the broad range
-    findings ordered by severity, then what the light- and heavy-end
-    findings mean together, the deviation outside the ranges, and the sharp
-    peaks on their own. Indicative only. Within ``CONCLUSION_BUDGET``
-    characters: the first ``CONCLUSION_FULL_FINDINGS`` findings in full and
-    up to ``CONCLUSION_SHORT_FINDINGS`` more in short, fewer of each while
-    the text is too long (a standard name of hundreds of characters could
-    still exceed it; the report and Compare then shorten it as any other).
-    Wording: docs/superpowers/specs/2026-10-07-v7-conclusions.md."""
+    findings by severity (the first ``CONCLUSION_FULL_FINDINGS``; any more
+    are pointed to the findings), each with what it could mean, then the
+    light and heavy ends together, the deviation outside the ranges, and
+    the sharp peaks. Short, plain sentences; indicative only."""
     sn = standard_name
     if any(i["kind"] == "no-calibration" for i in items):
-        return (f"Compared to {sn}, the defined ranges could not be evaluated "
-                "because no usable calibration was available for this sample.")
+        return ("The ranges could not be checked because this sample has no usable "
+                "calibration.")
     outside = next((i for i in items if i["kind"] == "outside"), None)
     if not ranges:
         if outside is None:
-            return (f"Compared to {sn}, this sample shows no significant deviation across the "
-                    "run. The chromatographic profile is consistent with the reference standard.")
+            return f"This sample closely matches {sn}."
         out = []
         if outside["spike_only"]:
-            out.append(f"Compared to {sn}, this sample shows no broad deviation across the run, "
-                       f"but {_spike_clause(items, located=False)}.")
+            out.append(f"Compared to {sn}, this sample matches closely overall.")
+            out += _spike_sentences(items, sn, "It has")
         else:
-            sev = outside["broad_severity"]
-            spans = _span_text(outside["spans"], 3) if outside["spans"] else ""
             if outside["verdict"] == "mixed":
-                out.append(f"Compared to {sn}, this sample differs from it in both directions "
-                           f"across the run ({_ADJECTIVE[sev]}), mostly {outside['direction']}"
-                           + (f" at {spans}" if spans else "") + ".")
+                out.append(f"Compared to {sn}, this sample has a different pattern "
+                           "(some parts higher, some lower).")
             else:
-                out.append(f"Compared to {sn}, this sample is {_ADVERB[sev]} "
-                           f"{outside['verdict']} across the run"
-                           + (f", at {spans}" if spans else "") + ".")
-            clause = _spike_clause(items, located=False)
-            if clause:
-                out.append(f"It also shows {clause}.")
-        out.append("No ranges were defined to attribute the deviation.")
+                adv = _OVERALL[outside["broad_severity"]]
+                out.append(f"Compared to {sn}, this sample reads "
+                           f"{(adv + ' ') if adv else ''}{outside['verdict']} overall.")
+            out += _spike_sentences(items, sn, "It also has")
         out.append(INDICATIVE)
         return " ".join(out)
 
     hits = _range_hits(items)
     range_spikes = any(i["kind"] == "range" and i["spikes"] for i in items)
     if not hits and outside is None and not range_spikes:
-        return (f"Compared to {sn}, this sample shows no significant deviation in the defined "
-                "ranges. The chromatographic profile is consistent with the reference standard.")
-    # the most that fits the budget: fewer findings in full, then fewer
-    # named in short, as the text grows
-    for n_full, n_short in ((CONCLUSION_FULL_FINDINGS, CONCLUSION_SHORT_FINDINGS),
-                            (3, 2), (2, 2), (1, 2), (1, 0)):
-        text = _ranges_conclusion(items, sn, hits, outside, range_spikes, n_full, n_short)
-        if len(text) <= CONCLUSION_BUDGET:
-            break
+        return f"This sample closely matches {sn} in every range."
+    text = _ranges_conclusion(items, sn, hits, outside)
+    if len(text) > CONCLUSION_BUDGET:   # only a standard name of hundreds of characters
+        text = text[:CONCLUSION_BUDGET - 1].rsplit(" ", 1)[0] + "…"
     return text
 
 
-def _ranges_conclusion(items, sn, hits, outside, range_spikes, n_full, n_short) -> str:
+def _ranges_conclusion(items, sn, hits, outside) -> str:
     out = []
-    spikes_said = False
+    meanings: list[str] = []
+    for n, h in enumerate(hits[:CONCLUSION_FULL_FINDINGS]):
+        has, means = _finding_text(h)
+        out.append(f"Compared to {sn}, this sample has {has}." if n == 0
+                   else f"It also has {has}.")
+        if means not in meanings:
+            meanings.append(means)
+            out.append(means)
+    if len(hits) > CONCLUSION_FULL_FINDINGS:
+        out.append("Other ranges differ too (see the findings).")
     if hits:
-        full = hits[:n_full]
-        out.append(f"Compared to {sn}, this sample shows {_finding_text(full[0], sn)}.")
-        out += [f"It also shows {_finding_text(h, sn)}." for h in full[1:]]
-        rest = hits[n_full:]
-        if rest:
-            shown = "; ".join(_short_finding(h) for h in rest[:n_short])
-            more = len(rest) - n_short
-            if more > 0 and not n_short:
-                shown = f"{more} more range{'s' if more != 1 else ''} (see the findings)"
-            elif more > 0:
-                shown += f"; and {more} more (see the findings)"
-            out.append(f"Further deviations: {shown}.")
         together = _together(hits, sn)
         if together:
             out.append(together)
-    elif range_spikes:
-        out.append(f"Compared to {sn}, this sample shows no broad deviation in the defined "
-                   f"ranges, but {_spike_clause(items, located=True)}.")
-        spikes_said = True
-    else:
-        out.append(f"Compared to {sn}, this sample shows no significant deviation in the "
-                   "defined ranges.")
     broad_outside = outside is not None and not outside["spike_only"]
+    if not hits:
+        out.append(f"Compared to {sn}, this sample matches closely in every range."
+                   if not broad_outside else f"Compared to {sn}, the ranges match closely.")
     if broad_outside:
-        out.append(f"Outside the defined ranges it is {_outside_text(outside, sn)}.")
-    if not spikes_said:
-        clause = _spike_clause(items, located=True)
-        if clause:
-            opener = "It also shows" if (hits or broad_outside) else "It shows"
-            out.append(f"{opener} {clause}.")
+        out.append(f"It also differs from {sn} outside the ranges.")
+    out += _spike_sentences(items, sn, "It also has" if (hits or broad_outside) else "It has")
     out.append(INDICATIVE)
     return " ".join(out)
 

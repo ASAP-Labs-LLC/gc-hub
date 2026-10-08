@@ -210,7 +210,7 @@ def test_log_report_writes_the_spec_fields(db):
         params={"quantile": 0.2, "window": 301}, ranges=[{"label": "Gas", "c_start": 5,
                                                            "c_end": 11}],
         windows=[{"label": "Gas", "t0": 0.4, "t1": 1.2}], bullets=[{"kind": "none"}],
-        bullets_text="No deviations above the marginal threshold.", conclusion="Fine.",
+        bullets_text="No differences found.", conclusion="Fine.",
         conclusion_edited=True, comment_ids=[3, 4], pdf_sha256="ab" * 32,
         user_name="Ryan Brown", author_ip="10.0.0.5", db=db)
     row = store.report_log.list(sid, db=db)[0]
@@ -220,7 +220,7 @@ def test_log_report_writes_the_spec_fields(db):
     assert json.loads(row["windows_json"])[0]["t1"] == 1.2
     assert json.loads(row["bullets_json"]) == [{"kind": "none"}]
     assert json.loads(row["comment_ids_json"]) == [3, 4]
-    assert row["conclusion_edited"] == 1 and row["bullets_text"].startswith("No deviations")
+    assert row["conclusion_edited"] == 1 and row["bullets_text"].startswith("No differences")
     assert row["author_initials"] == "RB" and row["author_ip"] == "10.0.0.5"
     assert row["user_name"] == "Ryan Brown"
     assert row["app_version"] and row["created_at"]

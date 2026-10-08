@@ -113,7 +113,7 @@ def test_a_range_beyond_the_run_is_listed_as_not_evaluated(run):
     windows = run["responses"]["analysis"]["json"]["windows"]
     beyond = [w for w in windows if w["label"] == "Heavy tail beyond the run"]
     assert beyond and beyond[0]["evaluable"] is False
-    line = "Heavy tail beyond the run (C60–C80): not evaluated"
+    line = "Heavy tail beyond the run (C60–C80): not checked, outside this run"
     assert line in run["responses"]["analysis"]["json"]["text"]
     for path in PATHS:
         assert line in run["pdf_text"][path], path

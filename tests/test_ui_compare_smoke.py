@@ -406,7 +406,7 @@ def set_range(drv, i, label=None, c_start=None, c_end=None):
 def test_ranges_added_in_adjust_print_on_the_report(env):
     """v7: every range on screen, in order and with its label, is on the
     report: the export sheet names them, the request carries them, the PDF
-    lists them (one beyond the run as "not evaluated"), and the report's
+    lists them (one beyond the run as "not checked, outside this run"), and the report's
     bands are the windows the view drew."""
     drv = open_page(env)
     drv.set_script_timeout(120)
@@ -445,7 +445,7 @@ def test_ranges_added_in_adjust_print_on_the_report(env):
     assert again == windows
     text = pdf_text(drv, body)
     assert "Jet fuel cut C12–C18" in text and "Heavy tail beyond the run C60–C80" in text, text[-900:]
-    assert "Heavy tail beyond the run (C60–C80): not evaluated" in text, text
+    assert "Heavy tail beyond the run (C60–C80): not checked, outside this run" in text, text
     assert text.index("Gas C5") < text.index("Oil C") < text.index("Jet fuel cut C12") \
         < text.index("Heavy tail beyond the run C60"), text[-900:]
 

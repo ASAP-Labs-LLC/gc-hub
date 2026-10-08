@@ -11,6 +11,7 @@ fed straight to ``build_deviation_report``: ``trend`` is the trend difference,
 """
 import math
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -234,19 +235,19 @@ class TestAlignment:
 
 
 # ── build_deviation_report + render_bullets: the rules, golden text ────
-# v7 wording (docs/superpowers/specs/2026-10-07-v7-conclusions.md): a bullet
-# leads with the range, then a plain direction (higher / lower / mixed /
-# sharp peaks) "than <std> — <severity>", then where in the standard's
-# distribution the range lies (light end / main body / heavy end), then the
-# numbers. report_layout.finding_rows splits the head at "(Cx–Cy):" and reads
-# the severity tag from the first "— <severity>".
+# v8 wording (docs/superpowers/specs/2026-10-08-v8-plain-wording.md): a
+# bullet leads with the range, then a plain direction (higher / lower / both
+# higher and lower / N sharp peaks) "than <std> — <severity>", then ", plus N
+# sharp peaks" when a broad finding also has peaks. No retention times, no
+# signal sizes, no percentages: the charts carry those. report_layout.
+# finding_rows splits the head at "(Cx–Cy…):" and reads the severity tag from
+# the first "— <severity>".
 
 class TestRangeBullets:
     def test_moderate(self):
         t, v = zeros()
         items, text = report(box(t, v, 1.0, 1.6, 620))
-        assert text == ("• Gas (C5–C11): higher than Diesel #2 — moderate, light end elevated "
-                        "(max +620 at 1.00 min; 20% of range beyond the marginal threshold)")
+        assert text == "• Gas (C5–C11): higher than Diesel #2 — moderate"
         (it,) = items
         assert it["kind"] == "range" and it["index"] == 0 and it["direction"] == "higher"
         assert it["verdict"] == "higher" and it["position"] == "light"
@@ -262,10 +263,8 @@ class TestRangeBullets:
         box(t, v, 6.5, 7.0, -2500)
         _, text = report(v)
         assert text == (
-            "• Gas (C5–C11): higher than Diesel #2 — marginal, light end elevated "
-            "(max +150 at 1.00 min; 20% of range beyond the marginal threshold)\n"
-            "• Oil (C20–C44, evaluated to C28): lower than Diesel #2 — significant, heavy end "
-            "reduced (max -2500 at 6.50 min; 25% of range beyond the marginal threshold)")
+            "• Gas (C5–C11): higher than Diesel #2 — marginal\n"
+            "• Oil (C20–C44, partly checked): lower than Diesel #2 — significant")
 
     def test_both_directions_is_mixed(self):
         """A range with a moderate run in the minority direction is mixed:
@@ -274,10 +273,7 @@ class TestRangeBullets:
         box(t, v, 0.6, 1.6, 200)             # broad, low: area 200
         box(t, v, 2.0, 2.1, -900)            # narrow, tall: area 90
         items, text = report(v)
-        assert text == ("• Gas (C5–C11): mixed, higher and lower than Diesel #2 — moderate, "
-                        "light end differs in shape (mostly higher, marginal; lower moderate "
-                        "at 2.00–2.10 min; max +200 at 0.60 min; 37% of range beyond the "
-                        "marginal threshold)")
+        assert text == "• Gas (C5–C11): both higher and lower than Diesel #2 — moderate"
         (it,) = items
         assert it["verdict"] == "mixed" and it["mixed"] is True
         assert it["direction"] == "higher" and it["broad_severity"] == "moderate"
@@ -290,32 +286,36 @@ class TestRangeBullets:
         box(t, v, 2.0, 2.1, -400)            # opposite but only marginal
         items, text = report(v)
         assert items[0]["also"] is None and items[0]["verdict"] == "higher"
-        assert "mixed" not in text and "lower" not in text
+        assert "both" not in text and "lower" not in text
 
-    def test_mixed_shows_at_most_two_merged_opposite_spans(self):
+    def test_mixed_with_many_opposite_runs_is_still_one_plain_line(self):
+        """v7 listed up to two merged opposite spans and "+N more"; v8 says
+        only "both higher and lower": the spans stay in the item."""
         t, v = zeros()
         box(t, v, 0.6, 1.6, 300)
         for a in (1.80, 1.87, 2.2, 2.6, 3.0):    # 1.80 and 1.87 merge (gap < 0.10)
             box(t, v, a, a + 0.06, -700)
-        _, text = report(v)
-        assert ("• Gas (C5–C11): mixed, higher and lower than Diesel #2 — moderate, light end "
-                "differs in shape (mostly higher, marginal; lower moderate at 1.80–1.93, "
-                "2.20–2.26 min, +2 more; max +300 at 0.60 min; ") in text, text
+        items, text = report(v)
+        assert text == "• Gas (C5–C11): both higher and lower than Diesel #2 — moderate"
+        (it,) = items
+        assert it["verdict"] == "mixed" and it["also"]["direction"] == "lower"
+        assert "min" not in text and "more" not in text
 
     def test_min_width_rejects_a_narrow_trend_run(self):
         t, v = zeros()
         box(t, v, 1.0, 1.03, 800)
         items, text = report(v)
-        assert text == "No deviations above the marginal threshold."
+        assert text == "No differences found." == ac.NO_DEVIATION
         assert [i["kind"] for i in items] == ["none"]
 
     def test_min_width_applies_after_clipping_at_a_window_edge(self):
         t, v = zeros()
         box(t, v, 3.47, 3.60, 800)           # 0.03 min inside Gas, 0.10 outside
-        _, text = report(v)
-        assert text == ("No deviations above the marginal threshold within the defined ranges.\n"
-                        "• Outside the defined ranges: higher than Diesel #2 — moderate "
-                        "at 3.50–3.60 min (max +800 at 3.50 min)")
+        items, text = report(v)
+        assert text == ("No differences found in the ranges.\n"
+                        "• Outside the defined ranges: higher than Diesel #2 — moderate")
+        assert text.splitlines()[0] == ac.NO_DEVIATION_IN_RANGES
+        assert [i["kind"] for i in items] == ["none", "outside"]
 
     def test_spike_only_range(self):
         t, v = zeros()
@@ -323,56 +323,61 @@ class TestRangeBullets:
         gauss(t, s, 0.84, 0.01, 900)
         gauss(t, s, 1.40, 0.01, 950)
         items, text = report(v, s)
-        assert text == ("• Gas (C5–C11): sharp peaks above Diesel #2 — moderate "
-                        "(2 sharp peaks above the standard at 0.84, 1.40 min; "
-                        "no broad deviation above the marginal threshold)")
+        assert text == "• Gas (C5–C11): 2 sharp peaks above Diesel #2 — moderate"
         (it,) = items
         assert it["spike_only"] is True and it["elevated"] is True
         assert it["verdict"] == "higher" and it["broad_severity"] is None
         assert [(round(x["t"], 2), x["sign"]) for x in it["spikes"]] == [(0.84, 1), (1.40, 1)]
 
-    def test_more_than_three_spikes_name_the_largest(self):
+    def test_many_spikes_are_counted_not_listed(self):
+        """v7 named the three largest by time; v8 gives the count only."""
         t, v = zeros()
         box(t, v, 2.5, 2.8, 300)
         s = np.zeros_like(t)
         for c, h in ((0.7, 600), (1.0, 1500), (1.3, 700), (1.6, 1200), (1.9, 800)):
             gauss(t, s, c, 0.01, h)
-        _, text = report(v, s)
-        assert text == ("• Gas (C5–C11): higher than Diesel #2 — moderate, light end elevated "
-                        "(max +1500 at 1.00 min; 10% of range beyond the marginal threshold; "
-                        "5 sharp peaks above the standard incl. 1.00, 1.60, 1.90 min)")
+        items, text = report(v, s)
+        assert text == "• Gas (C5–C11): higher than Diesel #2 — moderate, plus 5 sharp peaks"
+        assert len(items[0]["spikes"]) == 5
+        assert "min" not in text and "incl." not in text
 
-    def test_spikes_below_are_signed(self):
+    def test_spikes_below_are_counted_and_signed_in_the_item(self):
         t, v = zeros()
         s = np.zeros_like(t)
         gauss(t, s, 0.84, 0.01, 900)
         gauss(t, s, 1.40, 0.01, 950)
         gauss(t, s, 1.20, 0.01, -3000)
         box(t, v, 2.5, 2.8, 300)
+        items, text = report(v, s)
+        assert text == "• Gas (C5–C11): higher than Diesel #2 — moderate, plus 3 sharp peaks"
+        assert [(round(x["t"], 2), x["sign"]) for x in items[0]["spikes"]] == \
+            [(0.84, 1), (1.20, -1), (1.40, 1)]
+
+    def test_spike_only_peaks_both_ways_say_above_and_below(self):
+        t, v = zeros()
+        s = np.zeros_like(t)
+        gauss(t, s, 0.84, 0.01, 900)
+        gauss(t, s, 1.40, 0.01, 950)
+        gauss(t, s, 1.20, 0.01, -3000)
         _, text = report(v, s)
-        assert text == ("• Gas (C5–C11): higher than Diesel #2 — moderate, light end elevated "
-                        "(max +950 at 1.40 min; 10% of range beyond the marginal threshold; "
-                        "2 sharp peaks above, 1 below the standard at 0.84, 1.20, 1.40 min)")
+        assert text == "• Gas (C5–C11): 3 sharp peaks above and below Diesel #2 — significant"
 
     def test_spikes_outside_ranges_go_to_the_outside_bullet(self):
         t, v = zeros()
         s = np.zeros_like(t)
         gauss(t, s, 4.5, 0.01, -700)
         _, text = report(v, s)
-        assert text == ("No deviations above the marginal threshold within the defined ranges.\n"
-                        "• Outside the defined ranges: sharp peaks below Diesel #2 — moderate "
-                        "(1 sharp peak below the standard at 4.50 min; "
-                        "no broad deviation above the marginal threshold)")
+        assert text == ("No differences found in the ranges.\n"
+                        "• Outside the defined ranges: 1 sharp peak below Diesel #2 — moderate")
 
     def test_overlapping_ranges_each_report(self):
         t, v = zeros()
         box(t, v, 2.6, 2.9, 620)
         jet = {"label": "Jet", "c_start": 9, "c_end": 16}         # 2.5–5.0
-        _, text = report(v, ranges=(GAS, jet))
-        assert text == ("• Gas (C5–C11): higher than Diesel #2 — moderate, light end elevated "
-                        "(max +620 at 2.60 min; 10% of range beyond the marginal threshold)\n"
-                        "• Jet (C9–C16): higher than Diesel #2 — moderate, main body elevated "
-                        "(max +620 at 2.60 min; 12% of range beyond the marginal threshold)")
+        items, text = report(v, ranges=(GAS, jet))
+        assert text == ("• Gas (C5–C11): higher than Diesel #2 — moderate\n"
+                        "• Jet (C9–C16): higher than Diesel #2 — moderate")
+        assert [i["position"] for i in items] == ["light", "middle"]
 
     def test_duplicate_labels_each_get_a_bullet(self):
         t, v = zeros()
@@ -385,9 +390,8 @@ class TestRangeBullets:
         t, v = zeros()
         light = {"label": "Light", "c_start": 3, "c_end": 4}
         items, text = report(v, ranges=(light, GAS))
-        assert text == ("• Light (C3–C4): not evaluated — outside the evaluated window "
-                        "(calibration, run end or x-axis limit)\n"
-                        "No deviations above the marginal threshold.")
+        assert text == ("• Light (C3–C4): not checked, outside this run\n"
+                        "No differences found.")
         assert items[0]["kind"] == "not-evaluated" and items[0]["index"] == 0
 
     def test_evaluation_stops_at_x_max(self):
@@ -396,9 +400,11 @@ class TestRangeBullets:
         s = np.zeros_like(t)
         gauss(t, s, 8.6, 0.01, 900)
         _, text = report(v, s)
-        assert text == "No deviations above the marginal threshold."
-        _, text = report(v, s, x_max_min=8.9)
-        assert text.startswith("• Oil (C20–C44, evaluated to C31): higher")
+        assert text == "No differences found."
+        items, text = report(v, s, x_max_min=8.9)
+        assert text == ("• Oil (C20–C44, partly checked): higher than Diesel #2 — moderate, "
+                        "plus 1 sharp peak")
+        assert (items[0]["clipped"], items[0]["c_eval_end"]) == (True, 31)
 
     def test_report_layout_still_splits_every_bullet(self):
         """The PDF's findings rows: the bold head before the first "):" and
@@ -415,8 +421,55 @@ class TestRangeBullets:
         rows = rl.finding_rows(text)
         assert [(r["head"], r["severity"]) for r in rows] == [
             ("Gas (C5–C11):", "moderate"),
-            ("Oil (C20–C44, evaluated to C28):", "significant"),
+            ("Oil (C20–C44, partly checked):", "significant"),
             ("Outside the defined ranges:", "moderate")]
+
+
+def _busy():
+    """Every kind of finding at once: mixed, spikes both ways, a clipped
+    range, the outside, and a not-evaluated range."""
+    t, v = zeros()
+    box(t, v, 0.6, 1.6, 200)
+    box(t, v, 2.0, 2.1, -900)
+    box(t, v, 6.5, 7.0, -2500)
+    box(t, v, 5.0, 5.2, 700)
+    s = np.zeros_like(t)
+    gauss(t, s, 2.6, 0.01, 900)
+    gauss(t, s, 1.2, 0.01, -1500)
+    gauss(t, s, 4.5, 0.01, 1200)
+    ranges = [{"label": "Light", "c_start": 3, "c_end": 4}, GAS, OIL]
+    items, text = report(v, s, ranges=ranges)
+    return items, text, ac.deviation_conclusion(items, ranges, STD)
+
+
+NUMBERS = re.compile(r"\bmin\b|[+\-−]\d|\d[.,]\d|%")
+
+
+def test_no_times_sizes_or_percentages_in_the_plain_wording():
+    """v8: the customer reads the direction, the severity and a count. No
+    retention time ("min"), no signed size ("+620"), no decimal, no "%"."""
+    items, text, conclusion = _busy()
+    assert {i["kind"] for i in items} >= {"not-evaluated", "range", "outside"}
+    assert any(i.get("verdict") == "mixed" for i in items)
+    assert any(i.get("clipped") for i in items)
+    assert "sharp peak" in text and "sharp peak" in conclusion
+    for line in text.splitlines() + [conclusion]:
+        assert not NUMBERS.search(line), line
+    rng = random.Random(5)
+    t = axis()
+    for _ in range(40):
+        v = np.zeros_like(t)
+        s = np.zeros_like(t)
+        for _ in range(rng.randint(0, 12)):
+            a = rng.uniform(0, 8.8)
+            box(t, v, a, a + rng.uniform(0.05, 0.6), rng.choice([-1, 1]) * rng.uniform(50, 3000))
+        for _ in range(rng.randint(0, 6)):
+            gauss(t, s, rng.uniform(0, 8.8), 0.01, rng.choice([-1, 1]) * rng.uniform(100, 4000))
+        for ranges, ladder in (((GAS, OIL), LADDER), ((), LADDER), ((GAS, OIL), ([], []))):
+            items, text = report(v, s, ranges=ranges, ladder=ladder)
+            c = ac.deviation_conclusion(items, list(ranges), STD)
+            assert not NUMBERS.search(text), text
+            assert not NUMBERS.search(c), c
 
 
 class TestPosition:
@@ -443,12 +496,12 @@ class TestPosition:
         items = ac.build_deviation_report(t, v, np.zeros_like(t), ranges=[GAS, OIL],
                                           ladder=LADDER, params=PARAMS, std_profile=gasoline)
         assert items[0]["position"] == "middle"
-        assert ac.render_bullets(items, "Gasoline").startswith(
-            "• Gas (C5–C11): higher than Gasoline — moderate, main body elevated (")
+        assert ac.render_bullets(items, "Gasoline") == \
+            "• Gas (C5–C11): higher than Gasoline — moderate"
+        # the main body: no "light material", no "lighter fuel"
         assert ac.deviation_conclusion(items, [GAS, OIL], "Gasoline") == (
-            "Compared to Gasoline, this sample shows moderately elevated intensity in the gas "
-            "range (C5–C11): more material in the main body of the distribution than "
-            "Gasoline, consistent with a different blend or product. " + INDICATIVE)
+            "Compared to Gasoline, this sample has more material in the gas range. "
+            "This could be a different fuel or a blend. " + INDICATIVE)
 
     def test_standard_profile_reads_the_standards_area(self):
         t = axis()
@@ -463,15 +516,14 @@ class TestPosition:
 
 
 class TestOutsideAndSpecialCases:
-    def test_outside_merges_spans_and_counts_the_rest(self):
+    def test_outside_is_one_line_and_keeps_every_span_in_the_item(self):
         t, v = zeros()
         for a, b, h in ((3.70, 3.80, 300), (3.85, 3.95, 300), (4.2, 4.3, 300),
                         (4.6, 4.7, 300), (5.0, 5.1, 700), (5.4, 5.5, 300)):
             box(t, v, a, b, h)
         items, text = report(v)
-        assert text == ("No deviations above the marginal threshold within the defined ranges.\n"
-                        "• Outside the defined ranges: higher than Diesel #2 — moderate "
-                        "at 3.70–3.95, 4.20–4.30, 4.60–4.70 min, +2 more (max +700 at 5.00 min)")
+        assert text == ("No differences found in the ranges.\n"
+                        "• Outside the defined ranges: higher than Diesel #2 — moderate")
         assert items[-1]["kind"] == "outside" and len(items[-1]["spans"]) == 5
         assert items[-1]["position"] is None
 
@@ -479,29 +531,26 @@ class TestOutsideAndSpecialCases:
         t, v = zeros()
         box(t, v, 1.0, 1.6, 620)
         items, text = report(v, ranges=())
-        assert text == ("• Across the run: higher than Diesel #2 — moderate "
-                        "at 1.00–1.60 min (max +620 at 1.00 min)")
+        assert text == "• Across the run: higher than Diesel #2 — moderate"
         assert [i["kind"] for i in items] == ["outside"]
 
     def test_zero_ranges_no_deviation(self):
         _, text = report(ranges=())
-        assert text == "No deviations above the marginal threshold."
+        assert text == "No differences found."
 
     def test_no_calibration(self):
         t, v = zeros()
         box(t, v, 1.0, 1.6, 620)
         items, text = report(v, ladder=([], []))
         assert text == ("• Calibration unavailable — ranges not evaluated: higher than "
-                        "Diesel #2 — moderate at 1.00–1.60 min (max +620 at 1.00 min)")
+                        "Diesel #2 — moderate")
         assert [i["kind"] for i in items] == ["no-calibration"]
         assert ac.deviation_conclusion(items, [GAS, OIL], STD) == (
-            "Compared to Diesel #2, the defined ranges could not be evaluated "
-            "because no usable calibration was available for this sample.")
+            "The ranges could not be checked because this sample has no usable calibration.")
 
     def test_no_calibration_no_deviation(self):
         _, text = report(ladder=([0.5], [5]))
-        assert text == ("• Calibration unavailable — ranges not evaluated: "
-                        "no deviations above the marginal threshold.")
+        assert text == "• Calibration unavailable — ranges not evaluated: no differences found."
 
     def test_bound_never_exceeds_ranges_plus_one(self):
         rng = random.Random(1234)
@@ -525,14 +574,14 @@ class TestOutsideAndSpecialCases:
             assert len(items) == len(lines)
 
 
-INDICATIVE = "These findings are indicative only and do not confirm specific substances."
-GAS_UP = ("moderately elevated intensity in the gas range (C5–C11): more light-end material "
-          "than Diesel #2, consistent with possible light-end (gasoline-range) contamination")
-GAS_DOWN = ("lower intensity in the gas range (C5–C11): the light end is reduced compared "
-            "with Diesel #2, consistent with a heavier cut or loss of light components "
-            "(weathering/evaporation)")
-OIL_UP = ("elevated intensity in the oil range (C20–C44): more heavy-end material than "
-          "Diesel #2, consistent with heavier components such as lube/oil-range material")
+
+INDICATIVE = "This is a screening result only. It does not prove what is in the sample."
+GAS_UP = ("more light material in the gas range. "
+          "This could mean a lighter fuel, such as gasoline, was mixed in.")
+GAS_DOWN = ("less light material in the gas range. "
+            "The lightest parts may have evaporated, or it may be a heavier fuel.")
+OIL_UP = ("more heavy material in the oil range. "
+          "This could mean a heavier product, such as oil, was mixed in.")
 
 
 class TestConclusion:
@@ -543,62 +592,57 @@ class TestConclusion:
         items, _ = report(v, s, ranges=ranges)
         return ac.deviation_conclusion(items, list(ranges), STD)
 
+    def test_the_screening_sentence_is_pinned(self):
+        assert ac.INDICATIVE == INDICATIVE
+
     def test_all_within(self):
         t, v = zeros()
-        assert self._c(v) == (
-            "Compared to Diesel #2, this sample shows no significant deviation "
-            "in the defined ranges. The chromatographic profile is consistent with the "
-            "reference standard.")
+        assert self._c(v) == "This sample closely matches Diesel #2 in every range."
 
     def test_gas_higher(self):
         t, v = zeros()
         box(t, v, 1.0, 1.6, 620)
-        assert self._c(v) == f"Compared to Diesel #2, this sample shows {GAS_UP}. {INDICATIVE}"
+        assert self._c(v) == f"Compared to Diesel #2, this sample has {GAS_UP} {INDICATIVE}"
 
     def test_gas_lower(self):
         """Ryan, 2026-10-07: "The gas conclusion always says higher even if
         the deviation is lower." A lower range was not in the conclusion at all."""
         t, v = zeros()
         box(t, v, 1.0, 1.6, -620)
-        assert self._c(v) == (f"Compared to Diesel #2, this sample shows moderately "
-                              f"{GAS_DOWN}. {INDICATIVE}")
+        assert self._c(v) == f"Compared to Diesel #2, this sample has {GAS_DOWN} {INDICATIVE}"
 
     def test_gas_mixed(self):
         t, v = zeros()
         box(t, v, 0.6, 1.6, 600)             # broad, moderate: higher by area
         box(t, v, 2.0, 2.3, -900)            # moderate the other way
         assert self._c(v) == (
-            "Compared to Diesel #2, this sample shows moderate deviations in both directions "
-            "in the gas range (C5–C11): the light end differs in shape from Diesel #2 rather "
-            "than only in amount (mostly higher; lower at 2.00–2.30 min), consistent with a "
-            f"different product or a blend. {INDICATIVE}")
+            "Compared to Diesel #2, this sample has a different pattern in the gas range "
+            "(some parts higher, some lower). This could be a different fuel or a blend. "
+            f"{INDICATIVE}")
 
     def test_oil_higher(self):
         t, v = zeros()
         box(t, v, 6.5, 7.0, 620)
-        assert self._c(v) == (f"Compared to Diesel #2, this sample shows moderately "
-                              f"{OIL_UP}. {INDICATIVE}")
+        assert self._c(v) == f"Compared to Diesel #2, this sample has {OIL_UP} {INDICATIVE}"
 
     def test_two_ranges_in_different_directions(self):
         t, v = zeros()
         box(t, v, 1.0, 1.6, -2500)           # gas lower, significant
         box(t, v, 6.5, 7.0, 620)             # oil higher, moderate
         assert self._c(v) == (
-            f"Compared to Diesel #2, this sample shows significantly {GAS_DOWN}. "
-            f"It also shows moderately {OIL_UP}. "
-            "Together, a reduced light end and an elevated heavy end indicate a heavier "
-            f"overall distribution than Diesel #2. {INDICATIVE}")
+            f"Compared to Diesel #2, this sample has much {GAS_DOWN} "
+            f"It also has {OIL_UP} "
+            f"Overall, it is heavier than Diesel #2. {INDICATIVE}")
 
     def test_ordered_by_severity(self):
         t, v = zeros()
         box(t, v, 1.0, 1.6, 150)             # gas, marginal
         box(t, v, 6.5, 7.0, 2500)            # oil, significant
         c = self._c(v)
-        assert c.startswith("Compared to Diesel #2, this sample shows significantly elevated "
-                            "intensity in the oil range (C20–C44)")
-        assert "It also shows slightly elevated intensity in the gas range (C5–C11)" in c
-        assert ("Elevated light and heavy ends together are consistent with a blend of a "
-                "lighter and a heavier product (possible mixed contamination).") in c
+        assert c.startswith("Compared to Diesel #2, this sample has much more heavy material "
+                            "in the oil range.")
+        assert "It also has slightly more light material in the gas range." in c
+        assert "It may be a mix of a lighter and a heavier product." in c
 
     def test_spikes_only(self):
         t, v = zeros()
@@ -606,10 +650,9 @@ class TestConclusion:
         gauss(t, s, 0.84, 0.01, 900)
         gauss(t, s, 1.40, 0.01, 950)
         assert self._c(v, s) == (
-            "Compared to Diesel #2, this sample shows no broad deviation in the defined ranges, "
-            "but isolated sharp peaks above the standard at 0.84, 1.40 min (in the gas range; up "
-            "to +950, moderate), "
-            f"which may indicate specific added components. {INDICATIVE}")
+            "Compared to Diesel #2, this sample matches closely in every range. "
+            "It has 2 sharp peaks above Diesel #2. These could be something added. "
+            f"{INDICATIVE}")
 
     def test_lower_with_sharp_peaks_above(self):
         """The case behind Ryan's report: a range lower overall with sharp
@@ -623,39 +666,33 @@ class TestConclusion:
         gauss(t, s, 2.4, 0.01, 1200)
         gauss(t, s, 3.0, 0.01, -700)
         items, text = report(v, s)
-        assert text == ("• Gas (C5–C11): lower than Diesel #2 — moderate, light end reduced "
-                        "(max -700 at 3.00 min; 33% of range beyond the marginal threshold; "
-                        "2 sharp peaks above, 1 below the standard at 2.00, 2.40, 3.00 min)")
+        assert text == "• Gas (C5–C11): lower than Diesel #2 — moderate, plus 3 sharp peaks"
         assert items[0]["verdict"] == "lower" and items[0]["mixed"] is False
         assert items[0]["broad_severity"] == "marginal"
         assert ac.deviation_conclusion(items, [GAS, OIL], STD) == (
-            f"Compared to Diesel #2, this sample shows slightly {GAS_DOWN}. It also shows "
-            "isolated sharp peaks above the standard at 2.00, 2.40 min (in the gas range; up to "
-            "+1200, moderate), which may indicate specific added components, and an isolated "
-            "sharp peak below the standard at 3.00 min (in the gas range; -700, moderate), "
-            "which may indicate a specific "
-            f"component missing from the sample. {INDICATIVE}")
+            f"Compared to Diesel #2, this sample has slightly {GAS_DOWN} "
+            "It also has 2 sharp peaks above Diesel #2. These could be something added. "
+            "It also has 1 sharp peak below Diesel #2. This could be something missing. "
+            f"{INDICATIVE}")
 
     def test_outside_only(self):
         t, v = zeros()
         box(t, v, 3.7, 3.9, 700)
         assert self._c(v) == (
-            "Compared to Diesel #2, this sample shows no significant deviation in the defined "
-            "ranges. Outside the defined ranges it is moderately higher than Diesel #2 at "
-            f"3.70–3.90 min. {INDICATIVE}")
+            "Compared to Diesel #2, the ranges match closely. It also differs from "
+            f"Diesel #2 outside the ranges. {INDICATIVE}")
 
-    def test_outside_after_the_ranges_and_spikes_outside_located(self):
+    def test_outside_after_the_ranges_and_spikes_outside_counted(self):
         t, v = zeros()
         box(t, v, 1.0, 1.6, 620)
         box(t, v, 3.7, 3.9, -700)
         s = np.zeros_like(t)
         gauss(t, s, 4.5, 0.01, 900)
         assert self._c(v, s) == (
-            f"Compared to Diesel #2, this sample shows {GAS_UP}. Outside the defined ranges "
-            "it is moderately lower than Diesel #2 at 3.70–3.90 min. It also shows an "
-            "isolated sharp peak above the standard at 4.50 min (outside the defined ranges; "
-            "+900, moderate), "
-            f"which may indicate a specific added component. {INDICATIVE}")
+            f"Compared to Diesel #2, this sample has {GAS_UP} "
+            "It also differs from Diesel #2 outside the ranges. "
+            "It also has 1 sharp peak above Diesel #2. This could be something added. "
+            f"{INDICATIVE}")
 
     def test_lower_dominant_with_a_higher_run_is_never_just_elevated(self):
         """v6 set "elevated" for a range whose bullet was LOWER with an
@@ -666,15 +703,14 @@ class TestConclusion:
         items, text = report(v)
         assert items[0]["verdict"] == "lower" and "higher" not in text
         c = ac.deviation_conclusion(items, [GAS, OIL], STD)
-        assert c.startswith(f"Compared to Diesel #2, this sample shows moderately {GAS_DOWN}.")
-        assert "elevated" not in c
+        assert c.startswith(f"Compared to Diesel #2, this sample has {GAS_DOWN}")
+        assert "more" not in c and "higher" not in c
         box(t, v, 2.5, 2.6, 900)             # now a moderate one: mixed
         items, text = report(v)
-        assert items[0]["verdict"] == "mixed" and "mixed, higher and lower" in text
+        assert items[0]["verdict"] == "mixed" and "both higher and lower" in text
         c = ac.deviation_conclusion(items, [GAS, OIL], STD)
-        assert "moderate deviations in both directions in the gas range" in c
-        assert "(mostly lower; higher at 2.50–2.60 min)" in c
-        assert "elevated intensity" not in c
+        assert ("a different pattern in the gas range (some parts higher, some lower)") in c
+        assert "more light material" not in c and "less light material" not in c
 
     def test_same_span_ranges_are_named_together(self):
         t, v = zeros()
@@ -682,9 +718,9 @@ class TestConclusion:
         ranges = [GAS, dict(GAS), dict(GAS, label="Gasoline")]
         items, _ = report(v, ranges=ranges)
         assert ac.deviation_conclusion(items, ranges, STD) == (
-            "Compared to Diesel #2, this sample shows moderately elevated intensity in the "
-            "gas / gasoline range (C5–C11): more light-end material than Diesel #2, "
-            f"consistent with possible light-end (gasoline-range) contamination. {INDICATIVE}")
+            "Compared to Diesel #2, this sample has more light material in the "
+            "gas / gasoline range. This could mean a lighter fuel, such as gasoline, "
+            f"was mixed in. {INDICATIVE}")
 
     def test_label_case_is_kept_unless_a_plain_word(self):
         assert ac.range_name("Gas") == "gas"
@@ -695,13 +731,10 @@ class TestConclusion:
 
     def test_zero_ranges(self):
         t, v = zeros()
-        assert self._c(v, ranges=()) == (
-            "Compared to Diesel #2, this sample shows no significant deviation across the run. "
-            "The chromatographic profile is consistent with the reference standard.")
+        assert self._c(v, ranges=()) == "This sample closely matches Diesel #2."
         box(t, v, 1.0, 1.6, 620)
         assert self._c(v, ranges=()) == (
-            "Compared to Diesel #2, this sample is moderately higher across the run, at "
-            "1.00–1.60 min. No ranges were defined to attribute the deviation. " + INDICATIVE)
+            f"Compared to Diesel #2, this sample reads higher overall. {INDICATIVE}")
 
     def test_many_ranges_stay_under_the_conclusion_cap(self):
         t, v = zeros()
@@ -715,17 +748,20 @@ class TestConclusion:
             gauss(t, s, c, 0.01, 3000)
         items, _ = report(v, s, ranges=ranges)
         c = ac.deviation_conclusion(items, ranges, STD)
-        assert len(c) <= 1500, len(c)
-        assert "Further deviations:" in c and c.endswith(INDICATIVE)
+        assert len(c) <= ac.CONCLUSION_BUDGET == 1500, len(c)
+        assert "Other ranges differ too (see the findings)." in c and c.endswith(INDICATIVE)
+        # the first CONCLUSION_FULL_FINDINGS are written out, the rest pointed to
+        assert c.count("material in the Range number") == ac.CONCLUSION_FULL_FINDINGS == 3
 
     def test_the_conclusion_agrees_with_every_bullet(self):
         """Random reports: every range the conclusion names reads in the
         bullet's own direction."""
         rng = random.Random(77)
         t = axis()
-        words = {"higher": "elevated intensity in", "lower": "lower intensity in",
-                 "mixed": "deviations in both directions in"}
-        short = {"higher": "higher in", "lower": "lower in", "mixed": "higher and lower in"}
+        sev = r"(?:much |slightly )?"
+        words = {"higher": sev + r"more (?:light |heavy )?material in",
+                 "lower": sev + r"less (?:light |heavy )?material in",
+                 "mixed": r"a different pattern in"}
         for _ in range(80):
             v = np.zeros_like(t)
             s = np.zeros_like(t)
@@ -739,11 +775,10 @@ class TestConclusion:
             for it in items:
                 if it["kind"] != "range" or it["spike_only"]:
                     continue
-                name = f"the {ac.range_name(it['label'])} range (C{it['c_start']}–C{it['c_end']})"
-                assert (f"{words[it['verdict']]} {name}" in c
-                        or f"{short[it['verdict']]} {name}" in c), (text, c)
+                name = re.escape(f"the {ac.range_name(it['label'])} range")
+                assert re.search(f"{words[it['verdict']]} {name}", c), (text, c)
                 for other in set(words) - {it["verdict"]}:
-                    assert f"{words[other]} {name}" not in c, (text, c)
+                    assert not re.search(f"{words[other]} {name}", c), (text, c)
 
 
 def test_analyze_report_does_not_call_broad_humps_sharp_peaks():
@@ -756,8 +791,11 @@ def test_analyze_report_does_not_call_broad_humps_sharp_peaks():
     out = ac.analyze_report(t, ys, yst, ranges=[GAS, OIL], ladder=LADDER,
                             params=dict(PARAMS, sigma=0.0), standard_name=STD)
     assert [round(s["t"], 2) for s in out["spikes"]] == [1.2]
-    assert "1 sharp peak above the standard at 1.20 min" in out["text"]
-    assert "below the standard" not in out["text"]
+    assert out["text"] == ("• Gas (C5–C11): higher than Diesel #2 — significant, "
+                           "plus 1 sharp peak\n"
+                           "• Outside the defined ranges: lower than Diesel #2 — moderate")
+    assert "It also has 1 sharp peak above Diesel #2." in out["conclusion"]
+    assert "below Diesel #2" not in out["conclusion"]
 
 
 def test_analyze_report_runs_both_channels_and_returns_everything():
@@ -769,8 +807,9 @@ def test_analyze_report_runs_both_channels_and_returns_everything():
                             params=dict(PARAMS, sigma=0.0), standard_name=STD)
     assert set(out) >= {"diff", "spike_diff", "trend_sample", "trend_std", "windows",
                         "items", "text", "conclusion", "spikes", "alignment_lag_min"}
-    assert out["text"].startswith("• Gas (C5–C11): sharp peaks above Diesel #2 — significant "
-                                  "(1 sharp peak above the standard at 1.20 min")
+    assert out["text"] == "• Gas (C5–C11): 1 sharp peak above Diesel #2 — significant"
     assert [round(s["t"], 2) for s in out["spikes"]] == [1.2]
     assert [w["label"] for w in out["windows"]] == ["Gas", "Oil"]
-    assert "sharp peak above the standard at 1.20 min (in the gas range; +" in out["conclusion"]
+    assert out["conclusion"] == (
+        "Compared to Diesel #2, this sample matches closely in every range. "
+        "It has 1 sharp peak above Diesel #2. This could be something added. " + INDICATIVE)
