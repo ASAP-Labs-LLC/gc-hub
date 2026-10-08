@@ -199,6 +199,8 @@
 .num-tbl th:first-child, .num-tbl td:first-child { text-align: left; }
 .num-tbl td:first-child { color: var(--text-muted); }
 .num-tbl td.rep { font-weight: 650; }
+.num-tbl td.rep.held { cursor: help; }
+.data-d86-note { padding-bottom: var(--s3); }
 .num-tbl tr:last-child td { border-bottom: 0; }
 .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
 .facts .fact { padding: var(--s3) var(--s4); border-right: 1px solid var(--border-light); min-width: 0; }

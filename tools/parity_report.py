@@ -37,6 +37,13 @@ Tags. **Failing** tags fail the report; the others are informational.
                                peaks)
 ``corrections``       info     proven: v1's corrections file (with the hub's
                                blank and calibration) reproduces v1
+``d86-monotonic``     info     v7.0.0: v1's corrected D86 dipped below an
+                               earlier cut there; the hub holds it at the
+                               highest earlier v1 value (proven on the two
+                               rows: only those D86 cells, the hub's equal to
+                               its previous D86 cell, its series never dips).
+                               Recomputations are compared with v1's row
+                               under the same rule
 ``method-excluded``   info     the hub doesn't process the CDF's method
                                (``other_method``) and the name was accepted
                                (``accept_excluded_methods`` /
@@ -117,7 +124,7 @@ import pipeline  # noqa: E402
 import store  # noqa: E402
 
 INFO_TAGS = ("source-file", "injection-time-fix", "blank-rule", "auto-detect-off", "corrections",
-             "method-excluded", "not-in-hub", "v1-short-row")
+             "d86-monotonic", "method-excluded", "not-in-hub", "v1-short-row")
 FAILING_TAGS = ("no-v1-row", "lab-id-other-time", "ambiguous-match", "not-processed",
                 "review-method", "method-not-accepted", "not-verified", "unexplained")
 TAGS = INFO_TAGS + FAILING_TAGS
@@ -131,6 +138,8 @@ TAG_HELP = {
     "auto-detect-off": "Proven by recomputation: v1's auto-detected calibration reproduces "
                        "v1's values.",
     "corrections": "Proven by recomputation: v1's corrections file reproduces v1's values.",
+    "d86-monotonic": "v7.0.0: v1's corrected D86 fell below an earlier cut here; the hub holds "
+                     "it at that earlier value (a corrected D86 never decreases).",
     "method-excluded": "The CDF's method isn't processed by the hub, and its name was accepted "
                        "(--accept-excluded-method).",
     "method-not-accepted": "The CDF's method isn't processed by the hub and its name wasn't "
@@ -186,6 +195,52 @@ def load_v1_corrections(v1_corrections) -> Optional[dict]:
         raise ValueError(f"v1's corrections file {v1_corrections} yields no correction cuts "
                          f"(missing, unreadable or without an 'Agilent GC' section)")
     return values
+
+
+D86_COLUMNS = tuple(c for c in distill.CSV_HEADER if c.startswith("D86 "))   # IBP → FBP
+
+
+def v7_d86(values: dict) -> dict:
+    """``values`` (column -> string) under v7.0.0's rule
+    (``distill.monotonic_d86``): each D86 cell below an earlier D86 cell
+    becomes the highest earlier cell's string; nothing else changes."""
+    out = dict(values)
+    best = None
+    for c in D86_COLUMNS:
+        v = out.get(c, "")
+        if v == "":
+            continue
+        if best is not None and float(v) < best[0]:
+            out[c] = best[1]
+        else:
+            best = (float(v), v)
+    return out
+
+
+def d86_held(v1: dict, hub: dict, differing) -> set:
+    """The D86 columns of ``differing`` that v7.0.0's rule explains, all or
+    none: every one is a cell where v1's corrected series dipped, the hub's
+    value equals the hub's previous D86 cell and the highest earlier v1 cell,
+    every v1 dip differs, and the hub's D86 series never dips."""
+    cols = {c for c in differing if c in D86_COLUMNS}
+    if not cols:
+        return set()
+    v1_best = hub_best = hub_prev = None
+    dips = set()
+    for c in D86_COLUMNS:
+        a, b = v1.get(c, ""), hub.get(c, "")
+        if a != "":
+            if v1_best is not None and float(a) < v1_best:
+                dips.add(c)
+                if b == "" or b != hub_prev or float(b) != v1_best:
+                    return set()
+            v1_best = float(a) if v1_best is None else max(v1_best, float(a))
+        if b != "":
+            if hub_best is not None and float(b) < hub_best:
+                return set()
+            hub_best = float(b) if hub_best is None else max(hub_best, float(b))
+            hub_prev = b
+    return cols if dips == cols else set()
 
 
 def _rendered(row: dict) -> dict:
@@ -417,6 +472,15 @@ class _Report:
             else:
                 self._diff(row, sample, col, a, b, "unexplained", f"{col} differs")
         if result_diffs:
+            held = d86_held({c: row.values.get(c, "") for c in D86_COLUMNS if c in present}, hub,
+                            [c for c, _a, _b in result_diffs])
+            for col, a, b in result_diffs:
+                if col in held:
+                    self._diff(row, sample, col, a, b, "d86-monotonic",
+                               "v1's corrected D86 dipped below an earlier cut; the hub holds it at "
+                               "that cut's value")
+            result_diffs = [d for d in result_diffs if d[0] not in held]
+        if result_diffs:
             tag, detail = self._prove(row, sample, rev, v1_state, present)
             for col, a, b in result_diffs:
                 self._diff(row, sample, col, a, b, tag or "unexplained", detail)
@@ -553,11 +617,12 @@ class _Report:
                 return None, "the revision records no calibration anchors; nothing can be proven"
             control = self._recompute(cdf, own[1], hub_blank, hub_corr, False)
             hub = _rendered(dict(json.loads(rev["results"]), **{"Source File": ""}))
-            if control is None or any(control[c] != hub[c] for c in RESULT_COLUMNS):
+            # (a revision stored before v7.0.0 may dip; recomputing holds it)
+            if control is None or any(control[c] != v7_d86(hub)[c] for c in RESULT_COLUMNS):
                 return None, ("recomputing with the revision's own inputs doesn't reproduce it "
                               "(calibration, blank or CDF changed?); nothing can be proven")
-        target = {c: row.values.get(c, "") for c in RESULT_COLUMNS
-                  if c in present and row.values.get(c, "") != ""}
+        target = {c: v for c, v in v7_d86({c: row.values.get(c, "") for c in RESULT_COLUMNS
+                                            if c in present}).items() if v != ""}
         blanks = self._blank_candidates(sample, v1_state)
         tried = 0
         for cal_label, conf, allow_auto in cals:

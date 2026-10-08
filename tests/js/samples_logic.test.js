@@ -166,10 +166,54 @@ module.exports = async (t) => {
     t.eq(L.fmt(-12.08, 2), '−12.08');
 
     const data = L.dataRows(curve);
-    t.eq(data[0], { label: 'IBP', d2887: 111.59, raw: 183.79, correction: -12.08, reported: 171.71 });
-    t.eq(data[6], { label: '50%', d2887: 274.45, raw: 274.41, correction: -4.06, reported: 270.35 });
+    t.eq(data[0], { label: 'IBP', d2887: 111.59, raw: 183.79, correction: -12.08, reported: 171.71, held: false, note: null });
+    t.eq(data[6], { label: '50%', d2887: 274.45, raw: 274.41, correction: -4.06, reported: 270.35, held: false, note: null });
     t.eq(data[1].correction, null);
     t.eq(L.dataTableText(data.slice(0, 1)), 'Recovery\tD2887 °C\tD86 raw\tCorrection\tD86 reported\nIBP\t111.59\t183.79\t-12.08\t171.71');
+    t.eq(L.d86TableNote(curve, data), null);
+
+    // ── v7.0.0: a corrected D86 that never decreases ─────────────────────
+    // With the revision's factors (curve.corrections) the correction column
+    // is the factor, and a reported cell held at an earlier value is marked.
+    const cols = ['D86 IBP', 'D86 T5', 'D86 T10', 'D86 T20', 'D86 T30', 'D86 T40', 'D86 T50', 'D86 T60',
+        'D86 T70', 'D86 T80', 'D86 T90', 'D86 T95', 'D86 FBP'];
+    const rawVals = [160, 180, 184, 190, 200, 205, 210, 215, 220, 230, 240, 250, 260];
+    const factors = { IBP: -12.08, '5%': 0, '10%': -5.25, '20%': 0, '30%': 0, '50%': -4.06, '70%': 0, '80%': 0,
+        '90%': -3.46, '95%': 0, FBP: -5.57 };
+    const unc7 = {}, rep7 = {};
+    cols.forEach((c, i) => { unc7[c] = rawVals[i]; });
+    // raw + factor: 147.92, 180, 178.75 (dips below 180), 190, ...
+    cols.forEach((c, i) => { const l = ['IBP', '5%', '10%', '20%', '30%', '40%', '50%', '60%', '70%', '80%', '90%', '95%', 'FBP'][i];
+        rep7[c] = Math.round((rawVals[i] + (factors[l] || 0)) * 100) / 100; });
+    rep7['D86 T10'] = 180;                                  // what v7 stores: held at T5
+    const c7 = { d2887: {}, d86: rep7, d86_uncorrected: unc7, corrections: factors };
+    const d7 = L.dataRows(c7);
+    t.eq(d7[2].correction, -5.25);                          // the factor, not reported - raw
+    t.eq(d7[2].reported, 180);
+    t.eq(d7[2].held, true);
+    t.eq(d7[2].note, 'Held at the 5% value: raw + correction is 178.75, and a corrected D86 temperature never falls below an earlier one.');
+    t.eq(d7.filter((r) => r.held).map((r) => r.label), ['10%']);
+    t.eq(d7[5].correction, 0);                              // 40%: no factor
+    t.eq(L.d86TableNote(c7, d7), { reprocess: false,
+        text: '* 10% was held at an earlier value: a corrected D86 temperature never falls below an earlier one. D86 raw keeps the plain conversion.' });
+    // the same revision stored before v7.0.0 (T10 dipping): no held mark, and
+    // the note offers Re-process
+    const old7 = Object.assign({}, c7, { d86: Object.assign({}, rep7, { 'D86 T10': 178.75 }) });
+    const dOld = L.dataRows(old7);
+    t.eq(dOld.some((r) => r.held), false);
+    t.eq(dOld[2].correction, -5.25);
+    const oldNote = L.d86TableNote(old7, dOld);
+    t.eq(oldNote.reprocess, true);
+    t.eq(/^The reported D86 10% is below an earlier reported value: this result was computed before v7\.0\.0/.test(oldNote.text), true);
+    t.eq(/Re-process/.test(oldNote.text), true);
+    // a result-only v1 import has no CDF: no Re-process offered
+    const tableNote = L.d86TableNote(Object.assign({}, old7, { fromTable: true }), dOld);
+    t.eq(tableNote.reprocess, false);
+    t.eq(/imported from v1 as a result only/.test(tableNote.text), true);
+    // a v1 import (no factors): correction = reported - raw, no held marks
+    const v1c = Object.assign({}, c7, { corrections: null });
+    t.eq(L.dataRows(v1c)[2].correction, -4);
+    t.eq(L.dataRows(v1c).some((r) => r.held), false);
 
     // revisions → the history list, newest first, plain words
     const hist = L.historyItems({
@@ -236,7 +280,7 @@ module.exports = async (t) => {
     t.eq(un[7].d86, 276);                               // 60%: midpoint of 251 and 301
     // the Data view: raw = the conversion when the result stores none
     const dr = L.dataRows(tc, conv);
-    t.eq(dr[6], { label: '50%', d2887: 250, raw: 251, correction: 4, reported: 255 });
+    t.eq(dr[6], { label: '50%', d2887: 250, raw: 251, correction: 4, reported: 255, held: false, note: null });
     t.eq(L.dataRows(tc)[6].raw, null);
 
     // ── v6: the row's checkbox shows the selection, and only it ─────────

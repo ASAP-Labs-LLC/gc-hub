@@ -109,6 +109,31 @@ SNAPSHOT_CASES = {
 ALL_CASES = {**CASES, **BESTFIT_CASES, **SNAPSHOT_CASES}
 
 
+# v7.0.0 "Corrected D86 never decreases": the D86 columns (the corrected,
+# reported series) in percent order. The golden JSON stays v1.0.0's output;
+# the hub's row is that row with this one documented change applied.
+D86_COLUMNS = ("D86 IBP", "D86 T5", "D86 T10", "D86 T20", "D86 T30", "D86 T40", "D86 T50",
+               "D86 T60", "D86 T70", "D86 T80", "D86 T90", "D86 T95", "D86 FBP")
+
+
+def v7_expected(row: dict) -> dict:
+    """The hub's row for a golden (v1.0.0) row: every D86 cell below an earlier
+    D86 cell is replaced by the highest earlier cell's string (a running
+    maximum, IBP → FBP). Written here on the strings, independently of
+    ``distill.monotonic_d86``; nothing else in the row changes."""
+    out = dict(row)
+    best = None                       # (float, string) of the highest cell so far
+    for col in D86_COLUMNS:
+        cell = out.get(col, "")
+        if cell == "":
+            continue
+        if best is not None and float(cell) < best[0]:
+            out[col] = best[1]
+        else:
+            best = (float(cell), cell)
+    return out
+
+
 def snapshot_available() -> bool:
     return SNAPSHOT_CAL.is_file() and SNAPSHOT_BLANK.is_file()
 

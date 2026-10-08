@@ -81,6 +81,10 @@ def v1_row(hub: Hub, cdf: Path, *, blank: Path | None = None, instrument: str = 
     corr = distill.load_d86_corrections(corrections_file or hub.conf["correction_factors_json"])
     result = distill.compute(cdf, ctx, blank, corrections=corr, honour_env=False, allow_auto=True)
     row = dict(result["row"])
+    # v1 reported the corrected D86 as it fell (no v7.0.0 hold)
+    v1_d86 = distill.apply_d86_corrections(result["d86_uncorrected"], corr)
+    for cut, col in zip(distill.D86_ORDER, distill.CSV_HEADER[15:28]):
+        row[col] = v1_d86.get(cut, "")
     if injection_dt is None:
         _name, raw_stamp, _method = distill.read_cdf_names(cdf)
         v1 = distill.v1_parse_injection_datetime(raw_stamp)

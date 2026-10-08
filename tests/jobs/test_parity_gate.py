@@ -58,7 +58,9 @@ def _report(hub, tmp_path, rows, **kw):
 
 
 def _nonsrc(rep, lab=None):
-    return [d for d in rep["differences"] if d["tag"] != "source-file"
+    """The differences other than the expected ones: Source File, and the
+    corrected D86 cells v1 let dip (v7.0.0; these blank-less fixtures' T10)."""
+    return [d for d in rep["differences"] if d["tag"] not in ("source-file", "d86-monotonic")
             and (lab is None or d["lab_id"] == lab)]
 
 
@@ -222,7 +224,7 @@ def test_columns_an_old_header_lacks_are_v1_short_row_only(hub, tmp_path):
         w.writerow(OLD_HEADER)
         w.writerow([row[c] for c in OLD_HEADER])
     rep = _report(hub, tmp_path, path)
-    tags = {(d["column"], d["tag"]) for d in rep["differences"]}
+    tags = {(d["column"], d["tag"]) for d in rep["differences"] if d["tag"] != "d86-monotonic"}
     assert tags == {(c, "v1-short-row") for c in ("2887 T40", "2887 T60", "D86 T40", "D86 T60",
                                                    "Source File")}
     assert rep["summary"]["rows_numerically_verified"] == 1
@@ -530,3 +532,58 @@ def test_cli_accept_excluded_method(hub, tmp_path):
                "gc1", v1)
     assert res.returncode == 0, res.stdout + res.stderr
     assert "accepted excluded methods: D7096.M" in res.stdout
+
+
+# ── v7.0.0: a corrected D86 that never decreases ────────────────────────────
+
+def _dipping_sample(hub, tmp_path):
+    hub.gc1()
+    (s,), _ = _loaded(hub, tmp_path, lambda d: (
+        fx.sample_cdf(d / "s.CDF", name="40404", injected=at(14, 23), method_name=SIMDIS),))
+    row = v1_row(hub, s)                          # v1: the corrected T10 dips below T5
+    assert float(row["D86 T10"]) < float(row["D86 T5"])
+    return s, row
+
+
+def test_a_held_d86_cell_is_d86_monotonic_and_passes(hub, tmp_path):
+    s, row = _dipping_sample(hub, tmp_path)
+    rep = _report(hub, tmp_path, [row])
+    held = [d for d in rep["differences"] if d["tag"] == "d86-monotonic"]
+    assert [(d["column"], d["v1"], d["hub"]) for d in held] == [("D86 T10", str(row["D86 T10"]), str(row["D86 T5"]))]
+    assert _nonsrc(rep) == []
+    assert rep["summary"]["rows_numerically_verified"] == 1
+    assert rep["exit_code"] == 0
+
+
+def test_a_d86_cell_held_at_anything_else_is_unexplained(hub, tmp_path):
+    """The tag is proven, never assumed: a v1 row whose dip the hub's value
+    doesn't equal the earlier cut's isn't d86-monotonic."""
+    s, row = _dipping_sample(hub, tmp_path)
+    row["D86 T5"] = str(float(row["D86 T5"]) + 0.01)      # v1's T5 no longer what the hub held at
+    rep = _report(hub, tmp_path, [row])
+    assert "d86-monotonic" not in {d["tag"] for d in rep["differences"]}
+    assert {d["column"] for d in _nonsrc(rep) if d["tag"] == "unexplained"} >= {"D86 T5", "D86 T10"}
+    assert rep["exit_code"] == 1
+
+
+def test_a_revision_stored_before_v7_still_proves(hub, tmp_path):
+    """A hub revision from before v7.0.0 (its T10 dipping, like v1's) equals
+    v1's row; the control recomputation, which now holds T10, is compared with
+    that revision under the same rule, so a corrections difference elsewhere
+    is still proven."""
+    s, row = _dipping_sample(hub, tmp_path)
+    sample = store.samples.find_by_key("gc1", "40404", "2026-09-25 14:23:00", db=hub.db)
+    rev = store.get_revision(sample["id"], db=hub.db)
+    results = json.loads(rev["results"])
+    results["D86 T10"] = float(row["D86 T10"])           # as stored before v7.0.0
+    results["D86 IBP"] = results["D86 IBP"] + 1.5         # and the hub's IBP factor differed
+    used = json.loads(rev["corrections_used"])
+    used["values"]["IBP"] = used["values"]["IBP"] + 1.5
+    with store.connection(hub.db) as conn:
+        conn.execute("UPDATE sample_results SET results = ?, corrections_used = ? "
+                     "WHERE sample_id = ? AND revision = ?",
+                     (json.dumps(results), json.dumps(used), sample["id"], rev["revision"]))
+        conn.commit()
+    rep = _report(hub, tmp_path, [row])
+    assert [(d["column"], d["tag"]) for d in _nonsrc(rep)] == [("D86 IBP", "corrections")]
+    assert rep["exit_code"] == 0

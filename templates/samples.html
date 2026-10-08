@@ -6,7 +6,7 @@
 {% block title %}Samples{% endblock %}
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/gc_pages.css') }}?v=2">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/samples.css') }}?v=6">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/samples.css') }}?v=7">
 {% endblock %}
 {% block topbar %}
   <h1 class="tb-title">Samples</h1>
@@ -129,6 +129,7 @@
           <div class="data-main">
             <section class="card" aria-label="Numbers">
               <div class="tablewrap"><table class="tbl num-tbl" id="data-table" data-testid="data-table"></table></div>
+              <p class="side-note data-d86-note" id="data-d86-note" data-testid="data-d86-note" hidden></p>
             </section>
             <div class="facts card" id="data-facts" data-testid="data-facts"></div>
           </div>
@@ -181,15 +182,15 @@
 </dialog>
 {% endblock %}
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/distill_view.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/distill_view.js') }}?v=3"></script>
 <script src="{{ url_for('static', filename='js/sample_order.js') }}?v=2"></script>
 <script src="{{ url_for('static', filename='js/samples.js') }}?v=5"></script>
 <script src="{{ url_for('static', filename='js/deeplink.js') }}?v=5"></script>
 <script src="{{ url_for('static', filename='js/results_logic.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/samples_router.js') }}?v=2"></script>
 <script src="{{ url_for('static', filename='js/backfill_logic.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/samples_logic.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/samples_logic.js') }}?v=6"></script>
 {#- lane C: Plotly, ladder.js, comments.js, compare_logic.js, compare_view.js and compare.css -#}
 {% include "_compare_assets.html" %}
-<script src="{{ url_for('static', filename='js/samples_page.js') }}?v=7"></script>
+<script src="{{ url_for('static', filename='js/samples_page.js') }}?v=8"></script>
 {% endblock %}

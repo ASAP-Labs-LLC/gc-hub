@@ -87,5 +87,11 @@ the helpers DOM/fetch-free so they `require` cleanly outside the browser.
   rules unchanged).
 - `test_results_d86_js.py`: the Results page's uncorrected D86 equals
   `distill.x4_midpoints(distill._convert_to_d86(...))` (node).
+- `test_d86_monotonic.py` (v7.0.0): the corrected D86 never decreases
+  (`distill.monotonic_d86`, applied by `compute` after the factors; the
+  uncorrected series and D2887 keep any dip), the golden rows' v7
+  expectation, and `distill_view.monotonicD86` equal to Python (node);
+  `pipeline/test_d86_monotonic_pipeline.py`: stored, exported, and an old
+  revision kept as history until Re-process.
 - `test_ui_results_settings_smoke.py`: Selenium, both themes at 1366x768 and
   1440x900, Results/Settings/Help/the panel; screenshots to `GC_UI_SHOTS`.

@@ -176,6 +176,9 @@ def test_distillation_curve_is_the_revisions(hub_app):
     assert body["d86"]["D86 T50"] == float(results["D86 T50"])
     unc = json.loads(rev["d86_uncorrected"])
     assert body["d86_uncorrected"]["D86 T50"] == float(unc["50%"])
+    # v7.0.0: the factors the revision used, for the Data table's held marks
+    used = json.loads(rev["corrections_used"])["values"]
+    assert body["corrections"] == {k: float(v) for k, v in used.items()}
     assert len(body["percent"]) == len(body["temperature"]) > 100
     # The curve at 50% recovered is the stored T50 (same calibration, same blank).
     import numpy as np

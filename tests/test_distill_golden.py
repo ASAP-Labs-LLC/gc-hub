@@ -1,6 +1,8 @@
 """Golden tests: distill's results for the synthetic fixtures are pinned to
 the rows v1.0.0 wrote (tests/golden/d2887_rows.json, produced by
-tests/golden/make_golden.py on the code before the phase 2 refactor).
+tests/golden/make_golden.py on the code before the phase 2 refactor), with
+v7.0.0's one documented change applied (``make_golden.v7_expected``: the
+corrected D86 cells never decrease, IBP → FBP).
 
 Any change to a pinned value is a change in results, which is a MAJOR
 release (see RELEASING.md), never a refactor.
@@ -82,7 +84,7 @@ class ProcessCdfGoldenTests(_IsolatedSettings):
         self.assertEqual(settings.CONFIG_PATH, self._saved_config)
         for name, expected in golden.items():
             with self.subTest(case=name):
-                self.assertEqual(rows[name], expected)
+                self.assertEqual(rows[name], make_golden.v7_expected(expected))
 
     def test_process_cdf_rows_equal_golden(self) -> None:
         self._assert_rows(make_golden.CASES, GOLDEN)
@@ -273,7 +275,7 @@ class ComputeTests(_IsolatedSettings):
                 self.assertEqual(list(row), distill.CSV_HEADER)
                 self.assertEqual(row["Source File"], "")
                 self.assertEqual(_csv_strings({k: v for k, v in row.items() if k != "Source File"}),
-                                 expected)
+                                 make_golden.v7_expected(expected))
 
     def test_row_equals_golden(self) -> None:
         self._assert_compute_rows(GOLDEN)
@@ -309,9 +311,9 @@ class ComputeTests(_IsolatedSettings):
     def test_empty_corrections_leave_d86_uncorrected(self) -> None:
         cdf, blank = self._case("sample_40304_blank")
         result = distill.compute(cdf, self._loaded_conf("sample_40304_blank"), blank, corrections={})
-        self.assertEqual(result["d86"], result["d86_uncorrected"])
+        self.assertEqual(result["d86"], distill.monotonic_d86(result["d86_uncorrected"]))
         row = {k: v for k, v in result["row"].items() if k != "Source File"}
-        self.assertEqual(_csv_strings(row), GOLDEN["no_corrections"])
+        self.assertEqual(_csv_strings(row), make_golden.v7_expected(GOLDEN["no_corrections"]))
 
     def test_compute_writes_nothing(self) -> None:
         cdf, blank = self._case("sample_40304_blank")

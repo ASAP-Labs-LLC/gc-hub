@@ -1946,6 +1946,16 @@ def api_sample_distillation_curve(sample_id: int):
                     d86_unc[col] = float(v)
                 except (TypeError, ValueError):
                     pass
+        # The factors the revision was computed with ({cut: value}; none for a
+        # v1 import): the Data table shows them, and which reported cells
+        # v7.0.0's rule held at an earlier value (distill.monotonic_d86).
+        used = _json_col(rev["corrections_used"], {}) or {}
+        factors = {}
+        for cut, v in ((used.get("values") or {}) if isinstance(used, dict) else {}).items():
+            try:
+                factors[str(cut)] = float(v)
+            except (TypeError, ValueError):
+                pass
         return jsonify({
             "sample_id": s["id"],
             "revision": rev["revision"],
@@ -1954,6 +1964,7 @@ def api_sample_distillation_curve(sample_id: int):
             "d2887": _numbers(results, _D2887_COLS),
             "d86": _numbers(results, _D86_COLS),       # corrected: the revision's reported values
             "d86_uncorrected": d86_unc,                # before the correction factors
+            "corrections": factors or None,            # the factors used, {cut: value}
             "blank_used": rev["blank_used"],
             "calibration": calibration,
         })
