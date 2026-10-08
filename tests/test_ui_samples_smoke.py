@@ -307,6 +307,12 @@ def test_copy_link_compare_and_adjust(page):
     box.send_keys("2345")
     assert wait_for(drv, lambda: _js(drv, "return GCSamples.state.compare.params().thresh_significant") in (2345, "2345"))
     _js(drv, "document.querySelector('[data-testid=add-to-queue]').click();")
+    # v8.0.1: it opens the export sheet titled for the queue; its main button queues
+    assert wait_for(drv, lambda: _js(drv, "const d = document.querySelector('[data-testid=export-sheet]'); "
+                                          "return !!(d && d.open) && d.querySelector('h2').textContent"))  == "Add to report queue"
+    assert _js(drv, "return document.querySelector('[data-testid=export-queue]').classList.contains('btn-primary')")
+    _js(drv, "document.querySelector('[data-testid=export-queue]').click();")
+    assert wait_for(drv, lambda: _js(drv, "return !document.querySelector('[data-testid=export-sheet]').open"))
     item = wait_for(drv, lambda: _js(drv, "const i = GCReportQueue.items(); return i.length && i[i.length - 1];"))
     assert item and item["sample_id"] == sid and item["standard_name"] == "Diesel", item
     assert float(item["params"]["thresh_significant"]) == 2345, item

@@ -17,12 +17,12 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v=2">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/shell.css') }}?v=3">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/badge.css') }}?v=3">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/status_shell.css') }}?v=1">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/report_queue.css') }}?v=3">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/status_shell.css') }}?v=2">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/report_queue.css') }}?v=4">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/notifications.css') }}?v=1">
   {% block head %}{% endblock %}
   {#- v6.0 lane L5: phones and tablets; last, so its media queries win over the page's own -#}
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/mobile.css') }}?v=2">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/mobile.css') }}?v=3">
 </head>
 <body class="gc" data-nav="{{ nav or '' }}">
   <div class="app">
@@ -83,9 +83,9 @@
       the adapter polls every 5 s. -#}
   <script src="{{ url_for('static', filename='js/live.js') }}?v=6"></script>
   <script src="{{ url_for('static', filename='js/live_adapter.js') }}?v=2"></script>
-  <script src="{{ url_for('static', filename='js/running_now.js') }}?v=5"></script>
+  <script src="{{ url_for('static', filename='js/running_now.js') }}?v=6"></script>
   <script src="{{ url_for('static', filename='js/report_payload.js') }}?v=5"></script>
-  <script src="{{ url_for('static', filename='js/report_queue.js') }}?v=8"></script>
+  <script src="{{ url_for('static', filename='js/report_queue.js') }}?v=9"></script>
   <script src="{{ url_for('static', filename='js/notifications_panel.js') }}?v=2"></script>
   {% block scripts %}{% endblock %}
   {#- v6.0 lane L5: the phone drawer, the top bar's status, Samples' one pane at a time, chart resizes -#}

@@ -394,6 +394,10 @@
         a.title = s.title;
         const g = el('span', 'gc-chip-glyph', s.glyph);
         g.setAttribute('aria-hidden', 'true');
+        // v8.0.1: on the icon rail the count itself ("1/2"), not a second dot
+        // beside the Live dot
+        const m = /^(\d+) of (\d+)/.exec(text);
+        a.setAttribute('data-short', m ? m[1] + '/' + m[2] : '');   // shown by CSS, never text
         a.append(g, el('span', 'sb-label', text));
     }
 

@@ -572,3 +572,14 @@ def test_the_chart_legends_fit_their_column(face):
         assert rl.key_width(diff) <= rl.KEY_W - rl.KEY_SLACK, diff
         labels = [t for _g, _c, t in diff]
         assert labels[:2] in (["higher than the standard", "lower"], ["higher", "lower"])
+
+
+def test_a_band_too_narrow_for_its_carbons_shows_its_name_not_its_number():
+    """v8.0.1: "Bio" fits a C19–C21 band that "Bio C19–C21" does not; the
+    report shows the name, and the number only when the name doesn't fit."""
+    w = {"evaluable": True, "t0": 3.6, "t1": 4.1, "c_start": 19, "c_end": 21,
+         "label": "Bio", "index": 2}
+    out = rl.band_labels([w], 0.0, 7.0, 500.0)
+    assert [t for _, t, _, _ in out] == ["Bio"]
+    long = dict(w, label="Biodiesel blend range")
+    assert [t for _, t, _, _ in rl.band_labels([long], 0.0, 7.0, 500.0)] != ["Biodiesel blend range"]

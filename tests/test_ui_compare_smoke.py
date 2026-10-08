@@ -345,7 +345,10 @@ def test_conclusion_edit_add_to_queue_export_and_download(env):
     frame(drv, "export sheet")
     shot(drv, "export-sheet-1440x900-light.png")
     assert "Thresholds 100 / 500 / 2000" in js(drv, "return document.querySelector('[data-testid=export-params]').textContent")
-    assert js(drv, "return document.querySelector('[data-testid=export-conclusion]').value") == "Operator wording."
+    # v8.0.1: no conclusion box; the line says the Compare edit is used
+    assert js(drv, "return document.querySelector('[data-testid=export-conclusion]').textContent") \
+        == "Conclusion: your edited text from Compare."
+    assert not js(drv, "return !!document.querySelector('[data-testid=export-sheet] textarea')")
     n = js(drv, "return window.__calls.length")
     js(drv, "document.querySelector('[data-testid=export-download]').click()")
     assert wait(lambda: js(drv, "return document.getElementById('toast').textContent").endswith("downloaded"), 90)

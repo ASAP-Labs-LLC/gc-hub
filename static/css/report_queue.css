@@ -71,3 +71,23 @@
 /* v7: the ranges a report prints, and an item the open Compare view has moved on from */
 .rq-sheet .rq-ranges { overflow-wrap: anywhere; }
 .rq-sheet .rq-stale { color: var(--warn-text); font-size: var(--fs-sm); margin: 0; }
+
+/* v8.0.1: one height for the sheet whatever it holds. The body scrolls; the
+   message line (two lines kept for it) and the buttons stay where they are,
+   so a long reason or "Building 2 of 5…" never grows the sheet or moves a
+   button. The header's ✕ and Escape close it. */
+dialog.rq-sheet[open] { display: flex; flex-direction: column; height: min(600px, calc(100vh - 64px)); overflow: hidden; }
+.rq-sheet .rq-head, .rq-sheet .rq-intro, .rq-sheet .rq-foot { flex: none; }
+.rq-sheet .rq-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; margin-top: var(--s2); padding-right: 2px; }
+.rq-sheet .rq-body .rq-list, .rq-sheet .rq-body .rq-uplist { max-height: none; overflow: visible; }
+.rq-sheet .rq-foot { border-top: 1px solid var(--border-light); padding-top: var(--s3); margin-top: var(--s2); }
+.rq-sheet .rq-foot .rq-msg { margin: 0; min-height: calc(2 * 1.45em); line-height: 1.45;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.rq-sheet .rq-foot .rq-msg:empty { display: -webkit-box; }
+.rq-sheet .rq-foot .actions { margin-top: var(--s2); flex-wrap: nowrap; }
+.rq-sheet .rq-foot .actions .btn { white-space: nowrap; }
+.rq-sheet .rq-download[aria-busy="true"], .rq-sheet [data-testid="rq-download"][aria-busy="true"] { cursor: progress; }
+/* a queue row: the text column takes the room; one line of reason (in full on hover) */
+.rq-list li { align-items: flex-start; }
+.rq-list li > .pill, .rq-list li > .btn { flex: none; margin-top: 2px; }
+.rq-sheet .rq-reason { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }

@@ -211,3 +211,11 @@
 .cmp-full-ico { --m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5'/%3E%3C/svg%3E"); }
 
 @media print { .cmp-drawer, .cmp-toolbar .btn { display: none; } }
+
+/* v8.0.1: the side column never scrolls sideways. Its section heads wrap
+   (Conclusion with "Use the generated text", "Add preset" and Edit is wider
+   than the 380px column), so every button stays in view. */
+.cmp-side { overflow-x: hidden; }
+@media (min-width: 1600px) { .cmp-side { overflow: hidden auto; } }
+.cmp-sec-head { flex-wrap: wrap; row-gap: var(--s1); }
+.cmp-sec-head .btn { white-space: nowrap; }

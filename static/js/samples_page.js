@@ -1365,7 +1365,13 @@
             return;
         }
         await settingsAndStandards();
-        C.addToQueue({ sample: S.row, standards: S.standards, settings: S.settings });   // it says what it did
+        // v8.0.1: the same sheet as Export report, titled for the queue, so the
+        // title, conclusion and other standards can be set before it is queued
+        if (typeof C.openExportSheet === 'function') {
+            C.openExportSheet({ sample: S.row, standards: S.standards, settings: S.settings, mode: 'queue' });
+        } else {
+            C.addToQueue({ sample: S.row, standards: S.standards, settings: S.settings });   // it says what it did
+        }
     }
 
     async function exportReport() {

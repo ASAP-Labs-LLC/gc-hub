@@ -231,8 +231,90 @@ def _resolve_chromedriver() -> Optional[str]:
     return None
 
 
-def _make_driver(headless: bool = True) -> object:
+_PROFILE_ROOT_NAME = "gc-hub-chrome"
+_PROFILE_MAX_AGE_S = 2 * 3600
+
+
+def _fresh_profile_dir() -> str:
+    """A new, empty Chrome profile folder for one session (v8.0.1).
+
+    Chrome started without ``--user-data-dir`` uses the account's default
+    profile, which a scheduled-task or service account may not be able to
+    create or may find locked by another Chrome: chromedriver then answers
+    only "session not created". Folders older than two hours are removed
+    (one Chrome still holds is skipped)."""
+    import shutil
+    import uuid
+    root = os.path.join(tempfile.gettempdir(), _PROFILE_ROOT_NAME)
+    os.makedirs(root, exist_ok=True)
+    now = time.time()
+    try:
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+            try:
+                if now - os.path.getmtime(path) > _PROFILE_MAX_AGE_S:
+                    shutil.rmtree(path, ignore_errors=True)
+            except OSError:
+                pass
+    except OSError:
+        pass
+    path = os.path.join(root, uuid.uuid4().hex)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def chrome_start_text(exc: BaseException) -> str:
+    """Why Chrome did not start, in one line: chromedriver puts the real
+    reason after "session not created" (often on the next line, e.g. the
+    supported Chrome version), so the message's lines are joined up to the
+    stack trace."""
+    msg = getattr(exc, "msg", None) or str(exc) or ""
+    if msg.startswith("Message: "):
+        msg = msg[len("Message: "):]
+    keep = []
+    for raw in msg.splitlines():
+        line = " ".join(raw.split())
+        if not line:
+            continue
+        if line.lower().startswith(("stacktrace", "backtrace", "#")) or line.startswith("0x"):
+            break
+        line = line.split(" For documentation on this error", 1)[0].rstrip(" ;")
+        if line:
+            keep.append(line)
+    return failure_line("; ".join(keep)) or type(exc).__name__
+
+
+def find_chrome(env=None) -> Optional[str]:
+    """The Chrome to start (v8.0.1): ``QBENCH_CHROME`` when set, else Chrome
+    installed for every user, else one installed for a single Windows user
+    (under ``C:\\Users\\<name>\\AppData\\Local``, which chromedriver never
+    looks in for another account: "cannot find Chrome binary"). ``None``
+    when there is none; Selenium Manager then downloads Chrome for Testing."""
+    import glob
+    env = os.environ if env is None else env
+    own = (env.get("QBENCH_CHROME") or "").strip().strip('"')
+    if own:
+        return own if os.path.isfile(own) else None
+    if not sys.platform.startswith("win"):
+        return None
+    tail = os.path.join("Google", "Chrome", "Application", "chrome.exe")
+    roots = [env.get("PROGRAMFILES"), env.get("PROGRAMFILES(X86)"), env.get("PROGRAMW6432"),
+             env.get("LOCALAPPDATA")]
+    for root in [r for r in roots if r]:
+        path = os.path.join(root, tail)
+        if os.path.isfile(path):
+            return path
+    drive = env.get("SYSTEMDRIVE", "C:")
+    for path in sorted(glob.glob(os.path.join(drive + os.sep, "Users", "*", "AppData", "Local", tail))):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _chrome_options(headless: bool, binary: Optional[str] = None) -> object:
     options = _ChromeOptions()
+    if binary:
+        options.binary_location = binary
     if headless:
         options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
@@ -240,12 +322,44 @@ def _make_driver(headless: bool = True) -> object:
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1600,900")
     options.add_argument("--disable-extensions")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument(f"--user-data-dir={_fresh_profile_dir()}")
+    return options
 
+
+def _make_driver(headless: bool = True) -> object:
+    """Start Chrome. First with the ChromeDriver resolved at start-up; when
+    that cannot start a session (most often Chrome updated itself since the
+    hub started, so that driver no longer matches), once more with
+    Selenium Manager, which finds the driver for the Chrome installed now.
+    Each attempt gets its own fresh profile."""
+    global _driver_path
     cd_path = _driver_path  # Use cached path (resolved before worker starts)
-    if cd_path and os.path.exists(cd_path):
-        driver = webdriver.Chrome(service=_ChromeService(cd_path), options=options)
-    else:
-        driver = webdriver.Chrome(options=options)
+    binary = find_chrome()
+    logger.info("[QBench] Chrome binary: %s", binary or "none found (Selenium Manager will fetch one)")
+    attempts = []
+    if cd_path and os.path.exists(cd_path) and binary:
+        attempts.append(cd_path)
+    attempts.append(None)               # Selenium Manager
+    last = None
+    driver = None
+    for path in attempts:
+        try:
+            if path:
+                driver = webdriver.Chrome(service=_ChromeService(path),
+                                          options=_chrome_options(headless, binary))
+            else:
+                driver = webdriver.Chrome(options=_chrome_options(headless, binary))
+            break
+        except WebDriverException as exc:
+            last = exc
+            logger.warning("[QBench] Chrome did not start with %s: %s",
+                           path or "Selenium Manager", chrome_start_text(exc), exc_info=True)
+            if path:
+                _driver_path = None     # don't reuse a driver that no longer starts
+    if driver is None:
+        raise last
     # Log browser version for debugging version-mismatch issues
     try:
         caps = driver.capabilities
@@ -754,7 +868,7 @@ def attach_pdf_to_sample(
         elif isinstance(exc, TimeoutException):
             reason = f"QBench did not answer in time (at: {stage})"
         elif driver is None:
-            reason = f"Chrome could not start: {_exc_text(exc)}"
+            reason = f"Chrome could not start: {chrome_start_text(exc)}"
         else:
             reason = f"The browser session ended: {_exc_text(exc)} (at: {stage})"
         _step(f"Browser error: {reason}")

@@ -316,8 +316,9 @@ def test_range_bands_are_drawn_and_labelled_on_both_charts(harness):
             rects = [s for s in fig["layout"]["shapes"] if s["type"] == "rect"]
             assert len(rects) == 2 and all(r["line"]["width"] > 0 for r in rects)
         labels = _band_texts(trend)
-        # "Spiky <b> C9–C11" is too wide for its band: both fall back to the carbons
-        assert labels == ["C9–C11", "Oil C20–C44"], labels
+        # "Spiky <b> C9–C11" is too wide for its band: since v8.0.1 the name
+        # alone is shown (escaped), before the carbons or the number
+        assert labels == ["Spiky &lt;b&gt;", "Oil C20–C44"], labels
         assert _band_texts(diff) == labels
         # the labels sit in a strip the data never reaches: the axis tops
         # leave room above the data

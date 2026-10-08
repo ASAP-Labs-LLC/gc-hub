@@ -331,3 +331,15 @@
     #sidebar, html.nav-open #sidebar { transition: none; }
 }
 @media print { .tb-menu, .tb-status, .tb-back, .sb-scrim { display: none !important; } }
+
+/* v8.0.1: the phone drawer is the full sidebar, so its footer keeps the
+   full rows, not the icon rail's centred column and "1/2" count */
+@media (max-width: 759.98px) {
+    #sidebar .sb-foot { align-items: stretch; }
+    #sidebar .sb-running { width: 100%; padding: 0 var(--s2); justify-content: flex-start; }
+    #sidebar .sb-running .rn-text, #sidebar .sb-running .rn-bar { display: revert; }
+    #sidebar .sb-gcs { padding: 0 var(--s2); justify-content: flex-start; font-weight: inherit; }
+    #sidebar .sb-gcs .gc-chip-glyph { display: inline; }
+    #sidebar .sb-gcs::after { content: none; }
+    #sidebar .user-chip { width: 100%; }
+}

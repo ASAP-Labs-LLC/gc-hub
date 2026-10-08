@@ -1326,48 +1326,71 @@
         ex.sub = h('p', { className: 'caption' });
         ex.std = h('select', { 'data-testid': 'export-standard' });
         ex.doc = h('input', { type: 'text', value: 'GC Analysis Report', maxlength: '120', 'data-testid': 'export-title' });
-        ex.concl = h('textarea', { rows: '4', maxlength: String(L.CONCLUSION_MAX), 'data-testid': 'export-conclusion',
-                                   placeholder: 'Leave empty to use the generated conclusion.' });
+        // v8.0.1: no conclusion box here; the conclusion is edited on Compare,
+        // and this line says which one the report prints
+        ex.concl = h('p', { className: 'caption cmp-export-concl', 'data-testid': 'export-conclusion' });
         ex.others = h('div', { className: 'cmp-export-others' });
         ex.params = h('p', { className: 'caption cmp-export-params', 'data-testid': 'export-params' });
         ex.msg = h('p', { className: 'caption', role: 'status' });
-        ex.dl = h('button', { type: 'submit', className: 'btn btn-primary', text: 'Download PDF', 'data-testid': 'export-download' });
+        ex.dl = h('button', { type: 'button', className: 'btn btn-primary', text: 'Download PDF', 'data-testid': 'export-download',
+                              onclick: () => exportDownload() });
         ex.queue = h('button', { type: 'button', className: 'btn', text: 'Add to queue', 'data-testid': 'export-queue' });
+        ex.actions = h('div', { className: 'actions' },
+            h('button', { type: 'button', className: 'btn btn-ghost', text: 'Cancel', onclick: () => exportDlg.close() }),
+            ex.queue, ex.dl);
         const form = h('form', { method: 'dialog', className: 'form' },
             ex.title, ex.sub,
             h('label', { className: 'field' }, h('span', { text: 'Compared with' }), ex.std),
             h('label', { className: 'field' }, h('span', { text: 'Report title' }), ex.doc),
-            h('label', { className: 'field' }, h('span', { text: 'Conclusion' }), ex.concl),
             h('details', { className: 'more' }, h('summary', { text: 'Also draw other standards on the report' }), ex.others),
-            ex.params, ex.msg,
-            h('div', { className: 'actions' },
-                h('button', { type: 'button', className: 'btn btn-ghost', text: 'Cancel', onclick: () => exportDlg.close() }),
-                ex.queue, ex.dl));
+            ex.concl, ex.params, ex.msg, ex.actions);
         exportDlg = h('dialog', { className: 'sheet cmp-export', 'data-testid': 'export-sheet', 'aria-labelledby': 'cmp-export-h' }, form);
-        form.addEventListener('submit', (e) => { e.preventDefault(); exportDownload(); });
-        ex.queue.addEventListener('click', () => {
-            const item = exportItem();
-            if (!item) return;
-            if (root.GCReportQueue && root.GCReportQueue.add(item)) exportDlg.close();
-        });
+        // Enter does what the sheet was opened for
+        form.addEventListener('submit', (e) => { e.preventDefault(); (ex.mode === 'queue' ? exportQueue : exportDownload)(); });
+        ex.queue.addEventListener('click', () => exportQueue());
         document.body.appendChild(exportDlg);
         return exportDlg;
+    }
+
+    function exportQueue() {
+        const item = exportItem();
+        if (!item) return;
+        if (!root.GCReportQueue) { ex.msg.textContent = 'The report queue is not available on this page.'; return; }
+        if (root.GCReportQueue.add(item)) exportDlg.close();
+    }
+
+    /** v8.0.1: one sheet for both header actions. Opened from Add to queue
+        (mode 'queue') it is titled for the queue and Add to queue is the main
+        button; from Export report, Download PDF is. */
+    function setExportMode(mode) {
+        ex.mode = mode === 'queue' ? 'queue' : 'download';
+        const q = ex.mode === 'queue';
+        ex.title.textContent = q ? 'Add to report queue' : 'Export report';
+        ex.queue.className = q ? 'btn btn-primary' : 'btn';
+        ex.dl.className = q ? 'btn' : 'btn btn-primary';
+        ex.actions.append(q ? ex.dl : ex.queue, q ? ex.queue : ex.dl);   // the main one last
     }
 
     function openExportFor(ctx) {
         buildExport();
         ex.ctx = ctx;
-        ex.sub.textContent = `Sample ${labelOf(ctx.sample)}. One PDF, built by the hub with these settings.`;
+        setExportMode(ctx.mode);
+        ex.sub.textContent = ex.mode === 'queue'
+            ? `Sample ${labelOf(ctx.sample)}. Added to the report queue with these settings.`
+            : `Sample ${labelOf(ctx.sample)}. One PDF, built by the hub with these settings.`;
         ex.std.textContent = '';
         for (const s of ctx.standards) ex.std.appendChild(h('option', { value: s.name, text: s.name }));
         ex.std.value = ctx.standard || '';
-        ex.generated = ctx.generated || '';
-        ex.concl.value = ctx.conclusion || ctx.generated || '';
-        ex.std.onchange = () => {
-            // another standard: the generated text was for the first one
-            if (ex.concl.value.trim() === ex.generated.trim()) ex.concl.value = '';
-            ex.generated = '';
+        // the conclusion edited on Compare for the standard picked here, else
+        // the generated one (edits are kept per standard)
+        ex.edited = ctx.edited || {};
+        const conclLine = () => {
+            const own = typeof ex.edited[ex.std.value] === 'string' && ex.edited[ex.std.value].trim();
+            ex.concl.textContent = own ? 'Conclusion: your edited text from Compare.'
+                : 'Conclusion: the generated text. Edit it on Compare.';
         };
+        ex.std.onchange = conclLine;
+        conclLine();
         ex.others.textContent = '';
         for (const s of ctx.standards) {
             ex.others.appendChild(h('label', { className: 'check' },
@@ -1380,7 +1403,7 @@
         // last valid settings (the ones listed), not what the drawer shows
         ex.msg.textContent = ctx.pending
             ? 'Adjust has fields to fix: the report uses the last valid settings, listed above.' : '';
-        ex.dl.disabled = !ctx.standards.length;
+        ex.dl.disabled = ex.queue.disabled = !ctx.standards.length;
         if (typeof exportDlg.showModal === 'function') exportDlg.showModal(); else exportDlg.setAttribute('open', '');
         return exportDlg;
     }
@@ -1390,8 +1413,7 @@
         if (!c) return null;
         const std = ex.std.value;
         if (!std) { ex.msg.textContent = 'Pick a standard.'; return null; }
-        let concl = ex.concl.value.trim();
-        if (ex.generated && concl === ex.generated.trim()) concl = '';
+        const concl = typeof ex.edited[std] === 'string' ? ex.edited[std].trim() : '';
         return {
             sample_id: c.sample.sample_id, lab_id: c.sample.lab_id || c.sample.name || '',
             sample_name: ex.doc.value.trim() || 'GC Analysis Report', standard_name: std, conclusion: concl,
@@ -1431,21 +1453,21 @@
         }
     }
 
-    function openExport(v) {
-        return openExportFor({ view: true, sample: v.sample, standards: v.standards, standard: v.standard,
+    function openExport(v, mode) {
+        return openExportFor({ mode, view: true, sample: v.sample, standards: v.standards, standard: v.standard,
             params: v.params, ranges: v.overlays, generated: generated(v),
             pending: !!(v.drawerOpen && v.draft && !L.validateAdjust(v.draft).ok),
-            conclusion: typeof v.edited[v.standard] === 'string' ? v.edited[v.standard] : '' });
+            edited: Object.assign({}, v.edited) });
     }
 
     function openExportSheet(o) {
         const v = viewFor(o && o.sample);
-        if (v) return openExport(v);
+        if (v) return openExport(v, o && o.mode);
         const opts = o || {};
         const item = detachedItem(opts);
-        return openExportFor({ view: false, sample: opts.sample || {}, standards: opts.standards || [],
+        return openExportFor({ mode: opts.mode, view: false, sample: opts.sample || {}, standards: opts.standards || [],
             standard: item.standard_name, params: item.params, ranges: item.ranges || [],
-            adjusted: item.adjusted, generated: '', conclusion: '' });
+            adjusted: item.adjusted, edited: {} });
     }
 
     root.GCCompare = { mount, addToQueue, openExportSheet, defaultStandard, reportItem, viewItem };

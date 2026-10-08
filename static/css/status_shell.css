@@ -49,3 +49,25 @@
 :root[data-sidebar="rail"] .sb .sb-running .rn-text,
 :root[data-sidebar="rail"] .sb .sb-running .rn-bar,
 :root[data-sidebar="rail"] .sb .sb-gcs .sb-label { display: none; }
+
+/* v8.0.1: the icon rail's footer is one centred column: the running-now
+   button a square around its glyph, the GCs as their count ("1/2", coloured
+   like the glyph it replaces), then the Live dot, the bell and the user. */
+@media (max-width: 1399px) {
+    :root:not([data-sidebar="full"]) .sb .sb-foot { align-items: center; }
+    :root:not([data-sidebar="full"]) .sb .sb-running { width: 36px; min-height: 32px; padding: 0; justify-content: center; }
+    :root:not([data-sidebar="full"]) .sb .sb-running .rn-text,
+    :root:not([data-sidebar="full"]) .sb .sb-running .rn-bar { display: none; }
+    :root:not([data-sidebar="full"]) .sb .sb-gcs { padding: 0; justify-content: center; font-weight: 600; }
+    :root:not([data-sidebar="full"]) .sb .sb-gcs .gc-chip-glyph { display: none; }
+    :root:not([data-sidebar="full"]) .sb .sb-gcs::after { content: attr(data-short); }
+    :root:not([data-sidebar="full"]) .sb .live-row { gap: var(--s3); }
+    :root:not([data-sidebar="full"]) .sb .user-chip { width: auto; }
+}
+:root[data-sidebar="rail"] .sb .sb-foot { align-items: center; }
+:root[data-sidebar="rail"] .sb .sb-running { width: 36px; min-height: 32px; padding: 0; justify-content: center; }
+:root[data-sidebar="rail"] .sb .sb-gcs { padding: 0; justify-content: center; font-weight: 600; }
+:root[data-sidebar="rail"] .sb .sb-gcs .gc-chip-glyph { display: none; }
+:root[data-sidebar="rail"] .sb .sb-gcs::after { content: attr(data-short); }
+:root[data-sidebar="rail"] .sb .live-row { gap: var(--s3); }
+:root[data-sidebar="rail"] .sb .user-chip { width: auto; }

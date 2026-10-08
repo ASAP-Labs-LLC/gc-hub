@@ -460,8 +460,6 @@
 
         el.clear = h('button', { type: 'button', className: 'btn btn-ghost btn-sm', 'data-testid': 'rq-clear',
                                  text: 'Clear', onclick: onClear });
-        el.close = h('button', { type: 'button', className: 'btn btn-sm', text: 'Close',
-                                 onclick: () => sheet.close() });
         el.download = h('button', { type: 'button', className: 'btn btn-sm', 'data-testid': 'rq-download',
                                     text: 'Download all', onclick: downloadAll });
         el.upload = h('button', { type: 'button', className: 'btn btn-primary btn-sm', 'data-testid': 'rq-upload',
@@ -480,9 +478,13 @@
                 h('button', { type: 'button', className: 'icon-btn', 'aria-label': 'Close the report queue',
                               onclick: () => sheet.close() }, h('span', { className: 'ico rq-x', 'aria-hidden': 'true' }))),
             h('p', { className: 'rq-intro', text: 'Each report is built with the standard and settings it was added with. The queue is kept in this browser tab.' }),
-            el.list, el.empty, el.signin, el.reauth, el.progress, el.msg,
-            h('div', { className: 'actions' }, el.clear, h('span', { className: 'spacer' }), el.close,
-              el.download, el.stop, el.retryFailed, el.upload));
+            // v8.0.1: the sheet keeps one height; only the body scrolls, and the
+            // message line and the buttons stay put whatever they say
+            h('div', { className: 'rq-body', 'data-testid': 'rq-body' },
+                el.list, el.empty, el.signin, el.reauth, el.progress),
+            h('div', { className: 'rq-foot' }, el.msg,
+                h('div', { className: 'actions' }, el.clear, h('span', { className: 'spacer' }),
+                  el.download, el.stop, el.retryFailed, el.upload)));
         document.body.appendChild(sheet);
         sheet.addEventListener('close', () => { el.msg.textContent = ''; });
         return sheet;
@@ -524,6 +526,7 @@
                     stale ? h('span', { className: 'rq-stale', 'data-testid': 'rq-stale',
                                         text: 'The open Compare view has changed since this was added.' }) : null,
                     it.upload_error ? h('span', { className: 'rq-reason', 'data-testid': 'rq-reason',
+                                                  title: it.upload_error.msg,
                                                   text: it.upload_error.msg }) : null),
                 state,
                 stale ? h('button', { type: 'button', className: 'btn btn-sm', text: 'Update from current view',
@@ -622,10 +625,11 @@
         if (!items.length || busy.download) return;
         busy.download = true;
         const btn = el.download;
+        btn.setAttribute('aria-busy', 'true');
         render();
         try {
             if (items.length === 1) {
-                btn.textContent = 'Building the PDF…';
+                el.msg.textContent = 'Building the PDF…';
                 const r = await fetch('/api/export-analysis-report', { method: 'POST',
                     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payloads(items)[0]) });
                 if (!r.ok) throw new Error(((await root.GCSession.readJson(r)).body || {}).error || ('HTTP ' + r.status));
@@ -634,7 +638,7 @@
                 el.msg.textContent = `${name} downloaded.`;
                 toast(`${name} downloaded`);
             } else {
-                btn.textContent = 'Starting…';
+                el.msg.textContent = 'Starting…';
                 const started = await postJson('/api/export-analysis-reports-zip', { items: payloads(items) });
                 if (!started.ok || !started.body.job) throw new Error(started.body.error || ('HTTP ' + started.status));
                 let job = started.body.job;
@@ -650,7 +654,6 @@
                         toast(v.message);
                         break;
                     }
-                    btn.textContent = `Building ${job.done || 0} of ${job.total}…`;
                     await new Promise(res => setTimeout(res, 1500));
                     const polled = await getJson(`/api/export-analysis-reports-zip/${encodeURIComponent(job.id)}`);
                     if (!polled.ok || !polled.body.job) throw new Error(polled.body.error || ('HTTP ' + polled.status));
@@ -662,7 +665,7 @@
             toast('Download failed: ' + e.message, 'err');
         } finally {
             busy.download = false;
-            btn.textContent = 'Download all';
+            btn.removeAttribute('aria-busy');
             render();
         }
     }
@@ -954,8 +957,7 @@
         const failed = store.failed().length;
         if (failed && sheet) {
             // never a dead end: what failed says why on its row, and one click sends them again
-            el.msg.textContent = `${failed} report${failed === 1 ? ' was' : 's were'} not uploaded; each row says why. `
-                + `${retryText(failed)} sends ${failed === 1 ? 'it' : 'them'} again, the queue kept as it is.`;
+            el.msg.textContent = `${retryText(failed)} sends ${failed === 1 ? 'it' : 'them'} again.`;
         }
         if (wasActive) toast('QBench: ' + ov.text, ov.tone === 'err' ? 'err' : undefined);
     }

@@ -160,7 +160,7 @@ def band_labels(windows: list[dict], x0: float, x1: float,
 
     Left to right, each label starts at its band's left edge, or past the
     end of an earlier band that overlaps it (so no edge runs through the
-    text), and is the first of "<label> Cx–Cy", "Cx–Cy" and "Cx–y" that fits
+    text), and is the first of "<label> Cx–Cy", "<label>", "Cx–Cy" and "Cx–y" that fits
     in the band from there without touching the previous label (row 0).
     A band too narrow for any of them gets its tag, the range's number
     (``index + 1``; the footer's Ranges line names it: ``range_tag``),
@@ -187,7 +187,9 @@ def band_labels(windows: list[dict], x0: float, x1: float,
         carbons = f"C{cs}–C{ce}" if cs != ce else f"C{cs}"
         compact = f"C{cs}–{ce}" if cs != ce else f"C{cs}"
         label = str(w.get("label") or "").strip()
-        tiers = ([f"{label} {carbons}"] if label else []) + [carbons, compact]
+        # the name matters more than the carbons (the findings give those):
+        # "<label> Cx–Cy", then the label alone, then the carbons
+        tiers = ([f"{label} {carbons}", label] if label else []) + [carbons, compact]
         placed = False
         for text in dict.fromkeys(tiers):
             need = line_width(text, BAND_LABEL_FS) + 2 * BAND_LABEL_PAD
