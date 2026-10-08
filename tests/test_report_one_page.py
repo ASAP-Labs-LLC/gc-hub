@@ -319,7 +319,11 @@ def test_a_face_chosen_after_another_is_the_one_measured():
         rl._font_candidates = _DEFAULT_CANDIDATES
         rl._FONTS.clear()
         rl.fonts()
-    assert w_vera != w_default
+    # DejaVu Sans (Linux's default here) is built from Bitstream Vera and has
+    # Vera's widths for Latin text, so only another family can show the width
+    # change; the switch itself is the filename check above.
+    if not os.path.basename(str(first.get("file") or "")).startswith("DejaVuSans"):
+        assert w_vera != w_default
 
 
 def test_the_plan_is_deterministic():
