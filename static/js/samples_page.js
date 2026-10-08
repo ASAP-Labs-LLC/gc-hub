@@ -1079,17 +1079,19 @@
         if (!row.current_revision) {
             const st = L.rowStatus(row);
             body.replaceChildren(h('p', { className: 'empty-note held-note', text: 'No result yet: ' + (st.reason || st.text) + '.' }));
+            renderCurve(null, null);
             return;
         }
-        if (!curve) { body.replaceChildren(h('p', { className: 'side-note', text: 'Loading…' })); return; }
-        if (curve.error) { body.replaceChildren(h('p', { className: 'side-note', role: 'alert', text: curve.error })); return; }
+        if (!curve) { body.replaceChildren(h('p', { className: 'side-note', text: 'Loading…' })); renderCurve(null, { loading: true }); return; }
+        if (curve.error) { body.replaceChildren(h('p', { className: 'side-note', role: 'alert', text: curve.error })); renderCurve(null, curve); return; }
         const rows = L.resultRows(curve, S.corrected, convert());
         const tbl = h('table', { className: 'res-tbl', 'data-testid': 'results-table' },
             h('thead', {}, h('tr', {}, h('th', { scope: 'col', text: 'Recovery' }), h('th', { scope: 'col', text: 'D86' }), h('th', { scope: 'col', text: 'D2887' }))),
-            h('tbody', {}, ...rows.map(r => h('tr', { className: r.key ? 'key' : '' },
+            h('tbody', {}, ...rows.map(r => h('tr', { className: r.key ? 'key' : '', 'data-label': r.label },
                 h('td', { text: r.label }),
-                h('td', { className: r.d86 === null ? 'none' : '', title: r.note || null, text: L.fmt(r.d86, 1) }),
-                h('td', { className: r.d2887 === null ? 'none' : '', text: L.fmt(r.d2887, 1) })))));
+                h('td', { className: r.d86 === null ? 'none' : '', title: r.note || null, 'data-series': 'd86', text: L.fmt(r.d86, 1) }),
+                h('td', { className: r.d2887 === null ? 'none' : '', 'data-series': 'd2887', text: L.fmt(r.d2887, 1) })))));
+        wireResultsLink(tbl);
         const sw = h('button', { type: 'button', className: 'switch', role: 'switch', 'aria-checked': S.corrected ? 'true' : 'false',
                                  'aria-label': 'D86 corrected', 'data-testid': 'corrected-toggle',
                                  onclick: () => { S.corrected = !S.corrected; saveBool(D86_KEY, S.corrected); renderResults(S.row, entry(S.row.sample_id).curve); } });
@@ -1105,6 +1107,72 @@
                     h('span', { className: 'v' }, best && best.label ? best.label : '—',
                         best && best.score != null ? h('small', { text: Number(best.score).toFixed(2) + ' match' }) : null)),
                 h('div', { className: 'line' }, h('span', { className: 'k', text: 'Flags' }), h('span', { className: 'v', text: flags || 'None' }))));
+        renderCurve(rows, curve);
+        markResults(CV && CV.active());       // a point still shown keeps its row marked
+    }
+
+    // ── v7: the distillation curve (the Results card's rows, drawn) ─────
+    let CV = null;
+    function curveView() {
+        if (!CV && window.GCDistillCurve && $('curve-body')) {
+            CV = window.GCDistillCurve.mount($('curve-body'), {
+                legend: $('curve-legend'),
+                onActive: markResults,
+                keepFor: (el) => !!(el && el.closest && el.closest('#results-body tbody')),
+            });
+        }
+        return CV;
+    }
+
+    /** rows: the Results card's rows (null: none to draw); state: the
+        curve answer or {loading}, for the line said instead. No result yet:
+        no card (the Results card says why). */
+    function renderCurve(rows, state) {
+        const card = $('curve-card');
+        const cv = curveView();
+        if (!card || !cv) return;
+        if (!rows && !state) { card.hidden = true; cv.message(''); return; }
+        card.hidden = false;
+        if (rows) cv.render(rows, { corrected: S.corrected });
+        else cv.message(state.loading ? 'Loading…' : state.error || 'No temperatures for this result.');
+    }
+
+    /** A dot is active: its Results row and cell are marked (and a row's
+        mark is cleared when no dot is). */
+    function markResults(sel) {
+        const body = $('results-body');
+        if (!body) return;
+        body.querySelectorAll('tr.is-linked, td.is-hot').forEach(el => el.classList.remove('is-linked', 'is-hot'));
+        if (!sel) return;
+        const tr = [...body.querySelectorAll('tbody tr')].find(r => r.dataset.label === sel.label);
+        if (!tr) return;
+        tr.classList.add('is-linked');
+        const td = tr.querySelector('td[data-series="' + sel.series + '"]');
+        if (td) td.classList.add('is-hot');
+    }
+
+    /** Pointing at (or tapping) a Results row lights its dot: the cell's
+        series, D86 from the label cell. */
+    function wireResultsLink(tbl) {
+        const tbody = tbl.querySelector('tbody');
+        if (!tbody) return;
+        const pick = (ev) => {
+            const cv = curveView();
+            const tr = ev.target.closest && ev.target.closest('tr[data-label]');
+            if (!cv || !tr) return;
+            const td = ev.target.closest('td[data-series]');
+            const series = td ? td.dataset.series : 'd86';
+            let sel = { series, label: tr.dataset.label };
+            if (!cv.setActive) return;
+            cv.setActive(sel, ev.pointerType === 'touch' ? 'tap' : 'link');
+            if (!cv.active()) {                           // no dot for that cell: the other series' dot at that %
+                sel = { series: series === 'd86' ? 'd2887' : 'd86', label: tr.dataset.label };
+                cv.setActive(sel, ev.pointerType === 'touch' ? 'tap' : 'link');
+            }
+        };
+        tbody.addEventListener('pointerover', (ev) => { if (ev.pointerType !== 'touch') pick(ev); });
+        tbody.addEventListener('pointerdown', (ev) => { if (ev.pointerType === 'touch') pick(ev); });
+        tbody.addEventListener('pointerleave', (ev) => { if (ev.pointerType !== 'touch' && CV) CV.clear('link'); });
     }
 
     function renderRuns(row, lab) {
@@ -1428,6 +1496,7 @@
         cancelAnimationFrame(themeFrame);
         themeFrame = requestAnimationFrame(() => {
             drawChart();                      // the open sample's chart, if it is drawn, in the new tokens
+            if (CV) CV.redraw();              // v7: the curve
         });
     }
 

@@ -595,6 +595,166 @@
         return { solid: '', dash: '6 4', dot: '1.5 3', dashdot: '6 3 1.5 3', longdash: '11 4', longdashdot: '11 3 1.5 3' }[dash] || '';
     }
 
+    // ── v7: the distillation curve on Overview ──────────────────────────
+    // It draws the Results card's own rows (resultRows: D86 per the Corrected
+    // D86 toggle, 40%/60% midpoints included), never numbers of its own, so
+    // a dot and its Results cell always agree.
+
+    /** % recovered of a Results label: IBP 0, FBP 100, '50%' 50. */
+    function curvePct(label) {
+        if (label === 'IBP') return 0;
+        if (label === 'FBP') return 100;
+        const n = parseFloat(String(label));
+        return Number.isFinite(n) ? n : null;
+    }
+
+    /** The curve's two series from the Results rows: D86 (named as the
+        toggle names it) and D2887, each [{label, pct, t, note}] with only the
+        points that have a temperature. */
+    const CURVE_MIDPOINT = { '40%': '30% and 50%', '60%': '50% and 70%' };
+    function curveSeries(rows, corrected) {
+        // the Results cell's tooltip, short enough for the callout: a 40/60 midpoint says so
+        const noteOf = (r) => (!r.note || r.d86 === null ? null : CURVE_MIDPOINT[r.label]
+            ? 'Midpoint of the ' + (corrected ? 'uncorrected ' : '') + CURVE_MIDPOINT[r.label] + ' values' : r.note);
+        const pts = (field, withNote) => (rows || [])
+            .map(r => ({ label: r.label, pct: curvePct(r.label), t: round2(r[field]), note: withNote ? noteOf(r) : null }))
+            .filter(p => p.pct !== null && p.t !== null);
+        return [
+            { id: 'd86', name: corrected ? 'D86 corrected' : 'D86 uncorrected', short: 'D86', points: pts('d86', true) },
+            { id: 'd2887', name: 'D2887', short: 'D2887', points: pts('d2887', false) },
+        ];
+    }
+
+    /** A temperature as the Results card prints it, with its unit. */
+    function tempText(t) {
+        return t === null || t === undefined || !Number.isFinite(Number(t)) ? '—' : fmt(t, 1) + ' °C';
+    }
+
+    /** A dot's accessible name: "50%: 285.1 °C, D86 uncorrected". */
+    function curvePointLabel(series, p) {
+        return p.label + ': ' + tempText(p.t) + ', ' + series.name;
+    }
+
+    /** Round axis ticks covering [lo, hi]: at most about maxTicks steps of
+        1, 2, 2.5 or 5 × 10ⁿ. */
+    function niceTicks(lo, hi, maxTicks) {
+        let a = Number(lo);
+        let b = Number(hi);
+        if (!Number.isFinite(a) || !Number.isFinite(b)) return { lo: 0, hi: 1, step: 1, ticks: [0, 1] };
+        if (a > b) [a, b] = [b, a];
+        if (a === b) { a -= 5; b += 5; }
+        const raw = (b - a) / Math.max(1, maxTicks || 5);
+        const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+        const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw - 1e-12);
+        const nlo = Math.floor(a / step + 1e-9) * step;
+        const nhi = Math.ceil(b / step - 1e-9) * step;
+        const ticks = [];
+        for (let v = nlo; v <= nhi + step / 2; v += step) ticks.push(Math.round(v * 1e6) / 1e6);
+        return { lo: nlo, hi: nhi, step, ticks };
+    }
+
+    /** The x labels for a plot this many pixels wide: IBP and FBP at the
+        ends, the tens between (every 20 when narrow). Every point keeps its
+        tick mark (marks), labelled or not. */
+    function curveXTicks(plotWidth) {
+        const every = plotWidth < 300 ? 20 : 10;
+        const labels = [{ pct: 0, text: 'IBP' }];
+        for (let p = every; p < 100; p += every) labels.push({ pct: p, text: String(p) });
+        labels.push({ pct: 100, text: 'FBP' });
+        const marks = LABELS.map(curvePct);
+        return { labels, marks };
+    }
+
+    /** Pixel geometry for the series in a width × height box. → {plot:
+        {left, top, right, bottom}, x(pct), y(t), yTicks, xTicks} (y grows
+        downward, as in SVG). */
+    function curveScale(series, width, height, margin) {
+        const m = Object.assign({ l: 44, r: 16, t: 14, b: 30 }, margin || {});
+        const ts = [];
+        for (const s of (series || [])) for (const p of s.points) ts.push(p.t);
+        const lo = ts.length ? Math.min(...ts) : 0;
+        const hi = ts.length ? Math.max(...ts) : 100;
+        const plotH = Math.max(40, height - m.t - m.b);
+        const ny = niceTicks(lo, hi, Math.max(2, Math.min(7, Math.floor(plotH / 34))));
+        const plot = { left: m.l, top: m.t, right: Math.max(m.l + 40, width - m.r), bottom: m.t + plotH };
+        const x = (pct) => plot.left + (Number(pct) / 100) * (plot.right - plot.left);
+        const y = (t) => plot.bottom - ((Number(t) - ny.lo) / ((ny.hi - ny.lo) || 1)) * (plot.bottom - plot.top);
+        return { plot, x, y, yTicks: ny.ticks, xTicks: curveXTicks(plot.right - plot.left) };
+    }
+
+    /** The point under the pointer: the % column nearest in x (columns are
+        unevenly spaced: 0, 5, 10 … 90, 95, 100), then of the series that
+        have that point, the one nearest in y. null outside the plot (with
+        `slack` pixels to spare) or when nothing is drawn. → {series, label}. */
+    function curveHit(series, scale, px, py, slack) {
+        const sl = slack === undefined ? 12 : slack;
+        const p = scale.plot;
+        if (px < p.left - sl || px > p.right + sl || py < p.top - sl || py > p.bottom + sl) return null;
+        let best = null;
+        for (const s of (series || [])) {
+            for (const pt of s.points) {
+                const dx = Math.abs(scale.x(pt.pct) - px);
+                const dy = Math.abs(scale.y(pt.t) - py);
+                if (!best || dx < best.dx - 0.5 || (Math.abs(dx - best.dx) <= 0.5 && dy < best.dy)) {
+                    best = { series: s.id, label: pt.label, dx, dy };
+                }
+            }
+        }
+        return best ? { series: best.series, label: best.label } : null;
+    }
+
+    /** Find a point: → {series, point} or null. */
+    function curveFind(series, sel) {
+        if (!sel) return null;
+        const s = (series || []).find(x => x.id === sel.series);
+        const p = s && s.points.find(x => x.label === sel.label);
+        return p ? { series: s, point: p } : null;
+    }
+
+    /** The keyboard path through the dots: ←/→ the previous/next point of
+        the same series, ↑/↓ the other series at the same % (else its
+        nearest), Home/End its first/last. → the new {series, label}, or the
+        current one when the key goes nowhere; the first D86 point (else the
+        first point) when nothing is chosen yet. */
+    function curveStep(series, cur, key) {
+        const list = (series || []).filter(s => s.points.length);
+        if (!list.length) return null;
+        const found = curveFind(list, cur);
+        if (!found) return { series: list[0].id, label: list[0].points[0].label };
+        const pts = found.series.points;
+        const i = pts.indexOf(found.point);
+        const at = (s, j) => ({ series: s.id, label: s.points[j].label });
+        if (key === 'ArrowRight') return at(found.series, Math.min(pts.length - 1, i + 1));
+        if (key === 'ArrowLeft') return at(found.series, Math.max(0, i - 1));
+        if (key === 'Home') return at(found.series, 0);
+        if (key === 'End') return at(found.series, pts.length - 1);
+        if (key === 'ArrowUp' || key === 'ArrowDown') {
+            const k = list.indexOf(found.series);
+            const other = list[(k + (key === 'ArrowDown' ? 1 : list.length - 1)) % list.length];
+            if (other === found.series) return at(found.series, i);
+            let j = 0;
+            other.points.forEach((p, n) => {
+                if (Math.abs(p.pct - found.point.pct) < Math.abs(other.points[j].pct - found.point.pct)) j = n;
+            });
+            return at(other, j);
+        }
+        return { series: found.series.id, label: found.point.label };
+    }
+
+    /** Where the callout box (w × h) goes for a dot at (px, py) in a
+        boxW × boxH box. A distillation curve only rises, so the space up and
+        to the left of a dot is empty: the callout goes there, and down and
+        to the right (also empty) when there is no room on the left; never
+        past an edge. → {left, top, side: 'upper-left'|'lower-right'}. */
+    function calloutPlace(px, py, w, h, boxW, boxH, gap) {
+        const g = gap === undefined ? 10 : gap;
+        const clamp = (v, hi) => Math.round(Math.max(0, Math.min(Math.max(0, hi), v)));
+        if (px - g - w >= 0) {
+            return { left: Math.round(px - g - w), top: clamp(py - g - h, boxH - h), side: 'upper-left' };
+        }
+        return { left: clamp(px + g, boxW - w), top: clamp(py + g, boxH - h), side: 'lower-right' };
+    }
+
     const api = {
         number, plural, fmt, rowStatus, rowDetail, flagText, reviewText, injectedText,
         selection, selectedIds, toggle, extend, paint, selectShown, selectAllMatching, clear, keepOnly, bulkBar,
@@ -603,6 +763,8 @@
         isChecked, pressBox, chartReason, backfillReason,
         OVERLAY_MAX, overlayKey, overlayState, overlayParse, overlayStringify, overlayAdd, overlayRemove, overlayClear,
         overlayMode, overlayShown, overlayAddText, traceStyles, plotlyText, overlayTraces, dashArray,
+        curvePct, curveSeries, tempText, curvePointLabel, niceTicks, curveXTicks, curveScale, curveHit, curveFind,
+        curveStep, calloutPlace,
     };
     root.SamplesLogic = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
