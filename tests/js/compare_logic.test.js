@@ -245,4 +245,30 @@ module.exports = (t) => {
     t.eq([mid.text.length, mid.text.endsWith('TAIL'), mid.caret, mid.cut], [1500, true, 1496, true]);
     // replacing a selection frees its room
     t.eq(L.pasteInto('a'.repeat(1500), 'bb', { start: 0, end: 2 }).cut, false);
+
+    // ── v7: a sample's Adjust state, kept in this tab (sessionStorage) ────
+    t.eq(L.parseAdjustments('junk'), []);
+    t.eq(L.parseAdjustments(null), []);
+    const adjRanges = [{ id: 7, label: 'Jet fuel cut', c_start: 12, c_end: 18, color: '#3498db44' },
+                       { id: 2, label: 'Heavy', c_start: '60', c_end: '80' }];
+    let adj = L.rememberAdjustments([], 40329, { params: { quantile: 0.3, window: 'x', sigma: 20 }, ranges: adjRanges });
+    adj = L.rememberAdjustments(adj, 7, { params: {}, ranges: [] });
+    const back = L.recallAdjustments(JSON.stringify(adj), '40329');
+    t.eq(back.params, { quantile: 0.3, sigma: 20 });
+    t.eq(back.ranges.map(r => [r.id, r.label, r.c_start, r.c_end]), [[1, 'Jet fuel cut', 12, 18], [2, 'Heavy', 60, 80]]);
+    t.eq(back.ranges[0].color, '#3498db44');
+    t.eq(!!back.ranges[1].color, true);
+    t.eq(L.recallAdjustments(adj, 7).ranges, []);             // "no ranges" is kept as such
+    t.eq(L.recallAdjustments(adj, 8), null);
+    t.eq(L.recallAdjustments(L.forgetAdjustments(adj, 40329), 40329), null);
+    // the newest wins, at most `cap` samples kept (oldest dropped)
+    let keptList = [];
+    for (let i = 1; i <= 5; i++) keptList = L.rememberAdjustments(keptList, i, { params: {}, ranges: [] }, 3);
+    t.eq(keptList.map(a => a.sample_id), ["3", "4", "5"]);
+    keptList = L.rememberAdjustments(keptList, 3, { params: { sigma: 9 }, ranges: [] }, 3);
+    t.eq(keptList.map(a => a.sample_id), ["4", "5", "3"]);
+    // the summary line names every range as the report's footer does
+    t.eq(L.paramSummary(d0, adjRanges).includes('Jet fuel cut C12–C18, Heavy C60–C80'), true);
+    // labels are one line as the server keeps them (format characters too)
+    t.eq(L.cleanLabel('Jet​fuel  cut﻿'), 'Jet fuel cut');
 };

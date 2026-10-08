@@ -23,9 +23,13 @@
    Run button, and the numbers are never computed here.
 
    Also: GCCompare.addToQueue({sample, standards, settings}) and
-   GCCompare.openExportSheet({...}) for the page header's actions (they use
-   the mounted view's parameters for that sample, else the saved defaults),
-   and GCCompare.defaultStandard(sample, standards) for bulk actions.
+   GCCompare.openExportSheet({...}) for the page header's actions,
+   GCCompare.reportItem({...}) for bulk actions (each uses what is on screen
+   for that sample: the mounted view, else the sample's adjustments kept for
+   this tab, else the saved defaults, captured now), GCCompare.viewItem(id)
+   (the mounted view's queue item, for the queue sheet's "Update from current
+   view") and GCCompare.defaultStandard(sample, standards). A change to what
+   a mounted view would report dispatches `gc:compare-change` {sample_id}.
 
    Needs: session.js, shell.js (GCShell), compare_logic.js, report_payload.js,
    ladder.js is not needed; comments.js (marked regions and earlier notes)
@@ -36,6 +40,7 @@
 
     const L = root.GCCompareLogic;
     const PICKS_KEY = 'gc.compare.picks';
+    const ADJUST_KEY = 'gc.compare.adjust';          // sessionStorage: this tab only
     const mounted = new Set();
 
     // ── small helpers ───────────────────────────────────────────────────────
@@ -81,6 +86,38 @@
         try { root.localStorage.setItem(PICKS_KEY, JSON.stringify(L.rememberPick(loadPicks(), sampleId, name))); }
         catch (_e) { /* private mode: not remembered */ }
     }
+    // v7: the parameters and ranges on screen for a sample, kept for this tab
+    // (compare_logic's *Adjustments): what its report uses when no view is
+    // mounted, and what the view opens with again
+    function loadAdjust() {
+        try { return L.parseAdjustments(root.sessionStorage.getItem(ADJUST_KEY)); } catch (_e) { return []; }
+    }
+    function writeAdjust(list) {
+        try { root.sessionStorage.setItem(ADJUST_KEY, JSON.stringify(list)); }
+        catch (_e) { /* storage refused: kept while the view is mounted only */ }
+    }
+    function keptAdjustments(sampleId) {
+        return sampleId == null ? null : L.recallAdjustments(loadAdjust(), sampleId);
+    }
+    function savedOverlays(settings) {
+        return root.overlaysFromSettings ? root.overlaysFromSettings(settings || {}) : [];
+    }
+    /** Keep the view's parameters and ranges for its sample, or forget them
+        when they are the saved defaults (Reset, Save as default). */
+    function rememberView(v) {
+        const sid = v.sample.sample_id;
+        if (sid == null) return;
+        const defaults = { params: L.defaultParams(v.settings), ranges: savedOverlays(v.settings) };
+        const now = { params: v.params, ranges: v.overlays || [] };
+        writeAdjust(root.reportDiffers && root.reportDiffers(defaults, now)
+            ? L.rememberAdjustments(loadAdjust(), sid, now)
+            : L.forgetAdjustments(loadAdjust(), sid));
+    }
+    function notifyChange(v) {
+        try {
+            document.dispatchEvent(new CustomEvent('gc:compare-change', { detail: { sample_id: v.sample.sample_id } }));
+        } catch (_e) { /* no CustomEvent */ }
+    }
     async function postJson(url, body) {
         const r = await fetch(url, { method: 'POST',
             headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -122,10 +159,12 @@
             editing: false, annotating: false, drawerOpen: false,
             cleanups: [],
         };
-        v.params = L.defaultParams(v.settings);
-        v.overlays = (root.overlaysFromSettings ? root.overlaysFromSettings(v.settings) : []);
-        v.draft = L.draftFrom(v.params, v.overlays);
         const sid = v.sample.sample_id;
+        // what this sample showed last in this tab, else the saved defaults
+        const kept = keptAdjustments(sid);
+        v.params = Object.assign(L.defaultParams(v.settings), kept ? kept.params : {});
+        v.overlays = kept ? kept.ranges : savedOverlays(v.settings);
+        v.draft = L.draftFrom(v.params, v.overlays);
 
         build(v);
         mounted.add(v);
@@ -211,6 +250,7 @@
             v.editing = false;
             renderConclusion(v);
             analyse(v, 0);
+            notifyChange(v);
         }
     }
 
@@ -842,6 +882,7 @@
         else v.edited[v.standard] = text;
         v.editing = false;
         renderConclusion(v);
+        notifyChange(v);
     }
 
     // ── conclusion presets and earlier notes (v6) ──────────────────────────
@@ -1148,12 +1189,13 @@
         if (!v.params || v.params.x_max_min !== res.params.x_max_min) v.zoom = null;
         v.params = res.params;
         v.overlays = res.ranges;
+        rememberView(v);
+        notifyChange(v);
         analyse(v);
     }
 
     function resetDraft(v) {
-        v.draft = L.draftFrom(L.defaultParams(v.settings),
-            root.overlaysFromSettings ? root.overlaysFromSettings(v.settings) : []);
+        v.draft = L.draftFrom(L.defaultParams(v.settings), savedOverlays(v.settings));
         fillDrawer(v);
         changed(v);
     }
@@ -1176,6 +1218,7 @@
             for (const [k, sk] of Object.entries(keys)) s[sk] = String(res.params[k]);
             s.analysis_range_overlays = JSON.stringify(body.range_overlays);
             v.settings = s;
+            rememberView(v);                // now the defaults: nothing to keep
             v.dom.drawerMsg.textContent = 'Saved as the default for every sample.';
             toast('Saved as the default for every sample');
         }
@@ -1217,7 +1260,8 @@
 
     function viewFor(sample) {
         const sid = sample && sample.sample_id;
-        for (const v of mounted) if (v.alive && v.sample.sample_id === sid) return v;
+        if (sid == null) return null;
+        for (const v of mounted) if (v.alive && String(v.sample.sample_id) === String(sid)) return v;
         return null;
     }
 
@@ -1230,21 +1274,46 @@
         return pick ? pick.name : null;
     }
 
+    /** A sample's report without a mounted view: the adjustments kept for it
+        in this tab (what its view showed last), else the saved defaults,
+        captured now (so the queue shows, and prints, these ranges even if
+        the defaults change before it is built). `adjusted` says which. */
     function detachedItem(o) {
         const sample = o.sample || {};
         const std = defaultStandard(sample, o.standards);
+        const kept = keptAdjustments(sample.sample_id);
         return {
             sample_id: sample.sample_id, lab_id: sample.lab_id || sample.name || '', sample_name: 'GC Analysis',
-            standard_name: std || '', conclusion: '', params: L.defaultParams(o.settings),
-            ranges: root.overlaysFromSettings ? root.overlaysFromSettings(o.settings || {}) : undefined,
-            overlay_standards: [],
+            standard_name: std || '', conclusion: '',
+            params: Object.assign(L.defaultParams(o.settings), kept ? kept.params : {}),
+            ranges: kept ? kept.ranges : savedOverlays(o.settings),
+            overlay_standards: [], adjusted: !!kept,
         };
+    }
+
+    /** The report item for a sample as it is on screen (bulk actions): the
+        mounted view's, else detachedItem's. `standard_name` is '' when
+        there is no standard to compare with. */
+    function reportItem(o) {
+        const v = viewFor(o && o.sample);
+        if (v && v.standard) return queueItem(v);
+        const item = detachedItem(o || {});
+        delete item.adjusted;
+        return item;
+    }
+
+    /** The mounted view's queue item for this sample (null: none mounted,
+        or no standard yet). */
+    function viewItem(sampleId) {
+        const v = viewFor({ sample_id: sampleId });
+        return v && v.standard ? queueItem(v) : null;
     }
 
     function addToQueue(o) {
         const v = viewFor(o && o.sample);
         if (v) return addViewToQueue(v);
         const item = detachedItem(o || {});
+        delete item.adjusted;
         if (!item.standard_name) { toast('No comparison standard to compare with.', 'err'); return null; }
         return root.GCReportQueue ? root.GCReportQueue.add(item) : null;
     }
@@ -1305,8 +1374,12 @@
                 h('input', { type: 'checkbox', 'data-path': s.path || '' }), h('span', { text: s.name })));
         }
         ex.params.textContent = 'Built with: ' + L.paramSummary(ctx.params, ctx.ranges) +
-            (ctx.view ? '. Change these in Adjust.' : ' (the saved defaults).');
-        ex.msg.textContent = '';
+            (ctx.view ? '. Change these in Adjust.'
+                : ctx.adjusted ? ' (as this sample was last shown in Compare).' : ' (the saved defaults).');
+        // the drawer holds an edit it can't use yet: say the report uses the
+        // last valid settings (the ones listed), not what the drawer shows
+        ex.msg.textContent = ctx.pending
+            ? 'Adjust has fields to fix: the report uses the last valid settings, listed above.' : '';
         ex.dl.disabled = !ctx.standards.length;
         if (typeof exportDlg.showModal === 'function') exportDlg.showModal(); else exportDlg.setAttribute('open', '');
         return exportDlg;
@@ -1361,6 +1434,7 @@
     function openExport(v) {
         return openExportFor({ view: true, sample: v.sample, standards: v.standards, standard: v.standard,
             params: v.params, ranges: v.overlays, generated: generated(v),
+            pending: !!(v.drawerOpen && v.draft && !L.validateAdjust(v.draft).ok),
             conclusion: typeof v.edited[v.standard] === 'string' ? v.edited[v.standard] : '' });
     }
 
@@ -1371,8 +1445,8 @@
         const item = detachedItem(opts);
         return openExportFor({ view: false, sample: opts.sample || {}, standards: opts.standards || [],
             standard: item.standard_name, params: item.params, ranges: item.ranges || [],
-            generated: '', conclusion: '' });
+            adjusted: item.adjusted, generated: '', conclusion: '' });
     }
 
-    root.GCCompare = { mount, addToQueue, openExportSheet, defaultStandard };
+    root.GCCompare = { mount, addToQueue, openExportSheet, defaultStandard, reportItem, viewItem };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -68,3 +68,6 @@
 .rq-uplist li[data-status="failed"] .rq-detail,
 .rq-uplist li[data-status="error"] .rq-detail,
 .rq-uplist li[data-status="login_failed"] .rq-detail { white-space: normal; overflow-wrap: anywhere; color: var(--text); }
+/* v7: the ranges a report prints, and an item the open Compare view has moved on from */
+.rq-sheet .rq-ranges { overflow-wrap: anywhere; }
+.rq-sheet .rq-stale { color: var(--warn-text); font-size: var(--fs-sm); margin: 0; }

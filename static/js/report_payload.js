@@ -58,6 +58,60 @@
         return payload;
     }
 
+    function oneLine(s) {
+        return String(s == null ? '' : s).split(/\s+/).filter(Boolean).join(' ');
+    }
+
+    /** The ranges a report prints, in the report footer's words and order:
+        "Gas C5–C11, Jet C12–C18" (carbons low to high, as the hub swaps
+        them). '' for an explicit [] (no ranges); null when nothing was
+        captured (the hub then uses its saved defaults when it builds). */
+    function rangesText(ranges) {
+        if (!Array.isArray(ranges)) return null;
+        return rangesForPayload(ranges).map((r) => {
+            const lo = Math.min(r.c_start, r.c_end);
+            const hi = Math.max(r.c_start, r.c_end);
+            return `${oneLine(r.label) || 'Range'} C${lo}–C${hi}`;
+        }).join(', ');
+    }
+
+    function rangesKey(ranges) {
+        if (!Array.isArray(ranges)) return null;
+        return JSON.stringify(rangesForPayload(ranges).map(r => [oneLine(r.label), r.c_start, r.c_end]));
+    }
+
+    /** Would *current* (the open Compare view's queue item) build another
+        report than the queued *item*? The standard, the parameters, the
+        ranges (label and carbons, in order; UI ids and colours don't count)
+        and a conclusion edited on screen. A conclusion typed only in the
+        export sheet is the item's own and never counts. */
+    function reportDiffers(item, current) {
+        if (!item || !current) return false;
+        if (String(item.standard_name || '') !== String(current.standard_name || '')) return true;
+        const a = captureReportParams(item.params);
+        const b = captureReportParams(current.params);
+        if (REPORT_PARAM_KEYS.some(k => a[k] !== b[k])) return true;
+        if (rangesKey(item.ranges) !== rangesKey(current.ranges)) return true;
+        const edited = String(current.conclusion || '').trim();
+        return !!edited && edited !== String(item.conclusion || '').trim();
+    }
+
+    /** The queued *item* brought up to the open view (*current*): its
+        standard, parameters and ranges, and its conclusion when edited on
+        screen (else the item's own, unless the standard changed: that text
+        was written for the other one). The title, the other standards drawn
+        and the sample are the item's. */
+    function refreshItem(item, current) {
+        const edited = String(current.conclusion || '').trim();
+        const same = String(item.standard_name || '') === String(current.standard_name || '');
+        return Object.assign({}, item, {
+            standard_name: current.standard_name,
+            params: captureReportParams(current.params),
+            ranges: rangesForPayload(Array.isArray(current.ranges) ? current.ranges : []),
+            conclusion: edited || (same ? String(item.conclusion || '') : ''),
+        });
+    }
+
     /** The Analysis tab's range overlays from the settings, in the server's
         order (analysis_core.resolve_report_ranges): a saved list is final,
         even an empty one ("[]" = no ranges); nothing saved or unreadable →
@@ -115,8 +169,11 @@
     root.buildReportItemPayload = buildReportItemPayload;
     root.zipJobView = zipJobView;
     root.isZipDownloadUrl = isZipDownloadUrl;
+    root.rangesText = rangesText;
+    root.reportDiffers = reportDiffers;
+    root.refreshItem = refreshItem;
     if (typeof module !== 'undefined' && module.exports) {
         module.exports = { rangesForPayload, captureReportParams, buildReportItemPayload,
-            overlaysFromSettings, zipJobView, isZipDownloadUrl };
+            overlaysFromSettings, zipJobView, isZipDownloadUrl, rangesText, reportDiffers, refreshItem };
     }
 })(typeof window !== 'undefined' ? window : globalThis);

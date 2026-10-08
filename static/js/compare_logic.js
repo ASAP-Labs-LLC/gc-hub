@@ -139,6 +139,45 @@
         return hit ? hit[1] : null;
     }
 
+    // ── v7: a sample's Adjust state, kept for this tab ──────────────────────
+    // The parameters and ranges on screen for a sample, so they still make
+    // its report after the view goes (the Samples page unmounts Compare on
+    // Overview/Data and on another sample) and when it is opened again.
+    // [{sample_id: '<id>', params, ranges}], newest last, at most ADJUST_CAP.
+    const ADJUST_CAP = 100;
+    function parseAdjustments(raw) {
+        let v;
+        try { v = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (_e) { return []; }
+        if (!Array.isArray(v)) return [];
+        return v.filter(a => a && typeof a === 'object' && typeof a.sample_id === 'string'
+            && Array.isArray(a.ranges));
+    }
+    function rememberAdjustments(list, sampleId, state, cap) {
+        const key = String(sampleId);
+        const out = parseAdjustments(list).filter(a => a.sample_id !== key);
+        const s = state || {};
+        out.push({ sample_id: key, params: payload.captureReportParams(s.params || {}),
+                   ranges: payload.rangesForPayload(Array.isArray(s.ranges) ? s.ranges : []) });
+        const max = cap || ADJUST_CAP;
+        return out.length > max ? out.slice(out.length - max) : out;
+    }
+    /** -> {params, ranges (with UI ids and colours)} or null. */
+    function recallAdjustments(list, sampleId) {
+        const key = String(sampleId);
+        const hit = parseAdjustments(list).find(a => a.sample_id === key);
+        if (!hit) return null;
+        return {
+            params: payload.captureReportParams(hit.params || {}),
+            ranges: payload.rangesForPayload(hit.ranges).map((r, i) => ({
+                id: i + 1, label: r.label, c_start: r.c_start, c_end: r.c_end,
+                color: r.color || RANGE_PALETTE[i % RANGE_PALETTE.length] })),
+        };
+    }
+    function forgetAdjustments(list, sampleId) {
+        const key = String(sampleId);
+        return parseAdjustments(list).filter(a => a.sample_id !== key);
+    }
+
     // ── findings ────────────────────────────────────────────────────────────
     function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''; }
 
@@ -211,7 +250,10 @@
 
     function cleanLabel(s) {
         // one line, as analysis_core.clean_range_label keeps it
-        return String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+        // (Cc, Cf, Zl, Zp → a space: control and format characters, zero-width
+        // spaces and joiners, bidi marks and the BOM included)
+        return String(s == null ? '' : s).replace(
+            /[\u0000-\u001f\u007f-\u009f\u00ad\u0600-\u0605\u061c\u06dd\u070f\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/g, ' ')
             .split(/\s+/).filter(Boolean).join(' ');
     }
 
@@ -307,8 +349,9 @@
             'Smoothing ' + sliderLabel(realToSlider('smoothing', p.sigma)),
             `Thresholds ${p.thresh_marginal} / ${p.thresh_moderate} / ${p.thresh_significant}`,
         ];
-        const rs = (ranges || []).map(r => `${cleanLabel(r.label)} C${r.c_start}–C${r.c_end}`);
-        parts.push(rs.length ? rs.join(', ') : 'No ranges');
+        // the ranges as the report's footer names them (every one, in order)
+        const rs = payload.rangesText((ranges || []).map(r => Object.assign({}, r, { label: cleanLabel(r.label) })));
+        parts.push(rs || 'No ranges');
         parts.push(`Up to ${p.x_max_min} min`);
         return parts.join(' · ');
     }
@@ -428,6 +471,7 @@
         sliderToReal, realToSlider, sliderReal, sliderLabel,
         defaultParams, analysisBody, standardFromSearch, comparePath,
         pickStandard, parsePicks, rememberPick, recallPick,
+        ADJUST_CAP, parseAdjustments, rememberAdjustments, recallAdjustments, forgetAdjustments,
         findingsView, draftFrom, validateAdjust, newRange, paramSummary,
         withAlpha, carbonTicks, diffSpan, cleanLabel,
         CONCLUSION_MAX, insertPreset, conclusionCount, pasteInto,

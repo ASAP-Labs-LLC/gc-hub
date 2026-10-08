@@ -220,4 +220,16 @@ module.exports = (t) => {
     t.eq(Q.startRefusal({ refused: [{ lab_id: '1', error: 'not final' }, { sample_id: 2, error: 'gone' }] }, 409),
         { needPassword: false, text: 'Not uploaded: 1 (not final); 2 (gone)' });
     t.eq(Q.startRefusal({}, 502), { needPassword: false, text: 'Not uploaded: HTTP 502' });
+
+    // v7: the sheet names the ranges each report prints, in order
+    t.eq(Q.rangesLine(it.ranges), 'Ranges: Gas C5–C11');
+    t.eq(Q.rangesLine([{ label: 'Gas', c_start: 5, c_end: 11 }, { label: 'Heavy tail', c_start: 60, c_end: 80 }]),
+        'Ranges: Gas C5–C11, Heavy tail C60–C80');
+    t.eq(Q.rangesLine([]), 'Ranges: none');
+    t.eq(Q.rangesLine(undefined), 'Ranges: the saved defaults when it is built');
+    // an item added with no ranges keeps "none" through storage and the payload
+    const st = Q.createStore(memStorage(), 'k');
+    st.add(Object.assign({}, raw, { ranges: [] }));
+    t.eq(st.items()[0].ranges, []);
+    t.eq(Q.payloads(st.items())[0].ranges, []);
 };
