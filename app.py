@@ -1203,10 +1203,38 @@ def _report_footer_lines(content: dict) -> list[str]:
         f"· spike max FWHM {p['spike_max_fwhm_min']:g} min · spike dominance "
         f"≥{p['spike_min_dominance']:g}")
     ranges = content.get("ranges") or []
+    # every range, always (v7): a range whose band carries only its number
+    # on the charts is listed with it, "(6) Name C20–C22"
+    tags = {int(w.get("index", -1)): text for w, text, _x, _row in _report_band_labels(content)
+            if report_layout.is_tag(text)}
     ranges_line = "Ranges: " + (", ".join(
-        f"{r.get('label', 'Range')} C{min(int(r['c_start']), int(r['c_end']))}–"
-        f"C{max(int(r['c_start']), int(r['c_end']))}" for r in ranges) or "none")
+        (f"({tags[i]}) " if i in tags else "")
+        + f"{r.get('label', 'Range')} C{min(int(r['c_start']), int(r['c_end']))}–"
+        f"C{max(int(r['c_start']), int(r['c_end']))}" for i, r in enumerate(ranges)) or "none")
     return [params_line, ranges_line]
+
+
+def _report_band_labels(content: dict) -> list:
+    """The charts' range labels (``report_layout.band_labels``): one decision
+    for the trend, the difference and the footer."""
+    t = (content.get("series") or {}).get("t")
+    if t is None or len(t) == 0:
+        return []
+    m = _REPORT_MARGIN_PT
+    return report_layout.band_labels(content.get("windows") or [], float(t[0]),
+                                     float(content["params_used"]["x_max_min"]),
+                                     report_layout.BODY_W - m["l"] - m["r"])
+
+
+def _report_ranges_on_charts(content: dict) -> bool:
+    """Every range carries its full label ("<label> Cx–Cy") on both charts."""
+    ranges = content.get("ranges") or []
+    windows = content.get("windows") or []
+    if not ranges or len(windows) != len(ranges) or not all(w["evaluable"] for w in windows):
+        return False
+    full = {int(w.get("index", -1)) for w, text, _x, _row in _report_band_labels(content)
+            if str(w.get("label") or "").strip() and text.startswith(str(w["label"]).strip() + " ")}
+    return full == set(range(len(ranges)))
 
 
 def _report_comment_lines(comments: list[dict], ladder) -> tuple[list[str], list[str]]:
@@ -1312,17 +1340,19 @@ def _report_figures(content: dict, sample_name: str, overlay_standards: list,
 
     # Range bands and their labels: the same bands, edges and labels on both charts.
     plot_w_pt = rl.BODY_W - m["l"] - m["r"]
-    labelled = rl.band_labels(content["windows"], x_range[0], x_range[1], plot_w_pt)
-    lane_pt = rl.BAND_LANE_PT if labelled else 0.0
+    labelled = _report_band_labels(content)
+    lane_pt = rl.band_lane_pt(1 + max((row for *_r, row in labelled), default=-1))
     bands = [dict(type="rect", x0=w["t0"], x1=w["t1"], y0=0, y1=1, xref="x", yref="paper",
                   fillcolor=c["band"], layer="below",
                   line=dict(color=c["band_edge"], width=0.5 * k))
              for w in content["windows"] if w["evaluable"]]
-    band_labels = [dict(x=x, xref="x", xanchor="left",
-                        xshift=rl.BAND_LABEL_PAD * k, y=1, yref="paper", yanchor="top",
-                        yshift=-1.5 * k, showarrow=False, text=_esc(text),
+    band_labels = [dict(x=x, xref="x", xanchor="center" if rl.is_tag(text) else "left",
+                        xshift=0 if rl.is_tag(text) else rl.BAND_LABEL_PAD * k, y=1,
+                        yref="paper", yanchor="top",
+                        yshift=-(rl.BAND_LANE_PAD + row * rl.BAND_ROW_PT) * k, showarrow=False,
+                        text=_esc(text), borderpad=0,
                         font=dict(size=rl.BAND_LABEL_FS * k, color=c["band_text"]))
-                   for w, text, x in labelled]
+                   for w, text, x, row in labelled]
 
     axis = dict(gridcolor=c["grid"], gridwidth=0.5 * k, linecolor=c["tick"], linewidth=0.75 * k,
                 tickcolor=c["tick"], tickwidth=0.75 * k, ticklen=2.5 * k, ticks="outside",
@@ -1522,7 +1552,8 @@ def _generate_analysis_report_pdf(params: dict, content: dict, comments: list[di
     plan = report_layout.plan(
         doc_name=doc_name, lab_id=lab_id, std_name=content["standard_name"],
         bullets_text=content["text"], conclusion=conclusion, region_lines=region_lines,
-        note_lines=note_lines, footer_lines=footer_lines, has_logo=bool(logo_b64))
+        note_lines=note_lines, footer_lines=footer_lines, has_logo=bool(logo_b64),
+        ranges_on_charts=_report_ranges_on_charts(content))
     if plan.shortened:
         LOGGER.info("Report for %s shortened to fit one page: %s", lab_id or "a sample",
                     "; ".join(plan.shortened))

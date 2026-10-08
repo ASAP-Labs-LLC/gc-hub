@@ -258,7 +258,13 @@ def test_every_section_at_its_worst_is_still_one_page(face):
     assert rl.more_notes_text(50 - plan.notes_shown, plan.notes_shown) in text
     for part in PARAMS_LINE.split(" · "):
         assert flat(part.replace("Parameters: ", "")) in text, part
-    assert "Range number 00 with a long label xx C5–C8" in text and "more" in text
+    # v7: every range is named, never "and N more" (names may be shortened)
+    k = plan.ranges_name_chars
+    assert k is not None and k >= rl.RANGES_NAME_MIN
+    for i in range(40):
+        name = f"Range number {i:02d} with a long label xx"
+        assert flat(f"{name[:k].rstrip()}… C{5 + i}–C{8 + i}") in text, i
+    assert " more, " not in text and not re.search(r"and \d+ more", text)
     assert "GC hub v6.0.0" in text
     assert plan.shortened and not any("does not fit" in x for x in plan.shortened)
 
@@ -328,6 +334,16 @@ def test_finding_rows_keep_the_line_whole():
 
 
 # ── the real path: kaleido charts, every export route, worst content ─────
+WORST_RANGES = 12
+
+
+def worst_range_label(i: int) -> str:
+    """40 characters, the hub's cap on a range label."""
+    label = f"Range number {i:02d} with a long label xxxxxx"
+    assert len(label) == 40
+    return label
+
+
 @pytest.fixture(scope="module")
 def worst_harness():
     pytest.importorskip("flask")
@@ -350,8 +366,8 @@ def worst_harness():
             "standard_name": WORST_STD, "quantile": 0.25, "window": 251, "sigma": 20.0,
             "thresh_marginal": 120, "thresh_moderate": 450, "thresh_significant": 1800,
             "x_max_min": 6.5,
-            "ranges": [{"label": f"Range number {i:02d} with a long label xx", "c_start": 5 + 3 * i,
-                        "c_end": 7 + 3 * i} for i in range(13)],
+            "ranges": [{"label": worst_range_label(i), "c_start": 5 + 3 * i,
+                        "c_end": 7 + 3 * i} for i in range(WORST_RANGES)],
             "conclusion": conclusion_of(1500),
             "doc_name": "GC Analysis of an exceptionally long customer document name " * 3,
             "overlay_standards": [],
@@ -392,8 +408,8 @@ def test_worst_case_reports_are_one_page_on_every_path(worst_harness):
 
 
 def test_worst_case_charts_label_the_same_bands_on_both(worst_harness):
-    """13 ranges: the wide ones fall back to their carbons, the narrow ones go
-    unlabelled, and the two charts agree band for band."""
+    """12 ranges: the wide ones fall back to their carbons, the narrow ones
+    carry their number, and the two charts agree band for band."""
     def texts(fig):
         return [a["text"] for a in fig["layout"]["annotations"] or []
                 if a.get("yref") == "paper" and a.get("y") == 1]
@@ -401,38 +417,93 @@ def test_worst_case_charts_label_the_same_bands_on_both(worst_harness):
         trend, diff = rec["figs"]
         assert texts(trend) == texts(diff)
         assert texts(trend)[:2] == ["C5–C7", "C8–C10"], texts(trend)
-        assert 0 < len(texts(trend)) < 13
-        assert sum(s["type"] == "rect" for s in diff["layout"]["shapes"]) == 13
+        assert len(texts(trend)) == WORST_RANGES          # every band labelled or numbered
+        assert any(rl.is_tag(t) for t in texts(trend))
+        assert sum(s["type"] == "rect" for s in diff["layout"]["shapes"]) == WORST_RANGES
+
+
+def test_worst_case_reports_name_every_range(worst_harness):
+    """v7 (Ryan: every range added on the comparison reflects on the report):
+    on the most crowded page every range is still named in the PDF's text,
+    in order with its carbons; a numbered band's number is in its entry."""
+    assert worst_harness["pdf_pages"] == {"direct": 1, "zip": 1, "qbench": 1}
+    tags = {t for rec in worst_harness["figures"] for t in
+            (a["text"] for a in rec["figs"][0]["layout"]["annotations"] or [])
+            if rl.is_tag(t)}
+    for path, pdf in worst_harness["pdf_text"].items():
+        assert re.search(r"and \d+ more", pdf) is None, path
+        line = pdf[pdf.rindex("Ranges ") + len("Ranges "):pdf.rindex(" Generated")]
+        entries = rl.range_entries(line)
+        assert len(entries) == WORST_RANGES, (path, line)
+        for i, (name, carbons) in enumerate(entries):
+            assert carbons == f"C{5 + 3 * i}–C{7 + 3 * i}", (path, line)
+            tag = f"({i + 1}) "
+            assert name.startswith(tag) == (str(i + 1) in tags), (path, name)
+            name = name.removeprefix(tag)
+            label = worst_range_label(i)
+            assert name == label or (name.endswith("…") and len(name) - 1 >= rl.RANGES_NAME_MIN
+                                     and label.startswith(name[:-1])), (path, name)
 
 
 # ── v7: range labels and legend swatches (pure) ──────────────────────────
-def _win(t0, t1, cs, ce, label="", evaluable=True):
+def _win(t0, t1, cs, ce, label="", evaluable=True, index=0):
     return {"t0": t0, "t1": t1, "c_start": cs, "c_end": ce, "label": label,
-            "evaluable": evaluable}
+            "evaluable": evaluable, "index": index}
 
 
-def test_band_labels_fall_back_from_name_to_carbons_to_nothing(face):
+def test_band_labels_fall_back_from_name_to_carbons_to_the_ranges_number(face):
     plot_w = 500.0                                    # pt for 0–10 min: 50 pt a minute
-    wins = [_win(0.0, 4.0, 5, 11, "Gasoline"),        # 200 pt: the full label
-            _win(4.2, 5.0, 12, 14, "A very long range name"),   # 40 pt: carbons only
-            _win(5.2, 5.4, 20, 22, "Narrow"),         # 10 pt: nothing
-            _win(6.0, 9.0, 30, 40, "Skipped", evaluable=False)]
+    wins = [_win(0.0, 4.0, 5, 11, "Gasoline", index=0),        # 200 pt: the full label
+            _win(4.2, 5.0, 12, 14, "A very long range name", index=1),   # 40 pt: carbons
+            _win(5.2, 5.4, 20, 22, "Narrow", index=2),         # 10 pt: its number
+            _win(6.0, 9.0, 30, 40, "Skipped", evaluable=False, index=3)]
     out = rl.band_labels(wins, 0.0, 10.0, plot_w)
-    assert [t for _w, t, _x in out] == ["Gasoline C5–C11", "C12–C14"]
+    assert [(t, row) for _w, t, _x, row in out] == [
+        ("Gasoline C5–C11", 0), ("C12–C14", 0), ("3", 0)]
+    assert out[2][2] == pytest.approx(5.3)            # a tag is centred on its band
+    assert rl.is_tag("3") and not rl.is_tag("C12–C14")
 
 
 def test_band_labels_start_clear_of_an_overlapping_bands_edge(face):
-    wins = [_win(0.0, 3.0, 5, 11, "Gasoline"), _win(2.0, 8.0, 10, 22, "Diesel")]
+    wins = [_win(0.0, 3.0, 5, 11, "Gasoline"), _win(2.0, 8.0, 10, 22, "Diesel", index=1)]
     out = rl.band_labels(wins, 0.0, 10.0, 500.0)
-    assert [(t, x) for _w, t, x in out] == [("Gasoline C5–C11", 0.0), ("Diesel C10–C22", 3.0)]
+    assert [(t, x) for _w, t, x, _r in out] == [("Gasoline C5–C11", 0.0), ("Diesel C10–C22", 3.0)]
 
 
 def test_band_labels_never_touch_each_other(face):
-    wins = [_win(i * 0.5, i * 0.5 + 0.9, 5 + i, 6 + i, f"R{i}") for i in range(12)]
+    wins = [_win(i * 0.5, i * 0.5 + 0.9, 5 + i, 6 + i, f"R{i}", index=i) for i in range(12)]
     out = rl.band_labels(wins, 0.0, 10.0, 500.0)
-    spans = [(x * 50, x * 50 + rl.line_width(t, rl.BAND_LABEL_FS) + 2 * rl.BAND_LABEL_PAD)
-             for _w, t, x in out]
-    assert all(a[1] <= b[0] for a, b in zip(spans, spans[1:]))
+    for row in (0, 1):
+        spans = []
+        for _w, t, x, r in out:
+            if r != row:
+                continue
+            wd = rl.line_width(t, rl.BAND_LABEL_FS)
+            spans.append((x * 50 - wd / 2 - 1, x * 50 + wd / 2 + 1) if rl.is_tag(t)
+                         else (x * 50, x * 50 + wd + 2 * rl.BAND_LABEL_PAD))
+        assert all(a[1] <= b[0] for a, b in zip(spans, spans[1:])), (row, spans)
+
+
+def test_narrow_neighbours_stagger_their_numbers_into_a_second_row(face):
+    wins = [_win(1.0 + i * 0.12, 1.0 + i * 0.12 + 0.1, 20 + 2 * i, 21 + 2 * i, "Narrow",
+                 index=i + 8) for i in range(6)]    # 5 pt bands, 1 pt apart
+    out = rl.band_labels(wins, 0.0, 10.0, 500.0)
+    assert {t for _w, t, _x, _r in out} <= {str(i + 9) for i in range(6)}
+    assert {r for *_a, r in out} == {0, 1} and len(out) >= 4
+    assert rl.band_lane_pt(2) > rl.band_lane_pt(1) > rl.band_lane_pt(0) == 0
+
+
+def test_the_ranges_line_never_leaves_a_range_out():
+    line = "Gas, light C5–C11, (3) Oil C20–C44, Single C7"
+    assert rl.range_entries(line) == [("Gas, light", "C5–C11"), ("(3) Oil", "C20–C44"),
+                                      ("Single", "C7")]
+    p = rl.Plan(trend_h=0, diff_h=0, fs=8.5)
+    assert rl.ranges_text(line, p) == line
+    p.ranges_name_chars = 4
+    assert rl.ranges_text(line, p) == "Gas,… C5–C11, (3) Oil C20–C44, Sing… C7"
+    p.ranges_on_charts = True
+    assert rl.ranges_text(line, p) == "3 ranges, each named on both charts"
+    assert rl.ranges_text("none", rl.Plan(trend_h=0, diff_h=0, fs=8.5, ranges_name_chars=3)) == "none"
 
 
 def _pixels(png: bytes):
