@@ -138,19 +138,27 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
         out = orig_html(*a, **kw)
         htmls.append(out)
         return out
-    app._report_content = rec_content
-    app._report_html = rec_html
-
-    # the trend chart's range bands as drawn (x0, x1 of its rect shapes), per
-    # report, so a test can hold them to the windows /api/analysis returned
+    # what each report's charts drew: the marks and layout (not the data), and
+    # the trend chart's range bands (x0, x1 of its rect shapes), so a test can
+    # hold them to the windows /api/analysis returned
+    figures: list[dict] = []
     bands: list[list] = []
     orig_figures = app._report_figures
 
     def rec_figures(*a, **kw):
-        fig1, fig2 = orig_figures(*a, **kw)
-        bands.append([[float(sh.x0), float(sh.x1)] for sh in (fig1.layout.shapes or ())
+        out = orig_figures(*a, **kw)
+        def slim(f):           # the marks and the layout, not the data
+            d = json.loads(f.to_json())
+            traces = [{k: v for k, v in t.items() if k not in ("x", "y")} for t in d["data"]]
+            lay = d["layout"]
+            return {"data": traces, "layout": {k: lay.get(k) for k in
+                                               ("shapes", "annotations", "yaxis", "margin")}}
+        figures.append({"heights_pt": kw.get("heights_pt"), "figs": [slim(f) for f in out]})
+        bands.append([[float(sh.x0), float(sh.x1)] for sh in (out[0].layout.shapes or ())
                       if sh.type == "rect"])
-        return fig1, fig2
+        return out
+    app._report_content = rec_content
+    app._report_html = rec_html
     app._report_figures = rec_figures
 
     pdfs: dict[str, bytes] = {}
@@ -212,6 +220,13 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
     # the status the report queue matches its reports against (by sample_id)
     out["upload_status"] = client.get("/api/qbench-upload-status").get_json()
 
+    # GC_HARNESS_PDFS: a folder to keep the PDFs in (to look at them)
+    if os.environ.get("GC_HARNESS_PDFS"):
+        keep = Path(os.environ["GC_HARNESS_PDFS"])
+        keep.mkdir(parents=True, exist_ok=True)
+        for k, v in pdfs.items():
+            (keep / f"{k}.pdf").write_bytes(v)
+
     import pypdf
     out["pdf_text"] = {
         k: " ".join(" ".join((p.extract_text() or "") for p in
@@ -221,6 +236,7 @@ def main(data_dir: str, sample_id: int, request_path: str, out_path: str) -> Non
     out["records"] = records
     out["htmls"] = htmls
     out["bands"] = bands
+    out["figures"] = figures
     out["log_rows"] = log_rows
     Path(out_path).write_text(json.dumps(out, default=_jsonable), encoding="utf-8")
     os._exit(0)          # skip the hub threads' shutdown

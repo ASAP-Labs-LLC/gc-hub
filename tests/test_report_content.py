@@ -274,3 +274,53 @@ def test_comments_module_is_a_hard_import():
     top_imports = [a.name for n in tree.body if isinstance(n, ast.Import) for a in n.names]
     assert "comments" in top_imports
     assert "comments_mod is None" not in _app_src()
+
+
+# ── v7: the charts read in colour and in black and white ─────────────────
+def _band_texts(fig: dict) -> list[str]:
+    """The range labels: annotations anchored to the plot's top edge."""
+    return [a["text"] for a in fig["layout"]["annotations"] or []
+            if a.get("yref") == "paper" and a.get("y") == 1]
+
+
+def test_the_charts_carry_colour_and_texture(harness):
+    """Ryan, v7: the sample in colour AND distinguishable printed in black and
+    white; higher / lower filled in colour AND told apart by a pattern."""
+    import report_layout as rl
+    assert len(harness["figures"]) == 3            # direct, ZIP, QBench
+    for rec in harness["figures"]:
+        assert rec["heights_pt"] and len(rec["heights_pt"]) == 2
+        trend, diff = rec["figs"]
+        by_name = {t.get("name", ""): t for t in trend["data"]}
+        sample = next(t for n, t in by_name.items() if n.startswith("Sample"))
+        std = next(t for n, t in by_name.items() if n.startswith("Standard"))
+        assert sample["line"]["color"] == rl.SAMPLE and not sample.get("fill")
+        assert std["fill"] == "tozeroy" and std["line"]["color"] == rl.STD_EDGE
+        traces = {t.get("name"): t for t in diff["data"]}
+        above, below = traces["Higher than the standard"], traces["Lower than the standard"]
+        assert above["fillpattern"]["shape"] == rl.ABOVE_PATTERN == "/"
+        assert below["fillpattern"]["shape"] == rl.BELOW_PATTERN == "."
+        assert above["fillpattern"]["fgcolor"] == rl.DEV_ABOVE
+        assert below["fillpattern"]["fgcolor"] == rl.DEV_BELOW
+        assert above["fillcolor"] == rl.DEV_ABOVE_FILL and below["fillcolor"] == rl.DEV_BELOW_FILL
+        spikes = traces["Counted spikes (raw difference)"]
+        assert set(spikes["marker"]["symbol"]) <= {"triangle-up", "triangle-down"}
+        dashes = {s["line"]["dash"] for s in diff["layout"]["shapes"] if s["type"] == "line"}
+        assert len(dashes) >= 2                    # marginal and moderate differ by dash
+
+
+def test_range_bands_are_drawn_and_labelled_on_both_charts(harness):
+    for rec in harness["figures"]:
+        trend, diff = rec["figs"]
+        for fig in (trend, diff):
+            rects = [s for s in fig["layout"]["shapes"] if s["type"] == "rect"]
+            assert len(rects) == 2 and all(r["line"]["width"] > 0 for r in rects)
+        labels = _band_texts(trend)
+        # "Spiky <b> C9–C11" is too wide for its band: both fall back to the carbons
+        assert labels == ["C9–C11", "Oil C20–C44"], labels
+        assert _band_texts(diff) == labels
+        # the labels sit in a strip the data never reaches: the axis tops
+        # leave room above the data
+        assert trend["layout"]["yaxis"]["range"][1] > 0
+        lo, hi = diff["layout"]["yaxis"]["range"]
+        assert hi > -lo > 0

@@ -21,9 +21,7 @@ One page, deterministically
    (a short report gets tall charts, a long one shorter charts);
 2. if the text does not fit beside the smallest charts, sets the text in the
    next smaller type size (``TYPE_STEPS``);
-3. still too long: shortens the footer's ranges line (the ranges are also
-   on the charts and in the findings) to ``RANGES_CHARS``, "…, and N more",
-   and lets the charts go down to ``CHART_FLOOR``;
+3. still too long: lets the charts go down to ``CHART_FLOOR``;
 4. then lists as many of the conclusion's notes as fit (in their order) and
    one line "N more notes are in the GC hub";
 5. then as many marked regions as fit, "N more marked regions are in the
@@ -35,6 +33,12 @@ One page, deterministically
    cap the hub enforces); only a longer one (an old queue item, an API
    client) is shortened, never below the cap, at a word, ending
    "… (shortened; the full conclusion is in the GC hub)".
+8. the footer's Ranges line never leaves a range out (v7: every range on
+   the comparison is named on the page): still too long, it says "named
+   on the charts" when every range carries its full label on both charts
+   (``ranges_on_charts``), else each name is shortened (to as many
+   characters as fit, at least ``RANGES_NAME_MIN``; the carbons always
+   whole), with the charts allowed down to ``CHART_HARD`` on the way.
 
 With the conclusion at its cap, every section at its worst and the
 smallest type, one finding and the footer still fit beside the smallest
@@ -99,7 +103,8 @@ FOOT_LINE = 1.35                          # the footer's line height (``.foot td
 FOOT_TOP = 10.0 + 4.0                     # the footer: its margin, the first row's extra padding
 LAB_ID_CHARS = 40                         # the header's lab ID, at most (real ones are ~5-12)
 STD_NAME_CHARS = 120                      # the standard's name in the subtitle, at most
-RANGES_CHARS = 300                        # the footer's ranges line, when shortened
+RANGES_NAME_MIN = 6                       # a range's name in the footer, when shortened
+CHART_HARD = (100.0, 64.0)                # the charts' last floor: for a long Ranges line only
 CONCLUSION_KEEP = 1500                    # the conclusion cap: always printed whole
 
 # ── tokens (static/css/tokens.css, light) ────────────────────────────────
@@ -112,6 +117,183 @@ SUNKEN = "#f4f4f5"
 DEV_ABOVE, DEV_ABOVE_FILL = "#dc2626", "#fecaca"
 DEV_BELOW, DEV_BELOW_FILL = "#2563eb", "#bfdbfe"
 CHART_REF = "#a8b0bc"
+
+# ── the charts' marks (v7): colour for meaning, texture for print ────────
+# Every mark is told apart twice, by colour and by something that survives
+# a black-and-white printer: the sample is the one coloured line (the app's
+# accent, dark: ~35% grey in greyscale) over the standard's light grey area
+# (~88% grey, with a mid-grey edge); "higher" and "lower" are red and blue
+# fills (both ~85% grey once printed, so the colour alone would vanish)
+# carrying opposite textures, diagonal hatch and dots, in their dark tone;
+# spikes are triangles pointing the way they go; the thresholds differ by
+# dash; range bands are a neutral tint with hairline edges (no hue: colour
+# is kept for what the data means).
+SAMPLE = "#0e7490"                         # --accent
+STD_EDGE = "#8f98a6"                       # the standard's outline: between --chart-ref and --chart-axis
+STD_FILL = (168, 176, 188, 0.35)           # --chart-ref at 35%
+BAND_FILL = (15, 23, 42, 0.05)
+BAND_EDGE = (15, 23, 42, 0.22)
+ABOVE_PATTERN, BELOW_PATTERN = "/", "."    # Plotly fillpattern shapes
+PATTERN_PT = 3.2                           # a pattern cell, printed points
+PATTERN_SOLIDITY = {"/": 0.22, ".": 0.3}
+THRESHOLD_DASH = {"marginal": "dot", "moderate": "dash", "significant": "longdashdot"}
+BAND_LABEL_FS = 6.5                        # range labels on both charts (pt)
+BAND_LABEL_PAD = 3.0                       # from the band's left edge (pt)
+BAND_ROW_PT = BAND_LABEL_FS * 1.25         # one row of range labels
+BAND_LANE_PAD = 1.5                         # above and below the label rows
+
+
+def band_lane_pt(rows: int) -> float:
+    """The data-free strip *rows* rows of range labels sit in (0: none)."""
+    return rows * BAND_ROW_PT + 2 * BAND_LANE_PAD if rows else 0.0
+
+
+def rgba(c: tuple) -> str:
+    return f"rgba({c[0]},{c[1]},{c[2]},{c[3]:g})"
+
+
+def band_labels(windows: list[dict], x0: float, x1: float,
+                plot_w_pt: float) -> list[tuple[dict, str, float, int]]:
+    """The range labels, one decision for both charts (they share the
+    width and the x axis): ``(window, text, x, row)`` per labelled window
+    (``x`` in minutes: a label's left edge, or a tag's centre).
+
+    Left to right, each label starts at its band's left edge, or past the
+    end of an earlier band that overlaps it (so no edge runs through the
+    text), and is the first of "<label> Cx–Cy", "Cx–Cy" and "Cx–y" that fits
+    in the band from there without touching the previous label (row 0).
+    A band too narrow for any of them gets its tag, the range's number
+    (``index + 1``; the footer's Ranges line names it: ``range_tag``),
+    centred on the band, in row 0 or, when that would touch a label, row 1.
+    Only a band with neither is left unlabelled (the footer still names it)."""
+    span = max(x1 - x0, 1e-9)
+
+    def pt(t: float) -> float:
+        return (min(max(float(t), x0), x1) - x0) / span * plot_w_pt
+    out: list[tuple[dict, str, float, int]] = []
+    ends = [-1e9, -1e9]                    # where each row's last label ends (pt)
+    seen: list[dict] = []
+    for i, w in enumerate(windows):
+        if not w.get("evaluable"):
+            continue
+        t0, t1 = float(w["t0"]), float(w["t1"])
+        start = t0
+        for o in seen:                     # clear of earlier bands' right edges
+            if float(o["t0"]) <= start < float(o["t1"]) < t1:
+                start = float(o["t1"])
+        seen.append(w)
+        a, b = pt(start), pt(t1)
+        cs, ce = w["c_start"], w["c_end"]
+        carbons = f"C{cs}–C{ce}" if cs != ce else f"C{cs}"
+        compact = f"C{cs}–{ce}" if cs != ce else f"C{cs}"
+        label = str(w.get("label") or "").strip()
+        tiers = ([f"{label} {carbons}"] if label else []) + [carbons, compact]
+        placed = False
+        for text in dict.fromkeys(tiers):
+            need = line_width(text, BAND_LABEL_FS) + 2 * BAND_LABEL_PAD
+            if b - a >= need and a >= ends[0]:
+                out.append((w, text, max(start, x0), 0))
+                ends[0] = a + need
+                placed = True
+                break
+        if placed:
+            continue
+        tag = range_tag(w, i)
+        half = line_width(tag, BAND_LABEL_FS) / 2 + 1.0
+        mid = (pt(t0) + b) / 2
+        lo_, hi_ = mid - half, mid + half
+        if lo_ < 0 or hi_ > plot_w_pt:
+            continue
+        for row in (0, 1):
+            if lo_ >= ends[row]:
+                out.append((w, tag, x0 + mid / plot_w_pt * span, row))
+                ends[row] = hi_ + 1.0
+                break
+    return out
+
+
+def range_tag(w: dict, i: int) -> str:
+    """A range's tag on the charts: its number on the comparison."""
+    return str(int(w.get("index", i)) + 1)
+
+
+def is_tag(text: str) -> bool:
+    return text.isdigit()
+
+
+# ── legend swatches: tiny PNGs drawn here (no image library) ─────────────
+_SW_PX = 4                                 # swatch pixels per point
+
+def _png_rgb(rows: list[bytearray], w: int, h: int) -> bytes:
+    import struct
+    import zlib
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    raw = b"".join(b"\x00" + bytes(r) for r in rows)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+
+
+def _hex(c: str) -> tuple[int, int, int]:
+    c = c.lstrip("#")
+    return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+
+
+def _over_white(c: tuple) -> tuple[int, int, int]:
+    a = c[3]
+    return tuple(round(255 * (1 - a) + v * a) for v in c[:3])
+
+
+def swatch_png(kind: str, w_pt: float = 12.0, h_pt: float = 7.0) -> bytes:
+    """A legend swatch matching the chart's mark: ``standard`` (grey area,
+    edge on top), ``sample`` (the coloured line), ``range`` (tint, hairline
+    edges), ``above`` (red fill, diagonal hatch), ``below`` (blue fill, dots)."""
+    k = _SW_PX
+    w, h = round(w_pt * k), round(h_pt * k)
+    white = (255, 255, 255)
+    px = [[white] * w for _ in range(h)]
+
+    def fill(c, x0=0, y0=0, x1=w, y1=h):
+        for y in range(max(y0, 0), min(y1, h)):
+            for x in range(max(x0, 0), min(x1, w)):
+                px[y][x] = c
+    cell = round(PATTERN_PT * k)
+    if kind == "standard":
+        top = round(h * 0.3)
+        fill(_over_white(STD_FILL), y0=top)
+        fill(_hex(STD_EDGE), y0=top, y1=top + max(1, round(0.6 * k)))
+    elif kind == "sample":
+        t = round(1.0 * k)
+        fill(_hex(SAMPLE), y0=(h - t) // 2, y1=(h - t) // 2 + t)
+    elif kind == "range":
+        fill(_over_white(BAND_FILL))
+        edge = _over_white(BAND_EDGE)
+        e = max(1, round(0.6 * k))
+        fill(edge, x1=e)
+        fill(edge, x0=w - e)
+    elif kind in ("above", "below"):
+        bg, fg = ((_hex(DEV_ABOVE_FILL), _hex(DEV_ABOVE)) if kind == "above"
+                  else (_hex(DEV_BELOW_FILL), _hex(DEV_BELOW)))
+        fill(bg)
+        if kind == "above":                # "/" lines, as Plotly draws them
+            t = max(1.0, PATTERN_SOLIDITY["/"] * cell)
+            for y in range(h):
+                for x in range(w):
+                    if ((x + y) % cell) < t:
+                        px[y][x] = fg
+        else:                              # dots on a square grid
+            r = max(1.0, (PATTERN_SOLIDITY["."] * cell * cell / math.pi) ** 0.5)
+            for y in range(h):
+                for x in range(w):
+                    dx = (x % cell) - cell / 2 + 0.5
+                    dy = (y % cell) - cell / 2 + 0.5
+                    if dx * dx + dy * dy <= r * r:
+                        px[y][x] = fg
+    else:
+        raise ValueError(kind)
+    rows = [bytearray(b for p in row for b in p) for row in px]
+    return _png_rgb(rows, w, h)
 
 FAMILY = "GCReport"
 NO_DEVIATION_FALLBACK = "No deviations detected."
@@ -325,7 +507,8 @@ class Plan:
     regions_shown: int | None = None
     notes_shown: int | None = None
     conclusion_chars: int | None = None
-    ranges_chars: int | None = None
+    ranges_name_chars: int | None = None   # each range's name shortened to this
+    ranges_on_charts: bool = False         # the Ranges line says "named on the charts"
     shortened: list = field(default_factory=list)
 
     @property
@@ -374,12 +557,30 @@ def _footer_parts(line: str) -> tuple[str, str]:
     return (head, rest) if sep and len(head) <= 14 else ("", line)
 
 
-def _ranges_short(line: str, limit: int | None) -> str:
-    if limit is None or len(line) <= limit:
-        return line
-    shown = line[:limit].rsplit(", ", 1)[0]
-    left = line[len(shown):].count(", ")
-    return f"{shown}, and {left} more" if left else shown
+_RANGE_ENTRY = re.compile(r"(.*?)\s*(C\d+(?:–C\d+)?)(?:, |$)")
+
+
+def range_entries(rest: str) -> list[tuple[str, str]]:
+    """The Ranges line's entries, ``(name, carbons)``: "Gas C5–C11, Oil
+    C20–C44" → ``[("Gas", "C5–C11"), ("Oil", "C20–C44")]``."""
+    return [(n, c) for n, c in _RANGE_ENTRY.findall(rest or "")] if rest != "none" else []
+
+
+def ranges_text(rest: str, plan: "Plan") -> str:
+    """The Ranges line as printed: every range, always (``plan`` may say
+    they are named on the charts, or shorten each name, never drop one)."""
+    entries = range_entries(rest)
+    if plan.ranges_on_charts and entries:
+        n = len(entries)
+        return f"{n} range{'s' if n != 1 else ''}, each named on both charts"
+    k = plan.ranges_name_chars
+    if k is None or not entries:
+        return rest
+
+    def short(name: str) -> str:            # the "(6) " tag stays whole
+        tag, name = re.match(r"(\(\d+\) )?(.*)", name, re.S).groups()
+        return (tag or "") + (name if len(name) <= k else name[:k].rstrip() + "…")
+    return ", ".join(f"{short(n)} {c}".strip() for n, c in entries)
 
 
 def _rows_h(lines: list[str], shown: int | None, fs: float, more_extra: float = 0.0) -> float:
@@ -436,7 +637,7 @@ def _text_height(plan: Plan, *, title: str, subtitle: str, lab_id: str, std_name
     for line in footer_lines:
         head, rest = _footer_parts(line)
         if head == "Ranges":
-            rest = _ranges_short(rest, plan.ranges_chars)
+            rest = ranges_text(rest, plan)
         foot += line_count(rest, TEXT_W, FOOT_FS) * FOOT_FS * FOOT_LINE + 2 + PARA
     foot += FOOT_FS * FOOT_LINE + 2 + PARA
     h += foot
@@ -453,7 +654,8 @@ def split_comments(comments: list[dict]) -> tuple[list[dict], list[dict]]:
 
 def plan(*, doc_name: str, lab_id: str, std_name: str, bullets_text: str,
          conclusion: str, region_lines: list[str] = (), note_lines: list[str] = (),
-         footer_lines: list[str], has_logo: bool = False) -> Plan:
+         footer_lines: list[str], has_logo: bool = False,
+         ranges_on_charts: bool = False) -> Plan:
     """The one-page plan for this content (see the module docstring)."""
     title = display_title(doc_name)
     subtitle = subtitle_text(std_name)
@@ -496,11 +698,7 @@ def plan(*, doc_name: str, lab_id: str, std_name: str, bullets_text: str,
         p.fs = fs
         if fits(p):
             break
-    ranges_len = max((len(_footer_parts(x)[1]) for x in kw["footer_lines"]
-                      if _footer_parts(x)[0] == "Ranges"), default=0)
-    if not fits(p) and ranges_len > RANGES_CHARS:          # 3: the ranges line,
-        p.ranges_chars = RANGES_CHARS
-    if not fits(p):                                        # and smaller charts
+    if not fits(p):                                        # 3: smaller charts
         floor["charts"] = CHART_FLOOR
     if not fits(p) and note_lines:                         # 4: notes
         cut(p, "notes_shown", len(note_lines))
@@ -518,10 +716,40 @@ def plan(*, doc_name: str, lab_id: str, std_name: str, bullets_text: str,
             else:
                 hi = mid - 1
         p.conclusion_chars = lo
+    range_names = [n for line in kw["footer_lines"] if _footer_parts(line)[0] == "Ranges"
+                   for n, _c in range_entries(_footer_parts(line)[1])]
+    longest = max((len(n) for n in range_names), default=0)
+
+    def shorten_names(lowest: int) -> None:
+        lo, hi = lowest, longest - 1
+        p.ranges_name_chars = lowest
+        if not fits(p):
+            return
+        while lo < hi:                                     # the longest names that fit
+            mid = (lo + hi + 1) // 2
+            p.ranges_name_chars = mid
+            if fits(p):
+                lo = mid
+            else:
+                hi = mid - 1
+        p.ranges_name_chars = lo
+    if not fits(p) and range_names:                        # 8: the Ranges line, never a range left out
+        if ranges_on_charts:
+            p.ranges_on_charts = True
+        elif longest > 16:
+            shorten_names(16)
+        if not fits(p) and not p.ranges_on_charts:
+            floor["charts"] = CHART_HARD
+            if not fits(p) and longest > RANGES_NAME_MIN:
+                shorten_names(RANGES_NAME_MIN)
+            elif fits(p) and p.ranges_name_chars is not None:
+                shorten_names(16)                          # the lower floor bought room back
     give_back(p, "regions_shown", len(region_lines))       # regions first, then notes
     give_back(p, "notes_shown", len(note_lines))
-    if p.ranges_chars is not None:
-        p.shortened.append("ranges line shortened")
+    if p.ranges_on_charts:
+        p.shortened.append("ranges named on the charts")
+    if p.ranges_name_chars is not None:
+        p.shortened.append(f"range names shortened to {p.ranges_name_chars} characters")
     for attr, total, what in (("notes_shown", len(note_lines), "notes"),
                               ("regions_shown", len(region_lines), "marked regions"),
                               ("findings_shown", len(rows), "findings")):
@@ -533,7 +761,7 @@ def plan(*, doc_name: str, lab_id: str, std_name: str, bullets_text: str,
     if not fits(p):
         p.shortened.append("does not fit even at the smallest; the page is scaled to fit")
     lo = floor["charts"]
-    if lo == CHART_FLOOR:
+    if lo in (CHART_FLOOR, CHART_HARD):
         p.shortened.append("charts below their usual minimum")
     room = max(BODY_H - _text_height(p, **kw), min_charts())
     trend = min(CHART_MAX[0], max(lo[0], room / (1 + ratio)))
@@ -686,12 +914,12 @@ def conclusion_section(conclusion: str, *, chars: int | None, fs: float = TYPE_S
     return "<!-- CONCLUSION -->" + _section("Conclusion", rows)
 
 
-def _footer(footer_lines: list[str], generated: str, *, ranges_chars: int | None) -> str:
+def _footer(footer_lines: list[str], generated: str, *, plan_: "Plan") -> str:
     rows = []
     for line in list(footer_lines) + [generated]:
         head, rest = _footer_parts(line)
         if head == "Ranges":
-            rest = _ranges_short(rest, ranges_chars)
+            rest = ranges_text(rest, plan_)
         rows.append((head, rest))
     out = []
     for i, (head, rest) in enumerate(rows):
@@ -700,10 +928,19 @@ def _footer(footer_lines: list[str], generated: str, *, ranges_chars: int | None
     return f'<table class="foot" width="100%">{"".join(out)}</table>'
 
 
+def _swatch(kind: str) -> str:
+    import base64
+    b64 = base64.b64encode(swatch_png(kind)).decode("ascii")
+    return (f'<img src="data:image/png;base64,{b64}" width="{round(12 * IMG_PX_PER_PT)}" '
+            f'height="{round(7 * IMG_PX_PER_PT)}" style="vertical-align:middle;">')
+
+
 def _key(items: list[tuple[str, str, str]]) -> str:
-    """A chart's legend: ``(glyph, colour, label)``."""
+    """A chart's legend: ``(glyph, colour, label)``, or ``("swatch", kind,
+    label)`` for a drawn swatch (``swatch_png``: colour and texture)."""
     return "&nbsp;&nbsp;&nbsp;".join(
-        f'<font color="{c}">{g}</font>&nbsp;{_esc(t)}' for g, c, t in items)
+        (_swatch(c) if g == "swatch" else f'<font color="{c}">{g}</font>') + f"&nbsp;{_esc(t)}"
+        for g, c, t in items)
 
 
 def render_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str,
@@ -734,12 +971,13 @@ def render_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str,
 <table width="100%" class="rule" style="margin-top:9pt;"><tr><td>&nbsp;</td></tr></table>"""
 
     w_px = round(BODY_W * IMG_PX_PER_PT)
-    trend_key = _key([("&#9632;", CHART_REF, "standard"), ("&#8212;", INK, "sample"),
-                      ("&#9632;", BORDER, "range")])
-    diff_items = [("&#9632;", DEV_ABOVE_FILL, "higher than the standard"),
-                  ("&#9632;", DEV_BELOW_FILL, "lower")]
+    trend_key = _key([("swatch", "standard", "standard"), ("swatch", "sample", "sample"),
+                      ("swatch", "range", "range")])
+    diff_items = [("swatch", "above", "higher than the standard"),
+                  ("swatch", "below", "lower")]
     if spikes_marked:
-        diff_items.append(("&#9650;", INK, "counted spike"))
+        diff_items.append((f'<font color="{DEV_ABOVE}">&#9650;</font>'
+                           f'<font color="{DEV_BELOW}">&#9660;</font>', INK, "counted spike"))
 
     def chart(title: str, caption: str, key: str, b64: str, h_pt: float) -> str:
         return f"""
@@ -760,7 +998,7 @@ def render_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str,
                                      notes=list(note_lines), notes_shown=p.notes_shown,
                                      note_fs=p.note_fs))
     generated = f"Generated: GC hub {app_version}, {datetime_str}"
-    footer = _footer(footer_lines, generated, ranges_chars=p.ranges_chars)
+    footer = _footer(footer_lines, generated, plan_=p)
     return f"""<!DOCTYPE HTML>
 <html><head><meta charset="utf-8"><title>{e(display_title(doc_name))}</title>
 <style>{_css(p.fs)}</style></head>

@@ -13,6 +13,8 @@ draws).
 """
 from __future__ import annotations
 
+import re
+
 import json
 import os
 import shutil
@@ -97,11 +99,14 @@ def test_every_path_reports_every_range_in_order(run):
 
 
 def test_every_pdf_lists_every_range_in_the_footer_in_order(run):
+    """Every range, in order. A range the charts can only label by its number
+    is listed with that number first ("(5) Single C14–C14", v7 report charts)."""
     names = [footer_name(r) for r in RANGES]
-    expected = "Ranges " + ", ".join(names)
+    expected = re.compile("Ranges " + ", ".join(
+        rf"(?:\({i}\) )?{re.escape(n)}" for i, n in enumerate(names, start=1)))
     for path in PATHS:
         text = run["pdf_text"][path]
-        assert expected in text, (path, text[-900:])
+        assert expected.search(text), (path, text[-900:])
 
 
 def test_a_range_beyond_the_run_is_listed_as_not_evaluated(run):
