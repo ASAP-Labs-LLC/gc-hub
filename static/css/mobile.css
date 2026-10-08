@@ -259,6 +259,9 @@
     .bulk-run { grid-template-columns: minmax(0, 1fr) auto; }
     .bulk-run .progress { grid-column: 1 / -1; }
     .chart { height: 280px; margin: 0 0 var(--s2); }
+    /* v7: the distillation curve fits the one pane; a tap shows a point (a sideways drag walks them) */
+    .curve-wrap { height: 240px; }
+    .curve-body { margin: var(--s2) 0 0; }
     .card-bar { flex-wrap: wrap; }
     .res-tbl th, .res-tbl td { padding-right: var(--s3); }
     .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }

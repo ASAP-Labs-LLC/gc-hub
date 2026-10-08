@@ -159,6 +159,13 @@ PAIRS = [
     ("--text-muted", ["--bg-card"], TEXT, "a held run's reason and empty cells"),
     ("--text-muted-sunken", ["--bg-card", "--bg-sunken"], TEXT, "backfill and flag tags"),
     ("--text", ["--bg-sunken"], TEXT, "keys on the help page"),
+    # v7: the distillation curve (samples.css): its callout, axis labels, the Results row its dot marks
+    ("--text", ["--bg-elevated"], TEXT, "the curve callout's temperature"),
+    ("--text-muted", ["--bg-elevated"], TEXT, "the curve callout's series and recovery"),
+    ("--chart-axis", ["--bg-card"], TEXT, "the curve's axis and end labels"),
+    ("--text", ["--bg-card", "--bg-active"], TEXT, "the Results row of the curve's active dot"),
+    ("--text-muted-sunken", ["--bg-card", "--bg-active"], TEXT, "an empty cell in that row"),
+    ("--accent", ["--bg-card"], UI, "a focused dot's ring"),
     ("--accent", ["--bg"], UI, "focus ring"),
     ("--accent", ["--sidebar-bg"], UI, "focus ring in the sidebar"),
     ("--accent", ["--bg-sunken"], UI, "focus ring on sunken fields"),

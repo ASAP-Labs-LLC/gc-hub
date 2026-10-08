@@ -6,7 +6,7 @@
 {% block title %}Samples{% endblock %}
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/gc_pages.css') }}?v=2">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/samples.css') }}?v=6">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/samples.css') }}?v=7">
 {% endblock %}
 {% block topbar %}
   <h1 class="tb-title">Samples</h1>
@@ -110,14 +110,20 @@
               </div>
               <div class="trace-legend" id="chrom-legend" data-testid="chrom-legend" hidden></div>
             </section>
-            <section class="runs" id="other-runs" data-testid="other-runs" hidden>
-              <h2 class="sub">Other runs of <span id="runs-lab"></span></h2>
-              <ul id="runs-list"></ul>
-            </section>
           </div>
           <section class="card results-card" id="results-card" aria-labelledby="results-title" data-testid="results-card">
             <div class="card-bar"><h2 id="results-title">Results</h2><span class="spacer"></span><span class="caption">°C</span></div>
             <div id="results-body"></div>
+          </section>
+          {#- v7: the distillation curve, the Results card's own numbers; a dot and its Results row light each other -#}
+          <section class="card curve-card" id="curve-card" aria-labelledby="curve-title" data-testid="curve-card" hidden>
+            <div class="card-bar"><h2 id="curve-title">Distillation curve</h2><span class="spacer"></span>
+              <ul class="curve-legend" id="curve-legend" aria-label="Series" data-testid="curve-legend"></ul></div>
+            <div class="curve-body" id="curve-body"></div>
+          </section>
+          <section class="runs" id="other-runs" data-testid="other-runs" hidden>
+            <h2 class="sub">Other runs of <span id="runs-lab"></span></h2>
+            <ul id="runs-list"></ul>
           </section>
         </div>
       </div>
@@ -188,8 +194,9 @@
 <script src="{{ url_for('static', filename='js/results_logic.js') }}?v=1"></script>
 <script src="{{ url_for('static', filename='js/samples_router.js') }}?v=2"></script>
 <script src="{{ url_for('static', filename='js/backfill_logic.js') }}?v=1"></script>
-<script src="{{ url_for('static', filename='js/samples_logic.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/samples_logic.js') }}?v=6"></script>
+<script src="{{ url_for('static', filename='js/distill_curve.js') }}?v=1"></script>
 {#- lane C: Plotly, ladder.js, comments.js, compare_logic.js, compare_view.js and compare.css -#}
 {% include "_compare_assets.html" %}
-<script src="{{ url_for('static', filename='js/samples_page.js') }}?v=7"></script>
+<script src="{{ url_for('static', filename='js/samples_page.js') }}?v=8"></script>
 {% endblock %}
