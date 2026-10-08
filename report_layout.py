@@ -113,6 +113,149 @@ DEV_ABOVE, DEV_ABOVE_FILL = "#dc2626", "#fecaca"
 DEV_BELOW, DEV_BELOW_FILL = "#2563eb", "#bfdbfe"
 CHART_REF = "#a8b0bc"
 
+# ── the charts' marks (v7): colour for meaning, texture for print ────────
+# Every mark is told apart twice, by colour and by something that survives
+# a black-and-white printer: the sample is the one coloured line (the app's
+# accent, dark: ~35% grey in greyscale) over the standard's light grey area
+# (~88% grey, with a mid-grey edge); "higher" and "lower" are red and blue
+# fills (both ~85% grey once printed, so the colour alone would vanish)
+# carrying opposite textures, diagonal hatch and dots, in their dark tone;
+# spikes are triangles pointing the way they go; the thresholds differ by
+# dash; range bands are a neutral tint with hairline edges (no hue: colour
+# is kept for what the data means).
+SAMPLE = "#0e7490"                         # --accent
+STD_EDGE = "#8f98a6"                       # the standard's outline: between --chart-ref and --chart-axis
+STD_FILL = (168, 176, 188, 0.35)           # --chart-ref at 35%
+BAND_FILL = (15, 23, 42, 0.05)
+BAND_EDGE = (15, 23, 42, 0.22)
+ABOVE_PATTERN, BELOW_PATTERN = "/", "."    # Plotly fillpattern shapes
+PATTERN_PT = 3.2                           # a pattern cell, printed points
+PATTERN_SOLIDITY = {"/": 0.22, ".": 0.3}
+THRESHOLD_DASH = {"marginal": "dot", "moderate": "dash", "significant": "longdashdot"}
+BAND_LABEL_FS = 6.5                        # range labels on both charts (pt)
+BAND_LABEL_PAD = 3.0                       # from the band's left edge (pt)
+BAND_LANE_PT = BAND_LABEL_FS * 1.25 + 3.0  # the data-free strip the labels sit in
+
+
+def rgba(c: tuple) -> str:
+    return f"rgba({c[0]},{c[1]},{c[2]},{c[3]:g})"
+
+
+def band_labels(windows: list[dict], x0: float, x1: float,
+                plot_w_pt: float) -> list[tuple[dict, str, float]]:
+    """The range labels, one decision for both charts (they share the
+    width and the x axis): ``(window, text, x)`` per labelled window. Left
+    to right, each label starts at its band's left edge, or past the end of
+    an earlier band that overlaps it (so no edge runs through the text),
+    and is the first of "<label> Cx–Cy", "Cx–Cy" and "Cx–y" that fits in
+    the band from there without touching the previous label; else the band
+    is left unlabelled (every range is named in the findings and the
+    footer)."""
+    span = max(x1 - x0, 1e-9)
+
+    def pt(t: float) -> float:
+        return (min(max(float(t), x0), x1) - x0) / span * plot_w_pt
+    out: list[tuple[dict, str, float]] = []
+    label_end = -1e9
+    seen: list[dict] = []
+    for w in windows:
+        if not w.get("evaluable"):
+            continue
+        t0, t1 = float(w["t0"]), float(w["t1"])
+        start = t0
+        for o in seen:                     # clear of earlier bands' right edges
+            if float(o["t0"]) <= start < float(o["t1"]) < t1:
+                start = float(o["t1"])
+        seen.append(w)
+        a, b = pt(start), pt(t1)
+        cs, ce = w["c_start"], w["c_end"]
+        carbons = f"C{cs}–C{ce}" if cs != ce else f"C{cs}"
+        compact = f"C{cs}–{ce}" if cs != ce else f"C{cs}"
+        label = str(w.get("label") or "").strip()
+        tiers = ([f"{label} {carbons}"] if label else []) + [carbons, compact]
+        for text in dict.fromkeys(tiers):
+            need = line_width(text, BAND_LABEL_FS) + 2 * BAND_LABEL_PAD
+            if b - a >= need and a >= label_end:
+                out.append((w, text, max(start, x0)))
+                label_end = a + need
+                break
+    return out
+
+
+# ── legend swatches: tiny PNGs drawn here (no image library) ─────────────
+_SW_PX = 4                                 # swatch pixels per point
+
+def _png_rgb(rows: list[bytearray], w: int, h: int) -> bytes:
+    import struct
+    import zlib
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    raw = b"".join(b"\x00" + bytes(r) for r in rows)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+
+
+def _hex(c: str) -> tuple[int, int, int]:
+    c = c.lstrip("#")
+    return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+
+
+def _over_white(c: tuple) -> tuple[int, int, int]:
+    a = c[3]
+    return tuple(round(255 * (1 - a) + v * a) for v in c[:3])
+
+
+def swatch_png(kind: str, w_pt: float = 12.0, h_pt: float = 7.0) -> bytes:
+    """A legend swatch matching the chart's mark: ``standard`` (grey area,
+    edge on top), ``sample`` (the coloured line), ``range`` (tint, hairline
+    edges), ``above`` (red fill, diagonal hatch), ``below`` (blue fill, dots)."""
+    k = _SW_PX
+    w, h = round(w_pt * k), round(h_pt * k)
+    white = (255, 255, 255)
+    px = [[white] * w for _ in range(h)]
+
+    def fill(c, x0=0, y0=0, x1=w, y1=h):
+        for y in range(max(y0, 0), min(y1, h)):
+            for x in range(max(x0, 0), min(x1, w)):
+                px[y][x] = c
+    cell = round(PATTERN_PT * k)
+    if kind == "standard":
+        top = round(h * 0.3)
+        fill(_over_white(STD_FILL), y0=top)
+        fill(_hex(STD_EDGE), y0=top, y1=top + max(1, round(0.6 * k)))
+    elif kind == "sample":
+        t = round(1.0 * k)
+        fill(_hex(SAMPLE), y0=(h - t) // 2, y1=(h - t) // 2 + t)
+    elif kind == "range":
+        fill(_over_white(BAND_FILL))
+        edge = _over_white(BAND_EDGE)
+        e = max(1, round(0.6 * k))
+        fill(edge, x1=e)
+        fill(edge, x0=w - e)
+    elif kind in ("above", "below"):
+        bg, fg = ((_hex(DEV_ABOVE_FILL), _hex(DEV_ABOVE)) if kind == "above"
+                  else (_hex(DEV_BELOW_FILL), _hex(DEV_BELOW)))
+        fill(bg)
+        if kind == "above":                # "/" lines, as Plotly draws them
+            t = max(1.0, PATTERN_SOLIDITY["/"] * cell)
+            for y in range(h):
+                for x in range(w):
+                    if ((x + y) % cell) < t:
+                        px[y][x] = fg
+        else:                              # dots on a square grid
+            r = max(1.0, (PATTERN_SOLIDITY["."] * cell * cell / math.pi) ** 0.5)
+            for y in range(h):
+                for x in range(w):
+                    dx = (x % cell) - cell / 2 + 0.5
+                    dy = (y % cell) - cell / 2 + 0.5
+                    if dx * dx + dy * dy <= r * r:
+                        px[y][x] = fg
+    else:
+        raise ValueError(kind)
+    rows = [bytearray(b for p in row for b in p) for row in px]
+    return _png_rgb(rows, w, h)
+
 FAMILY = "GCReport"
 NO_DEVIATION_FALLBACK = "No deviations detected."
 
@@ -700,10 +843,19 @@ def _footer(footer_lines: list[str], generated: str, *, ranges_chars: int | None
     return f'<table class="foot" width="100%">{"".join(out)}</table>'
 
 
+def _swatch(kind: str) -> str:
+    import base64
+    b64 = base64.b64encode(swatch_png(kind)).decode("ascii")
+    return (f'<img src="data:image/png;base64,{b64}" width="{round(12 * IMG_PX_PER_PT)}" '
+            f'height="{round(7 * IMG_PX_PER_PT)}" style="vertical-align:middle;">')
+
+
 def _key(items: list[tuple[str, str, str]]) -> str:
-    """A chart's legend: ``(glyph, colour, label)``."""
+    """A chart's legend: ``(glyph, colour, label)``, or ``("swatch", kind,
+    label)`` for a drawn swatch (``swatch_png``: colour and texture)."""
     return "&nbsp;&nbsp;&nbsp;".join(
-        f'<font color="{c}">{g}</font>&nbsp;{_esc(t)}' for g, c, t in items)
+        (_swatch(c) if g == "swatch" else f'<font color="{c}">{g}</font>') + f"&nbsp;{_esc(t)}"
+        for g, c, t in items)
 
 
 def render_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str,
@@ -734,12 +886,13 @@ def render_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str,
 <table width="100%" class="rule" style="margin-top:9pt;"><tr><td>&nbsp;</td></tr></table>"""
 
     w_px = round(BODY_W * IMG_PX_PER_PT)
-    trend_key = _key([("&#9632;", CHART_REF, "standard"), ("&#8212;", INK, "sample"),
-                      ("&#9632;", BORDER, "range")])
-    diff_items = [("&#9632;", DEV_ABOVE_FILL, "higher than the standard"),
-                  ("&#9632;", DEV_BELOW_FILL, "lower")]
+    trend_key = _key([("swatch", "standard", "standard"), ("swatch", "sample", "sample"),
+                      ("swatch", "range", "range")])
+    diff_items = [("swatch", "above", "higher than the standard"),
+                  ("swatch", "below", "lower")]
     if spikes_marked:
-        diff_items.append(("&#9650;", INK, "counted spike"))
+        diff_items.append((f'<font color="{DEV_ABOVE}">&#9650;</font>'
+                           f'<font color="{DEV_BELOW}">&#9660;</font>', INK, "counted spike"))
 
     def chart(title: str, caption: str, key: str, b64: str, h_pt: float) -> str:
         return f"""

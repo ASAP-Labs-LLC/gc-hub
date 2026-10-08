@@ -1247,11 +1247,18 @@ def _report_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str
         no_deviation=analysis_core.NO_DEVIATION)
 
 
-# The report charts in the app's chart style (tokens.css, light: compare_view.js).
-_RC = dict(ink="#0f172a", ref="#a8b0bc", grid="#eef0f3", axis="#64748b", tick="#cbd2da",
-           band="rgba(15,23,42,0.05)", band_edge="rgba(15,23,42,0.16)", band_text="#5b6678",
-           above_fill="#fecaca", below_fill="#bfdbfe", card="#ffffff")
+# The report charts in the app's chart style (tokens.css, light: compare_view.js),
+# with v7's print rule: every mark told apart by colour AND by something that
+# survives a black-and-white printer (report_layout's chart marks).
+_RL = report_layout
+_RC = dict(ink="#0f172a", sample=_RL.SAMPLE, ref=_RL.CHART_REF, ref_edge=_RL.STD_EDGE,
+           ref_fill=_RL.rgba(_RL.STD_FILL), grid="#eef0f3", axis="#64748b", tick="#cbd2da",
+           band=_RL.rgba(_RL.BAND_FILL), band_edge=_RL.rgba(_RL.BAND_EDGE), band_text="#5b6678",
+           above=_RL.DEV_ABOVE, above_fill=_RL.DEV_ABOVE_FILL,
+           below=_RL.DEV_BELOW, below_fill=_RL.DEV_BELOW_FILL, card="#ffffff")
 _REPORT_PX_PER_PT = 2          # figure px per printed point (fonts and lines below are in px)
+_REPORT_MARGIN_PT = dict(l=34, r=6, b=24)
+_REPORT_TOP_PT = (14, 6, 4)    # trend with carbon axis, trend without, difference
 
 
 def _carbon_ticks(times, carbons) -> tuple[list, list]:
@@ -1265,54 +1272,57 @@ def _carbon_ticks(times, carbons) -> tuple[list, list]:
     return [p[0] for p in pairs], [f"C{p[1]}" for p in pairs]
 
 
+def _lane_top(lo: float, hi: float, plot_h_pt: float, lane_pt: float) -> float:
+    """The axis top that leaves *lane_pt* above *hi* (the data's top) free."""
+    usable = max(plot_h_pt - lane_pt, plot_h_pt * 0.5)
+    return lo + (hi - lo) * plot_h_pt / usable
+
+
 def _report_figures(content: dict, sample_name: str, overlay_standards: list,
-                    conf: dict) -> tuple:
+                    conf: dict, heights_pt: tuple | None = None) -> tuple:
     """The report's two charts (trend, difference) from the report content,
-    drawn like the Compare view: the standard a light area, the sample an ink
-    line, range bands from its windows (the very windows the bullets used),
-    carbon numbers on the trend's top axis from the report's ladder, the
-    difference filled above/below with ±threshold lines and the counted
-    spikes. Sized by the caller (``to_image(width, height)``) at
-    ``_REPORT_PX_PER_PT`` px per printed point."""
+    drawn like the Compare view and readable in black and white: the
+    standard a light grey area with a mid-grey edge, the sample the one
+    coloured line (the accent, dark in greyscale); the difference filled red
+    above with a diagonal hatch and blue below with dots, ±threshold lines
+    told apart by dash, the counted spikes as triangles pointing their way.
+    Range bands (the very windows the bullets used) are a neutral tint with
+    hairline edges on BOTH charts, labelled on both with one decision
+    (``report_layout.band_labels``) in a strip above the data that the
+    data never enters. Carbon numbers on the trend's top axis from the
+    report's ladder. Sized by the caller (``to_image(width, height)``) at
+    ``_REPORT_PX_PER_PT`` px per printed point; *heights_pt* (trend,
+    difference) are the printed heights the label strip is reserved for."""
     s = content["series"]
     p = content["params_used"]
     c = _RC
+    rl = report_layout
     k = _REPORT_PX_PER_PT
+    trend_h_pt, diff_h_pt = heights_pt or rl.CHART_MAX
+    m = _REPORT_MARGIN_PT
     t_common = np.asarray(s["t"], dtype=float)
-    std_raw, smp_raw = np.asarray(s["standard"]), np.asarray(s["sample"])
+    std_raw, smp_raw = np.asarray(s["standard"], dtype=float), np.asarray(s["sample"], dtype=float)
     diff = np.asarray(s["diff"], dtype=float)
     std_name = content["standard_name"]
     x_max_min = float(p["x_max_min"])
     cal_times, cal_carbons = content["ladder"]
     x_range = [float(t_common[0]), x_max_min]
+    shown = t_common <= x_max_min
     font = report_layout.chart_font_family()
 
-    bands: list[dict] = []
-    band_labels: list[dict] = []
-    # A band's label only where it fits inside the band without touching the
-    # previous one: the full label, else just its carbons, else none (the
-    # ranges are named in the findings and the footer).
-    plot_w_pt = report_layout.BODY_W - 40          # the plot area: margins l=34, r=6
-    span_min = max(x_range[1] - x_range[0], 1e-9)
-    label_end = -1e9
-    for w in content["windows"]:
-        if not w["evaluable"]:
-            continue
-        bands.append(dict(type="rect", x0=w["t0"], x1=w["t1"], y0=0, y1=1, xref="x",
-                          yref="paper", fillcolor=c["band"], layer="below",
-                          line=dict(color=c["band_edge"], width=0.6 * k)))
-        x0_pt = (max(w["t0"], x_range[0]) - x_range[0]) / span_min * plot_w_pt
-        x1_pt = (min(w["t1"], x_range[1]) - x_range[0]) / span_min * plot_w_pt
-        carbons = f"C{w['c_start']}–C{w['c_end']}"
-        for text in (f"{w['label']} {carbons}", carbons):
-            need = report_layout.line_width(text, 6.5) + 6
-            if x1_pt - x0_pt >= need and x0_pt >= label_end:
-                band_labels.append(dict(
-                    x=w["t0"], xref="x", xanchor="left", xshift=3 * k, y=1, yref="paper",
-                    yanchor="top", yshift=-2 * k, showarrow=False, text=_esc(text),
-                    font=dict(size=6.5 * k, color=c["band_text"])))
-                label_end = x0_pt + need
-                break
+    # Range bands and their labels: the same bands, edges and labels on both charts.
+    plot_w_pt = rl.BODY_W - m["l"] - m["r"]
+    labelled = rl.band_labels(content["windows"], x_range[0], x_range[1], plot_w_pt)
+    lane_pt = rl.BAND_LANE_PT if labelled else 0.0
+    bands = [dict(type="rect", x0=w["t0"], x1=w["t1"], y0=0, y1=1, xref="x", yref="paper",
+                  fillcolor=c["band"], layer="below",
+                  line=dict(color=c["band_edge"], width=0.5 * k))
+             for w in content["windows"] if w["evaluable"]]
+    band_labels = [dict(x=x, xref="x", xanchor="left",
+                        xshift=rl.BAND_LABEL_PAD * k, y=1, yref="paper", yanchor="top",
+                        yshift=-1.5 * k, showarrow=False, text=_esc(text),
+                        font=dict(size=rl.BAND_LABEL_FS * k, color=c["band_text"]))
+                   for w, text, x in labelled]
 
     axis = dict(gridcolor=c["grid"], gridwidth=0.5 * k, linecolor=c["tick"], linewidth=0.75 * k,
                 tickcolor=c["tick"], tickwidth=0.75 * k, ticklen=2.5 * k, ticks="outside",
@@ -1328,15 +1338,16 @@ def _report_figures(content: dict, sample_name: str, overlay_standards: list,
         base.update(extra)
         return base
 
-    # Trend: the standard a light area behind, the sample an ink line on top.
+    # Trend: the standard a light area with an edge, the sample the coloured line on top.
     fig1 = go.Figure()
     fig1.add_trace(go.Scatter(x=t_common.tolist(), y=std_raw.tolist(), mode="lines",
                               name=f"Standard: {_esc(std_name)}", fill="tozeroy",
-                              fillcolor="rgba(168,176,188,0.35)",
-                              line=dict(color=c["ref"], width=0.6 * k)))
+                              fillcolor=c["ref_fill"],
+                              line=dict(color=c["ref_edge"], width=0.6 * k)))
     fig1.add_trace(go.Scatter(x=t_common.tolist(), y=smp_raw.tolist(), mode="lines",
                               name=f"Sample: {_esc(sample_name)}",
-                              line=dict(color=c["ink"], width=0.9 * k)))
+                              line=dict(color=c["sample"], width=1.0 * k)))
+    y_series = [std_raw, smp_raw]
     comp_dir = Path(conf.get("comparison_defaults_dir", str(paths.standards_dir())))
     for oi, ov_name in enumerate(overlay_standards or []):
         try:
@@ -1353,7 +1364,8 @@ def _report_figures(content: dict, sample_name: str, overlay_standards: list,
                 _tr = distill.gc_trace_from_cdf(ov_path)
                 ox, oy = _tr.x, _tr.y
             oy_i = np.interp(t_common, np.array(ox, dtype=float), np.array(oy, dtype=float))
-            # monochrome, told apart by dash (as on Results)
+            y_series.append(oy_i)
+            # neutral grey, told apart by dash (as on Results): never the sample's colour
             fig1.add_trace(go.Scatter(
                 x=t_common.tolist(), y=oy_i.tolist(), name=_esc(ov_path.stem), mode="lines",
                 line=dict(color=c["axis"], width=0.75 * k,
@@ -1361,8 +1373,18 @@ def _report_figures(content: dict, sample_name: str, overlay_standards: list,
         except Exception:
             LOGGER.warning("Could not load overlay standard %s", ov_name)
     tick_vals, tick_text = _carbon_ticks(cal_times, cal_carbons)
+    top_pt = _REPORT_TOP_PT[0] if tick_vals else _REPORT_TOP_PT[1]
     trend_layout = layout(shapes=bands, annotations=band_labels,
-                          margin=dict(l=34 * k, r=6 * k, t=(14 if tick_vals else 6) * k, b=24 * k))
+                          margin=dict(l=m["l"] * k, r=m["r"] * k, t=top_pt * k, b=m["b"] * k))
+    vis = [v[shown] for v in y_series if v.size == t_common.size and shown.any()]
+    vis = [v[np.isfinite(v)] for v in vis]
+    vis = [v for v in vis if v.size]
+    if vis:
+        lo = min(0.0, min(float(v.min()) for v in vis))
+        hi = max(float(v.max()) for v in vis)
+        hi = hi + (hi - lo) * 0.03 if hi > lo else lo + 1.0
+        trend_layout["yaxis"] = dict(trend_layout["yaxis"], range=[
+            lo, _lane_top(lo, hi, trend_h_pt - top_pt - m["b"], lane_pt)])
     if tick_vals:
         fig1.add_trace(go.Scatter(x=[tick_vals[0]], y=[None], xaxis="x2", mode="lines",
                                   hoverinfo="skip", showlegend=False))
@@ -1373,18 +1395,28 @@ def _report_figures(content: dict, sample_name: str, overlay_standards: list,
             showline=False, zeroline=False)
     fig1.update_layout(**trend_layout)
 
-    # Difference: above / below fills, the ink line, ±thresholds, the counted spikes.
-    shown = t_common <= x_max_min
+    # Difference: hatched red above, dotted blue below, the ink line, ±thresholds, spikes.
     spikes = content.get("spikes") or []
     span = max([float(np.max(np.abs(diff[shown]))) if shown.any() else 0.0,
                 float(p["thresh_marginal"])] + [abs(float(x["value"])) for x in spikes])
-    y_lim = span * 1.15 or 1.0
+    y_data = span * 1.12 or 1.0
+    diff_plot_pt = diff_h_pt - _REPORT_TOP_PT[2] - m["b"]
+    y_top = _lane_top(-y_data, y_data, diff_plot_pt, lane_pt)
+    cell = rl.PATTERN_PT * k
+
+    def pattern(shape, fg, bg):
+        return dict(shape=shape, fgcolor=fg, bgcolor=bg, size=cell,
+                    solidity=rl.PATTERN_SOLIDITY[shape], fillmode="replace")
     fig2 = go.Figure()
     fig2.add_trace(go.Scatter(x=t_common.tolist(), y=np.where(diff > 0, diff, 0.0).tolist(),
                               fill="tozeroy", fillcolor=c["above_fill"], mode="lines",
+                              name="Higher than the standard",
+                              fillpattern=pattern(rl.ABOVE_PATTERN, c["above"], c["above_fill"]),
                               line=dict(width=0), showlegend=False, hoverinfo="skip"))
     fig2.add_trace(go.Scatter(x=t_common.tolist(), y=np.where(diff < 0, diff, 0.0).tolist(),
                               fill="tozeroy", fillcolor=c["below_fill"], mode="lines",
+                              name="Lower than the standard",
+                              fillpattern=pattern(rl.BELOW_PATTERN, c["below"], c["below_fill"]),
                               line=dict(width=0), showlegend=False, hoverinfo="skip"))
     fig2.add_trace(go.Scatter(x=t_common.tolist(), y=diff.tolist(), mode="lines",
                               name="Difference (sample − std)",
@@ -1394,22 +1426,54 @@ def _report_figures(content: dict, sample_name: str, overlay_standards: list,
             x=[x["t"] for x in spikes], y=[x["value"] for x in spikes], mode="markers",
             name="Counted spikes (raw difference)",
             marker=dict(symbol=["triangle-up" if x["sign"] > 0 else "triangle-down" for x in spikes],
-                        size=5 * k, color=c["ink"], line=dict(color="#ffffff", width=0.5 * k))))
+                        size=5 * k,
+                        color=[c["above"] if x["sign"] > 0 else c["below"] for x in spikes],
+                        line=dict(color="#ffffff", width=0.6 * k))))
     thr_shapes, thr_ann = [], []
-    for level, name, dash in ((p["thresh_marginal"], "marginal", "dot"),
-                              (p["thresh_moderate"], "moderate", "dash"),
-                              (p["thresh_significant"], "significant", "dash")):
+    taken: list[tuple[float, float, float, float]] = []      # placed labels (pt): x0, x1, y0, y1
+    y_span = max(y_top + y_data, 1e-9)
+    thr_fs, thr_h = 6, 6 * 1.3
+    for level, name in ((p["thresh_marginal"], "marginal"), (p["thresh_moderate"], "moderate"),
+                        (p["thresh_significant"], "significant")):
+        level = float(level)
+        if level > y_data:            # off the data area: never through the label strip
+            continue
         for sgn in (1, -1):
             thr_shapes.append(dict(type="line", xref="paper", x0=0, x1=1, yref="y",
-                                   y0=sgn * level, y1=sgn * level, layer="below", opacity=0.6,
-                                   line=dict(color=c["axis"], width=0.6 * k, dash=dash)))
-        if level <= y_lim:
-            thr_ann.append(dict(xref="paper", x=1, xanchor="right", y=level, yref="y",
-                                yanchor="bottom", showarrow=False, text=f"{name} ±{level:g}",
-                                font=dict(size=6 * k, color=c["axis"])))
-    diff_layout = layout(shapes=[dict(b, line=dict(width=0)) for b in bands] + thr_shapes,
-                         annotations=thr_ann, margin=dict(l=34 * k, r=6 * k, t=4 * k, b=24 * k))
-    diff_layout["yaxis"] = dict(axis, range=[-y_lim, y_lim], tickformat="+~s", zeroline=True,
+                                   y0=sgn * level, y1=sgn * level, layer="below", opacity=0.7,
+                                   line=dict(color=c["axis"], width=0.6 * k,
+                                             dash=rl.THRESHOLD_DASH[name])))
+        # its name by the + line, right-aligned: above it, else under it, else
+        # beside the label in the way; never into the range-label strip or
+        # over another threshold's name (left out if there is no room at all)
+        text = f"{name} ±{level:g}"
+        tw = rl.line_width(text, thr_fs) + 2
+        y_pt = (level + y_data) / y_span * diff_plot_pt
+        ceiling = (y_data + y_data) / y_span * diff_plot_pt if lane_pt else diff_plot_pt
+        zero_pt = y_data / y_span * diff_plot_pt
+        spot = None
+        for right in [plot_w_pt] + [r[0] - 6 for r in taken]:
+            for up in (True, False):
+                y0, y1 = (y_pt + 0.5, y_pt + 0.5 + thr_h) if up else (y_pt - 0.5 - thr_h, y_pt - 0.5)
+                box = (right - tw, right, y0, y1)
+                if (box[0] >= 0 and y1 <= ceiling and y0 >= zero_pt
+                        and not any(box[0] < t[1] and t[0] < box[1] and y0 < t[3] and t[2] < y1
+                                    for t in taken)):
+                    spot = (box, up)
+                    break
+            if spot:
+                break
+        if spot is None:
+            continue
+        (bx0, bx1, _y0, _y1), up = spot
+        taken.append(spot[0])
+        thr_ann.append(dict(xref="paper", x=bx1 / plot_w_pt, xanchor="right", y=level, yref="y",
+                            yanchor="bottom" if up else "top", showarrow=False, text=text,
+                            font=dict(size=thr_fs * k, color=c["axis"])))
+    diff_layout = layout(shapes=bands + thr_shapes, annotations=band_labels + thr_ann,
+                         margin=dict(l=m["l"] * k, r=m["r"] * k, t=_REPORT_TOP_PT[2] * k,
+                                     b=m["b"] * k))
+    diff_layout["yaxis"] = dict(axis, range=[-y_data, y_top], tickformat="+~s", zeroline=True,
                                 zerolinecolor=c["tick"], zerolinewidth=0.75 * k)
     fig2.update_layout(**diff_layout)
     return fig1, fig2
@@ -1418,7 +1482,8 @@ def _report_figures(content: dict, sample_name: str, overlay_standards: list,
 def _render_report_charts(content: dict, sample_name: str, overlay_standards: list,
                           conf: dict, plan) -> tuple[bytes, bytes]:
     """The two chart PNGs at the plan's printed size (2x for print)."""
-    fig1, fig2 = _report_figures(content, sample_name, overlay_standards, conf)
+    fig1, fig2 = _report_figures(content, sample_name, overlay_standards, conf,
+                                 heights_pt=(plan.trend_h, plan.diff_h))
     k = _REPORT_PX_PER_PT
     w = round(plan.width * k)
     try:

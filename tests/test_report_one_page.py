@@ -389,3 +389,83 @@ def test_worst_case_reports_are_one_page_on_every_path(worst_harness):
         assert re.search(r"\d+ (more )?notes? (is|are) in the GC hub", pdf), path
         assert "Comments" not in pdf and "Marked regions" in pdf, path
         assert "window 251" in pdf and "spike dominance ≥0.6" in pdf, path
+
+
+def test_worst_case_charts_label_the_same_bands_on_both(worst_harness):
+    """13 ranges: the wide ones fall back to their carbons, the narrow ones go
+    unlabelled, and the two charts agree band for band."""
+    def texts(fig):
+        return [a["text"] for a in fig["layout"]["annotations"] or []
+                if a.get("yref") == "paper" and a.get("y") == 1]
+    for rec in worst_harness["figures"]:
+        trend, diff = rec["figs"]
+        assert texts(trend) == texts(diff)
+        assert texts(trend)[:2] == ["C5–C7", "C8–C10"], texts(trend)
+        assert 0 < len(texts(trend)) < 13
+        assert sum(s["type"] == "rect" for s in diff["layout"]["shapes"]) == 13
+
+
+# ── v7: range labels and legend swatches (pure) ──────────────────────────
+def _win(t0, t1, cs, ce, label="", evaluable=True):
+    return {"t0": t0, "t1": t1, "c_start": cs, "c_end": ce, "label": label,
+            "evaluable": evaluable}
+
+
+def test_band_labels_fall_back_from_name_to_carbons_to_nothing(face):
+    plot_w = 500.0                                    # pt for 0–10 min: 50 pt a minute
+    wins = [_win(0.0, 4.0, 5, 11, "Gasoline"),        # 200 pt: the full label
+            _win(4.2, 5.0, 12, 14, "A very long range name"),   # 40 pt: carbons only
+            _win(5.2, 5.4, 20, 22, "Narrow"),         # 10 pt: nothing
+            _win(6.0, 9.0, 30, 40, "Skipped", evaluable=False)]
+    out = rl.band_labels(wins, 0.0, 10.0, plot_w)
+    assert [t for _w, t, _x in out] == ["Gasoline C5–C11", "C12–C14"]
+
+
+def test_band_labels_start_clear_of_an_overlapping_bands_edge(face):
+    wins = [_win(0.0, 3.0, 5, 11, "Gasoline"), _win(2.0, 8.0, 10, 22, "Diesel")]
+    out = rl.band_labels(wins, 0.0, 10.0, 500.0)
+    assert [(t, x) for _w, t, x in out] == [("Gasoline C5–C11", 0.0), ("Diesel C10–C22", 3.0)]
+
+
+def test_band_labels_never_touch_each_other(face):
+    wins = [_win(i * 0.5, i * 0.5 + 0.9, 5 + i, 6 + i, f"R{i}") for i in range(12)]
+    out = rl.band_labels(wins, 0.0, 10.0, 500.0)
+    spans = [(x * 50, x * 50 + rl.line_width(t, rl.BAND_LABEL_FS) + 2 * rl.BAND_LABEL_PAD)
+             for _w, t, x in out]
+    assert all(a[1] <= b[0] for a, b in zip(spans, spans[1:]))
+
+
+def _pixels(png: bytes):
+    """Decode a swatch (8-bit RGB, filter 0, as swatch_png writes it)."""
+    import zlib
+    w, h = struct.unpack(">II", png[16:24])
+    raw = zlib.decompress(png[png.index(b"IDAT") + 4:png.index(b"IEND") - 8])
+    rows = [raw[y * (3 * w + 1) + 1:(y + 1) * (3 * w + 1)] for y in range(h)]
+    return [[tuple(r[3 * x:3 * x + 3]) for x in range(w)] for r in rows]
+
+
+def test_legend_swatches_carry_the_charts_colour_and_texture():
+    above, below = _pixels(rl.swatch_png("above")), _pixels(rl.swatch_png("below"))
+    hexrgb = rl._hex
+    for px, fill, ink in ((above, rl.DEV_ABOVE_FILL, rl.DEV_ABOVE),
+                          (below, rl.DEV_BELOW_FILL, rl.DEV_BELOW)):
+        colours = {p for row in px for p in row}
+        assert colours == {hexrgb(fill), hexrgb(ink)}
+
+    def grey(px):            # the texture as a printer would see it
+        return [[sum(p) > 3 * 160 for p in row] for row in px]
+    assert grey(above) != grey(below)                # hatch vs dots, not just hue
+    sample = {p for row in _pixels(rl.swatch_png("sample")) for p in row}
+    assert hexrgb(rl.SAMPLE) in sample
+
+
+def test_the_chart_legends_fit_their_column(face):
+    """The keys stay on one line in every face (the plan counts one)."""
+    sp = rl.line_width(" ", 7)
+    swatch = 12 + sp
+    gap = 3 * sp
+    trend = 3 * swatch + sum(rl.line_width(t, 7) for t in ("standard", "sample", "range")) + 2 * gap
+    diff = (2 * swatch + rl.line_width("▲▼", 7) + sp
+            + sum(rl.line_width(t, 7) for t in ("higher than the standard", "lower",
+                                                 "counted spike")) + 2 * gap)
+    assert trend < rl.KEY_W and diff < rl.KEY_W, (trend, diff)
