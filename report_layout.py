@@ -353,6 +353,12 @@ def fonts() -> dict:
         if not (os.path.isfile(reg) and os.path.isfile(bold)):
             continue
         ital = ital if os.path.isfile(ital) else reg
+        # reportlab keeps the FIRST TrueType font registered under a name
+        # (registerFont ignores a second one), so a face chosen after
+        # another (the tests' fixture switching faces) would be measured
+        # and drawn in the first; drop ours before registering
+        for name in (FAMILY, FAMILY + "-Bold", FAMILY + "-Italic"):
+            getattr(pdfmetrics, "_fonts", {}).pop(name, None)
         try:
             pdfmetrics.registerFont(TTFont(FAMILY, reg))
             pdfmetrics.registerFont(TTFont(FAMILY + "-Bold", bold))
@@ -804,7 +810,7 @@ p {{ margin: 0; }}
 .chead td {{ padding: 10pt 0 3pt 0; }}
 .ctitle {{ font-weight: bold; color: {INK}; }}
 .ccap {{ color: {MUTED}; }}
-.key {{ font-size: 7pt; color: {MUTED}; text-align: right; }}
+.key {{ font-size: {KEY_FS:g}pt; color: {MUTED}; text-align: right; }}
 .sec td.lbl {{ width: {LABEL_W:g}pt; font-weight: bold; color: {INK}; padding: 4pt 8pt 2pt 0; border-top: 0.75pt solid {BORDER}; }}
 .sec td.txt {{ padding: 4pt 0 2pt 0; border-top: 0.75pt solid {BORDER}; }}
 .sec td.cont {{ border-top: 0.5pt solid {HAIRLINE}; padding-top: 2pt; }}
@@ -935,6 +941,39 @@ def _swatch(kind: str) -> str:
             f'height="{round(7 * IMG_PX_PER_PT)}" style="vertical-align:middle;">')
 
 
+KEY_FS = 7.0                              # the legends' type (``.key``)
+KEY_SLACK = 6.0                           # kept free in the legend's column
+SPIKE_GLYPH = (f'<font color="{DEV_ABOVE}">&#9650;</font>'
+               f'<font color="{DEV_BELOW}">&#9660;</font>')
+
+
+def key_width(items: list[tuple[str, str, str]]) -> float:
+    """A legend's width in the face in use: each item a 12pt swatch (or
+    its glyphs) and a no-break space before its label, three no-break
+    spaces between items."""
+    sp = line_width("\u00a0", KEY_FS)
+    w = 0.0
+    for g, _c, t in items:
+        mark = (12.0 if g == "swatch"
+                else line_width(html.unescape(re.sub(r"<[^>]+>", "", g)), KEY_FS))
+        w += mark + sp + line_width(t, KEY_FS)
+    return w + 3 * sp * (len(items) - 1)
+
+
+def chart_keys(spikes_marked: bool) -> tuple[list, list]:
+    """The two legends' items, each on one line in the face in use (the
+    plan counts one line): the difference key says "higher than the
+    standard" where that fits its column, else "higher" / "lower" (the
+    chart's caption already says "minus <standard>")."""
+    trend = [("swatch", "standard", "standard"), ("swatch", "sample", "sample"),
+             ("swatch", "range", "range")]
+    spike = [(SPIKE_GLYPH, INK, "counted spike")] if spikes_marked else []
+    diff = [("swatch", "above", "higher than the standard"), ("swatch", "below", "lower")] + spike
+    if key_width(diff) > KEY_W - KEY_SLACK:
+        diff = [("swatch", "above", "higher"), ("swatch", "below", "lower")] + spike
+    return trend, diff
+
+
 def _key(items: list[tuple[str, str, str]]) -> str:
     """A chart's legend: ``(glyph, colour, label)``, or ``("swatch", kind,
     label)`` for a drawn swatch (``swatch_png``: colour and texture)."""
@@ -971,13 +1010,8 @@ def render_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str,
 <table width="100%" class="rule" style="margin-top:9pt;"><tr><td>&nbsp;</td></tr></table>"""
 
     w_px = round(BODY_W * IMG_PX_PER_PT)
-    trend_key = _key([("swatch", "standard", "standard"), ("swatch", "sample", "sample"),
-                      ("swatch", "range", "range")])
-    diff_items = [("swatch", "above", "higher than the standard"),
-                  ("swatch", "below", "lower")]
-    if spikes_marked:
-        diff_items.append((f'<font color="{DEV_ABOVE}">&#9650;</font>'
-                           f'<font color="{DEV_BELOW}">&#9660;</font>', INK, "counted spike"))
+    trend_items, diff_items = chart_keys(spikes_marked)
+    trend_key = _key(trend_items)
 
     def chart(title: str, caption: str, key: str, b64: str, h_pt: float) -> str:
         return f"""

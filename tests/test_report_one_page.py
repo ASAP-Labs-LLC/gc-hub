@@ -296,6 +296,32 @@ def test_every_interpolated_string_is_escaped(face):
     assert "&lt;img src=file:///etc/passwd&gt;" in page and "&lt;b&gt;bold&lt;/b&gt; &amp; more" in page
 
 
+def test_a_face_chosen_after_another_is_the_one_measured():
+    """reportlab keeps the first TrueType font registered under a name, so
+    the ``vera`` runs above measured (and drew) in whichever face came
+    first until ``fonts()`` dropped it: v7's legend fitted on a Mac and
+    wrapped on Linux."""
+    if not _vera_only():
+        pytest.skip("reportlab's Vera is not installed")
+    rl._FONTS.clear()
+    first = rl.fonts()
+    if os.path.basename(str(first.get("file") or "")) == "Vera.ttf":
+        pytest.skip("the default face is Vera already")
+    text = "higher than the standard"
+    w_default = rl.line_width(text, 7)
+    rl._font_candidates = _vera_only
+    rl._FONTS.clear()
+    try:
+        w_vera = rl.line_width(text, 7)
+        from reportlab.pdfbase import pdfmetrics
+        assert os.path.basename(pdfmetrics.getFont(rl.FAMILY).face.filename) == "Vera.ttf"
+    finally:
+        rl._font_candidates = _DEFAULT_CANDIDATES
+        rl._FONTS.clear()
+        rl.fonts()
+    assert w_vera != w_default
+
+
 def test_the_plan_is_deterministic():
     kw = dict(doc_name="GC Analysis", lab_id=WORST_LAB, std_name=WORST_STD,
               bullets_text=worst_bullets(WORST_STD), conclusion=conclusion_of(1500),
@@ -531,12 +557,11 @@ def test_legend_swatches_carry_the_charts_colour_and_texture():
 
 
 def test_the_chart_legends_fit_their_column(face):
-    """The keys stay on one line in every face (the plan counts one)."""
-    sp = rl.line_width(" ", 7)
-    swatch = 12 + sp
-    gap = 3 * sp
-    trend = 3 * swatch + sum(rl.line_width(t, 7) for t in ("standard", "sample", "range")) + 2 * gap
-    diff = (2 * swatch + rl.line_width("▲▼", 7) + sp
-            + sum(rl.line_width(t, 7) for t in ("higher than the standard", "lower",
-                                                 "counted spike")) + 2 * gap)
-    assert trend < rl.KEY_W and diff < rl.KEY_W, (trend, diff)
+    """The keys stay on one line in every face (the plan counts one): the
+    difference key drops "than the standard" where it would not fit."""
+    for spikes in (True, False):
+        trend, diff = rl.chart_keys(spikes)
+        assert rl.key_width(trend) <= rl.KEY_W - rl.KEY_SLACK
+        assert rl.key_width(diff) <= rl.KEY_W - rl.KEY_SLACK, diff
+        labels = [t for _g, _c, t in diff]
+        assert labels[:2] in (["higher than the standard", "lower"], ["higher", "lower"])
