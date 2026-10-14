@@ -148,6 +148,7 @@ BAND_LABEL_FS = 6.5                        # range labels on both charts (pt)
 BAND_LABEL_PAD = 3.0                       # from the band's left edge (pt)
 BAND_ROW_PT = BAND_LABEL_FS * 1.25         # one row of range labels
 BAND_LANE_PAD = 1.5                         # above and below the label rows
+BAND_ROWS = 3                              # label rows above the data (v8.1.1: names before numbers)
 
 
 def band_lane_pt(rows: int) -> float:
@@ -163,7 +164,7 @@ def band_labels(windows: list[dict], x0: float, x1: float,
                 plot_w_pt: float) -> list[tuple[dict, str, float, int]]:
     """The range labels, one decision for both charts (they share the
     width and the x axis): ``(window, text, x, row)`` per labelled window
-    (``x`` in minutes: a label's left edge, or a tag's centre).
+    (``x`` in minutes: a label box's left edge, or a tag's centre).
 
     Left to right (by where the bands start, whatever order the ranges are
     listed in: v8.1.1), each label starts at its band's left edge, or past the
@@ -173,12 +174,19 @@ def band_labels(windows: list[dict], x0: float, x1: float,
     A band too narrow for any of them gets its tag, the range's number
     (``index + 1``; the footer's Ranges line names it: ``range_tag``),
     centred on the band, in row 0 or, when that would touch a label, row 1.
-    Only a band with neither is left unlabelled (the footer still names it)."""
+
+    Then (v8.1.1) every band showing only its carbons or its number, or
+    nothing, shows its name instead wherever the whole name fits: centred on
+    the band (running past its edges in the label strip, kept inside the
+    plot), in the first of the ``BAND_ROWS`` rows where it touches no other
+    label. So a name is cut down only when there is no room for it, and no
+    band loses the label the first pass gave it. A band with no label at the
+    end is left unlabelled (the footer still names it)."""
     span = max(x1 - x0, 1e-9)
 
     def pt(t: float) -> float:
         return (min(max(float(t), x0), x1) - x0) / span * plot_w_pt
-    out: list[tuple[dict, str, float, int]] = []
+    placed: dict[int, list] = {}            # window index -> [text, x, row, lo_pt, hi_pt]
     ends = [-1e9, -1e9]                    # where each row's last label ends (pt)
     seen: list[dict] = []
     order = sorted((i for i, w in enumerate(windows) if w.get("evaluable")),
@@ -199,15 +207,13 @@ def band_labels(windows: list[dict], x0: float, x1: float,
         # the name matters more than the carbons (the findings give those):
         # "<label> Cx–Cy", then the label alone, then the carbons
         tiers = ([f"{label} {carbons}", label] if label else []) + [carbons, compact]
-        placed = False
         for text in dict.fromkeys(tiers):
             need = line_width(text, BAND_LABEL_FS) + 2 * BAND_LABEL_PAD
             if b - a >= need and a >= ends[0]:
-                out.append((w, text, max(start, x0), 0))
+                placed[i] = [text, max(start, x0), 0, a, a + need]
                 ends[0] = a + need
-                placed = True
                 break
-        if placed:
+        if i in placed:
             continue
         tag = range_tag(w, i)
         half = line_width(tag, BAND_LABEL_FS) / 2 + 1.0
@@ -217,10 +223,39 @@ def band_labels(windows: list[dict], x0: float, x1: float,
             continue
         for row in (0, 1):
             if lo_ >= ends[row]:
-                out.append((w, tag, x0 + mid / plot_w_pt * span, row))
+                placed[i] = [tag, x0 + mid / plot_w_pt * span, row, lo_, hi_ + 1.0]
                 ends[row] = hi_ + 1.0
                 break
-    return out
+
+    def free(row: int, lo: float, hi: float, own: int) -> bool:
+        return not any(j != own and p[2] == row and lo < p[4] and p[3] < hi
+                       for j, p in placed.items())
+    for i in order:                        # v8.1.1: the name, whole, wherever it fits
+        w = windows[i]
+        label = str(w.get("label") or "").strip()
+        if not label or (i in placed and label in placed[i][0]):
+            continue
+        need = line_width(label, BAND_LABEL_FS) + 2 * BAND_LABEL_PAD
+        mid = (pt(w["t0"]) + pt(w["t1"])) / 2
+        lo = min(max(mid - need / 2, 0.0), plot_w_pt - need)
+        if lo < 0:                         # wider than the whole plot
+            continue
+        for row in range(BAND_ROWS):
+            if free(row, lo, lo + need, i):
+                placed[i] = [label, x0 + lo / plot_w_pt * span, row, lo, lo + need]
+                break
+    return [(windows[i], *placed[i][:3]) for i in order if i in placed]
+
+
+def label_overflows(w: dict, text: str, x: float, x0: float, x1: float,
+                    plot_w_pt: float) -> bool:
+    """Whether a label ``band_labels`` placed (``text`` at ``x``) runs past
+    its band's edges: the charts give it a backing, so the edges' hairlines
+    never cross its letters (v8.1.1). A tag never does."""
+    if is_tag(text):
+        return False
+    box = (line_width(text, BAND_LABEL_FS) + 2 * BAND_LABEL_PAD) / plot_w_pt * max(x1 - x0, 1e-9)
+    return x < float(w["t0"]) - 1e-9 or x + box > float(w["t1"]) + 1e-9
 
 
 def range_tag(w: dict, i: int) -> str:

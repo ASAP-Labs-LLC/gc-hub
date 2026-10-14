@@ -441,17 +441,19 @@ def test_worst_case_reports_are_one_page_on_every_path(worst_harness):
 
 
 def test_worst_case_charts_label_the_same_bands_on_both(worst_harness):
-    """12 ranges: the wide ones fall back to their carbons, the narrow ones
-    carry their number, and the two charts agree band for band."""
+    """12 ranges with 40-character names on narrow bands: every band keeps a
+    label, most show their whole name (v8.1.1: centred, in up to three rows)
+    and the rest their carbons or number, and the two charts agree band for
+    band."""
     def texts(fig):
         return [a["text"] for a in fig["layout"]["annotations"] or []
                 if a.get("yref") == "paper" and a.get("y") == 1]
+    names = {worst_range_label(i) for i in range(WORST_RANGES)}
     for rec in worst_harness["figures"]:
         trend, diff = rec["figs"]
         assert texts(trend) == texts(diff)
-        assert texts(trend)[:2] == ["C5–C7", "C8–C10"], texts(trend)
-        assert len(texts(trend)) == WORST_RANGES          # every band labelled or numbered
-        assert any(rl.is_tag(t) for t in texts(trend))
+        assert len(texts(trend)) == WORST_RANGES          # every band labelled
+        assert sum(t in names for t in texts(trend)) >= 3, texts(trend)       # 5 at present
         assert sum(s["type"] == "rect" for s in diff["layout"]["shapes"]) == WORST_RANGES
 
 
@@ -484,17 +486,62 @@ def _win(t0, t1, cs, ce, label="", evaluable=True, index=0):
             "evaluable": evaluable, "index": index}
 
 
-def test_band_labels_fall_back_from_name_to_carbons_to_the_ranges_number(face):
+def _box(t: str) -> float:
+    return rl.line_width(t, rl.BAND_LABEL_FS) + 2 * rl.BAND_LABEL_PAD
+
+
+def test_a_name_too_wide_for_its_band_is_printed_whole_centred_on_it(face):
+    """v8.1.1: a range's name wider than its band is printed whole, centred
+    on the band (running past its edges in the label strip): never cut down
+    to its carbons or its number when there is room in a label row."""
     plot_w = 500.0                                    # pt for 0–10 min: 50 pt a minute
     wins = [_win(0.0, 4.0, 5, 11, "Gasoline", index=0),        # 200 pt: the full label
-            _win(4.2, 5.0, 12, 14, "A very long range name", index=1),   # 40 pt: carbons
-            _win(5.2, 5.4, 20, 22, "Narrow", index=2),         # 10 pt: its number
+            _win(4.2, 5.0, 12, 14, "A very long range name", index=1),   # 40 pt: wider
+            _win(5.2, 5.4, 20, 22, "Narrow", index=2),         # 10 pt: wider
             _win(6.0, 9.0, 30, 40, "Skipped", evaluable=False, index=3)]
     out = rl.band_labels(wins, 0.0, 10.0, plot_w)
-    assert [(t, row) for _w, t, _x, row in out] == [
-        ("Gasoline C5–C11", 0), ("C12–C14", 0), ("3", 0)]
-    assert out[2][2] == pytest.approx(5.3)            # a tag is centred on its band
+    assert [t for _w, t, _x, _r in out] == ["Gasoline C5–C11", "A very long range name", "Narrow"]
+    for w, t, x, _r in out[1:]:                       # x is the label box's left edge
+        assert x * 50 + _box(t) / 2 == pytest.approx((w["t0"] + w["t1"]) / 2 * 50, abs=0.01), t
     assert rl.is_tag("3") and not rl.is_tag("C12–C14")
+
+
+def test_a_wide_name_at_the_plots_edge_stays_inside_it(face):
+    w = _win(9.9, 10.0, 40, 44, "Heavy end tail", index=0)
+    (_w, t, x, row), = rl.band_labels([w], 0.0, 10.0, 500.0)
+    assert t == "Heavy end tail" and row == 0
+    assert x * 50 + _box(t) <= 500.0 + 1e-6 and x >= 0.0
+
+
+def _apart(out, per_min=50.0):
+    """No two labels in a row touch (a tag's box is centred on x, a label's
+    starts at x)."""
+    for row in range(rl.BAND_ROWS):
+        spans = []
+        for _w, t, x, r in out:
+            if r != row:
+                continue
+            wd = rl.line_width(t, rl.BAND_LABEL_FS)
+            spans.append((x * per_min - wd / 2 - 1, x * per_min + wd / 2 + 1) if rl.is_tag(t)
+                         else (x * per_min, x * per_min + wd + 2 * rl.BAND_LABEL_PAD))
+        spans.sort()
+        assert all(a[1] <= b[0] + 1e-6 for a, b in zip(spans, spans[1:])), (row, spans)
+
+
+def test_crowded_narrow_bands_keep_a_label_each_and_names_where_they_fit(face):
+    """Six 5 pt bands 1 pt apart: every band keeps a label; a name goes
+    wherever it fits whole (in up to three rows), the rest keep their number
+    (the footer names them), and no two labels touch."""
+    wins = [_win(1.0 + i * 0.12, 1.0 + i * 0.12 + 0.1, 20 + 2 * i, 21 + 2 * i, "Narrow",
+                 index=i + 8) for i in range(6)]
+    out = rl.band_labels(wins, 0.0, 10.0, 500.0)
+    assert len(out) == 6
+    assert any(t == "Narrow" for _w, t, _x, _r in out)
+    for w, t, _x, r in out:
+        assert t == "Narrow" or t == str(w["index"] + 1), t
+        assert r in range(rl.BAND_ROWS)
+    _apart(out)
+    assert rl.band_lane_pt(3) > rl.band_lane_pt(2) > rl.band_lane_pt(1) > rl.band_lane_pt(0) == 0
 
 
 def test_band_labels_start_clear_of_an_overlapping_bands_edge(face):
@@ -506,7 +553,7 @@ def test_band_labels_start_clear_of_an_overlapping_bands_edge(face):
 def test_band_labels_never_touch_each_other(face):
     wins = [_win(i * 0.5, i * 0.5 + 0.9, 5 + i, 6 + i, f"R{i}", index=i) for i in range(12)]
     out = rl.band_labels(wins, 0.0, 10.0, 500.0)
-    for row in (0, 1):
+    for row in (0, 1, 2):
         spans = []
         for _w, t, x, r in out:
             if r != row:
@@ -515,15 +562,6 @@ def test_band_labels_never_touch_each_other(face):
             spans.append((x * 50 - wd / 2 - 1, x * 50 + wd / 2 + 1) if rl.is_tag(t)
                          else (x * 50, x * 50 + wd + 2 * rl.BAND_LABEL_PAD))
         assert all(a[1] <= b[0] for a, b in zip(spans, spans[1:])), (row, spans)
-
-
-def test_narrow_neighbours_stagger_their_numbers_into_a_second_row(face):
-    wins = [_win(1.0 + i * 0.12, 1.0 + i * 0.12 + 0.1, 20 + 2 * i, 21 + 2 * i, "Narrow",
-                 index=i + 8) for i in range(6)]    # 5 pt bands, 1 pt apart
-    out = rl.band_labels(wins, 0.0, 10.0, 500.0)
-    assert {t for _w, t, _x, _r in out} <= {str(i + 9) for i in range(6)}
-    assert {r for *_a, r in out} == {0, 1} and len(out) >= 4
-    assert rl.band_lane_pt(2) > rl.band_lane_pt(1) > rl.band_lane_pt(0) == 0
 
 
 def test_the_ranges_line_never_leaves_a_range_out():
@@ -581,8 +619,8 @@ def test_a_band_too_narrow_for_its_carbons_shows_its_name_not_its_number():
          "label": "Bio", "index": 2}
     out = rl.band_labels([w], 0.0, 7.0, 500.0)
     assert [t for _, t, _, _ in out] == ["Bio"]
-    long = dict(w, label="Biodiesel blend range")
-    assert [t for _, t, _, _ in rl.band_labels([long], 0.0, 7.0, 500.0)] != ["Biodiesel blend range"]
+    long = dict(w, label="Biodiesel blend range")              # v8.1.1: whole, centred
+    assert [t for _, t, _, _ in rl.band_labels([long], 0.0, 7.0, 500.0)] == ["Biodiesel blend range"]
 
 
 def test_a_range_listed_after_one_to_its_right_keeps_its_name():
@@ -595,7 +633,18 @@ def test_a_range_listed_after_one_to_its_right_keeps_its_name():
     out = rl.band_labels([lighter, heavier, bio], 0.0, 7.0, 500.0)
     assert sorted(t for _w, t, _x, _r in out) == ["Bio", "Heavier C22–C44", "Lighter C5–C11"], out
     assert all(r == 0 for *_a, r in out)
-    # the tag, when a band does need one, is still the range's own number
+    # a band too narrow for its name still shows the name, centred on it
     narrow = _win(3.85, 3.9, 19, 21, "Biodiesel blend", index=2)
     out = rl.band_labels([lighter, heavier, narrow], 0.0, 7.0, 500.0)
-    assert [t for w, t, _x, _r in out if w is narrow] == ["3"]
+    assert [t for w, t, _x, _r in out if w is narrow] == ["Biodiesel blend"]
+
+
+def test_a_name_running_past_its_band_is_known_so_its_label_gets_a_backing(face):
+    """v8.1.1: the charts give a label that runs past its band's edges a
+    backing (the edges' hairlines never cross its letters); one inside its
+    band, or a tag, has none."""
+    wins = [_win(0.0, 4.0, 5, 11, "Gasoline", index=0), _win(5.2, 5.4, 20, 22, "Narrow", index=1)]
+    out = rl.band_labels(wins, 0.0, 10.0, 500.0)
+    flags = [rl.label_overflows(w, t, x, 0.0, 10.0, 500.0) for w, t, x, _r in out]
+    assert [t for _w, t, _x, _r in out] == ["Gasoline C5–C11", "Narrow"] and flags == [False, True]
+    assert rl.label_overflows(wins[1], "3", 5.3, 0.0, 10.0, 500.0) is False

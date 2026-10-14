@@ -1374,6 +1374,10 @@ def _report_figures(content: dict, sample_name: str, overlay_standards: list,
                         yref="paper", yanchor="top",
                         yshift=-(rl.BAND_LANE_PAD + row * rl.BAND_ROW_PT) * k, showarrow=False,
                         text=_esc(text), borderpad=0,
+                        # v8.1.1: a name running past its band is backed, so the
+                        # band edges' hairlines never cross its letters
+                        bgcolor=("#ffffff" if rl.label_overflows(w, text, x, x_range[0], x_max_min,
+                                                                 plot_w_pt) else None),
                         font=dict(size=rl.BAND_LABEL_FS * k, color=c["band_text"]))
                    for w, text, x, row in labelled]
 
