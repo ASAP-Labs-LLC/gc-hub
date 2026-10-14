@@ -116,6 +116,7 @@ import reprocess_query
 import hub
 import instruments
 import pipeline
+import standards
 import store
 
 # Phase 4's comments module (the seam frozen in the phase 3+4 spec): the
@@ -2553,7 +2554,11 @@ def api_comparison_standard_trace(name: str):
 def api_add_comparison_standard():
     """Admin: make a stored sample's CDF (``sample_id``, its current
     revision's file) a comparison standard ``name``. Server paths are never
-    accepted (``source_path`` is refused)."""
+    accepted (``source_path`` is refused). v8.1: tagged with an instrument as
+    it is added (``standards.register``): no ``instrument_id`` = the sample's
+    own GC, an id = that GC (404 if unknown, nothing copied), ``null`` =
+    untagged. ``{status, path, standard}`` (``standard`` as ``/api/standards``
+    lists it); the same name again replaces the file and re-tags it."""
     body, err = _admin_json_body()
     if err:
         return err
@@ -2567,8 +2572,14 @@ def api_add_comparison_standard():
         return _error(problem)
     if body.get("sample_id") is None:
         return _error("sample_id and name are required")
+    inst = body.get("instrument_id")
+    if inst is not None and not isinstance(inst, str):
+        return _error("instrument_id must be an instrument id or null")
     data, db = _hub()
     s = _sample_or_404(body["sample_id"], db)
+    inst = s["instrument_id"] if "instrument_id" not in body else (inst or None)
+    if inst is not None and store.instruments.get(inst, db=db) is None:
+        return _error(f"Unknown instrument {inst!r}", 404)
     src = _revision_cdf(s, store.get_revision(s["id"], db=db) if s["current_revision"] else None,
                         data)
     try:
@@ -2576,8 +2587,10 @@ def api_add_comparison_standard():
         comp_dir.mkdir(parents=True, exist_ok=True)
         dest = comp_dir / f"{name}.CDF"
         shutil.copy2(str(src), str(dest))
-        LOGGER.info("Comparison standard %s added from sample %s by %s", name, s["id"], _who())
-        return jsonify({"status": "ok", "path": str(dest)})
+        row = standards.register(comp_dir, dest, inst, db=db)
+        LOGGER.info("Comparison standard %s added from sample %s (tagged %s) by %s", name, s["id"],
+                    inst, _who())
+        return jsonify({"status": "ok", "path": str(dest), "standard": row})
     except Exception as exc:
         return _route_failure(exc)
 

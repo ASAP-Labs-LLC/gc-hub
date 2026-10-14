@@ -86,6 +86,48 @@ def test_retag_and_filter(hub):
         standards.set_instrument(99999, "gc1", db=hub.db)
 
 
+def test_register_tags_a_new_file_at_once_over_the_first_use_migration(hub):
+    """v8.1: a standard added from a run is tagged as it is added; on the
+    folder's first use the migration tags the other files gc1, never it."""
+    hub.gc1()
+    hub.gc2()
+    d = _dir(hub, "Diesel.CDF", "Gas.CDF")
+    row = standards.register(d, d / "Gas.CDF", "gc2", db=hub.db)
+    assert (row["name"], row["instrument_id"], row["instrument_name"]) == ("Gas", "gc2", "GC-2")
+    assert row["file_name"] == "Gas.CDF" and row["missing"] is False and "cdf_path" not in row
+    rows = {r["name"]: r for r in standards.list_standards(d, db=hub.db)}
+    assert {n: r["instrument_id"] for n, r in rows.items()} == {"Diesel": "gc1", "Gas": "gc2"}
+    assert rows["Gas"]["id"] == row["id"]
+    (d / "Jet.CDF").write_bytes(b"x")                     # after the migration, untagged on purpose
+    assert standards.register(d, d / "Jet.CDF", None, db=hub.db)["instrument_id"] is None
+    assert standards.list_standards(d, "gc1", db=hub.db)[0]["name"] == "Diesel"
+
+
+def test_register_retags_a_known_file_and_refuses_an_unknown_instrument(hub):
+    hub.gc1()
+    hub.gc2()
+    d = _dir(hub, "Diesel.CDF")
+    first = standards.register(d, d / "Diesel.CDF", "gc1", db=hub.db)
+    again = standards.register(d, d / "Diesel.CDF", "gc2", db=hub.db)      # replaced from a gc2 run
+    assert again["id"] == first["id"] and again["instrument_id"] == "gc2"
+    assert [r["instrument_id"] for r in standards.list_standards(d, db=hub.db)] == ["gc2"]
+    with pytest.raises(LookupError):
+        standards.register(d, d / "Diesel.CDF", "gc9", db=hub.db)
+    assert standards.list_standards(d, db=hub.db)[0]["instrument_id"] == "gc2"
+
+
+def test_register_without_gc1_still_records_the_tag(hub):
+    """No gc1 yet (no migration possible): the added file is still listed with
+    its tag, and the later migration leaves it alone."""
+    hub.gc2()
+    d = _dir(hub, "Old.CDF", "New.CDF")
+    assert standards.register(d, d / "New.CDF", "gc2", db=hub.db)["instrument_id"] == "gc2"
+    assert [r["name"] for r in standards.list_standards(d, db=hub.db)] == ["New"]
+    hub.gc1()
+    rows = {r["name"]: r["instrument_id"] for r in standards.list_standards(d, db=hub.db)}
+    assert rows == {"New": "gc2", "Old": "gc1"}
+
+
 def test_missing_file_is_flagged(hub):
     hub.gc1()
     d = _dir(hub, "Diesel.CDF", "Gone.CDF")

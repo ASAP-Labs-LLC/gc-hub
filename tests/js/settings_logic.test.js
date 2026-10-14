@@ -4,7 +4,7 @@
 // OPERATOR_KEYS freely, ADMIN_KEYS with the admin password, anything else 400).
 const S = require('../../static/js/settings_logic.js');
 
-module.exports = (t) => {
+module.exports = async (t) => {
     // ── the sections, in order, each with its audience ───────────────────
     t.eq(S.SECTIONS.map((s) => s.id),
         ['browser', 'flags', 'bestfit', 'findings', 'compare', 'standards', 'qbench', 'lem', 'server']);
@@ -92,6 +92,82 @@ module.exports = (t) => {
     t.eq(S.standardTagText({ instrument_id: null }), 'Not tagged');
     t.eq(S.standardTagText({ instrument_id: 'gc2', instrument_name: 'GC-2' }), 'GC-2');
     t.eq(S.standardTagText({ instrument_id: 'gc2', missing: true }), 'gc2 · file missing');
+
+    // ── standards: add from a run (v8.1) ─────────────────────────────────
+    // the Samples list labels re-runs "<lab ID> (N)"; Add takes that label too
+    t.eq(S.parseRunLabel('DIESEL STD (30)'), { lab: 'DIESEL STD', run: 30 });
+    t.eq(S.parseRunLabel('40304'), { lab: '40304', run: null });
+    t.eq(S.parseRunLabel('40304(2)'), { lab: '40304', run: 2 });
+    t.eq(S.parseRunLabel(' 40304 (2) '), { lab: '40304', run: 2 });
+    t.eq(S.parseRunLabel('A (1) (12)'), { lab: 'A (1)', run: 12 });
+    t.eq(S.parseRunLabel('(2)'), { lab: '(2)', run: null });              // no lab ID before it
+    t.eq(S.parseRunLabel('40304 (0)'), { lab: '40304 (0)', run: null });  // runs count from 1
+    t.eq(S.parseRunLabel('40304 (x)'), { lab: '40304 (x)', run: null });
+    t.eq(S.parseRunLabel(''), { lab: '', run: null });
+
+    // /api/lab runs, newest first, with the list's run_no / display_name
+    const run = (sid, inst, no, dt, status) => ({ sample_id: sid, lab_id: 'DIESEL STD', instrument: inst,
+        instrument_name: inst.toUpperCase().replace('GC', 'GC-'), injection_dt: dt, status: status || 'final',
+        run_no: no, display_name: no > 1 ? 'DIESEL STD (' + no + ')' : 'DIESEL STD' });
+    const r30 = run(31, 'gc1', 30, '2026-10-03 10:15:00');
+    const b30 = run(32, 'gc2', 30, '2026-10-04 08:05:00', 'awaiting_calibration');
+    const r29 = run(29, 'gc1', 29, '2026-10-02 10:15:00');
+    const lab = { lab_id: 'DIESEL STD', sample_id: 31, runs: [b30, r30, r29] };
+    const one = { lab_id: '40304', sample_id: 7, runs: [{ sample_id: 7, lab_id: '40304', instrument: 'gc1',
+        instrument_name: 'GC-1', injection_dt: '2026-09-25 14:23:00', status: 'final', run_no: 1, display_name: '40304' }] };
+
+    // one run: added at once, as before
+    t.eq(S.addStandardRuns(one, null), { runs: one.runs, chosen: one.runs[0], selected: 7, prompt: null, error: null });
+    // several, no "(N)": pick one, the resolver's own run preselected
+    const many = S.addStandardRuns(lab, null);
+    t.eq([many.chosen, many.selected, many.error], [null, 31, null]);
+    t.eq(many.runs.map((r) => r.sample_id), [32, 31, 29]);
+    t.eq(many.prompt, 'DIESEL STD has 3 runs. Pick the one to add.');
+    // "(30)" names one run per GC: here two, so pick; the resolver's run first
+    const two = S.addStandardRuns(lab, 30);
+    t.eq([two.runs.map((r) => r.sample_id), two.chosen, two.selected], [[32, 31], null, 31]);
+    t.eq(two.prompt, 'DIESEL STD (30) is on 2 GCs. Pick the one to add.');
+    t.eq(S.addStandardRuns(lab, 29).chosen, r29);
+    // the preselected run is the first when the resolver's own is not among them
+    t.eq(S.addStandardRuns({ lab_id: 'DIESEL STD', sample_id: 29, runs: [b30, r30, r29] }, 30).selected, 32);
+    t.eq(S.addStandardRuns(lab, 31), { runs: [], chosen: null, selected: null, prompt: null,
+        error: 'No run 31 of DIESEL STD was found.' });
+
+    // the lookup: the whole text first (a lab ID may hold "(2)"), then the label's lab ID
+    const asked = [];
+    const hub = { 'DIESEL STD': lab, '40304 (2)': one, '40304': one };
+    const fetchLab = async (id) => { asked.push(id); return hub[id] || null; };
+    t.eq((await S.findAddRuns(' DIESEL STD (30) ', fetchLab)).runs.map((r) => r.sample_id), [32, 31]);
+    t.eq(asked, ['DIESEL STD (30)', 'DIESEL STD']);
+    asked.length = 0;
+    t.eq((await S.findAddRuns('40304 (2)', fetchLab)).chosen, one.runs[0]);    // literally that lab ID
+    t.eq(asked, ['40304 (2)']);
+    asked.length = 0;
+    t.eq((await S.findAddRuns('DIESEL STD (31)', fetchLab)).error, 'No run 31 of DIESEL STD was found.');
+    t.eq((await S.findAddRuns('99999', fetchLab)).error, 'No run with lab ID 99999 was found.');
+    t.eq((await S.findAddRuns('99999 (2)', fetchLab)).error, 'No run with lab ID 99999 (2) was found.');
+    t.eq(asked, ['DIESEL STD (31)', 'DIESEL STD', '99999', '99999 (2)', '99999']);
+
+    // the picker's options
+    t.eq(S.runChoiceLabel(r30), 'DIESEL STD (30) · GC-1 · Oct 3 10:15 · Final');
+    t.eq(S.runChoiceLabel(b30), 'DIESEL STD (30) · GC-2 · Oct 4 08:05 · Held');
+    t.eq(S.runChoiceLabel({ lab_id: 'X', instrument: 'gc3', injection_dt: '', status: 'error' }), 'X · gc3 · Error');
+
+    // the GC the standard is tagged with as it is added
+    t.eq(S.addGcOptions([{ id: 'gc1', name: 'GC-1' }, { id: 'gc2' }]),
+        [{ value: '', text: 'GC of the run' }, { value: 'gc1', text: 'GC-1' }, { value: 'gc2', text: 'gc2' },
+         { value: S.GC_NONE, text: 'Not tagged' }]);
+    t.eq(S.addGcOptions(null).map((o) => o.value), [S.GC_OF_RUN, S.GC_NONE]);
+    t.eq(S.addStandardBody(31, 'Diesel ULSD Std', S.GC_OF_RUN), { sample_id: 31, name: 'Diesel ULSD Std' });
+    t.eq(S.addStandardBody(31, 'D', 'gc2'), { sample_id: 31, name: 'D', instrument_id: 'gc2' });
+    t.eq(S.addStandardBody(31, 'D', S.GC_NONE), { sample_id: 31, name: 'D', instrument_id: null });
+
+    // the line after it is added names the run used
+    t.eq(S.addedText('Diesel ULSD Std', r30, { instrument_id: 'gc1', instrument_name: 'GC-1' }),
+        'Added Diesel ULSD Std from DIESEL STD (30) on GC-1.');
+    t.eq(S.addedText('D', r30, { instrument_id: 'gc2', instrument_name: 'GC-2' }),
+        'Added D from DIESEL STD (30) on GC-1, tagged GC-2.');
+    t.eq(S.addedText('D', r30, { instrument_id: null }), 'Added D from DIESEL STD (30) on GC-1, not tagged with a GC.');
 
     // ── QBench ───────────────────────────────────────────────────────────
     t.eq(S.webLoginText({ username: 'lab@asap', has_password: true }), 'Uploads sign in to QBench as lab@asap.');

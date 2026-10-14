@@ -11,6 +11,9 @@ The store's ``standards`` table tags each file with an instrument:
   leaves the migration for a later call.
 * **Later files** (added through the old comparison-standard routes) are
   registered untagged (``instrument_id`` NULL) until an admin tags them.
+* **Added from a run** (v8.1, ``POST /api/comparison-standard``): ``register``
+  records the file with the tag chosen as it is added (by default the run's
+  own GC), over whatever ``sync`` would give it; a known file is re-tagged.
 * A registered file that has gone is listed with ``missing: true``; its tag is
   kept (the file may come back).
 
@@ -25,6 +28,7 @@ API::
     list_standards(comp_dir, instrument=None, *, db) -> [{id, name, instrument_id,
         instrument_name, file_name, missing, added_at}]           # never server paths
     set_instrument(standard_id, instrument_id | None, *, db) -> row   # LookupError
+    register(comp_dir, path, instrument_id | None, *, db) -> row       # LookupError
     for_sample(comp_dir, sample_instrument, *, db) -> [row + {cross_instrument, warning}]
     cross_instrument_warning(sample_inst_name, standard_name, standard_inst_name | None) -> str
     paths_for(comp_dir, instrument, *, db) -> [Path]
@@ -128,6 +132,34 @@ def set_instrument(standard_id, instrument_id: Optional[str], *, db: store.Db = 
             out = _public(dict(conn.execute("SELECT * FROM standards WHERE id=?",
                                             (int(standard_id),)).fetchone()), names)
     log.warning("standards: %s tagged %s", out["name"], instrument_id)
+    return out
+
+
+def register(comp_dir, path, instrument_id: Optional[str], *, db: store.Db = None) -> dict:
+    """Register ``path`` (a file just put in ``comp_dir``) tagged
+    ``instrument_id`` (``None`` = untagged): the tag wins over ``sync``'s (on
+    the folder's first use the migration tags the other files gc1, not this
+    one). A file already registered is re-tagged. ``LookupError`` (nothing
+    registered) for an unknown instrument."""
+    if instrument_id is not None and store.instruments.get(instrument_id, db=db) is None:
+        raise LookupError(f"unknown instrument {instrument_id!r}")
+    sync(comp_dir, db=db)
+    p = Path(path).resolve()
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            row = conn.execute("SELECT id FROM standards WHERE cdf_path=? ORDER BY id",
+                               (str(p),)).fetchone()
+            if row is None:
+                sid = conn.execute("INSERT INTO standards(name, instrument_id, cdf_path, added_at) "
+                                   "VALUES (?,?,?,?)", (p.stem, instrument_id, str(p),
+                                                        store.now_iso())).lastrowid
+            else:
+                sid = row["id"]
+                conn.execute("UPDATE standards SET instrument_id=? WHERE id=?", (instrument_id, sid))
+            names = {r["id"]: r["name"] for r in store.instruments.list(db=conn)}
+            out = _public(dict(conn.execute("SELECT * FROM standards WHERE id=?", (sid,)).fetchone()),
+                          names)
+    log.warning("standards: %s added, tagged %s", out["name"], instrument_id)
     return out
 
 

@@ -311,7 +311,7 @@
     .lem-picker select { min-width: 0; width: 100%; }
     .gstep { grid-template-columns: 32px minmax(0, 1fr); gap: var(--s3); padding: var(--s4); }
     .gstep.current { padding: var(--s4); }
-    .add-std .field:first-child { width: 100%; }
+    .add-std .field:first-child, .add-std .add-gc { width: 100%; }
     .gc .std-tbl tr.inline input[type="text"] { width: 100%; }
     table.counts { min-width: 0; }
     .adm .tbl td.path { min-width: 140px; }
