@@ -1338,12 +1338,12 @@
         ex.actions = h('div', { className: 'actions' },
             h('button', { type: 'button', className: 'btn btn-ghost', text: 'Cancel', onclick: () => exportDlg.close() }),
             ex.queue, ex.dl);
+        ex.more = h('details', { className: 'more' }, h('summary', { text: 'Also draw other standards on the report' }), ex.others);
         const form = h('form', { method: 'dialog', className: 'form' },
             ex.title, ex.sub,
             h('label', { className: 'field' }, h('span', { text: 'Compared with' }), ex.std),
             h('label', { className: 'field' }, h('span', { text: 'Report title' }), ex.doc),
-            h('details', { className: 'more' }, h('summary', { text: 'Also draw other standards on the report' }), ex.others),
-            ex.concl, ex.params, ex.msg, ex.actions);
+            ex.more, ex.concl, ex.params, ex.msg, ex.actions);
         exportDlg = h('dialog', { className: 'sheet cmp-export', 'data-testid': 'export-sheet', 'aria-labelledby': 'cmp-export-h' }, form);
         // Enter does what the sheet was opened for
         form.addEventListener('submit', (e) => { e.preventDefault(); (ex.mode === 'queue' ? exportQueue : exportDownload)(); });
@@ -1380,30 +1380,37 @@
             : `Sample ${labelOf(ctx.sample)}. One PDF, built by the hub with these settings.`;
         ex.std.textContent = '';
         for (const s of ctx.standards) ex.std.appendChild(h('option', { value: s.name, text: s.name }));
-        ex.std.value = ctx.standard || '';
+        // v8.1: or none at all: the sample's chromatogram on its own
+        ex.std.appendChild(h('option', { value: L.NO_COMPARISON, text: 'No comparison (chromatogram only)' }));
+        ex.std.value = ctx.standard || (ctx.standards.length ? '' : L.NO_COMPARISON);
         // the conclusion edited on Compare for the standard picked here, else
         // the generated one (edits are kept per standard)
         ex.edited = ctx.edited || {};
-        const conclLine = () => {
-            const own = typeof ex.edited[ex.std.value] === 'string' && ex.edited[ex.std.value].trim();
-            ex.concl.textContent = own ? 'Conclusion: your edited text from Compare.'
-                : 'Conclusion: the generated text. Edit it on Compare.';
+        const where = ctx.view ? '. Change these in Adjust.'
+            : ctx.adjusted ? ' (as this sample was last shown in Compare).' : ' (the saved defaults).';
+        const describe = () => {
+            const none = ex.std.value === L.NO_COMPARISON;
+            const own = !none && typeof ex.edited[ex.std.value] === 'string' && ex.edited[ex.std.value].trim();
+            ex.concl.textContent = none
+                ? 'No comparison: the report prints the chromatogram with its marked regions and notes, with no findings or conclusion.'
+                : own ? 'Conclusion: your edited text from Compare.'
+                    : 'Conclusion: the generated text. Edit it on Compare.';
+            ex.more.hidden = none;
+            ex.params.textContent = 'Built with: ' +
+                (none ? L.graphSummary(ctx.params) : L.paramSummary(ctx.params, ctx.ranges)) + where;
         };
-        ex.std.onchange = conclLine;
-        conclLine();
+        ex.std.onchange = describe;
         ex.others.textContent = '';
         for (const s of ctx.standards) {
             ex.others.appendChild(h('label', { className: 'check' },
                 h('input', { type: 'checkbox', 'data-path': s.path || '' }), h('span', { text: s.name })));
         }
-        ex.params.textContent = 'Built with: ' + L.paramSummary(ctx.params, ctx.ranges) +
-            (ctx.view ? '. Change these in Adjust.'
-                : ctx.adjusted ? ' (as this sample was last shown in Compare).' : ' (the saved defaults).');
+        describe();
         // the drawer holds an edit it can't use yet: say the report uses the
         // last valid settings (the ones listed), not what the drawer shows
         ex.msg.textContent = ctx.pending
             ? 'Adjust has fields to fix: the report uses the last valid settings, listed above.' : '';
-        ex.dl.disabled = ex.queue.disabled = !ctx.standards.length;
+        ex.dl.disabled = ex.queue.disabled = false;
         if (typeof exportDlg.showModal === 'function') exportDlg.showModal(); else exportDlg.setAttribute('open', '');
         return exportDlg;
     }
@@ -1411,16 +1418,12 @@
     function exportItem() {
         const c = ex.ctx;
         if (!c) return null;
-        const std = ex.std.value;
-        if (!std) { ex.msg.textContent = 'Pick a standard.'; return null; }
-        const concl = typeof ex.edited[std] === 'string' ? ex.edited[std].trim() : '';
-        return {
-            sample_id: c.sample.sample_id, lab_id: c.sample.lab_id || c.sample.name || '',
-            sample_name: ex.doc.value.trim() || 'GC Analysis Report', standard_name: std, conclusion: concl,
-            params: Object.assign({}, c.params), ranges: (c.ranges || []).slice(),
-            overlay_standards: Array.from(ex.others.querySelectorAll('input:checked'))
-                .map(i => i.getAttribute('data-path')).filter(Boolean),
-        };
+        const item = L.exportItem({ sample: c.sample, standard: ex.std.value, title: ex.doc.value.trim(),
+            edited: ex.edited, params: c.params, ranges: c.ranges,
+            overlays: Array.from(ex.others.querySelectorAll('input:checked'))
+                .map(i => i.getAttribute('data-path')).filter(Boolean) });
+        if (!item) ex.msg.textContent = 'Pick a standard or No comparison.';
+        return item;
     }
 
     async function exportDownload() {

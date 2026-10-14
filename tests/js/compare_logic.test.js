@@ -282,4 +282,21 @@ module.exports = (t) => {
     t.eq(L.paramSummary(d0, adjRanges).includes('Jet fuel cut C12–C18, Heavy C60–C80'), true);
     // labels are one line as the server keeps them (format characters too)
     t.eq(L.cleanLabel('Jet​fuel  cut﻿'), 'Jet fuel cut');
+
+    // v8.1: the export sheet's item; NO_COMPARISON (never a standard's name:
+    // names can't hold ':') builds the chromatogram alone
+    t.eq(/:/.test(L.NO_COMPARISON), true);
+    const sheet = { sample: { sample_id: 7, lab_id: '40304' }, title: 'GC Report',
+        edited: { Red: ' Mine. ' }, params: { x_max_min: 6.5 }, ranges: [{ label: 'Gas', c_start: 5, c_end: 11 }],
+        overlays: ['/std/Blue.CDF'] };
+    t.eq(L.exportItem(Object.assign({ standard: 'Red' }, sheet)), { sample_id: 7, lab_id: '40304',
+        sample_name: 'GC Report', standard_name: 'Red', conclusion: 'Mine.', params: { x_max_min: 6.5 },
+        ranges: [{ label: 'Gas', c_start: 5, c_end: 11 }], overlay_standards: ['/std/Blue.CDF'] });
+    t.eq(L.exportItem(Object.assign({ standard: L.NO_COMPARISON }, sheet)), { sample_id: 7, lab_id: '40304',
+        sample_name: 'GC Report', standard_name: '', no_comparison: true, conclusion: '',
+        params: { x_max_min: 6.5 }, ranges: [], overlay_standards: [] });
+    t.eq(L.exportItem(Object.assign({ standard: '' }, sheet)), null);          // nothing picked
+    t.eq(L.exportItem(Object.assign({}, sheet, { standard: 'Red', title: '' })).sample_name, 'GC Analysis Report');
+    t.eq(L.graphSummary({ x_max_min: 6.5 }), 'The chromatogram up to 6.5 min');
+    t.eq(L.graphSummary({}), 'The chromatogram up to ' + L.PARAM_DEFAULTS.x_max_min + ' min');
 };

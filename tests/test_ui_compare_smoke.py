@@ -375,6 +375,52 @@ def test_conclusion_edit_add_to_queue_export_and_download(env):
     assert wait(lambda: js(drv, "return document.getElementById('report-queue-btn').hidden"))
 
 
+def test_export_with_no_comparison_is_the_chromatogram_alone(env):
+    """v8.1: Export report's "No comparison" sends no standard, conclusion,
+    ranges or other standards; the PDF is the chromatogram alone; Add to
+    queue keeps it so."""
+    drv = open_page(env)
+    sel = "document.querySelector('[data-testid=export-standard]')"
+    js(drv, "document.getElementById('h-export').click()")
+    assert wait(lambda: js(drv, "return document.querySelector('[data-testid=export-sheet]').open"))
+    opts = js(drv, f"return Array.from({sel}.options).map(o => [o.value, o.textContent])")
+    assert opts[-1] == [":none", "No comparison (chromatogram only)"], opts
+    js(drv, f"const s = {sel}; s.value = ':none'; s.dispatchEvent(new Event('change'));")
+    assert js(drv, "return document.querySelector('[data-testid=export-conclusion]').textContent") \
+        .startswith("No comparison: the report prints the chromatogram")
+    assert js(drv, "return document.querySelector('[data-testid=export-sheet] details.more').hidden")
+    assert js(drv, "return document.querySelector('[data-testid=export-params]').textContent") \
+        .startswith("Built with: The chromatogram up to ")
+    frame(drv, "export sheet, no comparison")
+    shot(drv, "export-sheet-no-comparison-1440x900-light.png")
+    n = js(drv, "return window.__calls.length")
+    js(drv, "document.querySelector('[data-testid=export-download]').click()")
+    assert wait(lambda: js(drv, "return document.getElementById('toast').textContent").endswith("downloaded"), 90)
+    body = json.loads(js(drv, "return window.__calls.slice(arguments[0]).find(c => c.url === '/api/export-analysis-report').body", n))
+    assert body["no_comparison"] is True and body["standard_name"] == "", body
+    assert body["conclusion"] == "" and body["overlay_standards"] == [] and body["ranges"] == [], body
+    text = pdf_text(drv, body)
+    assert "GC chromatogram, no comparison" in text and "Chromatogram" in text, text
+    for absent in ("Findings", "Conclusion", "compared with"):
+        assert absent not in text, absent
+
+    # the same sheet adds it to the queue with no comparison
+    js(drv, "document.getElementById('h-export').click()")
+    assert wait(lambda: js(drv, "return document.querySelector('[data-testid=export-sheet]').open"))
+    js(drv, f"const s = {sel}; s.value = ':none'; s.dispatchEvent(new Event('change'));")
+    js(drv, "document.querySelector('[data-testid=export-queue]').click()")
+    toast = wait(lambda: js(drv, "return document.getElementById('toast').textContent"))
+    assert toast == "Added 40329 to the report queue, with no comparison", toast
+    items = json.loads(js(drv, "return sessionStorage.getItem('gc.reportQueue')"))
+    assert len(items) == 1 and items[0]["no_comparison"] is True and items[0]["standard_name"] == ""
+    js(drv, "document.getElementById('report-queue-btn').click()")
+    assert wait(lambda: js(drv, "return document.querySelector('[data-testid=rq-ranges]').textContent")) \
+        == "The chromatogram only: no ranges or findings"
+    js(drv, "window.confirm = () => true; document.querySelector('[data-testid=rq-clear]').click()")
+    assert wait(lambda: js(drv, "return GCReportQueue.count()") == 0)
+    js(drv, "document.querySelector('[data-testid=report-queue-sheet]').close()")
+
+
 def pdf_text(drv, body):
     """The text of the PDF the hub builds for this export body (fetched in the
     page, so with its session), whitespace collapsed."""

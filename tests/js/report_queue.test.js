@@ -232,4 +232,22 @@ module.exports = (t) => {
     st.add(Object.assign({}, raw, { ranges: [] }));
     t.eq(st.items()[0].ranges, []);
     t.eq(Q.payloads(st.items())[0].ranges, []);
+
+    // v8.1: a report with no comparison is a queue item without a standard
+    const nc = Q.normalizeItem({ sample_id: 41, lab_id: '40330', no_comparison: true,
+        sample_name: 'GC Chromatogram', conclusion: 'x', overlay_standards: ['y'],
+        params: { x_max_min: 6.5 }, ranges: [{ label: 'Gas', c_start: 5, c_end: 11 }] },
+        '2026-10-14T12:00:00Z');
+    t.eq(nc, { id: 's41', sample_id: 41, lab_id: '40330', sample_name: 'GC Chromatogram',
+        standard_name: '', no_comparison: true, conclusion: '', params: { x_max_min: 6.5 },
+        overlay_standards: [], added_at: '2026-10-14T12:00:00Z', sent_at: null });
+    t.eq(Q.normalizeItem({ sample_id: 41, no_comparison: 'yes' }), null);     // exactly true
+    t.eq(Q.payloads([nc])[0].no_comparison, true);
+    t.eq(Q.addedText(nc, false), 'Added 40330 to the report queue, with no comparison');
+    t.eq(Q.itemLines(nc), { meta: 'No comparison', ranges: 'The chromatogram only: no ranges or findings' });
+    t.eq(Q.itemLines(it), { meta: 'Compared with Diesel ULSD Std · edited conclusion', ranges: 'Ranges: Gas C5–C11' });
+    // it survives storage
+    const st2 = Q.createStore(memStorage(), 'k2');
+    st2.add(nc);
+    t.eq(st2.items()[0].no_comparison, true);
 };

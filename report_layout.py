@@ -106,6 +106,13 @@ STD_NAME_CHARS = 120                      # the standard's name in the subtitle,
 RANGES_NAME_MIN = 6                       # a range's name in the footer, when shortened
 CHART_HARD = (100.0, 64.0)                # the charts' last floor: for a long Ranges line only
 CONCLUSION_KEEP = 1500                    # the conclusion cap: always printed whole
+# v8.1: the report with no comparison (``graph_plan``): one chart, the chromatogram
+GRAPH_MAX = 400.0                         # its height on a short page
+GRAPH_MIN = 300.0                         # the usual least
+GRAPH_FLOOR = 220.0                       # once the type is at its smallest
+GRAPH_SLACK = 14.0                        # kept back on top of SLACK: a header with a logo, a
+                                          # wrapped title and a long lab ID measures ~6pt short in
+                                          # Arial (the two-chart page's chrome covers it there)
 
 # ── tokens (static/css/tokens.css, light) ────────────────────────────────
 INK = "#0f172a"
@@ -608,13 +615,7 @@ def _text_height(plan: Plan, *, title: str, subtitle: str, lab_id: str, std_name
     """The page's height without the two chart images, modelled on the
     page's own CSS (see ``_css``) and xhtml2pdf's layout of it."""
     fs = plan.fs
-    h = 0.0
-    title_w = TITLE_W - (LOGO_W if has_logo else 0)
-    # header: title + subtitle at left (wraps), lab ID + date at right, the rule
-    left = _block_h(line_count(title, title_w, 15, True), 15) + \
-        _block_h(line_count(subtitle, title_w, 8), 8)
-    right = 9 + _block_h(line_count(display_lab_id(lab_id), 176, 13, True), 13) + 12
-    h += max(left, right, 42) + 12 + 1.5
+    h = _header_h(title, subtitle, lab_id, has_logo)
     # chart chrome (title rows and gaps), both charts; a long caption wraps
     for verb in ("against", "minus"):
         cap = "Difference  " + chart_caption(lab_id, std_name, verb)
@@ -640,16 +641,50 @@ def _text_height(plan: Plan, *, title: str, subtitle: str, lab_id: str, std_name
         h += sum(_block_h(line_count(x, TEXT_W, nfs), nfs) + 1.5 + PARA for x in view)
         if len(view) < len(note_lines):
             h += _block_h(1, nfs) + 1.5 + PARA
-    # footer: 10pt above, the first row's 5pt top padding, then rows of 1pt+1pt
+    h += _footer_h(footer_lines, plan)
+    return h * MEASURE_MARGIN + SLACK
+
+
+def _header_h(title: str, subtitle: str, lab_id: str, has_logo: bool) -> float:
+    """The header: title + subtitle at left (wraps), lab ID + date at right, the rule."""
+    title_w = TITLE_W - (LOGO_W if has_logo else 0)
+    left = _block_h(line_count(title, title_w, 15, True), 15) + \
+        _block_h(line_count(subtitle, title_w, 8), 8)
+    right = 9 + _block_h(line_count(display_lab_id(lab_id), 176, 13, True), 13) + 12
+    return max(left, right, 42) + 12 + 1.5
+
+
+def _footer_h(footer_lines: list[str], plan: Plan) -> float:
+    """The footer: 10pt above, the first row's 5pt top padding, then rows of
+    1pt+1pt, the "Generated" row last."""
     foot = FOOT_TOP
     for line in footer_lines:
         head, rest = _footer_parts(line)
         if head == "Ranges":
             rest = ranges_text(rest, plan)
         foot += line_count(rest, TEXT_W, FOOT_FS) * FOOT_FS * FOOT_LINE + 2 + PARA
-    foot += FOOT_FS * FOOT_LINE + 2 + PARA
-    h += foot
-    return h * MEASURE_MARGIN + SLACK
+    return foot + FOOT_FS * FOOT_LINE + 2 + PARA
+
+
+def _cut(p: Plan, attr: str, total: int, fits, floor: int = 0) -> None:
+    """List as many as fit (at least *floor*)."""
+    setattr(p, attr, total)
+    while getattr(p, attr) > floor and not fits(p):
+        setattr(p, attr, getattr(p, attr) - 1)
+
+
+def _give_back(p: Plan, attr: str, total: int, fits) -> None:
+    """Room freed by a later step: list more again while they fit."""
+    n = getattr(p, attr)
+    if n is None:
+        return
+    while n < total:
+        setattr(p, attr, n + 1)
+        if not fits(p):
+            setattr(p, attr, n)
+            return
+        n += 1
+    setattr(p, attr, None)
 
 
 def split_comments(comments: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -683,23 +718,10 @@ def plan(*, doc_name: str, lab_id: str, std_name: str, bullets_text: str,
         return BODY_H - _text_height(p, **kw) >= min_charts()
 
     def cut(p: Plan, attr: str, total: int, floor: int = 0) -> None:
-        """List as many as fit (at least *floor*)."""
-        setattr(p, attr, total)
-        while getattr(p, attr) > floor and not fits(p):
-            setattr(p, attr, getattr(p, attr) - 1)
+        _cut(p, attr, total, fits, floor)
 
     def give_back(p: Plan, attr: str, total: int) -> None:
-        """Room freed by a later step: list more again while they fit."""
-        n = getattr(p, attr)
-        if n is None:
-            return
-        while n < total:
-            setattr(p, attr, n + 1)
-            if not fits(p):
-                setattr(p, attr, n)
-                return
-            n += 1
-        setattr(p, attr, None)
+        _give_back(p, attr, total, fits)
 
     p = Plan(trend_h=CHART_MIN[0], diff_h=CHART_MIN[1], fs=TYPE_STEPS[0])
     for fs in TYPE_STEPS:                         # 1-2: the type steps down
@@ -776,6 +798,78 @@ def plan(*, doc_name: str, lab_id: str, std_name: str, bullets_text: str,
     diff = min(CHART_MAX[1], max(lo[1], room - trend))
     p.trend_h, p.diff_h = round(trend), round(diff)
     return p
+
+
+def _graph_text_height(plan: Plan, *, title: str, lab_id: str, region_lines: list[str],
+                       note_lines: list[str], footer_lines: list[str],
+                       has_logo: bool = False) -> float:
+    """The no-comparison page's height without its chart image
+    (``render_graph_html``): the header, the chart's title row, the marked
+    regions and the notes (each its own section), the footer."""
+    fs = plan.fs
+    h = _header_h(title, graph_subtitle_text(), lab_id, has_logo)
+    h += _block_h(line_count("Chromatogram  " + graph_caption(lab_id), BODY_W - KEY_W, fs), fs) + 26
+    if region_lines or note_lines:
+        h += 10                                            # the sections' table margin
+    if region_lines:
+        h += _rows_h(region_lines, plan.regions_shown, fs) + SECTION
+    if note_lines:
+        h += _rows_h(note_lines, plan.notes_shown, fs) + SECTION
+    h += _footer_h(footer_lines, plan)
+    return h * MEASURE_MARGIN + SLACK + GRAPH_SLACK
+
+
+def graph_plan(*, doc_name: str, lab_id: str, region_lines: list[str] = (),
+               note_lines: list[str] = (), footer_lines: list[str],
+               has_logo: bool = False) -> Plan:
+    """The one-page plan for a report with no comparison (v8.1): the
+    chromatogram gets what the text leaves, between ``GRAPH_MIN`` and
+    ``GRAPH_MAX``; when the text does not fit the type steps down, then the
+    chart may go down to ``GRAPH_FLOOR``, then as many notes and marked
+    regions are listed as fit ("N more … are in the GC hub"; room given back
+    to the regions first). ``trend_h`` is the chart's height (no difference
+    chart: ``diff_h`` is 0)."""
+    region_lines = list(region_lines or [])
+    note_lines = list(note_lines or [])
+    kw = dict(title=display_title(doc_name), lab_id=lab_id, region_lines=region_lines,
+              note_lines=note_lines, footer_lines=list(footer_lines or []), has_logo=has_logo)
+    floor = {"chart": GRAPH_MIN}
+
+    def fits(p: Plan) -> bool:
+        return BODY_H - _graph_text_height(p, **kw) >= floor["chart"]
+
+    p = Plan(trend_h=GRAPH_MIN, diff_h=0, fs=TYPE_STEPS[0])
+    for fs in TYPE_STEPS:                                  # the type steps down
+        p.fs = fs
+        if fits(p):
+            break
+    if not fits(p):                                        # a smaller chart
+        floor["chart"] = GRAPH_FLOOR
+    if not fits(p) and note_lines:                         # notes
+        _cut(p, "notes_shown", len(note_lines), fits)
+    if not fits(p) and region_lines:                       # marked regions
+        _cut(p, "regions_shown", len(region_lines), fits)
+    _give_back(p, "regions_shown", len(region_lines), fits)
+    _give_back(p, "notes_shown", len(note_lines), fits)
+    for attr, total, what in (("notes_shown", len(note_lines), "notes"),
+                              ("regions_shown", len(region_lines), "marked regions")):
+        if getattr(p, attr) is not None:
+            p.shortened.append(f"{what}: {getattr(p, attr)} of {total} listed")
+    if not fits(p):
+        p.shortened.append("does not fit even at the smallest; the page is scaled to fit")
+    if floor["chart"] == GRAPH_FLOOR:
+        p.shortened.append("chart below its usual minimum")
+    room = BODY_H - _graph_text_height(p, **kw)
+    p.trend_h = round(min(GRAPH_MAX, max(floor["chart"], room)))
+    return p
+
+
+def graph_subtitle_text() -> str:
+    return "GC chromatogram, no comparison"
+
+
+def graph_caption(sample_label: str) -> str:
+    return _clip(sample_label or "The sample", 40)
 
 
 def display_title(doc_name: str) -> str:
@@ -901,6 +995,15 @@ def regions_section(lines: list[str], *, shown: int | None, fs: float = TYPE_STE
     return "<!-- MARKED REGIONS -->" + _section("Marked regions", rows)
 
 
+def notes_section(lines: list[str], *, shown: int | None, fs: float = TYPE_STEPS[0]) -> str:
+    """The notes as their own section (v8.1, the report with no comparison,
+    which has no conclusion to print them under); nothing when there are none."""
+    if not lines:
+        return ""
+    rows = [[(x, "", 2)] for x in _listed(lines, shown, more_notes_text, TEXT_W, fs)]
+    return "<!-- NOTES -->" + _section("Notes", rows)
+
+
 def conclusion_section(conclusion: str, *, chars: int | None, fs: float = TYPE_STEPS[0],
                        notes: list[str] = (), notes_shown: int | None = None,
                        note_fs: float | None = None) -> str:
@@ -994,38 +1097,13 @@ def render_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str,
     """The report page for *plan_* (from ``plan`` with the same content)."""
     p = plan_
     e = _esc
-    logo = (f'<td style="width:64pt; padding-right:10pt; vertical-align:middle;">'
-            f'<img src="data:image/png;base64,{logo_b64}" height="44"></td>' if logo_b64 else "")
-    lab = (f'<p class="cap">Lab ID</p><p class="labid">{e(breakable(display_lab_id(lab_id), 176, 13, True))}</p>'
-           if lab_id else "")
-    header = f"""
-<table width="100%"><tr>
-  {logo}
-  <td style="vertical-align:bottom; padding-right:12pt;">
-    <p class="title">{e(breakable(display_title(doc_name), TITLE_W - (LOGO_W if logo_b64 else 0), 15, True))}</p>
-    <p class="sub">{e(breakable(subtitle_text(std_name), TITLE_W - (LOGO_W if logo_b64 else 0), 8))}</p>
-  </td>
-  <td style="width:180pt; text-align:right; vertical-align:bottom;">
-    {lab}<p class="cap" style="padding-top:2pt;">{e(date_display)}</p>
-  </td>
-</tr></table>
-<table width="100%" class="rule" style="margin-top:9pt;"><tr><td>&nbsp;</td></tr></table>"""
-
-    w_px = round(BODY_W * IMG_PX_PER_PT)
+    header = _header_html(doc_name, lab_id, date_display, logo_b64, subtitle_text(std_name))
     trend_items, diff_items = chart_keys(spikes_marked)
     trend_key = _key(trend_items)
-
-    def chart(title: str, caption: str, key: str, b64: str, h_pt: float) -> str:
-        return f"""
-<table width="100%" class="chead"><tr>
-  <td><span class="ctitle">{e(title)}</span>&nbsp;&nbsp;<span class="ccap">{e(caption)}</span></td>
-  <td class="key" style="width:{KEY_W:g}pt; vertical-align:bottom;">{key}</td>
-</tr></table>
-<img src="data:image/png;base64,{b64}" width="{w_px}" height="{round(h_pt * IMG_PX_PER_PT)}">"""
-
-    charts = (chart("Trend", chart_caption(sample_label, std_name, "against"), trend_key, img1_b64, p.trend_h)
-              + chart("Difference", chart_caption(sample_label, std_name, "minus"), _key(diff_items),
-                      img2_b64, p.diff_h))
+    charts = (_chart_html("Trend", chart_caption(sample_label, std_name, "against"), trend_key,
+                          img1_b64, p.trend_h)
+              + _chart_html("Difference", chart_caption(sample_label, std_name, "minus"),
+                            _key(diff_items), img2_b64, p.diff_h))
     sections = ("<!-- DEVIATION ANALYSIS -->"
                 + findings_section(bullets_text, shown=p.findings_shown,
                                    no_deviation=no_deviation, fs=p.fs)
@@ -1043,6 +1121,71 @@ def render_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str,
 {header}
 {charts}
 <table class="sec" width="100%" style="margin-top:10pt;">{sections}</table>
+<!-- FOOTER -->
+<table width="100%" style="margin-top:10pt;"><tr><td>{footer}</td></tr></table>
+</div>
+</body></html>"""
+
+
+def _header_html(doc_name: str, lab_id: str, date_display: str, logo_b64: str,
+                 subtitle: str) -> str:
+    """The page's header: logo, title and subtitle at left, lab ID and date at
+    right, the rule."""
+    e = _esc
+    logo = (f'<td style="width:64pt; padding-right:10pt; vertical-align:middle;">'
+            f'<img src="data:image/png;base64,{logo_b64}" height="44"></td>' if logo_b64 else "")
+    lab = (f'<p class="cap">Lab ID</p><p class="labid">{e(breakable(display_lab_id(lab_id), 176, 13, True))}</p>'
+           if lab_id else "")
+    return f"""
+<table width="100%"><tr>
+  {logo}
+  <td style="vertical-align:bottom; padding-right:12pt;">
+    <p class="title">{e(breakable(display_title(doc_name), TITLE_W - (LOGO_W if logo_b64 else 0), 15, True))}</p>
+    <p class="sub">{e(breakable(subtitle, TITLE_W - (LOGO_W if logo_b64 else 0), 8))}</p>
+  </td>
+  <td style="width:180pt; text-align:right; vertical-align:bottom;">
+    {lab}<p class="cap" style="padding-top:2pt;">{e(date_display)}</p>
+  </td>
+</tr></table>
+<table width="100%" class="rule" style="margin-top:9pt;"><tr><td>&nbsp;</td></tr></table>"""
+
+
+def _chart_html(title: str, caption: str, key: str, b64: str, h_pt: float) -> str:
+    """A chart: its title row (title, caption, legend) and its image, the body's width."""
+    e = _esc
+    return f"""
+<table width="100%" class="chead"><tr>
+  <td><span class="ctitle">{e(title)}</span>&nbsp;&nbsp;<span class="ccap">{e(caption)}</span></td>
+  <td class="key" style="width:{KEY_W:g}pt; vertical-align:bottom;">{key}</td>
+</tr></table>
+<img src="data:image/png;base64,{b64}" width="{round(BODY_W * IMG_PX_PER_PT)}" height="{round(h_pt * IMG_PX_PER_PT)}">"""
+
+
+def render_graph_html(*, doc_name: str, lab_id: str, date_display: str, datetime_str: str,
+                      img_b64: str, logo_b64: str, footer_lines: list[str], app_version: str,
+                      plan_: Plan, region_lines: list[str] = (), note_lines: list[str] = (),
+                      sample_label: str = "") -> str:
+    """The report page with no comparison (v8.1) for *plan_* (``graph_plan``
+    with the same content): the header, the chromatogram, the marked regions
+    and the notes, the footer. No findings, conclusion or standard."""
+    p = plan_
+    e = _esc
+    header = _header_html(doc_name, lab_id, date_display, logo_b64, graph_subtitle_text())
+    chart = _chart_html("Chromatogram", graph_caption(sample_label), "", img_b64, p.trend_h)
+    sections = (regions_section(list(region_lines), shown=p.regions_shown, fs=p.fs)
+                + notes_section(list(note_lines), shown=p.notes_shown, fs=p.fs))
+    if sections:
+        sections = f'<table class="sec" width="100%" style="margin-top:10pt;">{sections}</table>'
+    generated = f"Generated: GC hub {app_version}, {datetime_str}"
+    footer = _footer(footer_lines, generated, plan_=p)
+    return f"""<!DOCTYPE HTML>
+<html><head><meta charset="utf-8"><title>{e(display_title(doc_name))}</title>
+<style>{_css(p.fs)}</style></head>
+<body>
+<div style="-pdf-keep-in-frame-mode: shrink;">
+{header}
+{chart}
+{sections}
 <!-- FOOTER -->
 <table width="100%" style="margin-top:10pt;"><tr><td>{footer}</td></tr></table>
 </div>

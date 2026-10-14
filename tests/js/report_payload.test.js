@@ -142,4 +142,16 @@ module.exports = (t) => {
     t.eq(refreshItem(fromSheet, { ...now, conclusion: 'On screen' }).conclusion, 'On screen');
     t.eq(refreshItem(fromSheet, { ...now, standard_name: 'Red' }).conclusion, '');   // written for another standard
     t.eq(refreshItem(fromSheet, { ...now, ranges: [] }).ranges, []);
+
+    // v8.1: a report with no comparison carries the flag; no standard,
+    // conclusion, ranges or other standards are sent
+    const none = { sample_id: 7, lab_id: '40304', sample_name: 'GC Chromatogram', standard_name: '',
+                   no_comparison: true, conclusion: 'ignored', overlay_standards: ['x'],
+                   params: { x_max_min: 6.5, sigma: 50 }, ranges: [{ label: 'Gas', c_start: 5, c_end: 11 }] };
+    t.eq(buildReportItemPayload(none), { sample_id: 7, standard_name: '', no_comparison: true,
+        conclusion: '', doc_name: 'GC Chromatogram', lab_id: '40304', overlay_standards: [],
+        ranges: [], sigma: 50, x_max_min: 6.5 });
+    t.eq('no_comparison' in buildReportItemPayload(item), false);
+    // the open Compare view never makes a no-comparison report stale
+    t.eq(reportDiffers(none, { standard_name: 'Red', params: {}, ranges: [] }), false);
 };

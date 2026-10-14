@@ -363,6 +363,40 @@
         return parts.join(' · ');
     }
 
+    // ── the export sheet ────────────────────────────────────────────────────
+    /** v8.1: the sheet's "No comparison" choice. A standard's name can't hold
+        ':' (the hub refuses it), so this is never one. */
+    const NO_COMPARISON = ':none';
+
+    /** The report item the export sheet builds: `standard` is the picked
+        standard's name or NO_COMPARISON (the chromatogram alone: no standard,
+        conclusion, ranges or other standards); `edited` the conclusions
+        edited on Compare, per standard; `overlays` the other standards to
+        draw. null when nothing is picked. */
+    function exportItem(o) {
+        const s = o.sample || {};
+        const none = o.standard === NO_COMPARISON;
+        if (!none && !o.standard) return null;
+        const edited = (o.edited || {})[o.standard];
+        const item = {
+            sample_id: s.sample_id, lab_id: s.lab_id || s.name || '',
+            sample_name: o.title || 'GC Analysis Report',
+            standard_name: none ? '' : o.standard,
+            conclusion: !none && typeof edited === 'string' ? edited.trim() : '',
+            params: Object.assign({}, o.params),
+            ranges: none ? [] : (o.ranges || []).slice(),
+            overlay_standards: none ? [] : (o.overlays || []).slice(),
+        };
+        if (none) item.no_comparison = true;
+        return item;
+    }
+
+    /** The sheet's "Built with" line for a report with no comparison. */
+    function graphSummary(params) {
+        const p = Object.assign({}, PARAM_DEFAULTS, params || {});
+        return `The chromatogram up to ${p.x_max_min} min`;
+    }
+
     // ── charts ──────────────────────────────────────────────────────────────
     /** A CSS colour (#rgb, #rrggbb, rgb(), rgba()) with an alpha, for Plotly. */
     function withAlpha(color, alpha) {
@@ -480,6 +514,7 @@
         pickStandard, parsePicks, rememberPick, recallPick,
         ADJUST_CAP, parseAdjustments, rememberAdjustments, recallAdjustments, forgetAdjustments,
         findingsView, draftFrom, validateAdjust, newRange, paramSummary,
+        NO_COMPARISON, exportItem, graphSummary,
         withAlpha, carbonTicks, diffSpan, cleanLabel,
         CONCLUSION_MAX, insertPreset, conclusionCount, pasteInto,
     };
