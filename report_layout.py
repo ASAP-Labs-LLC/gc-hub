@@ -165,7 +165,8 @@ def band_labels(windows: list[dict], x0: float, x1: float,
     width and the x axis): ``(window, text, x, row)`` per labelled window
     (``x`` in minutes: a label's left edge, or a tag's centre).
 
-    Left to right, each label starts at its band's left edge, or past the
+    Left to right (by where the bands start, whatever order the ranges are
+    listed in: v8.1.1), each label starts at its band's left edge, or past the
     end of an earlier band that overlaps it (so no edge runs through the
     text), and is the first of "<label> Cx–Cy", "<label>", "Cx–Cy" and "Cx–y" that fits
     in the band from there without touching the previous label (row 0).
@@ -180,9 +181,10 @@ def band_labels(windows: list[dict], x0: float, x1: float,
     out: list[tuple[dict, str, float, int]] = []
     ends = [-1e9, -1e9]                    # where each row's last label ends (pt)
     seen: list[dict] = []
-    for i, w in enumerate(windows):
-        if not w.get("evaluable"):
-            continue
+    order = sorted((i for i, w in enumerate(windows) if w.get("evaluable")),
+                   key=lambda i: (float(windows[i]["t0"]), float(windows[i]["t1"]), i))
+    for i in order:
+        w = windows[i]
         t0, t1 = float(w["t0"]), float(w["t1"])
         start = t0
         for o in seen:                     # clear of earlier bands' right edges

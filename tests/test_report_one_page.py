@@ -583,3 +583,19 @@ def test_a_band_too_narrow_for_its_carbons_shows_its_name_not_its_number():
     assert [t for _, t, _, _ in out] == ["Bio"]
     long = dict(w, label="Biodiesel blend range")
     assert [t for _, t, _, _ in rl.band_labels([long], 0.0, 7.0, 500.0)] != ["Biodiesel blend range"]
+
+
+def test_a_range_listed_after_one_to_its_right_keeps_its_name():
+    """v8.1.1: the lab's ranges are listed Lighter, Heavier, Bio, but Bio
+    (C19–C21) sits left of Heavier (C22–C44). Labels are placed left to
+    right whatever the list order, so Bio is named, not numbered "3"."""
+    lighter = _win(0.55, 2.2, 5, 11, "Lighter", index=0)
+    heavier = _win(4.35, 6.9, 22, 44, "Heavier", index=1)
+    bio = _win(3.85, 4.35, 19, 21, "Bio", index=2)
+    out = rl.band_labels([lighter, heavier, bio], 0.0, 7.0, 500.0)
+    assert sorted(t for _w, t, _x, _r in out) == ["Bio", "Heavier C22–C44", "Lighter C5–C11"], out
+    assert all(r == 0 for *_a, r in out)
+    # the tag, when a band does need one, is still the range's own number
+    narrow = _win(3.85, 3.9, 19, 21, "Biodiesel blend", index=2)
+    out = rl.band_labels([lighter, heavier, narrow], 0.0, 7.0, 500.0)
+    assert [t for w, t, _x, _r in out if w is narrow] == ["3"]
