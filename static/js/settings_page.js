@@ -10,7 +10,10 @@
      with GCShell.adminPost, i.e. the page's one 15-minute unlock
      (GCAdminUnlock), never window.prompt.
    * Comparison standards (admin): tag with a GC, rename, delete, and add
-     from a run's lab ID (GET /api/lab/<id> -> POST /api/comparison-standard).
+     from a run's lab ID or its list label "<lab ID> (N)" (GET /api/lab/<id>
+     -> POST /api/comparison-standard). Several runs fit: a run picker under
+     the form ("Add this run" / Cancel). The GC select tags it as it is
+     added: the run's own GC by default, another, or none.
    * QBench: the API key (admin; tested before it is saved) and the web
      login's status. Server paths: read-only, collapsed.
    Every string is set with textContent; answers go through GCSession.readJson. */
@@ -346,26 +349,67 @@
             loadStandards();
         });
     }
+    function renderAddGc() {
+        const sel = $('add-gc');
+        const keep = sel.value;
+        const opts = S.addGcOptions(instruments);
+        sel.replaceChildren(...opts.map((o) => { const e = el('option', null, o.text); e.value = o.value; return e; }));
+        sel.value = opts.some((o) => o.value === keep) ? keep : S.GC_OF_RUN;
+    }
+    function closePick() {
+        const box = $('std-pick');
+        box.replaceChildren();
+        box.hidden = true;
+    }
+    // Several runs fit what was typed: pick one under the form.
+    function showPick(plan) {
+        const box = $('std-pick');
+        const sel = el('select');
+        sel.id = 'add-run';
+        sel.setAttribute('data-testid', 'standard-run-select');
+        sel.append(...plan.runs.map((r) => { const o = el('option', null, S.runChoiceLabel(r)); o.value = String(r.sample_id); return o; }));
+        sel.value = String(plan.selected);
+        const field = el('label', 'field grow');
+        field.append(el('span', null, 'Run'), sel);
+        const ok = el('button', 'btn btn-primary btn-sm', 'Add this run'); ok.type = 'button';
+        const cancel = el('button', 'btn btn-ghost btn-sm', 'Cancel'); cancel.type = 'button';
+        box.replaceChildren(field, ok, cancel);
+        box.hidden = false;
+        sel.focus();
+        cancel.addEventListener('click', () => { closePick(); msg('std-msg', ''); });
+        ok.addEventListener('click', () => postStandard(plan.runs.find((r) => String(r.sample_id) === sel.value)));
+    }
+    async function postStandard(run) {
+        const name = $('add-name').value.trim();
+        const problem = S.standardNameProblem(name);
+        if (problem) { msg('std-msg', problem, 'err'); return; }
+        const res = await window.GCShell.adminPost('/api/comparison-standard', S.addStandardBody(run.sample_id, name, $('add-gc').value),
+            { reason: 'Adding a standard needs the admin password.', quiet: true });
+        if (!res) return;
+        if (res.status !== 200) { msg('std-msg', (res.body && res.body.error) || ('Not added (HTTP ' + res.status + ').'), 'err'); return; }
+        closePick();
+        $('add-lab').value = '';
+        $('add-name').value = '';
+        $('add-gc').value = S.GC_OF_RUN;
+        msg('std-msg', S.addedText(name, run, res.body && res.body.standard), 'ok');
+        loadStandards();
+    }
     async function addStandard(ev) {
         ev.preventDefault();
+        closePick();
         const lab = $('add-lab').value.trim();
         const name = $('add-name').value.trim();
         const problem = S.standardNameProblem(name);
         if (!lab) { msg('std-msg', 'The lab ID of a run, please.', 'err'); return; }
         if (problem) { msg('std-msg', problem, 'err'); return; }
-        const found = await getJSON('/api/lab/' + encodeURIComponent(lab));
-        if (found.status !== 200 || !found.body || !found.body.sample_id) {
-            msg('std-msg', 'No run with lab ID ' + lab + ' was found.', 'err');
-            return;
-        }
-        const res = await window.GCShell.adminPost('/api/comparison-standard', { sample_id: found.body.sample_id, name },
-            { reason: 'Adding a standard needs the admin password.', quiet: true });
-        if (!res) return;
-        if (res.status !== 200) { msg('std-msg', (res.body && res.body.error) || ('Not added (HTTP ' + res.status + ').'), 'err'); return; }
-        $('add-lab').value = '';
-        $('add-name').value = '';
-        msg('std-msg', 'Added ' + name + ' from the newest run of ' + lab + '. Tag it with its GC.', 'ok');
-        loadStandards();
+        const plan = await S.findAddRuns(lab, async (id) => {
+            const found = await getJSON('/api/lab/' + encodeURIComponent(id));
+            return found.status === 200 && found.body && found.body.sample_id ? found.body : null;
+        });
+        if (plan.error) { msg('std-msg', plan.error, 'err'); return; }
+        if (plan.chosen) { await postStandard(plan.chosen); return; }
+        msg('std-msg', plan.prompt);
+        showPick(plan);
     }
 
     // ── QBench ──────────────────────────────────────────────────────────────
@@ -437,10 +481,13 @@
         $('save-flags').addEventListener('click', saveFlags);
         document.querySelectorAll('[data-save]').forEach((b) => b.addEventListener('click', () => saveSection(b.dataset.save)));
         $('add-std').addEventListener('submit', addStandard);
+        $('add-lab').addEventListener('input', () => { if (!$('std-pick').hidden) { closePick(); msg('std-msg', ''); } });
+        renderAddGc();
         $('qb-form').addEventListener('submit', saveQb);
         window.GCShell.onInstruments((body) => {
             instruments = (body && body.instruments) || [];
             renderStandards();
+            renderAddGc();
         });
         loadSettings();
         loadStandards();

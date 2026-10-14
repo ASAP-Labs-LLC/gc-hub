@@ -398,6 +398,73 @@ def test_comparison_standard_from_a_sample(hub_app):
                 {"sample_id": UNKNOWN, "name": "X", "password": pw})[0] == 404
 
 
+def _standard_rows(port, name):
+    code, body = get(port, "/api/standards")
+    assert code == 200, body
+    return [r for r in body["standards"] if r["name"] == name]
+
+
+def test_a_standard_is_tagged_with_its_runs_gc_when_added(hub_app):
+    """v8.1: no instrument_id in the body = the source run's own GC, at once
+    (no tagging afterwards); the answer carries the row /api/standards lists."""
+    port, hub, _ = hub_app
+    pw = _admin(port, hub)
+    for key, name, inst in (("held", "Auto GC2", "gc2"), ("final", "Auto GC1", "gc1")):
+        code, body = post(port, "/api/comparison-standard",
+                          {"sample_id": hub.ids[key], "name": name, "password": pw})
+        assert code == 200, body
+        assert body["standard"]["name"] == name and body["standard"]["instrument_id"] == inst, body
+        assert body["standard"]["file_name"] == f"{name}.CDF" and "path" not in body["standard"]
+        rows = _standard_rows(port, name)
+        assert [(r["id"], r["instrument_id"]) for r in rows] == [(body["standard"]["id"], inst)]
+    assert _standard_rows(port, "Auto GC2")[0]["instrument_name"] == "GC-2"
+
+
+def test_a_standard_can_be_tagged_another_gc_or_none_when_added(hub_app):
+    port, hub, _ = hub_app
+    pw = _admin(port, hub)
+    code, body = post(port, "/api/comparison-standard",
+                      {"sample_id": hub.ids["final"], "name": "Other GC", "instrument_id": "gc2",
+                       "password": pw})
+    assert code == 200 and body["standard"]["instrument_id"] == "gc2", body
+    assert _standard_rows(port, "Other GC")[0]["instrument_id"] == "gc2"
+    code, body = post(port, "/api/comparison-standard",
+                      {"sample_id": hub.ids["final"], "name": "No GC", "instrument_id": None,
+                       "password": pw})
+    assert code == 200 and body["standard"]["instrument_id"] is None, body
+    assert _standard_rows(port, "No GC")[0]["instrument_id"] is None
+    # the same name again replaces the file and re-tags its one row
+    code, body = post(port, "/api/comparison-standard",
+                      {"sample_id": hub.ids["final"], "name": "Other GC", "password": pw})
+    assert code == 200 and body["standard"]["instrument_id"] == "gc1", body
+    assert [r["instrument_id"] for r in _standard_rows(port, "Other GC")] == ["gc1"]
+
+
+@pytest.mark.parametrize("inst,expected", [("gc9", 404), (5, 400), (["gc1"], 400)])
+def test_an_unknown_or_odd_instrument_adds_nothing(hub_app, inst, expected):
+    port, hub, _ = hub_app
+    pw = _admin(port, hub)
+    code, body = post(port, "/api/comparison-standard",
+                      {"sample_id": hub.ids["final"], "name": "Nowhere", "instrument_id": inst,
+                       "password": pw})
+    assert _is_json_error(code, body, expected), (code, body)
+    assert not (hub.standards / "Nowhere.CDF").exists()
+    assert _standard_rows(port, "Nowhere") == []
+
+
+def test_lab_runs_carry_the_lists_labels(hub_app):
+    """v8.1: /api/lab's run_no / display_name are /api/files' "40304 (2)"."""
+    port, hub, _ = hub_app
+    code, body = get(port, "/api/lab/40304")
+    assert code == 200, body
+    _, files = get(port, "/api/files?q=40304")
+    listed = {s["sample_id"]: s["display_name"] for s in files["samples"]}
+    assert {r["sample_id"]: r["display_name"] for r in body["runs"]} == listed
+    assert listed[hub.ids["rerun"]] == "40304 (2)"
+    assert {r["sample_id"]: r["run_no"] for r in body["runs"]} == {hub.ids["final"]: 1,
+                                                                   hub.ids["rerun"]: 2}
+
+
 def test_calibration_reads_and_writes_the_gc1_row(hub_app):
     port, hub, store = hub_app
     code, body = get(port, "/api/calibration")

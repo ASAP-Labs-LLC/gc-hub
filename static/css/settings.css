@@ -60,6 +60,10 @@
 .add-std { align-items: flex-end; }
 .gc .add-std input[type="text"] { width: 100%; }
 .add-std .field:first-child { width: 170px; }
+.add-std .add-gc { width: 150px; }
+.gc .add-std select { width: 100%; }
+.std-pick { align-items: flex-end; margin-top: var(--s3); }
+.gc .std-pick select { width: 100%; }
 
 /* QBench */
 .sub { font-size: var(--fs-md); display: flex; align-items: center; margin-top: var(--s2); }

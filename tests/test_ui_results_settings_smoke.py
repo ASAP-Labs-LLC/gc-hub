@@ -12,7 +12,8 @@ notifications panel, keyed on ``data-testid``.
 * Settings: flag rules save without a password; an admin section asks once
   in the shell's masked dialog (never window.prompt), then not again; a bad
   value is refused next to its field; paths are collapsed; a standard is
-  renamed;
+  renamed, and added from a "(N)" label and through the run picker, tagged
+  with a GC as it is added;
 * the notifications panel updates live, dismisses one and all.
 
 Skipped when selenium or a Chrome/chromedriver can't be started.
@@ -274,8 +275,36 @@ def test_settings_save_with_one_unlock_never_prompt(tmp_path):
                      ".find(b => b.textContent === 'Rename').click();")
             assert _wait(lambda: name + " B" in _js(drv, "return document.getElementById('std-rows').textContent;"), timeout=30)
             assert not _js(drv, "return document.getElementById('admin-dialog').open;")
+
+            # v8.1: add from the list's "(N)" label, tagged with the run's GC at once
+            gc_opts = "return Array.from(document.getElementById('add-gc').options).map(o => o.textContent);"
+            assert _wait(lambda: _js(drv, gc_opts) == ["GC of the run", "GC-1", "GC-2", "Not tagged"])
+            tag_of = ("return (Array.from(document.querySelectorAll('[data-testid=standard-row]'))"
+                      ".find(tr => tr.querySelector('b').textContent === arguments[0]) || {querySelector: () => ({})})"
+                      ".querySelector('select').value;")
+            drv.find_element("id", "add-lab").send_keys("40304 (2)")
+            drv.find_element("id", "add-name").send_keys("Rerun Std")
+            drv.find_element("css selector", "#add-std button[type=submit]").click()
+            assert _wait(lambda: drv.find_element("id", "std-msg").text == "Added Rerun Std from 40304 (2) on GC-1.", timeout=30)
+            assert _wait(lambda: drv.execute_script(tag_of, "Rerun Std") == "gc1")
+            # a lab ID with two runs: pick one under the form; tagged GC-2 as asked
+            drv.find_element("id", "add-lab").send_keys("40304")
+            drv.find_element("id", "add-name").send_keys("Pick Std")
+            _js(drv, "const g = document.getElementById('add-gc'); g.value = 'gc2';")
+            drv.find_element("css selector", "#add-std button[type=submit]").click()
+            assert _wait(lambda: _js(drv, "return !document.getElementById('std-pick').hidden;"))
+            runs = _js(drv, "return Array.from(document.getElementById('add-run').options).map(o => o.textContent);")
+            assert len(runs) == 2 and runs[0].startswith("40304 (2) · GC-1 · ") and runs[1].startswith("40304 · GC-1 · "), runs
+            assert drv.find_element("id", "std-msg").text == "40304 has 2 runs. Pick the one to add."
+            _js(drv, "Array.from(document.querySelectorAll('#std-pick button')).find(b => b.textContent === 'Add this run').click();")
+            assert _wait(lambda: drv.find_element("id", "std-msg").text
+                         == "Added Pick Std from 40304 (2) on GC-1, tagged GC-2.", timeout=30)
+            assert _js(drv, "return document.getElementById('std-pick').hidden;") is True
+            assert _wait(lambda: drv.execute_script(tag_of, "Pick Std") == "gc2")
+            assert not _js(drv, "return document.getElementById('admin-dialog').open;")
             assert _js(drv, "return window.__prompts;") == 0
-            assert _errors(drv) == []
+            # "40304 (2)" is looked up whole first (a lab ID may end in "(2)"): that 404 is expected
+            assert [e for e in _errors(drv) if "/api/lab/40304%20(2) - Failed to load resource" not in e] == []
         finally:
             drv.quit()
 

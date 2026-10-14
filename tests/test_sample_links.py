@@ -121,7 +121,7 @@ def test_a_single_run_resolves_to_itself(env):
     assert body["sample_id"] == sid and body["lab_id"] == "40329"
     assert body["runs"] == [{"sample_id": sid, "lab_id": "40329", "instrument": "gc1",
                              "instrument_name": "GC-1", "injection_dt": "2026-09-28 10:00:00",
-                             "status": "final"}]
+                             "status": "final", "run_no": 1, "display_name": "40329"}]
 
 
 def test_runs_on_two_instruments_open_the_newest_and_list_both(env):
@@ -135,6 +135,39 @@ def test_runs_on_two_instruments_open_the_newest_and_list_both(env):
     assert body["sample_id"] == newer
     assert [r["sample_id"] for r in body["runs"]] == [newer, older]    # newest first
     assert [r["instrument_name"] for r in body["runs"]] == ["GC-2", "GC-1"]
+
+
+def test_runs_carry_the_lists_run_number(env):
+    """v8.1: each run's ``run_no`` and ``display_name`` are the Samples list's
+    ("40329 (2)"): its order among its instrument's injections of the same
+    lab ID, oldest = 1, so a copied "(N)" label names one run per GC."""
+    signed_in(env)
+    db = env["db"]
+    a1 = add(db, "40329", "2026-09-27 09:00:00", "gc1")
+    b1 = add(db, "40329", "2026-09-27 10:00:00", "gc2")
+    a2 = add(db, "40329", "2026-09-28 09:00:00", "gc1", status="error")
+    a3 = add(db, "40329", "2026-09-29 09:00:00", "gc1")
+    b2 = add(db, "40329", "2026-09-30 09:00:00", "gc2", status="awaiting_calibration")
+    code, body = api(env, "/api/lab/40329")
+    assert code == 200
+    got = {r["sample_id"]: (r["run_no"], r["display_name"]) for r in body["runs"]}
+    assert got == {a1: (1, "40329"), a2: (2, "40329 (2)"), a3: (3, "40329 (3)"),
+                   b1: (1, "40329"), b2: (2, "40329 (2)")}
+    assert [r["sample_id"] for r in body["runs"]] == [b2, a3, a2, b1, a1]    # still newest first
+
+
+def test_run_numbers_count_each_exact_spelling_apart(env):
+    """A case-insensitive match lists every spelling; the list numbers each
+    exact lab ID on its own, so does the resolver."""
+    signed_in(env)
+    db = env["db"]
+    u1 = add(db, "AB12", "2026-09-27 09:00:00")
+    l1 = add(db, "ab12", "2026-09-28 09:00:00")
+    u2 = add(db, "AB12", "2026-09-29 09:00:00")
+    code, body = api(env, "/api/lab/Ab12")
+    assert code == 200
+    got = {r["sample_id"]: (r["run_no"], r["display_name"]) for r in body["runs"]}
+    assert got == {u1: (1, "AB12"), l1: (1, "ab12"), u2: (2, "AB12 (2)")}
 
 
 def test_a_final_run_is_preferred_over_a_newer_held_one(env):
