@@ -452,6 +452,58 @@ def test_an_unknown_or_odd_instrument_adds_nothing(hub_app, inst, expected):
     assert _standard_rows(port, "Nowhere") == []
 
 
+def _delete_standard(port, name, pw):
+    from urllib.parse import quote
+    return send(port, "/api/comparison-standard/" + quote(name, safe=""),
+                json.dumps({"password": pw}).encode(), {"Content-Type": "application/json"},
+                method="DELETE")
+
+
+def test_renaming_a_standard_keeps_its_one_row_and_its_gc(hub_app):
+    """v8.1.1: a rename moves the file and its standards row: Settings lists
+    the new name once, still tagged, never the old name as a missing file."""
+    port, hub, _ = hub_app
+    pw = _admin(port, hub)
+    code, body = post(port, "/api/comparison-standard",
+                      {"sample_id": hub.ids["held"], "name": "Ren A", "password": pw})
+    assert code == 200, body
+    sid = body["standard"]["id"]
+    for old, new in (("Ren A", "Ren B"), ("Ren B", "Ren C")):
+        code, body = post(port, "/api/comparison-standard/rename",
+                          {"old_name": old, "new_name": new, "password": pw})
+        assert code == 200, body
+        assert _standard_rows(port, old) == [], old
+        rows = _standard_rows(port, new)
+        assert [(r["id"], r["instrument_id"], r["missing"], r["file_name"]) for r in rows] == \
+            [(sid, "gc2", False, f"{new}.CDF")], rows
+
+
+def test_deleting_a_standard_takes_it_off_the_list(hub_app):
+    """v8.1.1: a delete removes the file and its standards row (no "file is
+    missing" row left behind); the name can be added again, freshly tagged."""
+    port, hub, _ = hub_app
+    pw = _admin(port, hub)
+    code, body = post(port, "/api/comparison-standard",
+                      {"sample_id": hub.ids["final"], "name": "Del A", "password": pw})
+    assert code == 200, body
+    code, body = _delete_standard(port, "Del A", pw)
+    assert code == 200, body
+    assert not (hub.standards / "Del A.CDF").exists()
+    assert _standard_rows(port, "Del A") == []
+    code, body = post(port, "/api/comparison-standard",
+                      {"sample_id": hub.ids["held"], "name": "Del A", "password": pw})
+    assert code == 200, body
+    assert [(r["instrument_id"], r["missing"]) for r in _standard_rows(port, "Del A")] == [("gc2", False)]
+    # a row left behind by a delete or rename before v8.1.1 (its file already
+    # gone, "missing" in Settings) can be deleted too, not a 404
+    (hub.standards / "Del A.CDF").unlink()
+    assert [r["missing"] for r in _standard_rows(port, "Del A")] == [True]
+    code, body = _delete_standard(port, "Del A", pw)
+    assert code == 200, body
+    assert _standard_rows(port, "Del A") == []
+    assert _delete_standard(port, "Del A", pw)[0] == 404             # nothing left
+
+
 def test_lab_runs_carry_the_lists_labels(hub_app):
     """v8.1: /api/lab's run_no / display_name are /api/files' "40304 (2)"."""
     port, hub, _ = hub_app

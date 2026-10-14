@@ -275,6 +275,12 @@ def test_settings_save_with_one_unlock_never_prompt(tmp_path):
                      ".find(b => b.textContent === 'Rename').click();")
             assert _wait(lambda: name + " B" in _js(drv, "return document.getElementById('std-rows').textContent;"), timeout=30)
             assert not _js(drv, "return document.getElementById('admin-dialog').open;")
+            # v8.1.1: one row under the new name, the old name gone (not left as a missing file)
+            rows_js = ("return Array.from(document.querySelectorAll('[data-testid=standard-row]'))"
+                       ".map(tr => [tr.querySelector('b').textContent, !!tr.querySelector('.errline')]);")
+            assert _wait(lambda: [n for n, _m in _js(drv, rows_js)].count(name + " B") == 1)
+            assert name not in [n for n, _m in _js(drv, rows_js)], _js(drv, rows_js)
+            assert not any(m for _n, m in _js(drv, rows_js)), _js(drv, rows_js)
 
             # v8.1: add from the list's "(N)" label, tagged with the run's GC at once
             gc_opts = "return Array.from(document.getElementById('add-gc').options).map(o => o.textContent);"
@@ -301,6 +307,15 @@ def test_settings_save_with_one_unlock_never_prompt(tmp_path):
                          == "Added Pick Std from 40304 (2) on GC-1, tagged GC-2.", timeout=30)
             assert _js(drv, "return document.getElementById('std-pick').hidden;") is True
             assert _wait(lambda: drv.execute_script(tag_of, "Pick Std") == "gc2")
+            # v8.1.1: Delete takes it off the list (no "file is missing" row left)
+            _js(drv, "Array.from(document.querySelectorAll('[data-testid=standard-row]'))"
+                     ".find(tr => tr.querySelector('b').textContent === 'Rerun Std')"
+                     ".querySelector('button.btn-danger').click();")
+            _js(drv, "Array.from(document.querySelectorAll('#std-rows tr.inline button'))"
+                     ".find(b => b.textContent === 'Delete Rerun Std').click();")
+            assert _wait(lambda: drv.find_element("id", "std-msg").text == "Deleted Rerun Std.", timeout=30)
+            assert _wait(lambda: "Rerun Std" not in [n for n, _m in _js(drv, rows_js)]), _js(drv, rows_js)
+            assert not any(m for _n, m in _js(drv, rows_js)), _js(drv, rows_js)
             assert not _js(drv, "return document.getElementById('admin-dialog').open;")
             assert _js(drv, "return window.__prompts;") == 0
             # "40304 (2)" is looked up whole first (a lab ID may end in "(2)"): that 404 is expected

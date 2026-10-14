@@ -2700,7 +2700,9 @@ def api_add_comparison_standard():
 @app.route("/api/comparison-standard/<name>", methods=["DELETE"])
 def api_delete_comparison_standard(name: str):
     """Admin (JSON body with the password): delete a standard from the
-    standards folder."""
+    standards folder, and its row from the standards list (v8.1.1;
+    ``standards.forget``). A listed standard whose file is already gone
+    (left behind by a delete or rename before v8.1.1) is taken off the list."""
     body, err = _admin_json_body()
     if err:
         return err
@@ -2710,10 +2712,18 @@ def api_delete_comparison_standard(name: str):
     if problem:
         return _error(problem)
     try:
+        _data, db = _hub()
+        comp_dir = _fixed_standards_dir()
         target = _standard_file(name)
         if target is None:
-            return _error(f"Standard not found: {name}", 404)
+            gone = sum(standards.forget(comp_dir, comp_dir / f"{name}{sfx}", db=db)
+                       for sfx in (".CDF", ".cdf"))
+            if not gone:
+                return _error(f"Standard not found: {name}", 404)
+            LOGGER.info("Comparison standard %s (file already gone) removed by %s", name, _who())
+            return jsonify({"status": "ok"})
         target.unlink()
+        standards.forget(comp_dir, target, db=db)
         LOGGER.info("Comparison standard %s deleted by %s", name, _who())
         return jsonify({"status": "ok"})
     except Exception as exc:
@@ -2740,7 +2750,11 @@ def api_rename_comparison_standard():
         new_path = old_path.parent / f"{new_name}{old_path.suffix}"
         if new_path.exists():
             return _error(f"A standard named {new_name} already exists", 409)
+        _data, db = _hub()
         old_path.rename(new_path)
+        # v8.1.1: its row (and GC tag) follows; never a "missing" old name
+        standards.moved(old_path.parent, old_path, new_path, db=db)
+        LOGGER.info("Comparison standard %s renamed to %s by %s", old_name, new_name, _who())
         return jsonify({"status": "ok", "path": str(new_path)})
     except Exception as exc:
         return _route_failure(exc)

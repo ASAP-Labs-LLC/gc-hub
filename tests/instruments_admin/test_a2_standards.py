@@ -157,3 +157,40 @@ def test_warning_text():
     w = standards.cross_instrument_warning("GC-2", "Diesel", "GC-1")
     assert w == ("Standard Diesel was run on GC-1, not GC-2: retention times can differ "
                  "between instruments, so compare with care.")
+
+
+def test_moved_carries_the_row_and_its_tag_to_the_new_name(hub):
+    """v8.1.1: a rename keeps the one row (and its GC): the old name is gone,
+    never left as a missing file; a stale row already at the new name (its
+    file gone) is dropped."""
+    hub.gc1()
+    hub.gc2()
+    d = _dir(hub, "Diesel.CDF", "Gas.CDF")
+    first = standards.register(d, d / "Gas.CDF", "gc2", db=hub.db)
+    (d / "Ghost.CDF").write_bytes(b"x")
+    standards.sync(d, db=hub.db)
+    (d / "Ghost.CDF").unlink()                            # an old stale row, "missing"
+    (d / "Gas.CDF").rename(d / "Ghost.CDF")
+    row = standards.moved(d, d / "Gas.CDF", d / "Ghost.CDF", db=hub.db)
+    assert (row["id"], row["name"], row["instrument_id"], row["missing"]) == \
+        (first["id"], "Ghost", "gc2", False)
+    rows = standards.list_standards(d, db=hub.db)
+    assert sorted((r["name"], r["instrument_id"], r["missing"]) for r in rows) == \
+        [("Diesel", "gc1", False), ("Ghost", "gc2", False)]
+    # a file the table never knew: nothing to move (sync registers it later)
+    (d / "Loose.CDF").write_bytes(b"x")
+    (d / "Loose.CDF").rename(d / "Looser.CDF")
+    assert standards.moved(d, d / "Loose.CDF", d / "Looser.CDF", db=hub.db) is None
+
+
+def test_forget_drops_a_deleted_files_row_and_a_missing_ones(hub):
+    hub.gc1()
+    d = _dir(hub, "Diesel.CDF", "Gas.CDF", "Jet.CDF")
+    standards.sync(d, db=hub.db)
+    (d / "Gas.CDF").unlink()
+    assert standards.forget(d, d / "Gas.CDF", db=hub.db) == 1
+    (d / "Jet.CDF").unlink()                              # gone before v8.1.1: a "missing" row
+    assert [r["name"] for r in standards.list_standards(d, db=hub.db) if r["missing"]] == ["Jet"]
+    assert standards.forget(d, d / "Jet.CDF", db=hub.db) == 1
+    assert [r["name"] for r in standards.list_standards(d, db=hub.db)] == ["Diesel"]
+    assert standards.forget(d, d / "Nope.CDF", db=hub.db) == 0
