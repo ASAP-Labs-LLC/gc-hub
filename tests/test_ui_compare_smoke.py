@@ -375,6 +375,55 @@ def test_conclusion_edit_add_to_queue_export_and_download(env):
     assert wait(lambda: js(drv, "return document.getElementById('report-queue-btn').hidden"))
 
 
+RQ_VISIBLE = """const s = document.querySelector('[data-testid=report-queue-sheet]');
+  const body = s.querySelector('.rq-body').getBoundingClientRect();
+  return Array.from(s.querySelectorAll('[data-testid=rq-item]'))
+    .filter(li => { const r = li.getBoundingClientRect(); return r.top >= body.top - 1 && r.bottom <= body.bottom + 1; })
+    .length;"""
+
+
+def test_the_report_queue_shows_many_reports_at_once(env):
+    """v8.1.1: a queue row is the lab ID and its standard on one line and its
+    ranges on one (all of them on hover), with Update beside the short note
+    when the open Compare view has moved on, and the sheet uses the window's
+    height: 8 reports show at once at 1440x900, 6 at 1366x768, none wider
+    than a phone."""
+    drv = open_page(env)
+    ranges = [{"label": "Lighter", "c_start": 5, "c_end": 11}, {"label": "Heavier", "c_start": 22, "c_end": 44},
+              {"label": "Bio", "c_start": 19, "c_end": 21}]
+    items = [{"sample_id": env["sid"] if i < 3 else 900001 + i, "lab_id": f"4137{i}",
+              "sample_name": "GC Analysis Report", "standard_name": "R99 Standard GC-2",
+              "conclusion": "Edited." if i % 2 else "", "params": {"x_max_min": 7}, "ranges": ranges,
+              "overlay_standards": [], "added_at": "2026-10-14T12:00:00Z", "sent_at": None}
+             for i in range(10)]
+    js(drv, "sessionStorage.setItem('gc.reportQueue', arguments[0]);", json.dumps(items))
+    drv.refresh()
+    assert wait(lambda: js(drv, "return !document.getElementById('report-queue-btn').hidden"))
+    js(drv, "document.getElementById('report-queue-btn').click()")
+    assert wait(lambda: js(drv, "return document.querySelectorAll('[data-testid=rq-item]').length") == 10)
+    assert wait(lambda: js(drv, "return document.querySelectorAll('[data-testid=rq-update]').length") == 3)
+    frame(drv, "report queue, 10 reports")
+    shot(drv, "report-queue-1440x900-light.png")
+    assert js(drv, RQ_VISIBLE) >= 8, js(drv, RQ_VISIBLE)
+    rng = "document.querySelector('[data-testid=rq-ranges]')"
+    assert js(drv, f"return {rng}.title") == js(drv, f"return {rng}.textContent")
+    assert js(drv, f"return {rng}.getBoundingClientRect().height") < 24          # one line
+    sheet = "document.querySelector('[data-testid=report-queue-sheet]')"
+    assert js(drv, f"return {sheet}.getBoundingClientRect().width") >= 700      # not shell.css's 460px
+    assert js(drv, f"return {rng}.scrollWidth <= {rng}.clientWidth + 1"), "three ranges fit whole"
+    for size, least in (((1366, 768), 6), ((390, 844), 1)):
+        drv.execute_cdp_cmd("Emulation.setDeviceMetricsOverride",
+                            {"width": size[0], "height": size[1], "deviceScaleFactor": 1, "mobile": size[0] < 600})
+        time.sleep(0.3)
+        assert js(drv, RQ_VISIBLE) >= least, (size, js(drv, RQ_VISIBLE))
+        assert js(drv, "const s = document.querySelector('[data-testid=report-queue-sheet] .rq-body');"
+                       "return s.scrollWidth <= s.clientWidth + 1;"), size
+        shot(drv, f"report-queue-{size[0]}x{size[1]}-light.png")
+    js(drv, "window.confirm = () => true; document.querySelector('[data-testid=rq-clear]').click()")
+    assert wait(lambda: js(drv, "return GCReportQueue.count()") == 0)
+    js(drv, "document.querySelector('[data-testid=report-queue-sheet]').close()")
+
+
 def test_export_with_no_comparison_is_the_chromatogram_alone(env):
     """v8.1: Export report's "No comparison" sends no standard, conclusion,
     ranges or other standards; the PDF is the chromatogram alone; Add to
