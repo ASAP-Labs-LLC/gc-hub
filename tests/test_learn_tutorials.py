@@ -1,11 +1,14 @@
 """The Learn page's tutorials: the committed manifest and its screenshots.
 
-``static/learn/tutorials.json`` and ``static/learn/shots/*.webp`` are made by
-``tools/learn_capture.py`` (run by hand; it boots its own hub and drives
-Chrome). This checks what was committed, with no browser: the manifest's
-shape, the five tutorials in order, every image a WebP of the manifest's
-size (read from the RIFF header: no PIL), every highlight box inside the
-picture, plain one-sentence captions, and no screenshot left unreferenced.
+``static/learn/tutorials.json``, ``static/learn/shots/*.webp`` (light) and
+``static/learn/shots/dark/*.webp`` (dark) are made by ``tools/learn_capture.py``
+(run by hand; it boots its own hub and drives Chrome). This checks what was
+committed, with no browser: the manifest's shape, the five tutorials in
+order, every image (``image`` and ``image_dark``) a WebP of the manifest's
+size (read from the RIFF header: no PIL), every highlight box (``box`` and
+``box_dark``) inside the picture and the dark one on the same element as the
+light one, plain one-sentence captions, and no screenshot left unreferenced
+in either folder.
 """
 from __future__ import annotations
 
@@ -20,7 +23,12 @@ ROOT = Path(__file__).resolve().parent.parent
 LEARN = ROOT / "static" / "learn"
 MANIFEST = LEARN / "tutorials.json"
 SHOTS = LEARN / "shots"
+DARK = SHOTS / "dark"
 IDS = ["search", "edit", "queue", "download", "upload"]
+STEP_KEYS = {"image", "caption", "box", "image_dark", "box_dark"}
+# each theme's picture and its highlight box
+THEMES = {"light": ("image", "box"), "dark": ("image_dark", "box_dark")}
+BOX_DRIFT = 0.01            # how far a dark box may sit from the light one (fraction of the picture)
 
 
 class UnknownWebP(Exception):
@@ -90,7 +98,7 @@ def test_the_manifest_has_the_five_tutorials_in_order():
 def test_every_caption_is_one_plain_sentence():
     manifest = load_manifest()
     for tid, n, step in _steps(manifest):
-        assert set(step) == {"image", "caption", "box"}, (tid, n, sorted(step))
+        assert set(step) == STEP_KEYS, (tid, n, sorted(step))
         cap = step["caption"]
         assert isinstance(cap, str) and 10 <= len(cap) <= 150, (tid, n, cap)
         assert "<" not in cap, (tid, n, cap)
@@ -101,25 +109,46 @@ def test_every_caption_is_one_plain_sentence():
 def test_every_box_is_inside_the_picture():
     manifest = load_manifest()
     for tid, n, step in _steps(manifest):
-        box = step["box"]
-        if box is None:
-            continue
-        assert isinstance(box, list) and len(box) == 4, (tid, n, box)
-        assert all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
-                   for v in box), (tid, n, box)
-        x, y, w, h = box
-        assert x >= 0 and y >= 0, (tid, n, box)
-        assert w > 0.005 and h > 0.005, (tid, n, box)
-        assert x + w <= 1 + 1e-9 and y + h <= 1 + 1e-9, (tid, n, box)
+        for theme, (_image, key) in THEMES.items():
+            assert key in step, f"{tid} step {n}: no {key}"
+            box = step[key]
+            if box is None:
+                continue
+            where = (tid, n, theme, box)
+            assert isinstance(box, list) and len(box) == 4, where
+            assert all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                       for v in box), where
+            x, y, w, h = box
+            assert x >= 0 and y >= 0, where
+            assert w > 0.005 and h > 0.005, where
+            assert x + w <= 1 + 1e-9 and y + h <= 1 + 1e-9, where
 
 
-def test_every_image_is_a_webp_of_the_manifest_size():
+def test_the_dark_box_highlights_what_the_light_one_does():
+    manifest = load_manifest()
+    for tid, n, step in _steps(manifest):
+        assert "box_dark" in step, f"{tid} step {n}: no box_dark"
+        light, dark = step["box"], step["box_dark"]
+        assert (light is None) == (dark is None), (tid, n, light, dark)
+        if light is not None:
+            drift = max(abs(a - b) for a, b in zip(light, dark))
+            assert drift <= BOX_DRIFT, f"{tid} step {n}: box {light} vs box_dark {dark}"
+
+
+@pytest.mark.parametrize("theme", list(THEMES))
+def test_every_image_is_a_webp_of_the_manifest_size(theme):
     manifest = load_manifest()
     size = tuple(manifest["size"])
+    key = THEMES[theme][0]
+    folder = "shots/dark/" if theme == "dark" else "shots/"
     unknown = []
     for tid, n, step in _steps(manifest):
-        rel = step["image"]
-        assert isinstance(rel, str) and rel.startswith("shots/") and rel.endswith(".webp"), (tid, n, rel)
+        assert key in step, f"{tid} step {n}: no {key}"
+        rel = step[key]
+        assert isinstance(rel, str) and rel.startswith(folder) and rel.endswith(".webp"), (tid, n, rel)
+        assert "/" not in rel[len(folder):], (tid, n, rel)
+        if theme == "dark":       # the light picture's name, in shots/dark/
+            assert rel == "shots/dark/" + step["image"][len("shots/"):], (tid, n, rel, step["image"])
         path = (LEARN / rel).resolve()
         assert LEARN.resolve() in path.parents, (tid, n, rel)
         assert path.is_file(), f"{tid} step {n}: {rel} is missing"
@@ -137,8 +166,12 @@ def test_every_image_is_a_webp_of_the_manifest_size():
 
 def test_every_image_is_used_once_and_no_shot_is_left_over():
     manifest = load_manifest()
-    images = [step["image"] for _tid, _n, step in _steps(manifest)]
-    assert len(images) == len(set(images)), "an image is used by two steps"
-    on_disk = sorted("shots/" + p.name for p in SHOTS.iterdir() if p.is_file()) if SHOTS.is_dir() else []
+    images = [step.get(key) for _tid, _n, step in _steps(manifest) for key, _box in THEMES.values()]
+    assert all(isinstance(i, str) for i in images), "a step has no image or no image_dark"
+    assert len(images) == len(set(images)), "an image is used by two steps (or by both themes)"
+    # everything under shots/ (light) and shots/dark/; any other folder counts as left over
+    entries = [p for p in SHOTS.rglob("*") if p != DARK] if SHOTS.is_dir() else []
+    on_disk = sorted(p.relative_to(LEARN).as_posix() + ("" if p.is_file() else "/") for p in entries)
     unreferenced = sorted(set(on_disk) - set(images))
     assert unreferenced == [], f"unreferenced files under static/learn/shots: {unreferenced}"
+    assert any(p.startswith("shots/dark/") for p in on_disk), "no dark screenshots in static/learn/shots/dark"

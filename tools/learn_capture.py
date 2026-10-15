@@ -4,10 +4,11 @@
 Run by hand from the repo root (Chrome, chromedriver, Selenium, numpy,
 netCDF4 and ImageMagick's ``magick`` needed; nothing real is contacted):
 
-    python tools/learn_capture.py                     # all five, into static/learn
+    python tools/learn_capture.py                     # all five, light and dark, into static/learn
     python tools/learn_capture.py --out /tmp/learn    # somewhere else
     python tools/learn_capture.py --only edit,queue   # re-take some; the rest of the manifest is kept
-    python tools/learn_capture.py --keep-png /tmp/png # also keep Chrome's PNGs, to look at
+    python tools/learn_capture.py --theme dark        # one theme; the other's shots are kept
+    python tools/learn_capture.py --keep-png /tmp/png # also keep Chrome's PNGs (dark ones in png/dark)
 
 What it does:
 
@@ -19,29 +20,43 @@ What it does:
   machine (each lab ID's outcome comes from a plan file; the API key, the
   saved sign-in and the token URL are fakes in the temp folder);
 * signs in (``bootapp.sign_in`` + ``browser_sign_in``) and drives headless
-  Chrome at exactly 1280x800, deviceScaleFactor 1, light theme, scrollbars
-  hidden, animations, transitions and the text caret off, the build badge
-  hidden; downloads go to the temp folder;
+  Chrome at exactly 1280x800, deviceScaleFactor 1, scrollbars hidden,
+  animations, transitions and the text caret off, the build badge hidden;
+  downloads go to the temp folder;
+* does that once per theme (``--theme both``, the default: light, then
+  dark), each on its own freshly built hub and browser so both runs start
+  from the same data and go through the same states: the theme is the
+  stored choice (``localStorage['gc.theme']``, set before every tutorial's
+  first page) plus the matching ``prefers-color-scheme``, and every shot
+  checks ``<html data-theme>`` is that theme;
 * for each step waits for the page to settle (data loaded, charts drawn,
   layout unchanged across several polls; no fixed sleeps), clears any toast,
   takes Chrome's PNG and converts it with ``magick in.png -quality 80
   out.webp`` (a lower quality only if a shot comes out over 120 KB);
-* writes ``<out>/shots/<tutorial>-<n>.webp`` and ``<out>/tutorials.json``:
+* writes ``<out>/shots/<tutorial>-<n>.webp`` (light),
+  ``<out>/shots/dark/<tutorial>-<n>.webp`` (dark) and ``<out>/tutorials.json``:
 
       {"version": 1, "size": [1280, 800],
        "tutorials": [{"id", "title", "summary",
                       "steps": [{"image": "shots/search-1.webp", "caption": "...",
-                                 "box": [x, y, w, h] | null}]}]}
+                                 "box": [x, y, w, h] | null,
+                                 "image_dark": "shots/dark/search-1.webp",
+                                 "box_dark": [x, y, w, h] | null}]}]}
 
   where ``box`` is the highlighted element's rect (getBoundingClientRect
-  over the viewport, padded by 6 px, clamped to the picture) as fractions.
+  over the viewport, padded by 6 px, clamped to the picture) as fractions,
+  in the light picture, and ``box_dark`` the same element's rect in the
+  dark one (measured, not copied; it must be within ``BOX_DRIFT`` of
+  ``box``, and null exactly when ``box`` is).
 
-Nothing under ``--out`` changes unless every step worked; then the old shots
-of the tutorials it took are replaced (every shot, on a full run, so none is
-left unreferenced) and the manifest is rewritten (``--only`` keeps the other
-tutorials' entries). It prints each shot's size and box as it goes, and any
-browser console errors. ``tests/test_learn_tutorials.py`` checks the result
-in CI.
+Nothing under ``--out`` changes unless every step of every theme worked
+(and the two themes took the same steps); then the old shots of the
+tutorials and themes it took are replaced (every shot of a theme, on a full
+run, so none is left unreferenced) and the manifest is rewritten (``--only``
+keeps the other tutorials' entries; ``--theme light|dark`` keeps the other
+theme's shots, which must still match the steps, caption for caption). It
+prints each shot's size and box as it goes, and any browser console errors.
+``tests/test_learn_tutorials.py`` checks the result in CI.
 Never imports app.py: the app runs in its own process.
 """
 from __future__ import annotations
@@ -66,6 +81,10 @@ W, H = 1280, 800
 PAD = 6                          # px around a highlighted element
 MAX_BYTES = 120 * 1024           # per shot
 QUALITIES = (80, 74, 68, 60)     # the first is the rule; the rest only when a shot is too big
+THEMES = ("light", "dark")
+SHOT_DIR = {"light": "shots", "dark": "shots/dark"}   # under --out, and in the manifest's paths
+STEP_KEYS = {"light": ("image", "box"), "dark": ("image_dark", "box_dark")}
+BOX_DRIFT = 0.01                 # how far a dark box may sit from the light one (fraction of the picture)
 
 TUTORIALS = [
     ("search", "Find a sample", "Filter the Samples list by lab ID or status and open a run."),
@@ -149,9 +168,10 @@ def tid(name: str) -> str:
 
 # ── the browser ──────────────────────────────────────────────────────────────
 
-def make_driver(download_dir: Path):
+def make_driver(download_dir: Path, theme: str):
     """Headless Chrome as the UI tests start it (``tests/test_ui_setup_pages_smoke._driver``),
-    plus hidden scrollbars, at exactly 1280x800 and deviceScaleFactor 1, light."""
+    plus hidden scrollbars, at exactly 1280x800 and deviceScaleFactor 1, and the
+    system colour scheme set to ``theme`` (the stored choice is what counts)."""
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
     opts = Options()
@@ -166,7 +186,7 @@ def make_driver(download_dir: Path):
     drv.execute_cdp_cmd("Emulation.setDeviceMetricsOverride",
                         {"width": W, "height": H, "deviceScaleFactor": 1, "mobile": False})
     drv.execute_cdp_cmd("Emulation.setEmulatedMedia",
-                        {"features": [{"name": "prefers-color-scheme", "value": "light"},
+                        {"features": [{"name": "prefers-color-scheme", "value": theme},
                                       {"name": "prefers-reduced-motion", "value": "reduce"}]})
     drv.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": INJECT_JS})
     for cmd in ("Browser.setDownloadBehavior", "Page.setDownloadBehavior"):
@@ -182,12 +202,13 @@ def make_driver(download_dir: Path):
 class Capture:
     """Drives one signed-in browser through the tutorials and records the steps."""
 
-    def __init__(self, drv, base: str, shots: Path, keep_png: Path | None):
+    def __init__(self, drv, base: str, shots: Path, keep_png: Path | None, theme: str):
         self.drv = drv
         self.base = base
-        self.shots = shots
+        self.shots = shots              # this theme's staging folder
         self.keep_png = keep_png
-        self.steps: dict[str, list] = {}
+        self.theme = theme
+        self.steps: dict[str, list] = {}    # {tutorial: [{"image", "caption", "box"}]}, this theme's
 
     # ── plumbing ──
     def js(self, script, *args):
@@ -249,9 +270,11 @@ class Capture:
         ab.perform()
 
     def reset_storage(self):
-        """A fresh tab's storage (no queue, no remembered picks), light theme."""
+        """A fresh tab's storage (no queue, no remembered picks), this run's
+        theme chosen (so every page paints in it from the start)."""
         self.drv.get(self.base + "/static/favicon.svg")
-        self.js("localStorage.clear(); sessionStorage.clear(); localStorage.setItem('gc.theme', 'light');")
+        self.js("localStorage.clear(); sessionStorage.clear(); localStorage.setItem('gc.theme', arguments[0]);",
+                self.theme)
 
     def settle(self, timeout=30.0):
         """Wait until nothing moves: the page loaded, fonts in, charts drawn,
@@ -313,15 +336,19 @@ class Capture:
         if not toast:
             self.clear_toast()
         box = self.box(target)
+        mode = self.js("return document.documentElement.getAttribute('data-theme')")
+        if mode != self.theme:
+            raise CaptureError(f"{tutorial}: the page is in the {mode} theme, not {self.theme} ({caption!r})")
         png = self.drv.get_screenshot_as_png()
         if check is not None and not check():
             raise CaptureError(f"{tutorial}: the page moved on while the shot was taken ({caption!r})")
         n = len(self.steps.setdefault(tutorial, [])) + 1
         name = f"{tutorial}-{n}"
         image = to_webp(png, self.shots / f"{name}.webp", self.keep_png and self.keep_png / f"{name}.png")
-        self.steps[tutorial].append({"image": f"shots/{image.name}", "caption": caption, "box": box})
+        self.steps[tutorial].append({"image": f"{SHOT_DIR[self.theme]}/{image.name}", "caption": caption,
+                                     "box": box})
         size = image.stat().st_size
-        print(f"  {name}.webp  {size / 1024:5.1f} KB  box={box}  {caption}")
+        print(f"  {self.theme}/{name}.webp  {size / 1024:5.1f} KB  box={box}  {caption}")
 
     # ── page helpers ──
     def open_samples(self, path):
@@ -632,6 +659,10 @@ def tut_download(c: Capture, ids):
     msg = c.text(tid("rq-msg"))
     if not msg.startswith("Downloaded 3 reports"):
         raise CaptureError(f"Download all said: {msg}")
+    # the sidebar's Running now catches up (the ZIP's task ends a moment after
+    # the download): the same "done" in every run and theme, not a spinner
+    c.wait(lambda: not c.js("return !!document.querySelector('#running-now .rn-glyph-spinner')"),
+           "Running now to show the ZIP done", 60, soft=True)
     c.shot(t, "In the report queue, click Download all: several reports come as one ZIP file.", tid("rq-download"))
     c.js("GCReportQueue.clear();")
     c.close_dialogs()
@@ -663,18 +694,20 @@ def tut_upload(c: Capture, ids):
 
     c.click(tid("rq-upload"))
     rows = "return [...document.querySelectorAll('[data-testid=rq-up-item]')].map(r => r.dataset.status);"
-    running = ("generating", "report_ok", "uploading")
 
+    # one sent, the second uploading (the stub holds it there for 3 s; the PDF
+    # step before it takes as long as it takes), the third waiting: the same
+    # state in every theme
     def mid_run():
         st = c.js(rows) or []
-        if len(st) == 3 and st[0] == "ok" and st[1] in running and c.exists(tid("rq-stop")) \
+        if st == ["ok", "uploading", "waiting"] and c.exists(tid("rq-stop")) \
                 and c.js("return document.querySelectorAll('[data-testid=rq-skip]').length") >= 2:
             return st
         return None
-    c.wait(mid_run, "the upload to be under way (one sent, one running)", 90, every=0.05)
+    c.wait(mid_run, "the upload to be under way (one sent, one uploading)", 90, every=0.05)
     c.reveal(tid("rq-progress"))
     c.shot(t, "Watch each report's progress; click Skip to leave one out, or Stop to end the upload.",
-           tid("rq-progress"), check=lambda: (c.js(rows) or [None, None])[1] in running)
+           tid("rq-progress"), check=lambda: (c.js(rows) or [None, None])[1] == "uploading")
 
     c.wait(lambda: c.js("return GCReportQueue.items().every(i => !!i.sent_at)") and not c.exists(tid("rq-stop")),
            "the upload to finish", 120)
@@ -694,39 +727,98 @@ STEPS = {"search": tut_search, "edit": tut_edit, "queue": tut_queue, "download":
 
 # ── the run ──────────────────────────────────────────────────────────────────
 
-def write_manifest(out: Path, steps: dict[str, list]) -> dict:
-    old = {}
+def read_manifest(out: Path) -> dict[str, dict]:
+    """The manifest's tutorials by id ({} when there is none or it can't be read)."""
     path = out / "tutorials.json"
-    if path.is_file():
-        try:
-            old = {t["id"]: t for t in json.loads(path.read_text(encoding="utf-8")).get("tutorials", [])}
-        except (ValueError, KeyError, TypeError):
-            old = {}
+    if not path.is_file():
+        return {}
+    try:
+        return {t["id"]: t for t in json.loads(path.read_text(encoding="utf-8")).get("tutorials", [])}
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def combine(out: Path, only: list[str], taken: dict[str, dict], old: dict[str, dict]) -> dict[str, list]:
+    """Each taken tutorial's steps with both themes' picture and box: the
+    themes just taken, and the other one's from the old manifest, which must
+    be for the same steps (caption for caption) with its shots on disk. The
+    two themes must have taken the same steps, with a box on the same element
+    (null in both, or within ``BOX_DRIFT``). Raises ``CaptureError`` (nothing
+    written yet) when they don't."""
+    steps: dict[str, list] = {}
+    worst, boxes = (0.0, None), 0
+    for t in only:
+        sides = {}
+        for theme in THEMES:
+            image_key, box_key = STEP_KEYS[theme]
+            if theme in taken:
+                sides[theme] = [(s["caption"], s["image"], s["box"]) for s in taken[theme].get(t, [])]
+                continue
+            kept = (old.get(t) or {}).get("steps") or []
+            if not kept or any(image_key not in s or box_key not in s for s in kept):
+                raise CaptureError(f"the manifest has no {theme} shots of {t} to keep: run with --theme both")
+            gone = [s[image_key] for s in kept if not (out / s[image_key]).is_file()]
+            if gone:
+                raise CaptureError(f"the manifest's {theme} shots of {t} are missing ({', '.join(gone)}): "
+                                   "run with --theme both")
+            sides[theme] = [(s.get("caption"), s[image_key], s[box_key]) for s in kept]
+        light, dark = sides["light"], sides["dark"]
+        if len(light) != len(dark):
+            raise CaptureError(f"{t}: {len(light)} light steps but {len(dark)} dark ones: run with --theme both")
+        for n, (a, b) in enumerate(zip(light, dark), start=1):
+            if a[0] != b[0]:
+                raise CaptureError(f"{t}-{n}: the light and dark captions differ ({a[0]!r} vs {b[0]!r}): "
+                                   "run with --theme both")
+        steps[t] = []
+        for n, ((caption, image, box), (_c, image_dark, box_dark)) in enumerate(zip(light, dark), start=1):
+            if (box is None) != (box_dark is None):
+                raise CaptureError(f"{t}-{n}: a box in one theme only (light {box}, dark {box_dark})")
+            if box is not None:
+                drift = max(abs(a - b) for a, b in zip(box, box_dark))
+                if drift > BOX_DRIFT:
+                    raise CaptureError(f"{t}-{n}: the dark box {box_dark} is not where the light one is {box} "
+                                       "(the page laid out differently? with one --theme, try both)")
+                boxes += 1
+                if drift > worst[0]:
+                    worst = (drift, f"{t}-{n}")
+            steps[t].append({"image": image, "caption": caption, "box": box,
+                             "image_dark": image_dark, "box_dark": box_dark})
+    if worst[1]:
+        print(f"dark boxes vs light: at most {worst[0]:.4f} apart ({worst[1]}; "
+              f"{worst[0] * W:.1f} px across, {worst[0] * H:.1f} px down)")
+    elif boxes:
+        print(f"dark boxes vs light: all {boxes} the same")
+    return steps
+
+
+def write_manifest(out: Path, steps: dict[str, list], old: dict[str, dict]) -> dict:
     tutorials = []
     for tid_, title, summary in TUTORIALS:
         if tid_ in steps:
             tutorials.append({"id": tid_, "title": title, "summary": summary, "steps": steps[tid_]})
         elif tid_ in old:
             tutorials.append(dict(old[tid_], title=title, summary=summary))
+            if any("image_dark" not in s for s in old[tid_].get("steps", [])):
+                print(f"note: the manifest's {tid_} has no dark shots: take it too (or run without --only)")
     doc = {"version": 1, "size": [W, H], "tutorials": tutorials}
     text = json.dumps(doc, indent=1, ensure_ascii=False)
     # a box (or the size) on one line: easier to review in a diff
     text = re.sub(r"\[\s+(-?[\d.]+(?:,\s+-?[\d.]+)*)\s+\]",
                   lambda m: "[" + ", ".join(v.strip() for v in m.group(1).split(",")) + "]", text)
-    path.write_text(text + "\n", encoding="utf-8")
+    (out / "tutorials.json").write_text(text + "\n", encoding="utf-8")
     return doc
 
 
-def run(out: Path, only: list[str], keep_png: Path | None) -> None:
+def capture_theme(theme: str, only: list[str], stage: Path, keep_png: Path | None) -> dict[str, list]:
+    """Take ``only`` in ``theme`` on a hub and a browser of its own (built
+    fresh, so every theme starts from the same data), the WebPs into
+    ``stage``. Returns ``{tutorial: [{"image", "caption", "box"}]}``."""
     import bootapp
     import ui_compare_harness as harness
 
-    out = out.resolve()
-    shots = out / "shots"
-    tmp = Path(tempfile.mkdtemp(prefix="gc-learn-"))
-    stage = tmp / "stage"                # the new shots, moved into place only when every step worked
+    tmp = Path(tempfile.mkdtemp(prefix=f"gc-learn-{theme}-"))
     try:
-        print(f"building a hub in {tmp} …")
+        print(f"{theme}: building a hub in {tmp} …")
         hub = harness.build(tmp)
         home = tmp / "home"
         home.mkdir(exist_ok=True)
@@ -743,35 +835,52 @@ def run(out: Path, only: list[str], keep_png: Path | None) -> None:
             bootapp.sign_in(port, data)
             downloads = tmp / "downloads"
             downloads.mkdir(exist_ok=True)
-            drv = make_driver(downloads)
+            drv = make_driver(downloads, theme)
             try:
                 bootapp.browser_sign_in(drv, port)
-                cap = Capture(drv, f"http://127.0.0.1:{port}", stage, keep_png)
+                cap = Capture(drv, f"http://127.0.0.1:{port}", stage, keep_png, theme)
                 for name in only:
-                    print(f"{name}:")
+                    print(f"{name} ({theme}):")
                     STEPS[name](cap, hub.ids)
                 errors = [e["message"] for e in drv.get_log("browser")
                           if e["level"] == "SEVERE" and "favicon.ico" not in e["message"]]
                 if errors:
-                    print("browser console errors (check the shots):\n  " + "\n  ".join(errors))
+                    print(f"browser console errors, {theme} (check the shots):\n  " + "\n  ".join(errors))
             finally:
                 drv.quit()
-        # every step worked: replace the old shots of these tutorials (all of them
-        # on a full run), then the manifest
-        shots.mkdir(parents=True, exist_ok=True)
-        full = set(only) == {t[0] for t in TUTORIALS}
-        for old in shots.iterdir():
-            if old.is_file() and (full or any(old.name.startswith(f"{n}-") for n in only)):
-                old.unlink()
-        for new in sorted(stage.glob("*.webp")):
-            shutil.move(str(new), str(shots / new.name))
-        doc = write_manifest(out, cap.steps)
+        return cap.steps
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    total = sum(p.stat().st_size for p in shots.glob("*.webp"))
+
+
+def run(out: Path, only: list[str], keep_png: Path | None, themes: list[str]) -> None:
+    out = out.resolve()
+    stage = Path(tempfile.mkdtemp(prefix="gc-learn-stage-"))   # moved into place only when every step worked
+    try:
+        taken = {}
+        for theme in themes:
+            png = keep_png and (keep_png if theme == "light" else keep_png / theme)
+            taken[theme] = capture_theme(theme, only, stage / theme, png)
+        old = read_manifest(out)
+        steps = combine(out, only, taken, old)
+        # every step of every theme worked: replace the old shots of these
+        # tutorials in these themes (all of a theme's on a full run), then the manifest
+        full = set(only) == {t[0] for t in TUTORIALS}
+        for theme in themes:
+            folder = out / SHOT_DIR[theme]
+            folder.mkdir(parents=True, exist_ok=True)
+            for old_shot in folder.iterdir():
+                if old_shot.is_file() and (full or any(old_shot.name.startswith(f"{n}-") for n in only)):
+                    old_shot.unlink()
+            for new in sorted((stage / theme).glob("*.webp")):
+                shutil.move(str(new), str(folder / new.name))
+        doc = write_manifest(out, steps, old)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
     n = sum(len(t["steps"]) for t in doc["tutorials"])
-    print(f"wrote {out / 'tutorials.json'}: {len(doc['tutorials'])} tutorials, {n} steps, "
-          f"{total / 1024:.0f} KB of shots")
+    sizes = ", ".join(f"{sum(p.stat().st_size for p in (out / SHOT_DIR[th]).glob('*.webp')) / 1024:.0f} KB {th}"
+                      for th in THEMES)
+    print(f"wrote {out / 'tutorials.json'}: {len(doc['tutorials'])} tutorials, {n} steps; shots: {sizes}")
 
 
 def main(argv=None) -> int:
@@ -779,7 +888,9 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=str(ROOT / "static" / "learn"),
                     help="where tutorials.json and shots/ go (default: static/learn)")
     ap.add_argument("--only", default="", help="comma-separated tutorial ids to take (default: all)")
-    ap.add_argument("--keep-png", default="", help="also keep Chrome's PNGs in this folder")
+    ap.add_argument("--theme", choices=("light", "dark", "both"), default="both",
+                    help="which screenshot set to take (default: both; one theme keeps the other's shots)")
+    ap.add_argument("--keep-png", default="", help="also keep Chrome's PNGs in this folder (dark ones in dark/)")
     a = ap.parse_args(argv)
     ids = [t[0] for t in TUTORIALS]
     only = [s.strip() for s in a.only.split(",") if s.strip()] or ids
@@ -787,8 +898,9 @@ def main(argv=None) -> int:
     if bad:
         ap.error(f"unknown tutorial(s) {bad}; known: {ids}")
     only = [i for i in ids if i in only]
+    themes = list(THEMES) if a.theme == "both" else [a.theme]
     try:
-        run(Path(a.out), only, Path(a.keep_png).resolve() if a.keep_png else None)
+        run(Path(a.out), only, Path(a.keep_png).resolve() if a.keep_png else None, themes)
     except CaptureError as exc:
         print(f"learn_capture: {exc}", file=sys.stderr)
         return 1
