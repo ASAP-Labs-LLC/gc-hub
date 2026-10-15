@@ -1,0 +1,176 @@
+{
+ "version": 1,
+ "size": [1280, 800],
+ "tutorials": [
+  {
+   "id": "search",
+   "title": "Find a sample",
+   "summary": "Filter the Samples list by lab ID or status and open a run.",
+   "steps": [
+    {
+     "image": "shots/search-1.webp",
+     "caption": "Click Samples in the sidebar: every run is listed, newest first, under the day it ran.",
+     "box": [0.0016, 0.1175, 0.0461, 0.0625]
+    },
+    {
+     "image": "shots/search-2.webp",
+     "caption": "Press Ctrl K, or click Filter lab ID, and type part of a lab ID: the list narrows as you type.",
+     "box": [0.0578, 0.2075, 0.218, 0.06]
+    },
+    {
+     "image": "shots/search-3.webp",
+     "caption": "Click a run to open it.",
+     "box": [0.0516, 0.3563, 0.2305, 0.0856]
+    },
+    {
+     "image": "shots/search-4.webp",
+     "caption": "Check the header: the lab ID, its status, the instrument, when it was injected and the method.",
+     "box": [0.2984, 0.0925, 0.6687, 0.1062]
+    },
+    {
+     "image": "shots/search-5.webp",
+     "caption": "Read the chromatogram on Overview; scroll down for the results and the distillation curve.",
+     "box": [0.2984, 0.2687, 0.6687, 0.5663]
+    },
+    {
+     "image": "shots/search-6.webp",
+     "caption": "Use the instrument and status chips, or Not sent to QBench, to list only the runs you need.",
+     "box": [0.0578, 0.0775, 0.218, 0.135]
+    }
+   ]
+  },
+  {
+   "id": "edit",
+   "title": "Check a sample in Compare",
+   "summary": "Compare a run with a standard, adjust the graphs, mark a region and edit the conclusion.",
+   "steps": [
+    {
+     "image": "shots/edit-1.webp",
+     "caption": "Open the Compare tab to check the run against a comparison standard.",
+     "box": [0.373, 0.2075, 0.0795, 0.0525]
+    },
+    {
+     "image": "shots/edit-2.webp",
+     "caption": "Check Compared with: it starts on the best-fit standard; pick another from the list to switch.",
+     "box": [0.2984, 0.2687, 0.4222, 0.06]
+    },
+    {
+     "image": "shots/edit-3.webp",
+     "caption": "Click Adjust to change the thresholds, the shaded ranges and Show up to (min); the graphs redraw.",
+     "box": [0.7297, 0.0625, 0.2703, 0.9375]
+    },
+    {
+     "image": "shots/edit-4.webp",
+     "caption": "Click Annotate, drag across the trend chart to mark a region, type a note and click Save.",
+     "box": [0.4797, 0.3987, 0.4164, 0.2181]
+    },
+    {
+     "image": "shots/edit-5.webp",
+     "caption": "Under Conclusion, click Edit to change the wording, or Add preset to put in a stock sentence.",
+     "box": [0.2984, 0.3714, 0.6687, 0.4512]
+    },
+    {
+     "image": "shots/edit-6.webp",
+     "caption": "Click Save: this run's reports now print your conclusion instead of the generated one.",
+     "box": [0.2984, 0.6264, 0.6687, 0.1957]
+    }
+   ]
+  },
+  {
+   "id": "queue",
+   "title": "Queue reports",
+   "summary": "Collect reports in the report queue, reopen one in Compare, or remove it.",
+   "steps": [
+    {
+     "image": "shots/queue-1.webp",
+     "caption": "On a final run, click Add to queue at the top right.",
+     "box": [0.8095, 0.0981, 0.1234, 0.06]
+    },
+    {
+     "image": "shots/queue-2.webp",
+     "caption": "Pick the standard, or No comparison (chromatogram only), check the report title and click Add to queue.",
+     "box": [0.3156, 0.1834, 0.3688, 0.6331]
+    },
+    {
+     "image": "shots/queue-3.webp",
+     "caption": "Click Report queue at the top of any page; its number is how many reports are waiting.",
+     "box": [0.8442, 0.0069, 0.1355, 0.055]
+    },
+    {
+     "image": "shots/queue-4.webp",
+     "caption": "Click a report's lab ID to open that sample in Compare exactly as the report will show it.",
+     "box": [0.218, 0.1719, 0.0449, 0.0413]
+    },
+    {
+     "image": "shots/queue-5.webp",
+     "caption": "Check the sample in Compare: it opens on the report's standard, with the settings it was queued with.",
+     "box": [0.2984, 0.0925, 0.6687, 0.2838]
+    },
+    {
+     "image": "shots/queue-6.webp",
+     "caption": "Click Remove to take a report out of the queue; Clear empties the whole queue.",
+     "box": [0.712, 0.3075, 0.0685, 0.0525]
+    }
+   ]
+  },
+  {
+   "id": "download",
+   "title": "Download a report",
+   "summary": "Download one report as a PDF, the whole queue as one ZIP, or the raw CDF.",
+   "steps": [
+    {
+     "image": "shots/download-1.webp",
+     "caption": "On a final run, click Export report at the top right.",
+     "box": [0.6892, 0.0981, 0.1234, 0.06]
+    },
+    {
+     "image": "shots/download-2.webp",
+     "caption": "Check Compared with and the report title, then click Download PDF.",
+     "box": [0.3156, 0.1834, 0.3688, 0.6331]
+    },
+    {
+     "image": "shots/download-3.webp",
+     "caption": "For the chromatogram alone, pick No comparison (chromatogram only) before you download.",
+     "box": [0.3352, 0.3531, 0.3297, 0.2387]
+    },
+    {
+     "image": "shots/download-4.webp",
+     "caption": "In the report queue, click Download all: several reports come as one ZIP file.",
+     "box": [0.5748, 0.8838, 0.092, 0.0525]
+    },
+    {
+     "image": "shots/download-5.webp",
+     "caption": "For the raw data, open the ⋯ menu (More actions) and click Download CDF.",
+     "box": [0.793, 0.2594, 0.1672, 0.0612]
+    }
+   ]
+  },
+  {
+   "id": "upload",
+   "title": "Upload to QBench",
+   "summary": "Send the queued reports to QBench and follow each one until it is sent.",
+   "steps": [
+    {
+     "image": "shots/upload-1.webp",
+     "caption": "Open the report queue and click Upload to QBench.",
+     "box": [0.6637, 0.8838, 0.1183, 0.0525]
+    },
+    {
+     "image": "shots/upload-2.webp",
+     "caption": "Check the QBench sign-in, type the password if asked, then click Start upload.",
+     "box": [0.218, 0.3781, 0.5625, 0.1794]
+    },
+    {
+     "image": "shots/upload-3.webp",
+     "caption": "Watch each report's progress; click Skip to leave one out, or Stop to end the upload.",
+     "box": [0.218, 0.3781, 0.5625, 0.2362]
+    },
+    {
+     "image": "shots/upload-4.webp",
+     "caption": "Look for Sent to QBench on each report once the upload has finished.",
+     "box": [0.218, 0.1631, 0.5625, 0.21]
+    }
+   ]
+  }
+ ]
+}
