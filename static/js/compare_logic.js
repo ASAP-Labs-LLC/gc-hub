@@ -105,16 +105,19 @@
     // ── the standard a sample opens with ────────────────────────────────────
     /** explicit (the URL) > remembered manual pick > best fit (/api/best-fit's
         best_standard, else the list row's best-fit label when it names one
-        standard) > the first standard. Names that aren't standards are skipped. */
+        standard) > the first standard. Names that aren't standards are skipped.
+        v8.2: the row's best fit is {label, score} (/api/files); its label counts. */
     function pickStandard(opts) {
         const o = opts || {};
         const names = (o.standards || []).map(s => (s && typeof s === 'object') ? s.name : s);
         if (!names.length) return null;
         const has = n => typeof n === 'string' && names.includes(n);
+        const rowBest = (o.sampleBestFit && typeof o.sampleBestFit === 'object')
+            ? o.sampleBestFit.label : o.sampleBestFit;
         if (has(o.explicit)) return { name: o.explicit, source: 'explicit' };
         if (has(o.remembered)) return { name: o.remembered, source: 'remembered' };
         if (has(o.best)) return { name: o.best, source: 'best' };
-        if (has(o.sampleBestFit)) return { name: o.sampleBestFit, source: 'best' };
+        if (has(rowBest)) return { name: rowBest, source: 'best' };
         return { name: names[0], source: 'first' };
     }
 

@@ -890,3 +890,16 @@ def test_annotate_comments_retheme_and_unmount(env):
     errors = [e["message"] for e in drv.get_log("browser")
               if e["level"] == "SEVERE" and "favicon.ico" not in e["message"]]
     assert errors == [], errors
+
+
+def test_a_bulk_report_uses_the_rows_best_fit(env):
+    """v8.2: the Samples list's row carries best_fit as {label, score}; a
+    report made without a mounted view (bulk Add to report queue, Download
+    reports) uses that standard, not the first one listed."""
+    drv = open_page(env)
+    names = js(drv, "return window.__h.standards.map(s => s.name)")
+    assert "Diesel ULSD Std" in names and names[0] != "Diesel ULSD Std", names
+    std = js(drv, "return GCCompare.reportItem({sample: {sample_id: 987001, lab_id: 'x',"
+                  " best_fit: {label: 'Diesel ULSD Std', score: 0.97}},"
+                  " standards: window.__h.standards, settings: window.__h.settings}).standard_name")
+    assert std == "Diesel ULSD Std", std

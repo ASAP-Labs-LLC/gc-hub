@@ -317,4 +317,12 @@ module.exports = (t) => {
     // an explicit standard (the address, a restored report) beats a remembered pick
     t.eq(L.pickStandard({ explicit: 'B', remembered: 'A', standards: [{ name: 'A' }, { name: 'B' }] }),
          { name: 'B', source: 'explicit' });
+
+    // v8.2: the list row's best fit is {label, score} (/api/files): its label
+    // names the standard (bulk reports used to fall back to the first one)
+    t.eq(L.pickStandard({ sampleBestFit: { label: 'Diesel', score: 0.97 },
+                          standards: [{ name: 'Diesel #2 Red Dye Std' }, { name: 'Diesel' }] }),
+         { name: 'Diesel', source: 'best' });
+    t.eq(L.pickStandard({ sampleBestFit: { label: 'Mix: A + B (80/20)', score: 0.95 },
+                          standards: [{ name: 'A' }, { name: 'B' }] }), { name: 'A', source: 'first' });
 };
