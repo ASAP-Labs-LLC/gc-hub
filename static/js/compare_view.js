@@ -699,6 +699,7 @@
             shapes: bands.shapes.concat(notes.shapes, pat && pat.shape ? [pat.shape] : []),
             annotations: bands.labels.concat(notes.labels),
             dragmode: v.annotating ? 'select' : 'zoom', selectdirection: 'h',
+            newselection: { line: { color: c.text, width: 1, dash: 'dot' } },   // v8.3: shows on dark too
         });
         trendLayout.xaxis.range = xr;
         if (ticks.vals.length) {

@@ -945,3 +945,13 @@ def test_patterns_overlay_a_case_on_the_trend(env):
     assert flat[0] < 0.12 * flat[1], flat
     assert "water content" in js(drv, note)
     js(drv, "document.querySelector('[data-testid=compare-pattern-water]').click();")
+
+
+def test_the_annotate_selection_shows_in_the_dark_theme(env):
+    """v8.3: the drag box Annotate draws is the theme's text colour (Plotly's
+    default dark outline vanished on the dark chart)."""
+    drv = open_page(env, theme="dark")
+    col = js(drv, "const l = document.querySelector('[data-testid=compare-trend]').layout;"
+                  "return l.newselection && l.newselection.line && l.newselection.line.color")
+    text = js(drv, "return getComputedStyle(document.documentElement).getPropertyValue('--text').trim()")
+    assert col == text, (col, text)

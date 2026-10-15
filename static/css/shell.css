@@ -148,7 +148,7 @@ dialog.sheet {
     border: 1px solid var(--border-light); border-radius: var(--radius-lg); padding: var(--s5); width: min(460px, calc(100vw - 32px));
     background: var(--bg-elevated); color: var(--text); box-shadow: var(--e3);
 }
-dialog.sheet::backdrop { background: rgba(15, 23, 42, 0.35); }
+dialog.sheet::backdrop { background: var(--backdrop); }
 dialog.sheet h2 { font-size: var(--fs-lg); margin-bottom: var(--s2); }
 dialog.sheet p { margin: 0 0 var(--s3); color: var(--text-muted); }
 dialog.sheet .actions { display: flex; justify-content: flex-end; gap: var(--s2); margin-top: var(--s4); }
