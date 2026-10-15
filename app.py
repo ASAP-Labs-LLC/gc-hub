@@ -116,6 +116,7 @@ import reprocess_query
 import hub
 import instruments
 import pipeline
+import standards
 import store
 
 # Phase 4's comments module (the seam frozen in the phase 3+4 spec): the
@@ -1306,6 +1307,28 @@ def _lane_top(lo: float, hi: float, plot_h_pt: float, lane_pt: float) -> float:
     return lo + (hi - lo) * plot_h_pt / usable
 
 
+def _report_axis() -> dict:
+    """The report charts' axis style (hairline grid, short outside ticks)."""
+    c, k = _RC, _REPORT_PX_PER_PT
+    return dict(gridcolor=c["grid"], gridwidth=0.5 * k, linecolor=c["tick"], linewidth=0.75 * k,
+                tickcolor=c["tick"], tickwidth=0.75 * k, ticklen=2.5 * k, ticks="outside",
+                showline=True, zeroline=False, tickfont=dict(color=c["axis"], size=6.5 * k))
+
+
+def _add_carbon_axis(fig, layout: dict, tick_vals: list, tick_text: list, x_range: list) -> None:
+    """The carbon numbers on a chart's top axis (``xaxis2``), when there are any."""
+    if not tick_vals:
+        return
+    c, k = _RC, _REPORT_PX_PER_PT
+    fig.add_trace(go.Scatter(x=[tick_vals[0]], y=[None], xaxis="x2", mode="lines",
+                             hoverinfo="skip", showlegend=False))
+    layout["xaxis2"] = dict(
+        overlaying="x", side="top", matches="x", range=x_range, tickvals=tick_vals,
+        ticktext=tick_text, tickfont=dict(size=6 * k, color=c["axis"]), ticks="outside",
+        ticklen=2.5 * k, tickcolor=c["tick"], tickwidth=0.75 * k, showgrid=False,
+        showline=False, zeroline=False)
+
+
 def _report_figures(content: dict, sample_name: str, overlay_standards: list,
                     conf: dict, heights_pt: tuple | None = None) -> tuple:
     """The report's two charts (trend, difference) from the report content,
@@ -1351,12 +1374,14 @@ def _report_figures(content: dict, sample_name: str, overlay_standards: list,
                         yref="paper", yanchor="top",
                         yshift=-(rl.BAND_LANE_PAD + row * rl.BAND_ROW_PT) * k, showarrow=False,
                         text=_esc(text), borderpad=0,
+                        # v8.1.1: a name running past its band is backed, so the
+                        # band edges' hairlines never cross its letters
+                        bgcolor=("#ffffff" if rl.label_overflows(w, text, x, x_range[0], x_max_min,
+                                                                 plot_w_pt) else None),
                         font=dict(size=rl.BAND_LABEL_FS * k, color=c["band_text"]))
                    for w, text, x, row in labelled]
 
-    axis = dict(gridcolor=c["grid"], gridwidth=0.5 * k, linecolor=c["tick"], linewidth=0.75 * k,
-                tickcolor=c["tick"], tickwidth=0.75 * k, ticklen=2.5 * k, ticks="outside",
-                showline=True, zeroline=False, tickfont=dict(color=c["axis"], size=6.5 * k))
+    axis = _report_axis()
     xaxis = dict(axis, range=x_range,
                  title=dict(text="Retention time (min)", standoff=2 * k,
                             font=dict(size=6.5 * k, color=c["axis"])))
@@ -1415,14 +1440,7 @@ def _report_figures(content: dict, sample_name: str, overlay_standards: list,
         hi = hi + (hi - lo) * 0.03 if hi > lo else lo + 1.0
         trend_layout["yaxis"] = dict(trend_layout["yaxis"], range=[
             lo, _lane_top(lo, hi, trend_h_pt - top_pt - m["b"], lane_pt)])
-    if tick_vals:
-        fig1.add_trace(go.Scatter(x=[tick_vals[0]], y=[None], xaxis="x2", mode="lines",
-                                  hoverinfo="skip", showlegend=False))
-        trend_layout["xaxis2"] = dict(
-            overlaying="x", side="top", matches="x", range=x_range, tickvals=tick_vals,
-            ticktext=tick_text, tickfont=dict(size=6 * k, color=c["axis"]), ticks="outside",
-            ticklen=2.5 * k, tickcolor=c["tick"], tickwidth=0.75 * k, showgrid=False,
-            showline=False, zeroline=False)
+    _add_carbon_axis(fig1, trend_layout, tick_vals, tick_text, x_range)
     fig1.update_layout(**trend_layout)
 
     # Difference: hatched red above, dotted blue below, the ink line, ±thresholds, spikes.
@@ -1533,19 +1551,15 @@ def _generate_analysis_report_pdf(params: dict, content: dict, comments: list[di
     t1}]``, rendered and escaped). Always one Letter page
     (``report_layout.plan`` sizes the charts and shortens what cannot fit):
     two Plotly charts rendered as PNG in the page, converted with
-    xhtml2pdf."""
+    xhtml2pdf. v8.1: content with ``no_comparison`` is
+    ``_generate_chromatogram_report_pdf``."""
+    if content.get("no_comparison"):
+        return _generate_chromatogram_report_pdf(params, content, comments)
     doc_name = str(params.get("doc_name") or "GC Analysis")
     lab_id = str(params.get("lab_id") or "")
     conclusion = str(params.get("conclusion") or "").strip() or content["conclusion_generated"]
     conf = settings_mod.load_settings()
-
-    logo_b64 = ""
-    logo_path = conf.get("analysis_report_logo", "").strip()
-    if logo_path:
-        try:
-            logo_b64 = base64.b64encode(Path(logo_path).read_bytes()).decode("ascii")
-        except Exception:
-            pass
+    logo_b64 = _report_logo_b64(conf)
 
     footer_lines = _report_footer_lines(content)
     region_lines, note_lines = _report_comment_lines(comments, content["ladder"])
@@ -1569,8 +1583,25 @@ def _generate_analysis_report_pdf(params: dict, content: dict, comments: list[di
         logo_b64=logo_b64, bullets_text=content["text"], conclusion=conclusion,
         comments=comments or [], ladder=content["ladder"], footer_lines=footer_lines,
         plan=plan, spikes_marked=bool(content.get("spikes")))
+    return _report_page_pdf(page, lab_id, lambda: _report_figures(
+        content, lab_id or "Sample", params.get("overlay_standards") or [], conf)[0])
 
-    # xhtml2pdf (replaces QPrinter from the desktop app): US Letter, one page.
+
+def _report_logo_b64(conf: dict) -> str:
+    """The report logo (``analysis_report_logo``) as base64, '' when unset or unreadable."""
+    logo_path = conf.get("analysis_report_logo", "").strip()
+    if logo_path:
+        try:
+            return base64.b64encode(Path(logo_path).read_bytes()).decode("ascii")
+        except Exception:
+            pass
+    return ""
+
+
+def _report_page_pdf(page: str, lab_id: str, fallback_fig) -> bytes:
+    """A report page's HTML as the PDF: xhtml2pdf (replaces QPrinter from the
+    desktop app), US Letter, one page; without it (or on its errors) the
+    chart *fallback_fig()* draws, as a kaleido PDF."""
     if xhtml2pdf_pisa is not None:
         report_layout.fonts()
         pdf_buffer = io.BytesIO()
@@ -1588,12 +1619,88 @@ def _generate_analysis_report_pdf(params: dict, content: dict, comments: list[di
         LOGGER.warning("xhtml2pdf conversion had errors, falling back to PNG")
 
     LOGGER.warning("xhtml2pdf not available, falling back to kaleido single-chart PDF")
-    fig1, _fig2 = _report_figures(content, lab_id or "Sample",
-                                  params.get("overlay_standards") or [], conf)
     try:
-        return pio.to_image(fig1, format="pdf", width=1920, height=1080, scale=2)
+        return pio.to_image(fallback_fig(), format="pdf", width=1920, height=1080, scale=2)
     except Exception:
         return page.encode("utf-8")
+
+
+def _chromatogram_footer_lines(content: dict) -> list[str]:
+    """What a report with no comparison was drawn with (the version is added
+    by the page)."""
+    return [f"Graph: retention time to {content['params_used']['x_max_min']:g} min",
+            "Comparison: none"]
+
+
+def _chromatogram_figure(content: dict):
+    """The one chart of a report with no comparison (v8.1): the sample's
+    chromatogram as the coloured line, up to the graph limit, the carbon
+    numbers of the report's ladder on the top axis; the comparison charts'
+    axes, type and margins. Sized by the caller (``to_image``) at
+    ``_REPORT_PX_PER_PT`` px per printed point."""
+    s = content["series"]
+    c = _RC
+    k = _REPORT_PX_PER_PT
+    m = _REPORT_MARGIN_PT
+    t = np.asarray(s["t"], dtype=float)
+    y = np.asarray(s["sample"], dtype=float)
+    x_range = [float(t[0]), float(content["params_used"]["x_max_min"])]
+    axis = _report_axis()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=t.tolist(), y=y.tolist(), mode="lines", name="Sample",
+                             line=dict(color=c["sample"], width=1.0 * k)))
+    tick_vals, tick_text = _carbon_ticks(*content["ladder"])
+    top_pt = _REPORT_TOP_PT[0] if tick_vals else _REPORT_TOP_PT[1]
+    lay = dict(template="none", paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
+               font=dict(family=report_layout.chart_font_family(), color=c["axis"], size=6.5 * k),
+               showlegend=False,
+               xaxis=dict(axis, range=x_range,
+                          title=dict(text="Retention time (min)", standoff=2 * k,
+                                     font=dict(size=6.5 * k, color=c["axis"]))),
+               yaxis=dict(axis, tickformat="~s"),
+               margin=dict(l=m["l"] * k, r=m["r"] * k, t=top_pt * k, b=m["b"] * k))
+    shown = y[(t <= x_range[1]) & np.isfinite(y)]
+    if shown.size:
+        lo, hi = min(0.0, float(shown.min())), float(shown.max())
+        lay["yaxis"]["range"] = [lo, hi + (hi - lo) * 0.03 if hi > lo else lo + 1.0]
+    _add_carbon_axis(fig, lay, tick_vals, tick_text, x_range)
+    fig.update_layout(**lay)
+    return fig
+
+
+def _generate_chromatogram_report_pdf(params: dict, content: dict, comments: list[dict]) -> bytes:
+    """The report PDF with no comparison (v8.1): one Letter page
+    (``report_layout.graph_plan`` sizes the chart and lists what fits) with
+    the sample's chromatogram, its marked regions and notes, and a footer;
+    the presentation fields as ``_generate_analysis_report_pdf``'s."""
+    doc_name = str(params.get("doc_name") or "GC Analysis")
+    lab_id = str(params.get("lab_id") or "")
+    conf = settings_mod.load_settings()
+    logo_b64 = _report_logo_b64(conf)
+    footer_lines = _chromatogram_footer_lines(content)
+    region_lines, note_lines = _report_comment_lines(comments, content["ladder"])
+    plan = report_layout.graph_plan(doc_name=doc_name, lab_id=lab_id, region_lines=region_lines,
+                                    note_lines=note_lines, footer_lines=footer_lines,
+                                    has_logo=bool(logo_b64))
+    if plan.shortened:
+        LOGGER.info("Report for %s shortened to fit one page: %s", lab_id or "a sample",
+                    "; ".join(plan.shortened))
+    fig = _chromatogram_figure(content)
+    k = _REPORT_PX_PER_PT
+    try:
+        png = fig.to_image(format="png", width=round(plan.width * k),
+                           height=round(plan.trend_h * k), scale=2)
+    except Exception as exc:
+        LOGGER.error("Chart render failed: %s", exc)
+        raise RuntimeError(f"Could not render Plotly charts: {exc}") from exc
+    now = datetime.now()
+    page = report_layout.render_graph_html(
+        doc_name=doc_name, lab_id=lab_id, date_display=now.strftime("%B %d, %Y").replace(" 0", " "),
+        datetime_str=now.strftime("%Y-%m-%d %H:%M"),
+        img_b64=base64.b64encode(png).decode("ascii"), logo_b64=logo_b64,
+        footer_lines=footer_lines, app_version=version.APP_VERSION, plan_=plan,
+        region_lines=region_lines, note_lines=note_lines, sample_label=lab_id)
+    return _report_page_pdf(page, lab_id, lambda: fig)
 
 
 # ===================================================================== #
@@ -2553,7 +2660,11 @@ def api_comparison_standard_trace(name: str):
 def api_add_comparison_standard():
     """Admin: make a stored sample's CDF (``sample_id``, its current
     revision's file) a comparison standard ``name``. Server paths are never
-    accepted (``source_path`` is refused)."""
+    accepted (``source_path`` is refused). v8.1: tagged with an instrument as
+    it is added (``standards.register``): no ``instrument_id`` = the sample's
+    own GC, an id = that GC (404 if unknown, nothing copied), ``null`` =
+    untagged. ``{status, path, standard}`` (``standard`` as ``/api/standards``
+    lists it); the same name again replaces the file and re-tags it."""
     body, err = _admin_json_body()
     if err:
         return err
@@ -2567,8 +2678,14 @@ def api_add_comparison_standard():
         return _error(problem)
     if body.get("sample_id") is None:
         return _error("sample_id and name are required")
+    inst = body.get("instrument_id")
+    if inst is not None and not isinstance(inst, str):
+        return _error("instrument_id must be an instrument id or null")
     data, db = _hub()
     s = _sample_or_404(body["sample_id"], db)
+    inst = s["instrument_id"] if "instrument_id" not in body else (inst or None)
+    if inst is not None and store.instruments.get(inst, db=db) is None:
+        return _error(f"Unknown instrument {inst!r}", 404)
     src = _revision_cdf(s, store.get_revision(s["id"], db=db) if s["current_revision"] else None,
                         data)
     try:
@@ -2576,8 +2693,10 @@ def api_add_comparison_standard():
         comp_dir.mkdir(parents=True, exist_ok=True)
         dest = comp_dir / f"{name}.CDF"
         shutil.copy2(str(src), str(dest))
-        LOGGER.info("Comparison standard %s added from sample %s by %s", name, s["id"], _who())
-        return jsonify({"status": "ok", "path": str(dest)})
+        row = standards.register(comp_dir, dest, inst, db=db)
+        LOGGER.info("Comparison standard %s added from sample %s (tagged %s) by %s", name, s["id"],
+                    inst, _who())
+        return jsonify({"status": "ok", "path": str(dest), "standard": row})
     except Exception as exc:
         return _route_failure(exc)
 
@@ -2585,7 +2704,9 @@ def api_add_comparison_standard():
 @app.route("/api/comparison-standard/<name>", methods=["DELETE"])
 def api_delete_comparison_standard(name: str):
     """Admin (JSON body with the password): delete a standard from the
-    standards folder."""
+    standards folder, and its row from the standards list (v8.1.1;
+    ``standards.forget``). A listed standard whose file is already gone
+    (left behind by a delete or rename before v8.1.1) is taken off the list."""
     body, err = _admin_json_body()
     if err:
         return err
@@ -2595,10 +2716,18 @@ def api_delete_comparison_standard(name: str):
     if problem:
         return _error(problem)
     try:
+        _data, db = _hub()
+        comp_dir = _fixed_standards_dir()
         target = _standard_file(name)
         if target is None:
-            return _error(f"Standard not found: {name}", 404)
+            gone = sum(standards.forget(comp_dir, comp_dir / f"{name}{sfx}", db=db)
+                       for sfx in (".CDF", ".cdf"))
+            if not gone:
+                return _error(f"Standard not found: {name}", 404)
+            LOGGER.info("Comparison standard %s (file already gone) removed by %s", name, _who())
+            return jsonify({"status": "ok"})
         target.unlink()
+        standards.forget(comp_dir, target, db=db)
         LOGGER.info("Comparison standard %s deleted by %s", name, _who())
         return jsonify({"status": "ok"})
     except Exception as exc:
@@ -2625,7 +2754,11 @@ def api_rename_comparison_standard():
         new_path = old_path.parent / f"{new_name}{old_path.suffix}"
         if new_path.exists():
             return _error(f"A standard named {new_name} already exists", 409)
+        _data, db = _hub()
         old_path.rename(new_path)
+        # v8.1.1: its row (and GC tag) follows; never a "missing" old name
+        standards.moved(old_path.parent, old_path, new_path, db=db)
+        LOGGER.info("Comparison standard %s renamed to %s by %s", old_name, new_name, _who())
         return jsonify({"status": "ok", "path": str(new_path)})
     except Exception as exc:
         return _route_failure(exc)
@@ -2654,7 +2787,9 @@ def api_analysis():
     try:
         conf = settings_mod.load_settings()
         try:
-            content = _report_content(s, _report_request(body), conf, db)
+            # Compare always has a standard: no_comparison is a report option only
+            content = _report_content(s, dict(_report_request(body), no_comparison=False),
+                                      conf, db)
         except ValueError as exc:
             return _error(str(exc), 404 if "not found" in str(exc) else 400)
         series = content["series"]
@@ -2799,8 +2934,10 @@ def _report_request(src: dict) -> dict:
     limit (top-level, or under ``params`` as a queue item captured them),
     the ranges (``None`` when absent: saved defaults; ``[]``: no ranges),
     the document name, overlay standards and an operator-edited conclusion.
-    Anything else, a client ``bullets`` string included, is dropped. A
-    conclusion longer than ``comments.CONCLUSION_MAX`` raises
+    v8.1: ``no_comparison: true`` (exactly ``true``) asks for the sample's
+    chromatogram alone; the standard, ranges, overlays and conclusion are
+    then dropped. Anything else, a client ``bullets`` string included, is
+    dropped. A conclusion longer than ``comments.CONCLUSION_MAX`` raises
     ``ReportRequestError`` (every report path comes through here)."""
     src = src or {}
     problem = comments_mod.conclusion_problem(src.get("conclusion"))
@@ -2813,7 +2950,10 @@ def _report_request(src: dict) -> dict:
         "conclusion": str(src.get("conclusion") or ""),
         "overlay_standards": list(src.get("overlay_standards") or []),
         "ranges": src.get("ranges") if isinstance(src.get("ranges"), list) else None,
+        "no_comparison": src.get("no_comparison") is True,
     }
+    if out["no_comparison"]:
+        out.update(standard_name="", conclusion="", overlay_standards=[], ranges=[])
     for key in _REPORT_PARAM_KEYS:
         value = src.get(key, captured.get(key))
         if value is not None and value != "":
@@ -2887,7 +3027,9 @@ def _report_content(sample: dict, params: dict, conf: dict, db) -> dict:
     comments, ranges, standard_name, ladder, spikes, series}`` (``series``:
     the arrays the charts draw). ``ValueError`` with a user-facing message on
     a missing standard or a bad parameter, ``SampleNotFound`` on a missing
-    CDF."""
+    CDF. A request with ``no_comparison`` is ``_chromatogram_content``."""
+    if params.get("no_comparison"):
+        return _chromatogram_content(sample, params, conf, db)
     data = paths.data_dir()
     standard_name = str(params.get("standard_name") or "").strip()
     if not standard_name:
@@ -2919,6 +3061,34 @@ def _report_content(sample: dict, params: dict, conf: dict, db) -> dict:
         "series": {"t": np.asarray(t, dtype=float), "sample": np.asarray(y_sample),
                    "standard": np.asarray(y_std), "diff": out["diff"],
                    "spike_diff": out["spike_diff"]},
+    }
+
+
+def _chromatogram_content(sample: dict, params: dict, conf: dict, db) -> dict:
+    """``_report_content`` for a report with no comparison (v8.1): the
+    chromatogram of the sample's current-revision CDF as Overview draws it
+    (``/api/samples/<id>/trace``), the revision's ladder, the graph limit
+    (``params_used``) and the comments; no standard, ranges, findings or
+    conclusion. ``no_comparison`` marks it for the PDF."""
+    data = paths.data_dir()
+    sample_p = _revision_cdf(sample, store.get_revision(sample["id"], db=db)
+                             if sample["current_revision"] else None, data)
+    params_used = analysis_core.report_params(params, conf)
+    cal_times, cal_carbons = _revision_ladder(sample, conf, db, data)
+    t, y = distill.gc_xy_from_cdf(sample_p)
+    return {
+        "items": [],
+        "text": "",
+        "conclusion_generated": "",
+        "windows": [],
+        "params_used": params_used,
+        "comments": _comments_for_report(sample["id"], db),
+        "ranges": [],
+        "standard_name": None,
+        "ladder": ([float(x) for x in cal_times], [int(x) for x in cal_carbons]),
+        "spikes": [],
+        "series": {"t": np.asarray(t, dtype=float), "sample": np.asarray(y, dtype=float)},
+        "no_comparison": True,
     }
 
 
@@ -3479,7 +3649,7 @@ def api_qbench_upload():
                 rev_no = sample_row["current_revision"]
                 item_revs[idx] = rev_no
                 standard_name = str(item.get("standard_name") or "").strip()
-                if not standard_name:
+                if not standard_name and item.get("no_comparison") is not True:
                     fail_count += 1
                     _emit_item(idx, lab_id, "error", msg="No comparison standard was chosen.")
                     continue

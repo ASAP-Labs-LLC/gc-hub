@@ -23,7 +23,8 @@ lab ID … yet", with a link to search). COA Reviewer and other apps link to
 API (session)::
 
     GET /api/lab/<lab_id> → {lab_id, sample_id, runs: [{sample_id, lab_id,
-        instrument, instrument_name, injection_dt, status}]}   newest first; 404
+        instrument, instrument_name, injection_dt, status, run_no,
+        display_name}]}   newest first; 404
 
 **Resolution.** The lab ID is matched exactly, else ASCII case-insensitively
 (SQLite NOCASE: non-ASCII letters must match exactly; never a substring), both
@@ -31,6 +32,12 @@ through an index (``store.samples.with_lab_id``). The run opened is the one with
 latest ``injection_dt`` among the final runs, else among all runs (ties: the
 newest id), across instruments. The URL is decoded once, by the server; ``/``
 cannot be in a lab ID (the route does not match it).
+
+**Run numbers** (v8.1). Each run carries the Samples list's label: ``run_no``
+is its order among its instrument's injections of the same exact lab ID
+(oldest = 1, by ``injection_dt`` then id, as app.py's ``_run_numbers``) and
+``display_name`` is the lab ID, with `` (N)`` from the second run on. Settings
+uses it to find the run a copied "DIESEL STD (30)" label names.
 """
 from __future__ import annotations
 
@@ -72,6 +79,27 @@ def pick(runs: list[dict]) -> Optional[dict]:
     return (finals or runs or [None])[0]
 
 
+def run_numbers(runs: list[dict]) -> dict:
+    """``{sample id: run number}`` for ``runs`` (every run of their lab IDs,
+    as ``find_runs`` returns them): the order among the same instrument's
+    injections of the same exact lab ID, oldest = 1, by ``injection_dt`` then
+    id (no time first, as SQLite sorts NULL). The Samples list's numbers
+    (app.py ``_run_numbers``)."""
+    out: dict = {}
+    seen: dict = {}
+    for r in sorted(runs, key=lambda r: (r["injection_dt"] is not None, r["injection_dt"] or "",
+                                         r["id"])):
+        key = (r["instrument_id"], r["lab_id"])
+        seen[key] = seen.get(key, 0) + 1
+        out[r["id"]] = seen[key]
+    return out
+
+
+def display_name(lab_id: str, run_no: int) -> str:
+    """The list's label: ``40304``, then ``40304 (2)`` from the second run."""
+    return lab_id if run_no <= 1 else f"{lab_id} ({run_no})"
+
+
 def resolve(lab_id: str, *, db) -> Optional[dict]:
     """``{lab_id, sample_id, runs}`` for a lab ID, or None."""
     runs = find_runs(lab_id, db=db)
@@ -84,12 +112,15 @@ def resolve(lab_id: str, *, db) -> Optional[dict]:
         if iid not in names:
             inst = store.instruments.get(iid, db=db) or {}
             names[iid] = inst.get("name") or iid
+    run_no = run_numbers(runs)
     return {
         "lab_id": chosen["lab_id"],
         "sample_id": chosen["id"],
         "runs": [{"sample_id": r["id"], "lab_id": r["lab_id"], "instrument": r["instrument_id"],
                   "instrument_name": names[r["instrument_id"]],
-                  "injection_dt": r["injection_dt"], "status": r["status"]} for r in runs],
+                  "injection_dt": r["injection_dt"], "status": r["status"],
+                  "run_no": run_no[r["id"]], "display_name": display_name(r["lab_id"], run_no[r["id"]])}
+                 for r in runs],
     }
 
 

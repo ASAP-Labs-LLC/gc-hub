@@ -375,6 +375,101 @@ def test_conclusion_edit_add_to_queue_export_and_download(env):
     assert wait(lambda: js(drv, "return document.getElementById('report-queue-btn').hidden"))
 
 
+RQ_VISIBLE = """const s = document.querySelector('[data-testid=report-queue-sheet]');
+  const body = s.querySelector('.rq-body').getBoundingClientRect();
+  return Array.from(s.querySelectorAll('[data-testid=rq-item]'))
+    .filter(li => { const r = li.getBoundingClientRect(); return r.top >= body.top - 1 && r.bottom <= body.bottom + 1; })
+    .length;"""
+
+
+def test_the_report_queue_shows_many_reports_at_once(env):
+    """v8.1.1: a queue row is the lab ID and its standard on one line and its
+    ranges on one (all of them on hover), with Update beside the short note
+    when the open Compare view has moved on, and the sheet uses the window's
+    height: 8 reports show at once at 1440x900, 6 at 1366x768, none wider
+    than a phone."""
+    drv = open_page(env)
+    ranges = [{"label": "Lighter", "c_start": 5, "c_end": 11}, {"label": "Heavier", "c_start": 22, "c_end": 44},
+              {"label": "Bio", "c_start": 19, "c_end": 21}]
+    items = [{"sample_id": env["sid"] if i < 3 else 900001 + i, "lab_id": f"4137{i}",
+              "sample_name": "GC Analysis Report", "standard_name": "R99 Standard GC-2",
+              "conclusion": "Edited." if i % 2 else "", "params": {"x_max_min": 7}, "ranges": ranges,
+              "overlay_standards": [], "added_at": "2026-10-14T12:00:00Z", "sent_at": None}
+             for i in range(10)]
+    js(drv, "sessionStorage.setItem('gc.reportQueue', arguments[0]);", json.dumps(items))
+    drv.refresh()
+    assert wait(lambda: js(drv, "return !document.getElementById('report-queue-btn').hidden"))
+    js(drv, "document.getElementById('report-queue-btn').click()")
+    assert wait(lambda: js(drv, "return document.querySelectorAll('[data-testid=rq-item]').length") == 10)
+    assert wait(lambda: js(drv, "return document.querySelectorAll('[data-testid=rq-update]').length") == 3)
+    frame(drv, "report queue, 10 reports")
+    shot(drv, "report-queue-1440x900-light.png")
+    assert js(drv, RQ_VISIBLE) >= 8, js(drv, RQ_VISIBLE)
+    rng = "document.querySelector('[data-testid=rq-ranges]')"
+    assert js(drv, f"return {rng}.title") == js(drv, f"return {rng}.textContent")
+    assert js(drv, f"return {rng}.getBoundingClientRect().height") < 24          # one line
+    sheet = "document.querySelector('[data-testid=report-queue-sheet]')"
+    assert js(drv, f"return {sheet}.getBoundingClientRect().width") >= 700      # not shell.css's 460px
+    assert js(drv, f"return {rng}.scrollWidth <= {rng}.clientWidth + 1"), "three ranges fit whole"
+    for size, least in (((1366, 768), 6), ((390, 844), 1)):
+        drv.execute_cdp_cmd("Emulation.setDeviceMetricsOverride",
+                            {"width": size[0], "height": size[1], "deviceScaleFactor": 1, "mobile": size[0] < 600})
+        time.sleep(0.3)
+        assert js(drv, RQ_VISIBLE) >= least, (size, js(drv, RQ_VISIBLE))
+        assert js(drv, "const s = document.querySelector('[data-testid=report-queue-sheet] .rq-body');"
+                       "return s.scrollWidth <= s.clientWidth + 1;"), size
+        shot(drv, f"report-queue-{size[0]}x{size[1]}-light.png")
+    js(drv, "window.confirm = () => true; document.querySelector('[data-testid=rq-clear]').click()")
+    assert wait(lambda: js(drv, "return GCReportQueue.count()") == 0)
+    js(drv, "document.querySelector('[data-testid=report-queue-sheet]').close()")
+
+
+def test_export_with_no_comparison_is_the_chromatogram_alone(env):
+    """v8.1: Export report's "No comparison" sends no standard, conclusion,
+    ranges or other standards; the PDF is the chromatogram alone; Add to
+    queue keeps it so."""
+    drv = open_page(env)
+    sel = "document.querySelector('[data-testid=export-standard]')"
+    js(drv, "document.getElementById('h-export').click()")
+    assert wait(lambda: js(drv, "return document.querySelector('[data-testid=export-sheet]').open"))
+    opts = js(drv, f"return Array.from({sel}.options).map(o => [o.value, o.textContent])")
+    assert opts[-1] == [":none", "No comparison (chromatogram only)"], opts
+    js(drv, f"const s = {sel}; s.value = ':none'; s.dispatchEvent(new Event('change'));")
+    assert js(drv, "return document.querySelector('[data-testid=export-conclusion]').textContent") \
+        .startswith("No comparison: the report prints the chromatogram")
+    assert js(drv, "return document.querySelector('[data-testid=export-sheet] details.more').hidden")
+    assert js(drv, "return document.querySelector('[data-testid=export-params]').textContent") \
+        .startswith("Built with: The chromatogram up to ")
+    frame(drv, "export sheet, no comparison")
+    shot(drv, "export-sheet-no-comparison-1440x900-light.png")
+    n = js(drv, "return window.__calls.length")
+    js(drv, "document.querySelector('[data-testid=export-download]').click()")
+    assert wait(lambda: js(drv, "return document.getElementById('toast').textContent").endswith("downloaded"), 90)
+    body = json.loads(js(drv, "return window.__calls.slice(arguments[0]).find(c => c.url === '/api/export-analysis-report').body", n))
+    assert body["no_comparison"] is True and body["standard_name"] == "", body
+    assert body["conclusion"] == "" and body["overlay_standards"] == [] and body["ranges"] == [], body
+    text = pdf_text(drv, body)
+    assert "GC chromatogram, no comparison" in text and "Chromatogram" in text, text
+    for absent in ("Findings", "Conclusion", "compared with"):
+        assert absent not in text, absent
+
+    # the same sheet adds it to the queue with no comparison
+    js(drv, "document.getElementById('h-export').click()")
+    assert wait(lambda: js(drv, "return document.querySelector('[data-testid=export-sheet]').open"))
+    js(drv, f"const s = {sel}; s.value = ':none'; s.dispatchEvent(new Event('change'));")
+    js(drv, "document.querySelector('[data-testid=export-queue]').click()")
+    toast = wait(lambda: js(drv, "return document.getElementById('toast').textContent"))
+    assert toast == "Added 40329 to the report queue, with no comparison", toast
+    items = json.loads(js(drv, "return sessionStorage.getItem('gc.reportQueue')"))
+    assert len(items) == 1 and items[0]["no_comparison"] is True and items[0]["standard_name"] == ""
+    js(drv, "document.getElementById('report-queue-btn').click()")
+    assert wait(lambda: js(drv, "return document.querySelector('[data-testid=rq-ranges]').textContent")) \
+        == "The chromatogram only: no ranges or findings"
+    js(drv, "window.confirm = () => true; document.querySelector('[data-testid=rq-clear]').click()")
+    assert wait(lambda: js(drv, "return GCReportQueue.count()") == 0)
+    js(drv, "document.querySelector('[data-testid=report-queue-sheet]').close()")
+
+
 def pdf_text(drv, body):
     """The text of the PDF the hub builds for this export body (fetched in the
     page, so with its session), whitespace collapsed."""
@@ -795,3 +890,68 @@ def test_annotate_comments_retheme_and_unmount(env):
     errors = [e["message"] for e in drv.get_log("browser")
               if e["level"] == "SEVERE" and "favicon.ico" not in e["message"]]
     assert errors == [], errors
+
+
+def test_a_bulk_report_uses_the_rows_best_fit(env):
+    """v8.2: the Samples list's row carries best_fit as {label, score}; a
+    report made without a mounted view (bulk Add to report queue, Download
+    reports) uses that standard, not the first one listed."""
+    drv = open_page(env)
+    names = js(drv, "return window.__h.standards.map(s => s.name)")
+    assert "Diesel ULSD Std" in names and names[0] != "Diesel ULSD Std", names
+    std = js(drv, "return GCCompare.reportItem({sample: {sample_id: 987001, lab_id: 'x',"
+                  " best_fit: {label: 'Diesel ULSD Std', score: 0.97}},"
+                  " standards: window.__h.standards, settings: window.__h.settings}).standard_name")
+    assert std == "Diesel ULSD Std", std
+
+
+def test_patterns_overlay_a_case_on_the_trend(env):
+    """v8.3: Compare's Patterns list the cases we see most; picking one draws
+    it on the Trend chart (the standard on screen as that case would show
+    it, placed with the run's carbon ladder) with its notes; picking it again
+    takes it off; Water is a flat curve."""
+    drv = open_page(env)
+    pats = js(drv, "return [...document.querySelectorAll('button[data-testid^=compare-pattern-]')].map(b => b.textContent)")
+    assert len(pats) == 7 and pats[0] == "Gasoline in diesel" and pats[-1] == "Water: a flat curve", pats
+    names = "return document.querySelector('[data-testid=compare-trend]').data.map(t => t.name)"
+    before = js(drv, names)
+    js(drv, "document.querySelector('[data-testid=compare-pattern-gas]').click();")
+    assert wait(lambda: "Gasoline in diesel (sketch)" in js(drv, names))
+    assert js(drv, "return document.querySelector('[data-testid=compare-pattern-gas]').getAttribute('aria-pressed')") == "true"
+    note = "return document.querySelector('[data-testid=compare-pattern-note]').textContent"
+    assert "Lighter C5–C11" in js(drv, note) and "flash" in js(drv, note)
+    assert js(drv, "return document.querySelector('[data-testid=compare-legend-pattern]').textContent") \
+        == "Gasoline in diesel (sketch)"
+    # the overlay is the standard, changed where gasoline shows: more early, the same late
+    got = js(drv, """const d = document.querySelector('[data-testid=compare-trend]').data;
+        const std = d[0]; const pat = d.find(t => t.name === 'Gasoline in diesel (sketch)');
+        const n = std.x.length; const at = (f) => Math.floor(n * f);
+        const early = [...Array(Math.floor(n * 0.15)).keys()];
+        return {n, same: pat.x.length === n,
+                lateStd: std.y[at(0.8)], latePat: pat.y[at(0.8)],
+                earlyStd: early.reduce((a, i) => a + std.y[i], 0), earlyPat: early.reduce((a, i) => a + pat.y[i], 0)};""")
+    assert got["same"] and abs(got["latePat"] - got["lateStd"]) <= 1e-6 * max(1, abs(got["lateStd"])), got
+    assert got["earlyPat"] > got["earlyStd"], got
+    frame(drv, "compare with a pattern")
+    shot(drv, "compare-pattern-gas-1440x900-light.png")
+    js(drv, "document.querySelector('[data-testid=compare-pattern-gas]').click();")         # again: off
+    assert wait(lambda: js(drv, names) == before)
+    assert js(drv, "return document.querySelector('[data-testid=compare-pattern-gas]').getAttribute('aria-pressed')") == "false"
+    js(drv, "document.querySelector('[data-testid=compare-pattern-water]').click();")
+    assert wait(lambda: "Water: a flat curve (sketch)" in js(drv, names))
+    flat = js(drv, """const d = document.querySelector('[data-testid=compare-trend]').data;
+        const w = d.find(t => t.name === 'Water: a flat curve (sketch)');
+        return [Math.max(...w.y), Math.max(...d[0].y)];""")
+    assert flat[0] < 0.12 * flat[1], flat
+    assert "water content" in js(drv, note)
+    js(drv, "document.querySelector('[data-testid=compare-pattern-water]').click();")
+
+
+def test_the_annotate_selection_shows_in_the_dark_theme(env):
+    """v8.3: the drag box Annotate draws is the theme's text colour (Plotly's
+    default dark outline vanished on the dark chart)."""
+    drv = open_page(env, theme="dark")
+    col = js(drv, "const l = document.querySelector('[data-testid=compare-trend]').layout;"
+                  "return l.newselection && l.newselection.line && l.newselection.line.color")
+    text = js(drv, "return getComputedStyle(document.documentElement).getPropertyValue('--text').trim()")
+    assert col == text, (col, text)

@@ -39,17 +39,21 @@
         ranges were captured fall back to *fallbackOverlays* (current UI
         state); with neither, the key is omitted so the server uses its saved
         defaults. Parameters: the item's captured `params`, else
-        *fallbackParams* (current state), flattened to top-level keys. */
+        *fallbackParams* (current state), flattened to top-level keys.
+        v8.1: an item with `no_comparison` asks for the chromatogram alone:
+        no standard, conclusion, ranges or other standards are sent. */
     function buildReportItemPayload(item, fallbackOverlays, fallbackParams) {
+        const none = item.no_comparison === true;
         const payload = {
             sample_id: item.sample_id,
-            standard_name: item.standard_name,
-            conclusion: item.conclusion || '',
+            standard_name: none ? '' : item.standard_name,
+            conclusion: none ? '' : (item.conclusion || ''),
             doc_name: item.sample_name || 'GC Analysis',
             lab_id: item.lab_id,
-            overlay_standards: item.overlay_standards || [],
+            overlay_standards: none ? [] : (item.overlay_standards || []),
         };
-        const ranges = Array.isArray(item.ranges) ? item.ranges : fallbackOverlays;
+        if (none) payload.no_comparison = true;
+        const ranges = none ? [] : (Array.isArray(item.ranges) ? item.ranges : fallbackOverlays);
         if (Array.isArray(ranges)) payload.ranges = rangesForPayload(ranges);
         const params = (item.params && typeof item.params === 'object')
             ? captureReportParams(item.params)
@@ -86,7 +90,8 @@
         and a conclusion edited on screen. A conclusion typed only in the
         export sheet is the item's own and never counts. */
     function reportDiffers(item, current) {
-        if (!item || !current) return false;
+        // v8.1: a report with no comparison doesn't follow the Compare view
+        if (!item || !current || item.no_comparison === true) return false;
         if (String(item.standard_name || '') !== String(current.standard_name || '')) return true;
         const a = captureReportParams(item.params);
         const b = captureReportParams(current.params);

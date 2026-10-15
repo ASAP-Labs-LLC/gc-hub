@@ -41,37 +41,42 @@
     }
 
     /** A queue item from what the page captured, or null when it can't be a
-        report (no sample, no standard). Bullets are never kept. */
+        report (no sample, no standard). Bullets are never kept. v8.1: with
+        `no_comparison: true` the report is the chromatogram alone (no
+        standard, conclusion, ranges or other standards). */
     function normalizeItem(raw, now) {
         if (!raw || typeof raw !== 'object') return null;
         const sid = toId(raw.sample_id);
-        const std = typeof raw.standard_name === 'string' ? raw.standard_name.trim() : '';
-        if (sid === null || !std) return null;
+        const none = raw.no_comparison === true;
+        const std = !none && typeof raw.standard_name === 'string' ? raw.standard_name.trim() : '';
+        if (sid === null || (!std && !none)) return null;
         const item = {
             id: 's' + sid,
             sample_id: sid,
             lab_id: raw.lab_id != null ? String(raw.lab_id) : '',
             sample_name: raw.sample_name ? String(raw.sample_name) : 'GC Analysis',
             standard_name: std,
-            conclusion: String(raw.conclusion || '').trim(),
+            conclusion: none ? '' : String(raw.conclusion || '').trim(),
             params: payloadLib.captureReportParams(raw.params || {}),
-            overlay_standards: Array.isArray(raw.overlay_standards)
+            overlay_standards: !none && Array.isArray(raw.overlay_standards)
                 ? raw.overlay_standards.map(String) : [],
             added_at: raw.added_at || now || new Date().toISOString(),
             sent_at: raw.sent_at || null,
         };
-        if (Array.isArray(raw.ranges)) item.ranges = payloadLib.rangesForPayload(raw.ranges);
+        if (none) item.no_comparison = true;
+        else if (Array.isArray(raw.ranges)) item.ranges = payloadLib.rangesForPayload(raw.ranges);
         // v6.0.0: a report whose upload failed keeps the reason (one line) until
         // it is retried, re-added or removed; only then does the key exist
         const err = raw.upload_error;
         if (!item.sent_at && err && typeof err === 'object' && typeof err.msg === 'string') {
             item.upload_error = { msg: failureLine(err.msg) || 'Failed', at: err.at || null };
         }
-        // key order: id, sample_id, lab_id, sample_name, standard_name,
+        // key order: id, sample_id, lab_id, sample_name, standard_name, no_comparison,
         // conclusion, params, ranges, overlay_standards, added_at, sent_at, upload_error
         const ordered = {};
-        for (const k of ['id', 'sample_id', 'lab_id', 'sample_name', 'standard_name', 'conclusion',
-                         'params', 'ranges', 'overlay_standards', 'added_at', 'sent_at', 'upload_error']) {
+        for (const k of ['id', 'sample_id', 'lab_id', 'sample_name', 'standard_name', 'no_comparison',
+                         'conclusion', 'params', 'ranges', 'overlay_standards', 'added_at', 'sent_at',
+                         'upload_error']) {
             if (k in item) ordered[k] = item[k];
         }
         return ordered;
@@ -80,6 +85,24 @@
     /** The upload/ZIP payloads: report_payload.js's format, unchanged. */
     function payloads(items) {
         return (items || []).map(it => payloadLib.buildReportItemPayload(it, undefined, undefined));
+    }
+
+    // v8.2: a queued report re-opened on the Samples page. Compare takes the
+    // restore once, for its sample (compare_logic.js takeRestore, same key).
+    const RESTORE_KEY = 'gc.compare.restore';
+    /** Where a queue row opens its sample: {url, restore}. Compare on the
+        report's standard, restoring its parameters, its ranges (when it
+        captured any) and its edited conclusion; a report with no comparison
+        opens the sample's Overview (nothing to restore). */
+    function openTarget(item) {
+        const sid = item.sample_id;
+        if (item.no_comparison || !item.standard_name) return { url: '/samples/' + sid, restore: null };
+        const restore = { sample_id: String(sid), standard: item.standard_name,
+                          conclusion: String(item.conclusion || ''),
+                          params: payloadLib.captureReportParams(item.params || {}) };
+        if (Array.isArray(item.ranges)) restore.ranges = payloadLib.rangesForPayload(item.ranges);
+        return { url: '/samples/' + sid + '/compare?standard=' + encodeURIComponent(item.standard_name),
+                 restore };
     }
 
     function createStore(storage, key) {
@@ -203,7 +226,8 @@
 
     function addedText(item, replaced) {
         return (replaced ? `Updated ${nameOf(item)} in` : `Added ${nameOf(item)} to`) +
-            ` the report queue, compared with ${item.standard_name}`;
+            (item.no_comparison ? ' the report queue, with no comparison'
+                : ` the report queue, compared with ${item.standard_name}`);
     }
 
     /** The queue sheet's line naming the ranges an item's report prints. */
@@ -211,6 +235,17 @@
         const text = payloadLib.rangesText(ranges);
         if (text === null) return 'Ranges: the saved defaults when it is built';
         return 'Ranges: ' + (text || 'none');
+    }
+
+    /** The queue sheet's two caption lines for an item: what it is compared
+        with (and an edited conclusion), and its ranges. */
+    function itemLines(item) {
+        if (item.no_comparison) {
+            return { meta: 'No comparison', ranges: 'The chromatogram only: no ranges or findings' };
+        }
+        const meta = ['Compared with ' + item.standard_name];
+        if (item.conclusion) meta.push('edited conclusion');
+        return { meta: meta.join(' · '), ranges: rangesLine(item.ranges) };
     }
 
     const STATUS_TEXT = {
@@ -298,8 +333,8 @@
         return { needPassword: false, text };
     }
 
-    const pure = { STORAGE_KEY, UPLOAD_KEY, normalizeItem, payloads, createStore, buttonText,
-        addedText, rangesLine, statusText, isFinished, progress, overallView, failureLine, latestRows, reconcile,
+    const pure = { STORAGE_KEY, UPLOAD_KEY, RESTORE_KEY, normalizeItem, payloads, openTarget, createStore, buttonText,
+        addedText, rangesLine, itemLines, statusText, isFinished, progress, overallView, failureLine, latestRows, reconcile,
         retryText, startRefusal };
     if (typeof module !== 'undefined' && module.exports) module.exports = pure;
     if (typeof document === 'undefined') return;
@@ -500,8 +535,7 @@
         const failedN = items.filter(x => !x.sent_at && x.upload_error).length;
         const retryOff = busy.upload || !!up.watching;
         for (const it of items) {
-            const meta = ['Compared with ' + it.standard_name];
-            if (it.conclusion) meta.push('edited conclusion');
+            const lines = itemLines(it);
             const row = rowFor.get(Number(it.sample_id));
             let state = null;
             if (it.upload_error) {
@@ -518,20 +552,27 @@
             const stale = !!current && payloadLib.reportDiffers(it, current);
             el.list.appendChild(h('li', { 'data-testid': 'rq-item', 'data-id': it.id,
                                           'data-state': it.upload_error ? 'failed' : (it.sent_at ? 'sent' : 'queued') },
+                // v8.1.1: compact: the name and its standard on one line, the
+                // ranges on one (all of them on hover), Update beside its note
                 h('div', { className: 'rq-main' },
-                    h('b', { text: nameOf(it) }),
-                    h('span', { className: 'caption', text: meta.join(' · ') }),
+                    h('div', { className: 'rq-line' },
+                        // v8.2: the name opens the sample as this report shows it
+                        h('a', { className: 'rq-open', href: openTarget(it).url, 'data-testid': 'rq-open',
+                                 title: it.no_comparison ? 'Open this sample' : 'Open in Compare as this report shows it',
+                                 onclick: (ev) => openItem(ev, it) }, h('b', { text: nameOf(it) })),
+                        h('span', { className: 'caption rq-meta', text: lines.meta, title: lines.meta })),
                     h('span', { className: 'caption rq-ranges', 'data-testid': 'rq-ranges',
-                                text: rangesLine(it.ranges) }),
-                    stale ? h('span', { className: 'rq-stale', 'data-testid': 'rq-stale',
-                                        text: 'The open Compare view has changed since this was added.' }) : null,
+                                text: lines.ranges, title: lines.ranges }),
+                    stale ? h('div', { className: 'rq-stale-line' },
+                        h('span', { className: 'rq-stale', 'data-testid': 'rq-stale',
+                                    text: 'The open Compare view has changed since this was added.' }),
+                        h('button', { type: 'button', className: 'btn btn-sm', text: 'Update',
+                            'aria-label': 'Update ' + nameOf(it) + ' from the open Compare view', 'data-testid': 'rq-update',
+                            onclick: () => { store.add(payloadLib.refreshItem(it, current)); } })) : null,
                     it.upload_error ? h('span', { className: 'rq-reason', 'data-testid': 'rq-reason',
                                                   title: it.upload_error.msg,
                                                   text: it.upload_error.msg }) : null),
                 state,
-                stale ? h('button', { type: 'button', className: 'btn btn-sm', text: 'Update from current view',
-                    'aria-label': 'Update ' + nameOf(it) + ' from the open Compare view', 'data-testid': 'rq-update',
-                    onclick: () => { store.add(payloadLib.refreshItem(it, current)); } }) : null,
                 it.upload_error ? h('button', { type: 'button', className: 'btn btn-sm', text: 'Retry',
                     'aria-label': 'Retry ' + nameOf(it), 'data-testid': 'rq-retry', disabled: retryOff,
                     onclick: () => retry([it.id]) }) : null,
@@ -1015,6 +1056,30 @@
         up.needCreds = false;
         el.msg.textContent = 'Sent. The upload carries on.';
         render();
+    }
+
+    // v8.2: a queued report's sample, opened as the report shows it. On the
+    // Samples page the address changes in place (its popstate handler opens
+    // the view and keeps the list's filters); from another page, a navigation.
+    function openItem(ev, item) {
+        if (ev && (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button > 0)) return;   // a new tab: the link
+        if (ev) ev.preventDefault();
+        const tgt = openTarget(item);
+        try {
+            if (tgt.restore) session.setItem(RESTORE_KEY, JSON.stringify(tgt.restore));
+            else session.removeItem(RESTORE_KEY);
+        } catch (_e) { /* no storage: the standard still comes from the address */ }
+        if (sheet && sheet.open) sheet.close();
+        const S = root.GCSamples;
+        const R = root.SamplesRouter;
+        if (S && S.ready && S.state && S.state.route && R && typeof R.build === 'function') {
+            history.pushState(null, '', R.build(Object.assign({}, S.state.route, {
+                sampleId: Number(item.sample_id), view: tgt.restore ? 'compare' : 'overview',
+                standard: tgt.restore ? tgt.restore.standard : null })));
+            root.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+        } else {
+            root.location.assign(tgt.url);
+        }
     }
 
     // ── public API ──────────────────────────────────────────────────────────

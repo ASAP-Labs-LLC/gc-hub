@@ -67,6 +67,7 @@
     /* the nav's step count on a hovered or active item; the version badge */
     --nav-meta:      #475569;
     --badge-fg:      var(--text-muted);
+    --backdrop:      rgba(15, 23, 42, 0.35);  /* v8.3: behind an open sheet */
 
     /* Deviation fill (GC): above = sample higher than the standard */
     --dev-above:       #dc2626;
@@ -129,6 +130,7 @@
 }
 
 :root[data-theme="dark"] {
+    --backdrop:      rgba(0, 0, 0, 0.62);     /* v8.3: dims the dark page (a slate wash lightened it) */
     color-scheme: dark;
 
     --bg:            #0d0d0d;

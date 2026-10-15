@@ -106,6 +106,13 @@ STD_NAME_CHARS = 120                      # the standard's name in the subtitle,
 RANGES_NAME_MIN = 6                       # a range's name in the footer, when shortened
 CHART_HARD = (100.0, 64.0)                # the charts' last floor: for a long Ranges line only
 CONCLUSION_KEEP = 1500                    # the conclusion cap: always printed whole
+# v8.1: the report with no comparison (``graph_plan``): one chart, the chromatogram
+GRAPH_MAX = 400.0                         # its height on a short page
+GRAPH_MIN = 300.0                         # the usual least
+GRAPH_FLOOR = 220.0                       # once the type is at its smallest
+GRAPH_SLACK = 14.0                        # kept back on top of SLACK: a header with a logo, a
+                                          # wrapped title and a long lab ID measures ~6pt short in
+                                          # Arial (the two-chart page's chrome covers it there)
 
 # ── tokens (static/css/tokens.css, light) ────────────────────────────────
 INK = "#0f172a"
@@ -141,6 +148,7 @@ BAND_LABEL_FS = 6.5                        # range labels on both charts (pt)
 BAND_LABEL_PAD = 3.0                       # from the band's left edge (pt)
 BAND_ROW_PT = BAND_LABEL_FS * 1.25         # one row of range labels
 BAND_LANE_PAD = 1.5                         # above and below the label rows
+BAND_ROWS = 3                              # label rows above the data (v8.1.1: names before numbers)
 
 
 def band_lane_pt(rows: int) -> float:
@@ -156,26 +164,35 @@ def band_labels(windows: list[dict], x0: float, x1: float,
                 plot_w_pt: float) -> list[tuple[dict, str, float, int]]:
     """The range labels, one decision for both charts (they share the
     width and the x axis): ``(window, text, x, row)`` per labelled window
-    (``x`` in minutes: a label's left edge, or a tag's centre).
+    (``x`` in minutes: a label box's left edge, or a tag's centre).
 
-    Left to right, each label starts at its band's left edge, or past the
+    Left to right (by where the bands start, whatever order the ranges are
+    listed in: v8.1.1), each label starts at its band's left edge, or past the
     end of an earlier band that overlaps it (so no edge runs through the
     text), and is the first of "<label> Cx–Cy", "<label>", "Cx–Cy" and "Cx–y" that fits
     in the band from there without touching the previous label (row 0).
     A band too narrow for any of them gets its tag, the range's number
     (``index + 1``; the footer's Ranges line names it: ``range_tag``),
     centred on the band, in row 0 or, when that would touch a label, row 1.
-    Only a band with neither is left unlabelled (the footer still names it)."""
+
+    Then (v8.1.1) every band showing only its carbons or its number, or
+    nothing, shows its name instead wherever the whole name fits: centred on
+    the band (running past its edges in the label strip, kept inside the
+    plot), in the first of the ``BAND_ROWS`` rows where it touches no other
+    label. So a name is cut down only when there is no room for it, and no
+    band loses the label the first pass gave it. A band with no label at the
+    end is left unlabelled (the footer still names it)."""
     span = max(x1 - x0, 1e-9)
 
     def pt(t: float) -> float:
         return (min(max(float(t), x0), x1) - x0) / span * plot_w_pt
-    out: list[tuple[dict, str, float, int]] = []
+    placed: dict[int, list] = {}            # window index -> [text, x, row, lo_pt, hi_pt]
     ends = [-1e9, -1e9]                    # where each row's last label ends (pt)
     seen: list[dict] = []
-    for i, w in enumerate(windows):
-        if not w.get("evaluable"):
-            continue
+    order = sorted((i for i, w in enumerate(windows) if w.get("evaluable")),
+                   key=lambda i: (float(windows[i]["t0"]), float(windows[i]["t1"]), i))
+    for i in order:
+        w = windows[i]
         t0, t1 = float(w["t0"]), float(w["t1"])
         start = t0
         for o in seen:                     # clear of earlier bands' right edges
@@ -190,15 +207,13 @@ def band_labels(windows: list[dict], x0: float, x1: float,
         # the name matters more than the carbons (the findings give those):
         # "<label> Cx–Cy", then the label alone, then the carbons
         tiers = ([f"{label} {carbons}", label] if label else []) + [carbons, compact]
-        placed = False
         for text in dict.fromkeys(tiers):
             need = line_width(text, BAND_LABEL_FS) + 2 * BAND_LABEL_PAD
             if b - a >= need and a >= ends[0]:
-                out.append((w, text, max(start, x0), 0))
+                placed[i] = [text, max(start, x0), 0, a, a + need]
                 ends[0] = a + need
-                placed = True
                 break
-        if placed:
+        if i in placed:
             continue
         tag = range_tag(w, i)
         half = line_width(tag, BAND_LABEL_FS) / 2 + 1.0
@@ -208,10 +223,39 @@ def band_labels(windows: list[dict], x0: float, x1: float,
             continue
         for row in (0, 1):
             if lo_ >= ends[row]:
-                out.append((w, tag, x0 + mid / plot_w_pt * span, row))
+                placed[i] = [tag, x0 + mid / plot_w_pt * span, row, lo_, hi_ + 1.0]
                 ends[row] = hi_ + 1.0
                 break
-    return out
+
+    def free(row: int, lo: float, hi: float, own: int) -> bool:
+        return not any(j != own and p[2] == row and lo < p[4] and p[3] < hi
+                       for j, p in placed.items())
+    for i in order:                        # v8.1.1: the name, whole, wherever it fits
+        w = windows[i]
+        label = str(w.get("label") or "").strip()
+        if not label or (i in placed and label in placed[i][0]):
+            continue
+        need = line_width(label, BAND_LABEL_FS) + 2 * BAND_LABEL_PAD
+        mid = (pt(w["t0"]) + pt(w["t1"])) / 2
+        lo = min(max(mid - need / 2, 0.0), plot_w_pt - need)
+        if lo < 0:                         # wider than the whole plot
+            continue
+        for row in range(BAND_ROWS):
+            if free(row, lo, lo + need, i):
+                placed[i] = [label, x0 + lo / plot_w_pt * span, row, lo, lo + need]
+                break
+    return [(windows[i], *placed[i][:3]) for i in order if i in placed]
+
+
+def label_overflows(w: dict, text: str, x: float, x0: float, x1: float,
+                    plot_w_pt: float) -> bool:
+    """Whether a label ``band_labels`` placed (``text`` at ``x``) runs past
+    its band's edges: the charts give it a backing, so the edges' hairlines
+    never cross its letters (v8.1.1). A tag never does."""
+    if is_tag(text):
+        return False
+    box = (line_width(text, BAND_LABEL_FS) + 2 * BAND_LABEL_PAD) / plot_w_pt * max(x1 - x0, 1e-9)
+    return x < float(w["t0"]) - 1e-9 or x + box > float(w["t1"]) + 1e-9
 
 
 def range_tag(w: dict, i: int) -> str:
@@ -608,13 +652,7 @@ def _text_height(plan: Plan, *, title: str, subtitle: str, lab_id: str, std_name
     """The page's height without the two chart images, modelled on the
     page's own CSS (see ``_css``) and xhtml2pdf's layout of it."""
     fs = plan.fs
-    h = 0.0
-    title_w = TITLE_W - (LOGO_W if has_logo else 0)
-    # header: title + subtitle at left (wraps), lab ID + date at right, the rule
-    left = _block_h(line_count(title, title_w, 15, True), 15) + \
-        _block_h(line_count(subtitle, title_w, 8), 8)
-    right = 9 + _block_h(line_count(display_lab_id(lab_id), 176, 13, True), 13) + 12
-    h += max(left, right, 42) + 12 + 1.5
+    h = _header_h(title, subtitle, lab_id, has_logo)
     # chart chrome (title rows and gaps), both charts; a long caption wraps
     for verb in ("against", "minus"):
         cap = "Difference  " + chart_caption(lab_id, std_name, verb)
@@ -640,16 +678,50 @@ def _text_height(plan: Plan, *, title: str, subtitle: str, lab_id: str, std_name
         h += sum(_block_h(line_count(x, TEXT_W, nfs), nfs) + 1.5 + PARA for x in view)
         if len(view) < len(note_lines):
             h += _block_h(1, nfs) + 1.5 + PARA
-    # footer: 10pt above, the first row's 5pt top padding, then rows of 1pt+1pt
+    h += _footer_h(footer_lines, plan)
+    return h * MEASURE_MARGIN + SLACK
+
+
+def _header_h(title: str, subtitle: str, lab_id: str, has_logo: bool) -> float:
+    """The header: title + subtitle at left (wraps), lab ID + date at right, the rule."""
+    title_w = TITLE_W - (LOGO_W if has_logo else 0)
+    left = _block_h(line_count(title, title_w, 15, True), 15) + \
+        _block_h(line_count(subtitle, title_w, 8), 8)
+    right = 9 + _block_h(line_count(display_lab_id(lab_id), 176, 13, True), 13) + 12
+    return max(left, right, 42) + 12 + 1.5
+
+
+def _footer_h(footer_lines: list[str], plan: Plan) -> float:
+    """The footer: 10pt above, the first row's 5pt top padding, then rows of
+    1pt+1pt, the "Generated" row last."""
     foot = FOOT_TOP
     for line in footer_lines:
         head, rest = _footer_parts(line)
         if head == "Ranges":
             rest = ranges_text(rest, plan)
         foot += line_count(rest, TEXT_W, FOOT_FS) * FOOT_FS * FOOT_LINE + 2 + PARA
-    foot += FOOT_FS * FOOT_LINE + 2 + PARA
-    h += foot
-    return h * MEASURE_MARGIN + SLACK
+    return foot + FOOT_FS * FOOT_LINE + 2 + PARA
+
+
+def _cut(p: Plan, attr: str, total: int, fits, floor: int = 0) -> None:
+    """List as many as fit (at least *floor*)."""
+    setattr(p, attr, total)
+    while getattr(p, attr) > floor and not fits(p):
+        setattr(p, attr, getattr(p, attr) - 1)
+
+
+def _give_back(p: Plan, attr: str, total: int, fits) -> None:
+    """Room freed by a later step: list more again while they fit."""
+    n = getattr(p, attr)
+    if n is None:
+        return
+    while n < total:
+        setattr(p, attr, n + 1)
+        if not fits(p):
+            setattr(p, attr, n)
+            return
+        n += 1
+    setattr(p, attr, None)
 
 
 def split_comments(comments: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -683,23 +755,10 @@ def plan(*, doc_name: str, lab_id: str, std_name: str, bullets_text: str,
         return BODY_H - _text_height(p, **kw) >= min_charts()
 
     def cut(p: Plan, attr: str, total: int, floor: int = 0) -> None:
-        """List as many as fit (at least *floor*)."""
-        setattr(p, attr, total)
-        while getattr(p, attr) > floor and not fits(p):
-            setattr(p, attr, getattr(p, attr) - 1)
+        _cut(p, attr, total, fits, floor)
 
     def give_back(p: Plan, attr: str, total: int) -> None:
-        """Room freed by a later step: list more again while they fit."""
-        n = getattr(p, attr)
-        if n is None:
-            return
-        while n < total:
-            setattr(p, attr, n + 1)
-            if not fits(p):
-                setattr(p, attr, n)
-                return
-            n += 1
-        setattr(p, attr, None)
+        _give_back(p, attr, total, fits)
 
     p = Plan(trend_h=CHART_MIN[0], diff_h=CHART_MIN[1], fs=TYPE_STEPS[0])
     for fs in TYPE_STEPS:                         # 1-2: the type steps down
@@ -776,6 +835,78 @@ def plan(*, doc_name: str, lab_id: str, std_name: str, bullets_text: str,
     diff = min(CHART_MAX[1], max(lo[1], room - trend))
     p.trend_h, p.diff_h = round(trend), round(diff)
     return p
+
+
+def _graph_text_height(plan: Plan, *, title: str, lab_id: str, region_lines: list[str],
+                       note_lines: list[str], footer_lines: list[str],
+                       has_logo: bool = False) -> float:
+    """The no-comparison page's height without its chart image
+    (``render_graph_html``): the header, the chart's title row, the marked
+    regions and the notes (each its own section), the footer."""
+    fs = plan.fs
+    h = _header_h(title, graph_subtitle_text(), lab_id, has_logo)
+    h += _block_h(line_count("Chromatogram  " + graph_caption(lab_id), BODY_W - KEY_W, fs), fs) + 26
+    if region_lines or note_lines:
+        h += 10                                            # the sections' table margin
+    if region_lines:
+        h += _rows_h(region_lines, plan.regions_shown, fs) + SECTION
+    if note_lines:
+        h += _rows_h(note_lines, plan.notes_shown, fs) + SECTION
+    h += _footer_h(footer_lines, plan)
+    return h * MEASURE_MARGIN + SLACK + GRAPH_SLACK
+
+
+def graph_plan(*, doc_name: str, lab_id: str, region_lines: list[str] = (),
+               note_lines: list[str] = (), footer_lines: list[str],
+               has_logo: bool = False) -> Plan:
+    """The one-page plan for a report with no comparison (v8.1): the
+    chromatogram gets what the text leaves, between ``GRAPH_MIN`` and
+    ``GRAPH_MAX``; when the text does not fit the type steps down, then the
+    chart may go down to ``GRAPH_FLOOR``, then as many notes and marked
+    regions are listed as fit ("N more … are in the GC hub"; room given back
+    to the regions first). ``trend_h`` is the chart's height (no difference
+    chart: ``diff_h`` is 0)."""
+    region_lines = list(region_lines or [])
+    note_lines = list(note_lines or [])
+    kw = dict(title=display_title(doc_name), lab_id=lab_id, region_lines=region_lines,
+              note_lines=note_lines, footer_lines=list(footer_lines or []), has_logo=has_logo)
+    floor = {"chart": GRAPH_MIN}
+
+    def fits(p: Plan) -> bool:
+        return BODY_H - _graph_text_height(p, **kw) >= floor["chart"]
+
+    p = Plan(trend_h=GRAPH_MIN, diff_h=0, fs=TYPE_STEPS[0])
+    for fs in TYPE_STEPS:                                  # the type steps down
+        p.fs = fs
+        if fits(p):
+            break
+    if not fits(p):                                        # a smaller chart
+        floor["chart"] = GRAPH_FLOOR
+    if not fits(p) and note_lines:                         # notes
+        _cut(p, "notes_shown", len(note_lines), fits)
+    if not fits(p) and region_lines:                       # marked regions
+        _cut(p, "regions_shown", len(region_lines), fits)
+    _give_back(p, "regions_shown", len(region_lines), fits)
+    _give_back(p, "notes_shown", len(note_lines), fits)
+    for attr, total, what in (("notes_shown", len(note_lines), "notes"),
+                              ("regions_shown", len(region_lines), "marked regions")):
+        if getattr(p, attr) is not None:
+            p.shortened.append(f"{what}: {getattr(p, attr)} of {total} listed")
+    if not fits(p):
+        p.shortened.append("does not fit even at the smallest; the page is scaled to fit")
+    if floor["chart"] == GRAPH_FLOOR:
+        p.shortened.append("chart below its usual minimum")
+    room = BODY_H - _graph_text_height(p, **kw)
+    p.trend_h = round(min(GRAPH_MAX, max(floor["chart"], room)))
+    return p
+
+
+def graph_subtitle_text() -> str:
+    return "GC chromatogram, no comparison"
+
+
+def graph_caption(sample_label: str) -> str:
+    return _clip(sample_label or "The sample", 40)
 
 
 def display_title(doc_name: str) -> str:
@@ -901,6 +1032,15 @@ def regions_section(lines: list[str], *, shown: int | None, fs: float = TYPE_STE
     return "<!-- MARKED REGIONS -->" + _section("Marked regions", rows)
 
 
+def notes_section(lines: list[str], *, shown: int | None, fs: float = TYPE_STEPS[0]) -> str:
+    """The notes as their own section (v8.1, the report with no comparison,
+    which has no conclusion to print them under); nothing when there are none."""
+    if not lines:
+        return ""
+    rows = [[(x, "", 2)] for x in _listed(lines, shown, more_notes_text, TEXT_W, fs)]
+    return "<!-- NOTES -->" + _section("Notes", rows)
+
+
 def conclusion_section(conclusion: str, *, chars: int | None, fs: float = TYPE_STEPS[0],
                        notes: list[str] = (), notes_shown: int | None = None,
                        note_fs: float | None = None) -> str:
@@ -994,38 +1134,13 @@ def render_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str,
     """The report page for *plan_* (from ``plan`` with the same content)."""
     p = plan_
     e = _esc
-    logo = (f'<td style="width:64pt; padding-right:10pt; vertical-align:middle;">'
-            f'<img src="data:image/png;base64,{logo_b64}" height="44"></td>' if logo_b64 else "")
-    lab = (f'<p class="cap">Lab ID</p><p class="labid">{e(breakable(display_lab_id(lab_id), 176, 13, True))}</p>'
-           if lab_id else "")
-    header = f"""
-<table width="100%"><tr>
-  {logo}
-  <td style="vertical-align:bottom; padding-right:12pt;">
-    <p class="title">{e(breakable(display_title(doc_name), TITLE_W - (LOGO_W if logo_b64 else 0), 15, True))}</p>
-    <p class="sub">{e(breakable(subtitle_text(std_name), TITLE_W - (LOGO_W if logo_b64 else 0), 8))}</p>
-  </td>
-  <td style="width:180pt; text-align:right; vertical-align:bottom;">
-    {lab}<p class="cap" style="padding-top:2pt;">{e(date_display)}</p>
-  </td>
-</tr></table>
-<table width="100%" class="rule" style="margin-top:9pt;"><tr><td>&nbsp;</td></tr></table>"""
-
-    w_px = round(BODY_W * IMG_PX_PER_PT)
+    header = _header_html(doc_name, lab_id, date_display, logo_b64, subtitle_text(std_name))
     trend_items, diff_items = chart_keys(spikes_marked)
     trend_key = _key(trend_items)
-
-    def chart(title: str, caption: str, key: str, b64: str, h_pt: float) -> str:
-        return f"""
-<table width="100%" class="chead"><tr>
-  <td><span class="ctitle">{e(title)}</span>&nbsp;&nbsp;<span class="ccap">{e(caption)}</span></td>
-  <td class="key" style="width:{KEY_W:g}pt; vertical-align:bottom;">{key}</td>
-</tr></table>
-<img src="data:image/png;base64,{b64}" width="{w_px}" height="{round(h_pt * IMG_PX_PER_PT)}">"""
-
-    charts = (chart("Trend", chart_caption(sample_label, std_name, "against"), trend_key, img1_b64, p.trend_h)
-              + chart("Difference", chart_caption(sample_label, std_name, "minus"), _key(diff_items),
-                      img2_b64, p.diff_h))
+    charts = (_chart_html("Trend", chart_caption(sample_label, std_name, "against"), trend_key,
+                          img1_b64, p.trend_h)
+              + _chart_html("Difference", chart_caption(sample_label, std_name, "minus"),
+                            _key(diff_items), img2_b64, p.diff_h))
     sections = ("<!-- DEVIATION ANALYSIS -->"
                 + findings_section(bullets_text, shown=p.findings_shown,
                                    no_deviation=no_deviation, fs=p.fs)
@@ -1043,6 +1158,71 @@ def render_html(*, doc_name: str, lab_id: str, std_name: str, date_display: str,
 {header}
 {charts}
 <table class="sec" width="100%" style="margin-top:10pt;">{sections}</table>
+<!-- FOOTER -->
+<table width="100%" style="margin-top:10pt;"><tr><td>{footer}</td></tr></table>
+</div>
+</body></html>"""
+
+
+def _header_html(doc_name: str, lab_id: str, date_display: str, logo_b64: str,
+                 subtitle: str) -> str:
+    """The page's header: logo, title and subtitle at left, lab ID and date at
+    right, the rule."""
+    e = _esc
+    logo = (f'<td style="width:64pt; padding-right:10pt; vertical-align:middle;">'
+            f'<img src="data:image/png;base64,{logo_b64}" height="44"></td>' if logo_b64 else "")
+    lab = (f'<p class="cap">Lab ID</p><p class="labid">{e(breakable(display_lab_id(lab_id), 176, 13, True))}</p>'
+           if lab_id else "")
+    return f"""
+<table width="100%"><tr>
+  {logo}
+  <td style="vertical-align:bottom; padding-right:12pt;">
+    <p class="title">{e(breakable(display_title(doc_name), TITLE_W - (LOGO_W if logo_b64 else 0), 15, True))}</p>
+    <p class="sub">{e(breakable(subtitle, TITLE_W - (LOGO_W if logo_b64 else 0), 8))}</p>
+  </td>
+  <td style="width:180pt; text-align:right; vertical-align:bottom;">
+    {lab}<p class="cap" style="padding-top:2pt;">{e(date_display)}</p>
+  </td>
+</tr></table>
+<table width="100%" class="rule" style="margin-top:9pt;"><tr><td>&nbsp;</td></tr></table>"""
+
+
+def _chart_html(title: str, caption: str, key: str, b64: str, h_pt: float) -> str:
+    """A chart: its title row (title, caption, legend) and its image, the body's width."""
+    e = _esc
+    return f"""
+<table width="100%" class="chead"><tr>
+  <td><span class="ctitle">{e(title)}</span>&nbsp;&nbsp;<span class="ccap">{e(caption)}</span></td>
+  <td class="key" style="width:{KEY_W:g}pt; vertical-align:bottom;">{key}</td>
+</tr></table>
+<img src="data:image/png;base64,{b64}" width="{round(BODY_W * IMG_PX_PER_PT)}" height="{round(h_pt * IMG_PX_PER_PT)}">"""
+
+
+def render_graph_html(*, doc_name: str, lab_id: str, date_display: str, datetime_str: str,
+                      img_b64: str, logo_b64: str, footer_lines: list[str], app_version: str,
+                      plan_: Plan, region_lines: list[str] = (), note_lines: list[str] = (),
+                      sample_label: str = "") -> str:
+    """The report page with no comparison (v8.1) for *plan_* (``graph_plan``
+    with the same content): the header, the chromatogram, the marked regions
+    and the notes, the footer. No findings, conclusion or standard."""
+    p = plan_
+    e = _esc
+    header = _header_html(doc_name, lab_id, date_display, logo_b64, graph_subtitle_text())
+    chart = _chart_html("Chromatogram", graph_caption(sample_label), "", img_b64, p.trend_h)
+    sections = (regions_section(list(region_lines), shown=p.regions_shown, fs=p.fs)
+                + notes_section(list(note_lines), shown=p.notes_shown, fs=p.fs))
+    if sections:
+        sections = f'<table class="sec" width="100%" style="margin-top:10pt;">{sections}</table>'
+    generated = f"Generated: GC hub {app_version}, {datetime_str}"
+    footer = _footer(footer_lines, generated, plan_=p)
+    return f"""<!DOCTYPE HTML>
+<html><head><meta charset="utf-8"><title>{e(display_title(doc_name))}</title>
+<style>{_css(p.fs)}</style></head>
+<body>
+<div style="-pdf-keep-in-frame-mode: shrink;">
+{header}
+{chart}
+{sections}
 <!-- FOOTER -->
 <table width="100%" style="margin-top:10pt;"><tr><td>{footer}</td></tr></table>
 </div>

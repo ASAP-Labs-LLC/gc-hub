@@ -1,0 +1,118 @@
+{% extends "_layout.html" %}
+{#- v8.2: Learn. Short notes for reading the GC: how a chromatogram reads,
+    what the fuels we test look like, what we see most (from the lab's own
+    runs, limits and reports) and what it means, and click-through tutorials
+    for the everyday steps. learn.js draws the sketches (learn_logic.js:
+    shapes on a carbon axis, not real runs) and plays the tutorials
+    (static/learn/tutorials.json and its screenshots, made by
+    tools/learn_capture.py). -#}
+{% block title %}Learn{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/learn.css') }}?v=2">{% endblock %}
+{% block topbar %}<h1>Learn</h1>{% endblock %}
+{% block content %}
+<main class="content learn" id="main" data-testid="learn-page">
+  <p class="lead">Short notes for reading the GC: how a chromatogram works, what the fuels we test look like,
+    what we see most and what it means, and how to do the everyday steps in the hub.</p>
+  <nav class="learn-toc" aria-label="On this page">
+    <a href="#read">Reading a chromatogram</a><a href="#fuels">The fuels we test</a>
+    <a href="#seen">What we see most</a><a href="#howto">How to</a>
+  </nav>
+
+  <section id="read" aria-labelledby="h-read" data-testid="learn-read">
+    <h2 id="h-read">Reading a chromatogram</h2>
+    <p class="note">A short lesson, one step at a time. Each step marks its part of the chart. Sketches, not real runs.</p>
+    <div class="lesson" id="lesson" data-testid="learn-lesson">
+      <div class="lc-fig lc-big" id="lesson-chart" role="img" aria-labelledby="lesson-title"></div>
+      <div class="lesson-step">
+        <p class="lesson-count" id="lesson-count" data-testid="lesson-count"></p>
+        <h3 id="lesson-title" data-testid="lesson-title"></h3>
+        <p class="lesson-text" id="lesson-text" data-testid="lesson-text" aria-live="polite"></p>
+        <div class="lesson-controls">
+          <button type="button" class="btn btn-sm" id="lesson-prev" data-testid="lesson-prev">Back</button>
+          <button type="button" class="btn btn-sm btn-primary" id="lesson-next" data-testid="lesson-next">Next</button>
+          <span class="tut-dots" id="lesson-dots" role="group" aria-label="Lesson steps"></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="fuels" aria-labelledby="h-fuels" data-testid="learn-fuels">
+    <h2 id="h-fuels">The fuels we test</h2>
+    <p class="note">Sketches, not real runs: each shape is placed from the lab's standards and limits.</p>
+    <div class="cards">
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="diesel2" role="img" aria-label="Sketch: Diesel #2"></div>
+        <h3>Diesel #2 (ULSD)</h3>
+        <ul><li>A broad hump with a picket fence, about C9–C25.</li>
+          <li>Our standard's 10 / 50 / 90% points: C10.6 / C15.4 / C21.0.</li>
+          <li>Flash at least 52 °C, T90 282–338 °C, cetane at least 40.</li>
+          <li class="often">About half of all our runs best-fit Diesel #2.</li></ul></article>
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="diesel1" role="img" aria-label="Sketch: Diesel #1"></div>
+        <h3>Diesel #1</h3>
+        <ul><li>The same picket fence, narrower and to the left: about C8–C17.</li>
+          <li>Flash at least 38 °C, T90 at most 288 °C.</li>
+          <li class="often">Rare on its own; usually blended into #2.</li></ul></article>
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="renewable" role="img" aria-label="Sketch: renewable diesel"></div>
+        <h3>Renewable diesel (R99, R100, HVO)</h3>
+        <ul><li>One tall, narrow band, mostly C15–C18, with little hump around it.</li>
+          <li>Boils over a narrow range (T50 close to T90). Low density, high cetane, no sulfur, 0% biodiesel.</li>
+          <li>Flash often high: 41375 flashed at 92.5 °C.</li>
+          <li class="often">About 4% of our runs, up to 19% in April 2026.</li></ul></article>
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="biodiesel" data-bands="19-21:Bio" role="img" aria-label="Sketch: biodiesel B100"></div>
+        <h3>Biodiesel, B100 (FAME)</h3>
+        <ul><li>No hump: a few large, separate peaks near C18–C21, in our Bio C19–C21 band.</li>
+          <li>Flash at least 93 °C, cetane at least 47 (ASTM D6751).</li></ul></article>
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="b20" data-std="diesel2" data-bands="19-21:Bio" role="img" aria-label="Sketch: a B20 blend over Diesel #2"></div>
+        <h3>Blends, B5 and B20</h3>
+        <ul><li>A diesel hump with sharp peaks standing up in the Bio band; taller for B20.</li>
+          <li>Up to 5% is allowed in straight diesel. B6–B20 is its own product (ASTM D7467).</li></ul></article>
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="gasoline" role="img" aria-label="Sketch: gasoline"></div>
+        <h3>Gasoline</h3>
+        <ul><li>Everything in the first minutes, about C4–C12: many sharp peaks, no hump.</li>
+          <li>Flash far below 0 °C. D86 final boiling point at most 210 °C.</li></ul></article>
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="jet" role="img" aria-label="Sketch: jet fuel or kerosene"></div>
+        <h3>Jet A and kerosene</h3>
+        <ul><li>A narrow picket fence, about C8–C16. It looks like Diesel #1.</li>
+          <li>Flash at least 38 °C.</li></ul></article>
+    </div>
+  </section>
+
+  <section id="seen" aria-labelledby="h-seen" data-testid="learn-seen">
+    <h2 id="h-seen">What we see most</h2>
+    <p class="note">Pick a case: the chart shows how it looks against Diesel #2 (the grey area), red where it has more,
+      blue where it has less. Compare has the same cases under Patterns, against the run you are looking at.</p>
+    <div class="cases" data-testid="learn-cases">
+      <div class="cases-chart">
+        <div class="lc-fig lc-big" id="cases-chart" role="img" aria-label="The cases against Diesel #2"></div>
+        <div class="case-detail" id="case-detail" data-testid="case-detail" aria-live="polite"></div>
+      </div>
+      <div class="case-list" id="case-list" role="group" aria-label="Cases"></div>
+    </div>
+  </section>
+
+  <section id="howto" aria-labelledby="h-howto" data-testid="learn-howto">
+    <h2 id="h-howto">How to</h2>
+    <p class="note">The lesson, and short walk-throughs of the everyday steps. Press Watch; a walk-through plays by
+      itself, or step through it.</p>
+    <div class="tut-grid" id="learn-tutorials" data-testid="learn-tutorials">
+      <p class="note" id="learn-tut-note">Loading the walk-throughs…</p>
+    </div>
+  </section>
+
+  <dialog class="sheet tut-sheet" id="tut-player" data-testid="tut-player" aria-labelledby="tut-title">
+    <div class="tut-head"><h2 id="tut-title"></h2><span class="tut-count" id="tut-count" data-testid="tut-count"></span>
+      <button type="button" class="icon-btn" id="tut-close" data-testid="tut-close" aria-label="Close" title="Close">✕</button></div>
+    <div class="tut-stage"><img id="tut-img" data-testid="tut-img" alt=""><span class="tut-box" id="tut-box" aria-hidden="true" hidden></span></div>
+    <p class="tut-caption" id="tut-caption" data-testid="tut-caption" aria-live="polite"></p>
+    <div class="tut-controls">
+      <button type="button" class="btn btn-sm" id="tut-prev" data-testid="tut-prev">Back</button>
+      <button type="button" class="btn btn-sm btn-primary" id="tut-play" data-testid="tut-play">Pause</button>
+      <button type="button" class="btn btn-sm" id="tut-next" data-testid="tut-next">Next</button>
+      <span class="tut-dots" id="tut-dots" role="group" aria-label="Steps"></span>
+    </div>
+  </dialog>
+</main>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/learn_logic.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='js/learn.js') }}?v=2"></script>
+{% endblock %}

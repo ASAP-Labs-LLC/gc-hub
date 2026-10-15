@@ -105,16 +105,19 @@
     // ── the standard a sample opens with ────────────────────────────────────
     /** explicit (the URL) > remembered manual pick > best fit (/api/best-fit's
         best_standard, else the list row's best-fit label when it names one
-        standard) > the first standard. Names that aren't standards are skipped. */
+        standard) > the first standard. Names that aren't standards are skipped.
+        v8.2: the row's best fit is {label, score} (/api/files); its label counts. */
     function pickStandard(opts) {
         const o = opts || {};
         const names = (o.standards || []).map(s => (s && typeof s === 'object') ? s.name : s);
         if (!names.length) return null;
         const has = n => typeof n === 'string' && names.includes(n);
+        const rowBest = (o.sampleBestFit && typeof o.sampleBestFit === 'object')
+            ? o.sampleBestFit.label : o.sampleBestFit;
         if (has(o.explicit)) return { name: o.explicit, source: 'explicit' };
         if (has(o.remembered)) return { name: o.remembered, source: 'remembered' };
         if (has(o.best)) return { name: o.best, source: 'best' };
-        if (has(o.sampleBestFit)) return { name: o.sampleBestFit, source: 'best' };
+        if (has(rowBest)) return { name: rowBest, source: 'best' };
         return { name: names[0], source: 'first' };
     }
 
@@ -176,6 +179,28 @@
     function forgetAdjustments(list, sampleId) {
         const key = String(sampleId);
         return parseAdjustments(list).filter(a => a.sample_id !== key);
+    }
+
+    // ── v8.2: a queued report re-opened in Compare ──────────────────────────
+    // The report queue (report_queue.js openTarget) leaves what a report was
+    // built with here, for this tab, and opens its sample; Compare takes it
+    // once, for that sample only: {sample_id, standard, params, ranges?, conclusion}.
+    const RESTORE_KEY = 'gc.compare.restore';
+    /** -> {standard, params, ranges (with UI ids and colours; null = the saved
+        defaults), conclusion} for *sampleId*, or null. */
+    function takeRestore(raw, sampleId) {
+        let v;
+        try { v = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (_e) { return null; }
+        if (!v || typeof v !== 'object' || String(v.sample_id) !== String(sampleId)) return null;
+        if (typeof v.standard !== 'string' || !v.standard) return null;
+        return {
+            standard: v.standard,
+            params: payload.captureReportParams(v.params || {}),
+            ranges: Array.isArray(v.ranges) ? payload.rangesForPayload(v.ranges).map((r, i) => ({
+                id: i + 1, label: r.label, c_start: r.c_start, c_end: r.c_end,
+                color: r.color || RANGE_PALETTE[i % RANGE_PALETTE.length] })) : null,
+            conclusion: typeof v.conclusion === 'string' ? v.conclusion.trim() : '',
+        };
     }
 
     // ── findings ────────────────────────────────────────────────────────────
@@ -363,6 +388,40 @@
         return parts.join(' · ');
     }
 
+    // ── the export sheet ────────────────────────────────────────────────────
+    /** v8.1: the sheet's "No comparison" choice. A standard's name can't hold
+        ':' (the hub refuses it), so this is never one. */
+    const NO_COMPARISON = ':none';
+
+    /** The report item the export sheet builds: `standard` is the picked
+        standard's name or NO_COMPARISON (the chromatogram alone: no standard,
+        conclusion, ranges or other standards); `edited` the conclusions
+        edited on Compare, per standard; `overlays` the other standards to
+        draw. null when nothing is picked. */
+    function exportItem(o) {
+        const s = o.sample || {};
+        const none = o.standard === NO_COMPARISON;
+        if (!none && !o.standard) return null;
+        const edited = (o.edited || {})[o.standard];
+        const item = {
+            sample_id: s.sample_id, lab_id: s.lab_id || s.name || '',
+            sample_name: o.title || 'GC Analysis Report',
+            standard_name: none ? '' : o.standard,
+            conclusion: !none && typeof edited === 'string' ? edited.trim() : '',
+            params: Object.assign({}, o.params),
+            ranges: none ? [] : (o.ranges || []).slice(),
+            overlay_standards: none ? [] : (o.overlays || []).slice(),
+        };
+        if (none) item.no_comparison = true;
+        return item;
+    }
+
+    /** The sheet's "Built with" line for a report with no comparison. */
+    function graphSummary(params) {
+        const p = Object.assign({}, PARAM_DEFAULTS, params || {});
+        return `The chromatogram up to ${p.x_max_min} min`;
+    }
+
     // ── charts ──────────────────────────────────────────────────────────────
     /** A CSS colour (#rgb, #rrggbb, rgb(), rgba()) with an alpha, for Plotly. */
     function withAlpha(color, alpha) {
@@ -479,7 +538,9 @@
         defaultParams, analysisBody, standardFromSearch, comparePath,
         pickStandard, parsePicks, rememberPick, recallPick,
         ADJUST_CAP, parseAdjustments, rememberAdjustments, recallAdjustments, forgetAdjustments,
+        RESTORE_KEY, takeRestore,
         findingsView, draftFrom, validateAdjust, newRange, paramSummary,
+        NO_COMPARISON, exportItem, graphSummary,
         withAlpha, carbonTicks, diffSpan, cleanLabel,
         CONCLUSION_MAX, insertPreset, conclusionCount, pasteInto,
     };

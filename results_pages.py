@@ -8,6 +8,9 @@ Pages only, all session-gated like every page (``web_auth.route_class``):
     GET /settings   the settings, grouped by who changes them
                     (templates/settings.html)
     GET /help       a short plain-language help page (templates/help.html)
+    GET /learn      v8.2: reading a chromatogram, the fuels we test, what we
+                    see most, and click-through walk-throughs
+                    (templates/learn.html; static/learn/tutorials.json)
 
 They read and change nothing on the server themselves: the pages call the
 existing ``/api/`` routes (``/api/table``, ``/api/files``,
@@ -42,3 +45,8 @@ def settings_page():
 @bp.route("/help", methods=["GET"])
 def help_page():
     return _page("help.html", "help")
+
+
+@bp.route("/learn", methods=["GET"])
+def learn_page():
+    return _page("learn.html", "learn")

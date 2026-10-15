@@ -99,6 +99,16 @@
     function keptAdjustments(sampleId) {
         return sampleId == null ? null : L.recallAdjustments(loadAdjust(), sampleId);
     }
+    /** v8.2: the queued report re-opened for this sample (report_queue.js
+        openItem left it), taken once; null when there is none for it. */
+    function takeRestore(sampleId) {
+        if (sampleId == null) return null;
+        try {
+            const r = L.takeRestore(root.sessionStorage.getItem(L.RESTORE_KEY), sampleId);
+            if (r) root.sessionStorage.removeItem(L.RESTORE_KEY);
+            return r;
+        } catch (_e) { return null; }
+    }
     function savedOverlays(settings) {
         return root.overlaysFromSettings ? root.overlaysFromSettings(settings || {}) : [];
     }
@@ -139,8 +149,66 @@
             below: v('--dev-below', '#2563eb'), belowFill: v('--dev-below-fill', '#bfdbfe'),
             card: v('--bg-card', '#ffffff'), text: v('--text', '#0f172a'),
             bandText: v('--text-muted-sunken', '#5b6678'),     // AA over a band (test_ui_contrast)
+            warn: v('--warn', '#b45309'), warnSoft: v('--warn-soft', 'rgba(180,83,9,0.10)'),   // v8.3: Patterns
             font: v('--font', 'system-ui, sans-serif'),
         };
+    }
+
+    // ── v8.3: Patterns: the cases we see most, on the Trend chart ──────────
+    // GCLearn's cases (learn_logic.js, shared with the Learn page) applied to
+    // the standard on screen, its times turned into carbons with the run's
+    // own ladder: what this standard would look like with gasoline in it,
+    // a heavy end, water… Hovering a case shows it; a click keeps it.
+    function setPattern(v, id) {
+        v.pattern = id;
+        v.patternHover = null;
+        renderPatterns(v);
+        if (v.result) draw(v);
+    }
+    function hoverPattern(v, id) {
+        if (v.patternHover === id) return;
+        v.patternHover = id;
+        renderPatterns(v);
+        if (v.result) draw(v);
+    }
+    function hasLadder(r) {
+        return !!(r && Array.isArray(r.cal_times) && r.cal_times.length >= 2);
+    }
+    function renderPatterns(v) {
+        const PL = root.GCLearn;
+        const d = v.dom;
+        if (!PL || !d || !d.patBtns) return;
+        const r = v.result;
+        const placed = !r || hasLadder(r);
+        for (const b of d.patBtns) {
+            b.setAttribute('aria-pressed', b.getAttribute('data-pattern') === v.pattern ? 'true' : 'false');
+            b.disabled = !placed;
+        }
+        const id = v.patternHover || v.pattern;
+        const p = id ? PL.patterns().find(q => q.id === id) : null;
+        d.patNote.textContent = !placed ? 'Patterns need this run’s calibration (its carbon numbers) to be placed.'
+            : p ? `${p.see} ${p.check}` : '';
+        if (d.legendPat) {
+            d.legendPat.textContent = p && placed ? p.name + ' (sketch)' : '';
+            d.legendPat.hidden = d.legendPatSw.hidden = !(p && placed);
+        }
+    }
+    /** The shown case as a Trend trace and its band (null: none, or no ladder). */
+    function patternOverlay(v, r, c) {
+        const PL = root.GCLearn;
+        const id = v.patternHover || v.pattern;
+        if (!PL || !id || !r || !r.trend || !hasLadder(r)) return null;
+        const p = PL.patterns().find(q => q.id === id);
+        const cs = PL.carbonsAt(r.trend.standard_x, r.cal_times, r.cal_carbons);
+        if (!p || !cs) return null;
+        const name = p.name + ' (sketch)';
+        const trace = { x: r.trend.standard_x, y: PL.applyPattern(id, { c: cs, y: r.trend.standard_y }),
+            type: 'scatter', mode: 'lines', name: safe(name), line: { color: c.warn, width: 1.6, dash: 'dash' },
+            hovertemplate: '%{y:.0f}<extra>' + safe(name) + '</extra>' };
+        const shape = p.band ? { type: 'rect', xref: 'x', yref: 'paper', y0: 0, y1: 1, layer: 'below',
+            x0: PL.timeAt(p.band[0], r.cal_times, r.cal_carbons), x1: PL.timeAt(p.band[1], r.cal_times, r.cal_carbons),
+            fillcolor: c.warnSoft, line: { color: c.warn, width: 1 } } : null;
+        return { trace, shape };
     }
     const PLOT_CONFIG = { displayModeBar: false, responsive: true, displaylogo: false,
                           doubleClick: 'reset', scrollZoom: false };
@@ -156,25 +224,35 @@
             params: null, overlays: null, draft: null,
             result: null, bestFit: null, seq: 0, timer: null, alive: true,
             edited: {},              // standard -> the operator's conclusion
+            pattern: null, patternHover: null,                  // v8.3: Patterns
             editing: false, annotating: false, drawerOpen: false,
             cleanups: [],
         };
         const sid = v.sample.sample_id;
-        // what this sample showed last in this tab, else the saved defaults
-        const kept = keptAdjustments(sid);
-        v.params = Object.assign(L.defaultParams(v.settings), kept ? kept.params : {});
-        v.overlays = kept ? kept.ranges : savedOverlays(v.settings);
+        // v8.2: a report re-opened from the queue: what it was built with;
+        // else what this sample showed last in this tab, else the saved defaults
+        const restore = takeRestore(sid);
+        const kept = restore ? null : keptAdjustments(sid);
+        v.params = Object.assign(L.defaultParams(v.settings), restore ? restore.params : kept ? kept.params : {});
+        v.overlays = restore ? (restore.ranges || savedOverlays(v.settings))
+            : kept ? kept.ranges : savedOverlays(v.settings);
         v.draft = L.draftFrom(v.params, v.overlays);
+        if (restore && restore.conclusion) v.edited[restore.standard] = restore.conclusion;
+        if (restore) rememberView(v);
 
         build(v);
         mounted.add(v);
 
-        // the standard: explicit (lane S calls setStandard) > remembered > best fit
+        // the standard: explicit (the address, a restored report) > remembered
+        // > best fit. v8.2: the address's standard is chosen here, so a
+        // remembered pick can't replace it in the address first.
+        const explicit = restore ? restore.standard : (o.standard || null);
         const remembered = L.recallPick(loadPicks(), sid);
-        const first = L.pickStandard({ remembered, sampleBestFit: v.sample.best_fit, standards: v.standards });
+        const first = L.pickStandard({ explicit, remembered, sampleBestFit: v.sample.best_fit,
+                                       standards: v.standards });
         if (!first) {
             renderEmpty(v, 'No comparison standards yet. An admin adds one from a sample (Settings, Comparison standards).');
-        } else if (first.source === 'remembered' || !bestFitEnabled(v.settings)) {
+        } else if (first.source === 'explicit' || first.source === 'remembered' || !bestFitEnabled(v.settings)) {
             choose(v, first.name, first.source, true);
         } else {
             // wait (briefly) for the best fit, so the first analysis is the right one
@@ -190,7 +268,8 @@
                 if (pick && pick.name !== v.standard) choose(v, pick.name, pick.source, true);
             });
         }
-        if (first && first.source === 'remembered' && bestFitEnabled(v.settings)) fetchBestFit(v);
+        if (first && (first.source === 'remembered' || first.source === 'explicit')
+                && bestFitEnabled(v.settings)) fetchBestFit(v);
 
         const handle = {
             unmount: () => unmount(v),
@@ -318,7 +397,9 @@
             h('span', { className: 'spacer' }),
             h('span', { className: 'cmp-legend', 'aria-hidden': 'true' },
                 h('i', { className: 'sw sw-sample' }), h('span', { text: lab }),
-                h('i', { className: 'sw sw-std' }), d.legendStd),
+                h('i', { className: 'sw sw-std' }), d.legendStd,
+                d.legendPatSw = h('i', { className: 'sw sw-pat', hidden: true }),
+                d.legendPat = h('span', { 'data-testid': 'compare-legend-pattern', hidden: true })),
             d.adjustBtn);
 
         // Trend
@@ -451,8 +532,23 @@
                 d.presetBtn, d.conclEdit),
             d.conclText, d.conclNote, d.conclForm, d.notes);
 
+        // v8.3: Patterns (GCLearn, when learn_logic.js is loaded)
+        const PL = root.GCLearn;
+        d.patNote = h('p', { className: 'caption cmp-pat-note', 'data-testid': 'compare-pattern-note', 'aria-live': 'polite' });
+        d.patBtns = PL ? PL.patterns().map(p => h('button', { type: 'button', className: 'cmp-pat',
+            'data-testid': 'compare-pattern-' + p.id, 'data-pattern': p.id, 'aria-pressed': 'false',
+            onclick: () => setPattern(v, v.pattern === p.id ? null : p.id),
+            onmouseenter: () => hoverPattern(v, p.id), onmouseleave: () => hoverPattern(v, null) }, p.name)) : null;
+        const patSec = PL ? h('section', { className: 'cmp-sec', 'data-testid': 'compare-patterns',
+                                           'aria-labelledby': 'cmp-pat-h' },
+            h('div', { className: 'cmp-sec-head' }, h('h3', { id: 'cmp-pat-h', text: 'Patterns' }),
+                h('span', { className: 'spacer' }), h('a', { className: 'caption', href: '/learn#seen', text: 'On Learn' })),
+            h('p', { className: 'caption', text: 'What each case would look like against this standard. Hover or pick one.' }),
+            h('div', { className: 'cmp-pats', role: 'group', 'aria-label': 'Patterns' }, d.patBtns),
+            d.patNote) : null;
+
         const main = h('div', { className: 'cmp-main' }, d.trendCard, d.diffCard);
-        const side = h('div', { className: 'cmp-side' }, findSec, conclSec);
+        const side = h('div', { className: 'cmp-side' }, findSec, patSec, conclSec);
         const wrap = h('div', { className: 'cmp', 'data-testid': 'compare', 'data-sample': String(v.sample.sample_id) },
             toolbar, h('div', { className: 'cmp-body' }, main, side));
 
@@ -593,13 +689,17 @@
                 name: safe(lab), line: { color: c.ink, width: 1.5 },
                 hovertemplate: '%{x:.2f} min · %{y:.0f}<extra>' + safe(lab) + '</extra>' });
         }
+        renderPatterns(v);
+        const pat = patternOverlay(v, r, c);                    // v8.3: Patterns
+        if (pat) trendTraces.push(pat.trace);
         const ticks = L.carbonTicks(r.cal_times, r.cal_carbons);
         const bands = bandShapes(c, r.windows, true);
         const notes = annotationOverlay(v, c);
         const trendLayout = baseLayout(c, {
-            shapes: bands.shapes.concat(notes.shapes),
+            shapes: bands.shapes.concat(notes.shapes, pat && pat.shape ? [pat.shape] : []),
             annotations: bands.labels.concat(notes.labels),
             dragmode: v.annotating ? 'select' : 'zoom', selectdirection: 'h',
+            newselection: { line: { color: c.text, width: 1, dash: 'dot' } },   // v8.3: shows on dark too
         });
         trendLayout.xaxis.range = xr;
         if (ticks.vals.length) {
@@ -1338,12 +1438,12 @@
         ex.actions = h('div', { className: 'actions' },
             h('button', { type: 'button', className: 'btn btn-ghost', text: 'Cancel', onclick: () => exportDlg.close() }),
             ex.queue, ex.dl);
+        ex.more = h('details', { className: 'more' }, h('summary', { text: 'Also draw other standards on the report' }), ex.others);
         const form = h('form', { method: 'dialog', className: 'form' },
             ex.title, ex.sub,
             h('label', { className: 'field' }, h('span', { text: 'Compared with' }), ex.std),
             h('label', { className: 'field' }, h('span', { text: 'Report title' }), ex.doc),
-            h('details', { className: 'more' }, h('summary', { text: 'Also draw other standards on the report' }), ex.others),
-            ex.concl, ex.params, ex.msg, ex.actions);
+            ex.more, ex.concl, ex.params, ex.msg, ex.actions);
         exportDlg = h('dialog', { className: 'sheet cmp-export', 'data-testid': 'export-sheet', 'aria-labelledby': 'cmp-export-h' }, form);
         // Enter does what the sheet was opened for
         form.addEventListener('submit', (e) => { e.preventDefault(); (ex.mode === 'queue' ? exportQueue : exportDownload)(); });
@@ -1380,30 +1480,37 @@
             : `Sample ${labelOf(ctx.sample)}. One PDF, built by the hub with these settings.`;
         ex.std.textContent = '';
         for (const s of ctx.standards) ex.std.appendChild(h('option', { value: s.name, text: s.name }));
-        ex.std.value = ctx.standard || '';
+        // v8.1: or none at all: the sample's chromatogram on its own
+        ex.std.appendChild(h('option', { value: L.NO_COMPARISON, text: 'No comparison (chromatogram only)' }));
+        ex.std.value = ctx.standard || (ctx.standards.length ? '' : L.NO_COMPARISON);
         // the conclusion edited on Compare for the standard picked here, else
         // the generated one (edits are kept per standard)
         ex.edited = ctx.edited || {};
-        const conclLine = () => {
-            const own = typeof ex.edited[ex.std.value] === 'string' && ex.edited[ex.std.value].trim();
-            ex.concl.textContent = own ? 'Conclusion: your edited text from Compare.'
-                : 'Conclusion: the generated text. Edit it on Compare.';
+        const where = ctx.view ? '. Change these in Adjust.'
+            : ctx.adjusted ? ' (as this sample was last shown in Compare).' : ' (the saved defaults).';
+        const describe = () => {
+            const none = ex.std.value === L.NO_COMPARISON;
+            const own = !none && typeof ex.edited[ex.std.value] === 'string' && ex.edited[ex.std.value].trim();
+            ex.concl.textContent = none
+                ? 'No comparison: the report prints the chromatogram with its marked regions and notes, with no findings or conclusion.'
+                : own ? 'Conclusion: your edited text from Compare.'
+                    : 'Conclusion: the generated text. Edit it on Compare.';
+            ex.more.hidden = none;
+            ex.params.textContent = 'Built with: ' +
+                (none ? L.graphSummary(ctx.params) : L.paramSummary(ctx.params, ctx.ranges)) + where;
         };
-        ex.std.onchange = conclLine;
-        conclLine();
+        ex.std.onchange = describe;
         ex.others.textContent = '';
         for (const s of ctx.standards) {
             ex.others.appendChild(h('label', { className: 'check' },
                 h('input', { type: 'checkbox', 'data-path': s.path || '' }), h('span', { text: s.name })));
         }
-        ex.params.textContent = 'Built with: ' + L.paramSummary(ctx.params, ctx.ranges) +
-            (ctx.view ? '. Change these in Adjust.'
-                : ctx.adjusted ? ' (as this sample was last shown in Compare).' : ' (the saved defaults).');
+        describe();
         // the drawer holds an edit it can't use yet: say the report uses the
         // last valid settings (the ones listed), not what the drawer shows
         ex.msg.textContent = ctx.pending
             ? 'Adjust has fields to fix: the report uses the last valid settings, listed above.' : '';
-        ex.dl.disabled = ex.queue.disabled = !ctx.standards.length;
+        ex.dl.disabled = ex.queue.disabled = false;
         if (typeof exportDlg.showModal === 'function') exportDlg.showModal(); else exportDlg.setAttribute('open', '');
         return exportDlg;
     }
@@ -1411,16 +1518,12 @@
     function exportItem() {
         const c = ex.ctx;
         if (!c) return null;
-        const std = ex.std.value;
-        if (!std) { ex.msg.textContent = 'Pick a standard.'; return null; }
-        const concl = typeof ex.edited[std] === 'string' ? ex.edited[std].trim() : '';
-        return {
-            sample_id: c.sample.sample_id, lab_id: c.sample.lab_id || c.sample.name || '',
-            sample_name: ex.doc.value.trim() || 'GC Analysis Report', standard_name: std, conclusion: concl,
-            params: Object.assign({}, c.params), ranges: (c.ranges || []).slice(),
-            overlay_standards: Array.from(ex.others.querySelectorAll('input:checked'))
-                .map(i => i.getAttribute('data-path')).filter(Boolean),
-        };
+        const item = L.exportItem({ sample: c.sample, standard: ex.std.value, title: ex.doc.value.trim(),
+            edited: ex.edited, params: c.params, ranges: c.ranges,
+            overlays: Array.from(ex.others.querySelectorAll('input:checked'))
+                .map(i => i.getAttribute('data-path')).filter(Boolean) });
+        if (!item) ex.msg.textContent = 'Pick a standard or No comparison.';
+        return item;
     }
 
     async function exportDownload() {

@@ -1,0 +1,99 @@
+/* v8.2, v8.3: the Learn page (templates/learn.html, learn.js). Checked
+   tokens only (tests/test_ui_contrast.py); the sketches use the chart
+   tokens, so they follow the theme; highlights use the warning colour,
+   which shows on light and dark alike (dark's accent is white). */
+
+.learn { max-width: 1120px; }
+.learn .lead { font-size: var(--fs-lg); color: var(--text); margin: 0 0 var(--s3); max-width: 760px; }
+.learn-toc { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); margin: 0 0 var(--s4); font-size: var(--fs-sm); }
+.learn-toc a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.learn section { padding: var(--s5) 0; border-top: 1px solid var(--border-light); scroll-margin-top: var(--s4); }
+.learn h2 { font-size: var(--fs-lg); margin: 0 0 var(--s2); color: var(--text); }
+.learn h3 { font-size: var(--fs-md); margin: 0 0 var(--s1); color: var(--text); }
+.learn .note { color: var(--text-muted); font-size: var(--fs-sm); margin: 0 0 var(--s3); }
+
+.learn .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: var(--s3); }
+.lcard {
+    background: var(--bg-card); border: 1px solid var(--border-light); border-radius: var(--radius-card);
+    padding: var(--s3) var(--s4); min-width: 0;
+}
+.lcard p, .lcard li, .lcard dd { color: var(--text); font-size: var(--fs-sm); line-height: 1.45; margin: 0; }
+.lcard ul { margin: 0; padding-left: 18px; display: grid; gap: 3px; }
+.lcard li.often { color: var(--text-muted); list-style: none; margin-left: -18px; margin-top: 2px; }
+
+/* the sketches (learn.js draws the SVG): carbons on top, time along the bottom */
+.lc-fig { display: block; margin: 0 0 var(--s2); }
+.lc-svg { display: block; width: 100%; height: auto; }
+.lc-line { fill: none; stroke: var(--chart-ink); stroke-width: 1.4; stroke-linejoin: round; }
+.lc-std { fill: var(--chart-ref); fill-opacity: 0.45; stroke: var(--chart-ref); stroke-width: 0.8; }
+.lc-band { fill: var(--chart-band); stroke: var(--chart-tick); stroke-width: 0.6; }
+.lc-band.lc-band-on { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; }
+.lc-axis { stroke: var(--chart-tick); stroke-width: 1; }
+.lc-tick, .lc-band-label { fill: var(--chart-axis); font: 13px var(--font); }
+.lc-svg-big .lc-tick, .lc-svg-big .lc-band-label { font-size: 11px; }
+.lc-band-label.lc-band-on-label { fill: var(--warn-text); font-weight: 600; }
+.lc-axis.lc-focus { stroke: var(--warn); stroke-width: 2.5; }
+.lc-tick.lc-focus { fill: var(--warn-text); font-weight: 600; }
+.lc-above { fill: var(--dev-above-fill); stroke: none; }
+.lc-below { fill: var(--dev-below-fill); stroke: none; }
+.lc-line.lc-case { stroke: var(--chart-axis); stroke-width: 0.8; stroke-opacity: 0.35; }
+.lc-line.lc-case-on { stroke: var(--chart-ink); stroke-width: 1.8; }
+
+/* Reading a chromatogram: the lesson */
+.lesson { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--s4); align-items: start; }
+.lesson .lc-big { margin: 0; background: var(--bg-card); border: 1px solid var(--border-light); border-radius: var(--radius-card); padding: var(--s2); }
+.lesson-step { display: grid; gap: var(--s2); }
+.lesson-step h3 { font-size: var(--fs-lg); margin: 0; }
+.learn p.lesson-count { color: var(--text-muted); font-size: var(--fs-sm); margin: 0; }
+.learn p.lesson-text { color: var(--text); font-size: var(--fs-md); line-height: 1.5; margin: 0; min-height: 6em; }
+.lesson-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); }
+
+/* What we see most: one chart, the cases beside it */
+.cases { display: grid; grid-template-columns: minmax(0, 3fr) minmax(200px, 1fr); gap: var(--s4); align-items: start; }
+.cases-chart .lc-big { background: var(--bg-card); border: 1px solid var(--border-light); border-radius: var(--radius-card); padding: var(--s2); }
+.case-list { display: grid; gap: var(--s1); }
+.case-btn { text-align: left; font: inherit; font-size: var(--fs-sm); color: var(--text); background: var(--bg-card);
+    border: 1px solid var(--border-light); border-radius: var(--radius-md); padding: var(--s2) var(--s3); cursor: pointer; }
+.case-btn:hover { background: var(--bg-hover); }
+.case-btn[aria-pressed="true"] { border-color: var(--warn); box-shadow: inset 3px 0 0 var(--warn); font-weight: 600; }
+.case-detail h3 { margin: var(--s2) 0 var(--s1); }
+.case-detail dl { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--s1) var(--s3); }
+.case-detail dt { color: var(--text-muted); font-size: var(--fs-sm); font-weight: 600; }
+.case-detail dd { color: var(--text); font-size: var(--fs-sm); line-height: 1.45; margin: 0; }
+
+/* the walk-throughs */
+.tut-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--s3); }
+.tut-card {
+    display: grid; grid-template-rows: auto auto 1fr auto; gap: var(--s1); background: var(--bg-card);
+    border: 1px solid var(--border-light); border-radius: var(--radius-card); padding: var(--s3); min-width: 0;
+}
+.tut-card p { color: var(--text-muted); font-size: var(--fs-sm); margin: 0; }
+.tut-thumb-fig { margin: 0; border: 1px solid var(--border-light); border-radius: var(--radius-sm); background: var(--bg-card); }
+.tut-thumb { width: 100%; aspect-ratio: 16 / 10; object-fit: cover; object-position: top left;
+    border: 1px solid var(--border-light); border-radius: var(--radius-sm); background: var(--bg-sunken); }
+.tut-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); margin-top: var(--s1); }
+.tut-foot .note { margin: 0; }
+
+dialog.tut-sheet { width: min(1040px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
+.tut-head { display: flex; align-items: center; gap: var(--s3); margin-bottom: var(--s2); }
+.tut-head h2 { margin: 0; font-size: var(--fs-lg); color: var(--text); }
+.tut-head .tut-count { color: var(--text-muted); font-size: var(--fs-sm); }
+.tut-head .icon-btn { margin-left: auto; }
+.tut-stage { position: relative; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden;
+    background: var(--bg-sunken); line-height: 0; }
+.tut-stage img { display: block; width: 100%; height: auto; }
+.tut-box { position: absolute; border: 3px solid var(--warn); border-radius: var(--radius-sm);
+    box-shadow: 0 0 0 4px var(--warn-soft); pointer-events: none; transition: all var(--t-slow) var(--ease-out); }
+.tut-sheet p.tut-caption { color: var(--text); font-size: var(--fs-md); margin: var(--s3) 0 var(--s2); min-height: 2.9em; }
+.tut-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); }
+.tut-dots { display: inline-flex; gap: 6px; margin-left: auto; }
+.tut-dot { width: 10px; height: 10px; padding: 0; border-radius: var(--radius-pill); border: 1px solid var(--border-strong);
+    background: var(--bg-card); cursor: pointer; }
+.tut-dot[aria-current="step"] { background: var(--warn); border-color: var(--warn); }
+
+@media (prefers-reduced-motion: reduce) { .tut-box { transition: none; } }
+@media (max-width: 700px) {
+    .learn .cards, .tut-grid, .lesson, .cases { grid-template-columns: minmax(0, 1fr); }
+    .case-detail dl { grid-template-columns: minmax(0, 1fr); }
+    .tut-dots { margin-left: 0; width: 100%; }
+}

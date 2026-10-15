@@ -218,7 +218,9 @@ PAGE_CSS = [ROOT / "static" / "css" / "admin.css", ROOT / "static" / "css" / "ca
             ROOT / "static" / "css" / "results.css", ROOT / "static" / "css" / "settings.css",
             ROOT / "static" / "css" / "controls.css", ROOT / "static" / "css" / "notifications.css",
             # v6.0 lane L5: phones and tablets
-            ROOT / "static" / "css" / "mobile.css"]
+            ROOT / "static" / "css" / "mobile.css",
+            # v8.2: the Learn page
+            ROOT / "static" / "css" / "learn.css"]
 CHECKED_FG = {p[0] for p in PAIRS}
 
 
@@ -231,3 +233,21 @@ def test_the_new_pages_use_tokens_only(css):
         token = re.fullmatch(r"var\((--[\w-]+)\)", value)
         assert token, (css.name, value)
         assert token.group(1) in CHECKED_FG, (css.name, token.group(1))
+
+
+def test_dialogs_dim_the_page_in_both_themes():
+    """v8.3: the sheets' backdrop is a token: a slate wash over the light
+    page, near-black over the dark one (the slate wash lightened it)."""
+    tokens = (ROOT / "static" / "css" / "tokens.css").read_text(encoding="utf-8")
+    light = re.search(r"^:root\s*\{(.*?)^\}", tokens, re.S | re.M).group(1)
+    dark = re.search(r'^:root\[data-theme="dark"\]\s*\{(.*?)^\}', tokens, re.S | re.M).group(1)
+
+    def rgba(block):
+        m = re.search(r"--backdrop:\s*rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)", block)
+        assert m, "no --backdrop"
+        return [float(x) for x in m.groups()]
+    assert rgba(light)[3] <= 0.5
+    dr = rgba(dark)
+    assert max(dr[:3]) <= 20 and dr[3] >= 0.5, dr
+    shell = (ROOT / "static" / "css" / "shell.css").read_text(encoding="utf-8")
+    assert "dialog.sheet::backdrop { background: var(--backdrop); }" in shell

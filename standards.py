@@ -11,8 +11,14 @@ The store's ``standards`` table tags each file with an instrument:
   leaves the migration for a later call.
 * **Later files** (added through the old comparison-standard routes) are
   registered untagged (``instrument_id`` NULL) until an admin tags them.
+* **Added from a run** (v8.1, ``POST /api/comparison-standard``): ``register``
+  records the file with the tag chosen as it is added (by default the run's
+  own GC), over whatever ``sync`` would give it; a known file is re-tagged.
 * A registered file that has gone is listed with ``missing: true``; its tag is
   kept (the file may come back).
+* **Renamed or deleted in Settings** (v8.1.1): ``moved`` carries the row (and
+  its tag) to the new name; ``forget`` drops a deleted file's row, or a
+  missing one's (rows left behind by a rename or delete before v8.1.1).
 
 ``for_sample(dir, instrument)`` is the picker's order: the sample's own
 instrument's standards first, then the rest marked ``cross_instrument`` with
@@ -25,6 +31,9 @@ API::
     list_standards(comp_dir, instrument=None, *, db) -> [{id, name, instrument_id,
         instrument_name, file_name, missing, added_at}]           # never server paths
     set_instrument(standard_id, instrument_id | None, *, db) -> row   # LookupError
+    register(comp_dir, path, instrument_id | None, *, db) -> row       # LookupError
+    moved(comp_dir, old_path, new_path, *, db) -> row | None
+    forget(comp_dir, path, *, db) -> rows dropped
     for_sample(comp_dir, sample_instrument, *, db) -> [row + {cross_instrument, warning}]
     cross_instrument_warning(sample_inst_name, standard_name, standard_inst_name | None) -> str
     paths_for(comp_dir, instrument, *, db) -> [Path]
@@ -34,6 +43,7 @@ Stdlib + ``store`` only.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -129,6 +139,89 @@ def set_instrument(standard_id, instrument_id: Optional[str], *, db: store.Db = 
                                             (int(standard_id),)).fetchone()), names)
     log.warning("standards: %s tagged %s", out["name"], instrument_id)
     return out
+
+
+def register(comp_dir, path, instrument_id: Optional[str], *, db: store.Db = None) -> dict:
+    """Register ``path`` (a file just put in ``comp_dir``) tagged
+    ``instrument_id`` (``None`` = untagged): the tag wins over ``sync``'s (on
+    the folder's first use the migration tags the other files gc1, not this
+    one). A file already registered is re-tagged. ``LookupError`` (nothing
+    registered) for an unknown instrument."""
+    if instrument_id is not None and store.instruments.get(instrument_id, db=db) is None:
+        raise LookupError(f"unknown instrument {instrument_id!r}")
+    sync(comp_dir, db=db)
+    p = Path(path).resolve()
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            row = conn.execute("SELECT id FROM standards WHERE cdf_path=? ORDER BY id",
+                               (str(p),)).fetchone()
+            if row is None:
+                sid = conn.execute("INSERT INTO standards(name, instrument_id, cdf_path, added_at) "
+                                   "VALUES (?,?,?,?)", (p.stem, instrument_id, str(p),
+                                                        store.now_iso())).lastrowid
+            else:
+                sid = row["id"]
+                conn.execute("UPDATE standards SET instrument_id=? WHERE id=?", (instrument_id, sid))
+            names = {r["id"]: r["name"] for r in store.instruments.list(db=conn)}
+            out = _public(dict(conn.execute("SELECT * FROM standards WHERE id=?", (sid,)).fetchone()),
+                          names)
+    log.warning("standards: %s added, tagged %s", out["name"], instrument_id)
+    return out
+
+
+def _in_folder(comp_dir, *paths) -> list:
+    """*paths* resolved, each a file name directly in ``comp_dir`` (``ValueError`` otherwise)."""
+    base = Path(comp_dir).resolve()
+    out = [Path(p).resolve() for p in paths]
+    if any(p.parent != base for p in out):
+        raise ValueError(f"not a file in {base}")
+    return out
+
+
+def _rows_at(conn, path: Path) -> list:
+    """The rows registered for *path*, oldest first (as the OS compares paths:
+    case-insensitively on Windows)."""
+    want = os.path.normcase(str(path))
+    return [dict(r) for r in conn.execute("SELECT * FROM standards ORDER BY id")
+            if os.path.normcase(str(r["cdf_path"] or "")) == want]
+
+
+def moved(comp_dir, old_path, new_path, *, db: store.Db = None) -> Optional[dict]:
+    """A standard's file renamed within ``comp_dir`` (v8.1.1): its row
+    follows, name and path, keeping its tag. A stale row already at
+    ``new_path`` (its file gone) is dropped. ``None`` when ``old_path`` was
+    never registered (``sync`` registers the new file later)."""
+    old, new = _in_folder(comp_dir, old_path, new_path)
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            rows = _rows_at(conn, old)
+            if not rows:
+                return None
+            keep = rows[0]["id"]
+            for r in rows[1:] + _rows_at(conn, new):
+                if r["id"] != keep:
+                    conn.execute("DELETE FROM standards WHERE id=?", (r["id"],))
+            conn.execute("UPDATE standards SET name=?, cdf_path=? WHERE id=?",
+                         (new.stem, str(new), keep))
+            names = {r["id"]: r["name"] for r in store.instruments.list(db=conn)}
+            out = _public(dict(conn.execute("SELECT * FROM standards WHERE id=?",
+                                            (keep,)).fetchone()), names)
+    log.warning("standards: %s renamed to %s", old.stem, new.stem)
+    return out
+
+
+def forget(comp_dir, path, *, db: store.Db = None) -> int:
+    """Drop the row(s) of ``path``, a file just deleted from ``comp_dir`` or
+    already gone (a ``missing`` row) (v8.1.1). Returns how many were dropped."""
+    (p,) = _in_folder(comp_dir, path)
+    with store.connection(db) as conn:
+        with store.write_txn(conn):
+            rows = _rows_at(conn, p)
+            for r in rows:
+                conn.execute("DELETE FROM standards WHERE id=?", (r["id"],))
+    if rows:
+        log.warning("standards: %s removed", p.stem)
+    return len(rows)
 
 
 def cross_instrument_warning(sample_inst_name: str, standard_name: str,

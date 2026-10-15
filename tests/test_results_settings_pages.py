@@ -28,8 +28,8 @@ import settings as settings_mod  # noqa: E402
 JS = ROOT / "static" / "js"
 TPL = ROOT / "templates"
 NEW_JS = ["results_logic.js", "results.js", "settings_logic.js", "settings_page.js",
-          "notifications_panel.js", "admin_restart.js"]
-PAGES = ["results.html", "settings.html", "help.html"]
+          "notifications_panel.js", "admin_restart.js", "learn_logic.js", "learn.js"]
+PAGES = ["results.html", "settings.html", "help.html", "learn.html"]
 
 
 def _src(name: str) -> str:
@@ -81,6 +81,14 @@ def test_the_user_menu_opens_the_new_pages():
     assert 'href="/results"' in shell and 'data-nav="results"' in shell
 
 
+def test_learn_is_in_the_sidebar_and_help_points_to_it():
+    """v8.2: a Learn page (chromatograms, fuels, what we see most, how-to
+    tutorials) in the sidebar; Help sends readers there."""
+    shell = (TPL / "_shell.html").read_text(encoding="utf-8")
+    assert 'href="/learn"' in shell and 'data-nav="learn"' in shell
+    assert 'href="/learn"' in (TPL / "help.html").read_text(encoding="utf-8")
+
+
 def test_the_bell_is_the_panels_and_the_shell_only_opens_it():
     layout = (TPL / "_layout.html").read_text(encoding="utf-8")
     assert "js/notifications_panel.js" in layout and "css/notifications.css" in layout
@@ -116,7 +124,7 @@ def test_the_pages_answer_and_need_a_session(tmp_path):
     from bootapp import booted, get_text, post
     with booted(tmp_path) as (port, _proc, _data, _home):
         for path, testid in (("/results", "results-page"), ("/settings", "settings-page"),
-                             ("/help", "help-page")):
+                             ("/help", "help-page"), ("/learn", "learn-page")):
             html = get_text(port, path)
             assert f'data-testid="{testid}"' in html, path
             assert 'id="sidebar"' in html and 'id="bell-panel"' in html

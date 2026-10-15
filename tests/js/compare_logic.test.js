@@ -282,4 +282,47 @@ module.exports = (t) => {
     t.eq(L.paramSummary(d0, adjRanges).includes('Jet fuel cut C12–C18, Heavy C60–C80'), true);
     // labels are one line as the server keeps them (format characters too)
     t.eq(L.cleanLabel('Jet​fuel  cut﻿'), 'Jet fuel cut');
+
+    // v8.1: the export sheet's item; NO_COMPARISON (never a standard's name:
+    // names can't hold ':') builds the chromatogram alone
+    t.eq(/:/.test(L.NO_COMPARISON), true);
+    const sheet = { sample: { sample_id: 7, lab_id: '40304' }, title: 'GC Report',
+        edited: { Red: ' Mine. ' }, params: { x_max_min: 6.5 }, ranges: [{ label: 'Gas', c_start: 5, c_end: 11 }],
+        overlays: ['/std/Blue.CDF'] };
+    t.eq(L.exportItem(Object.assign({ standard: 'Red' }, sheet)), { sample_id: 7, lab_id: '40304',
+        sample_name: 'GC Report', standard_name: 'Red', conclusion: 'Mine.', params: { x_max_min: 6.5 },
+        ranges: [{ label: 'Gas', c_start: 5, c_end: 11 }], overlay_standards: ['/std/Blue.CDF'] });
+    t.eq(L.exportItem(Object.assign({ standard: L.NO_COMPARISON }, sheet)), { sample_id: 7, lab_id: '40304',
+        sample_name: 'GC Report', standard_name: '', no_comparison: true, conclusion: '',
+        params: { x_max_min: 6.5 }, ranges: [], overlay_standards: [] });
+    t.eq(L.exportItem(Object.assign({ standard: '' }, sheet)), null);          // nothing picked
+    t.eq(L.exportItem(Object.assign({}, sheet, { standard: 'Red', title: '' })).sample_name, 'GC Analysis Report');
+    t.eq(L.graphSummary({ x_max_min: 6.5 }), 'The chromatogram up to 6.5 min');
+    t.eq(L.graphSummary({}), 'The chromatogram up to ' + L.PARAM_DEFAULTS.x_max_min + ' min');
+
+    // v8.2: the report re-opened from the queue, for its own sample only
+    const handoff = JSON.stringify({ sample_id: '7', standard: 'Red', conclusion: ' Mine. ',
+        params: { thresh_marginal: 123, junk: 'x' }, ranges: [{ label: 'Bio', c_start: 19, c_end: 21 }] });
+    const restored = L.takeRestore(handoff, 7);
+    t.eq(restored.standard, 'Red');
+    t.eq(restored.conclusion, 'Mine.');
+    t.eq(restored.params, { thresh_marginal: 123 });
+    t.eq(restored.ranges.map(r => [r.id, r.label, r.c_start, r.c_end, typeof r.color]),
+         [[1, 'Bio', 19, 21, 'string']]);
+    t.eq(L.takeRestore(handoff, 8), null);                       // another sample's
+    t.eq(L.takeRestore('not json', 7), null);
+    t.eq(L.takeRestore(null, 7), null);
+    t.eq(L.takeRestore(JSON.stringify({ sample_id: '7', standard: '' }), 7), null);
+    t.eq(L.takeRestore(JSON.stringify({ sample_id: '7', standard: 'Red' }), 7).ranges, null);  // saved defaults
+    // an explicit standard (the address, a restored report) beats a remembered pick
+    t.eq(L.pickStandard({ explicit: 'B', remembered: 'A', standards: [{ name: 'A' }, { name: 'B' }] }),
+         { name: 'B', source: 'explicit' });
+
+    // v8.2: the list row's best fit is {label, score} (/api/files): its label
+    // names the standard (bulk reports used to fall back to the first one)
+    t.eq(L.pickStandard({ sampleBestFit: { label: 'Diesel', score: 0.97 },
+                          standards: [{ name: 'Diesel #2 Red Dye Std' }, { name: 'Diesel' }] }),
+         { name: 'Diesel', source: 'best' });
+    t.eq(L.pickStandard({ sampleBestFit: { label: 'Mix: A + B (80/20)', score: 0.95 },
+                          standards: [{ name: 'A' }, { name: 'B' }] }), { name: 'A', source: 'first' });
 };
