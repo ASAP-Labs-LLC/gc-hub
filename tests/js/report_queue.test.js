@@ -250,4 +250,21 @@ module.exports = (t) => {
     const st2 = Q.createStore(memStorage(), 'k2');
     st2.add(nc);
     t.eq(st2.items()[0].no_comparison, true);
+
+    // v8.2: a queue row opens its sample: Compare on the report's standard,
+    // with what the report is built with to restore there
+    const tgt = Q.openTarget(it);
+    t.eq(tgt.url, '/samples/40/compare?standard=Diesel%20ULSD%20Std');
+    t.eq(tgt.restore, { sample_id: '40', standard: 'Diesel ULSD Std', conclusion: 'Edited.',
+        params: { quantile: 0.2, window: 301, sigma: 34, thresh_marginal: 100, thresh_moderate: 500,
+                  thresh_significant: 2000, x_max_min: 7 },
+        ranges: [{ label: 'Gas', c_start: 5, c_end: 11, color: '#3fb95044' }] });
+    // no ranges captured: the saved defaults, so nothing to restore for them
+    const legacy = Q.normalizeItem({ sample_id: 9, standard_name: 'A&B', params: {} });
+    t.eq(Q.openTarget(legacy), { url: '/samples/9/compare?standard=A%26B',
+        restore: { sample_id: '9', standard: 'A&B', conclusion: '', params: {} } });
+    // a report with no comparison opens the sample's Overview
+    t.eq(Q.openTarget(nc), { url: '/samples/41', restore: null });
+    t.eq(Q.RESTORE_KEY, 'gc.compare.restore');
+    t.eq(Q.RESTORE_KEY, require('../../static/js/compare_logic.js').RESTORE_KEY);
 };

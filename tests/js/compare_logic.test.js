@@ -299,4 +299,22 @@ module.exports = (t) => {
     t.eq(L.exportItem(Object.assign({}, sheet, { standard: 'Red', title: '' })).sample_name, 'GC Analysis Report');
     t.eq(L.graphSummary({ x_max_min: 6.5 }), 'The chromatogram up to 6.5 min');
     t.eq(L.graphSummary({}), 'The chromatogram up to ' + L.PARAM_DEFAULTS.x_max_min + ' min');
+
+    // v8.2: the report re-opened from the queue, for its own sample only
+    const handoff = JSON.stringify({ sample_id: '7', standard: 'Red', conclusion: ' Mine. ',
+        params: { thresh_marginal: 123, junk: 'x' }, ranges: [{ label: 'Bio', c_start: 19, c_end: 21 }] });
+    const restored = L.takeRestore(handoff, 7);
+    t.eq(restored.standard, 'Red');
+    t.eq(restored.conclusion, 'Mine.');
+    t.eq(restored.params, { thresh_marginal: 123 });
+    t.eq(restored.ranges.map(r => [r.id, r.label, r.c_start, r.c_end, typeof r.color]),
+         [[1, 'Bio', 19, 21, 'string']]);
+    t.eq(L.takeRestore(handoff, 8), null);                       // another sample's
+    t.eq(L.takeRestore('not json', 7), null);
+    t.eq(L.takeRestore(null, 7), null);
+    t.eq(L.takeRestore(JSON.stringify({ sample_id: '7', standard: '' }), 7), null);
+    t.eq(L.takeRestore(JSON.stringify({ sample_id: '7', standard: 'Red' }), 7).ranges, null);  // saved defaults
+    // an explicit standard (the address, a restored report) beats a remembered pick
+    t.eq(L.pickStandard({ explicit: 'B', remembered: 'A', standards: [{ name: 'A' }, { name: 'B' }] }),
+         { name: 'B', source: 'explicit' });
 };

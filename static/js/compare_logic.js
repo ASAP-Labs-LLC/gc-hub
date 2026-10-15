@@ -178,6 +178,28 @@
         return parseAdjustments(list).filter(a => a.sample_id !== key);
     }
 
+    // ── v8.2: a queued report re-opened in Compare ──────────────────────────
+    // The report queue (report_queue.js openTarget) leaves what a report was
+    // built with here, for this tab, and opens its sample; Compare takes it
+    // once, for that sample only: {sample_id, standard, params, ranges?, conclusion}.
+    const RESTORE_KEY = 'gc.compare.restore';
+    /** -> {standard, params, ranges (with UI ids and colours; null = the saved
+        defaults), conclusion} for *sampleId*, or null. */
+    function takeRestore(raw, sampleId) {
+        let v;
+        try { v = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (_e) { return null; }
+        if (!v || typeof v !== 'object' || String(v.sample_id) !== String(sampleId)) return null;
+        if (typeof v.standard !== 'string' || !v.standard) return null;
+        return {
+            standard: v.standard,
+            params: payload.captureReportParams(v.params || {}),
+            ranges: Array.isArray(v.ranges) ? payload.rangesForPayload(v.ranges).map((r, i) => ({
+                id: i + 1, label: r.label, c_start: r.c_start, c_end: r.c_end,
+                color: r.color || RANGE_PALETTE[i % RANGE_PALETTE.length] })) : null,
+            conclusion: typeof v.conclusion === 'string' ? v.conclusion.trim() : '',
+        };
+    }
+
     // ── findings ────────────────────────────────────────────────────────────
     function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''; }
 
@@ -513,6 +535,7 @@
         defaultParams, analysisBody, standardFromSearch, comparePath,
         pickStandard, parsePicks, rememberPick, recallPick,
         ADJUST_CAP, parseAdjustments, rememberAdjustments, recallAdjustments, forgetAdjustments,
+        RESTORE_KEY, takeRestore,
         findingsView, draftFrom, validateAdjust, newRange, paramSummary,
         NO_COMPARISON, exportItem, graphSummary,
         withAlpha, carbonTicks, diffSpan, cleanLabel,

@@ -109,3 +109,7 @@ dialog.rq-sheet[open] { height: min(880px, calc(100vh - 64px)); }
 .rq-sheet .rq-stale-line .rq-stale { min-width: 0; }
 .rq-sheet .rq-stale-line .btn { flex: none; height: 24px; padding: 0 var(--s2); }
 .rq-list li > .pill, .rq-list li > .btn { margin-top: 0; }
+
+/* v8.2: a report's name opens its sample as the report shows it */
+.rq-sheet .rq-open { color: var(--text); text-decoration: none; flex: none; }
+.rq-sheet .rq-open:hover b, .rq-sheet .rq-open:focus-visible b { text-decoration: underline; }

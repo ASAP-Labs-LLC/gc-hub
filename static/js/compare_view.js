@@ -99,6 +99,16 @@
     function keptAdjustments(sampleId) {
         return sampleId == null ? null : L.recallAdjustments(loadAdjust(), sampleId);
     }
+    /** v8.2: the queued report re-opened for this sample (report_queue.js
+        openItem left it), taken once; null when there is none for it. */
+    function takeRestore(sampleId) {
+        if (sampleId == null) return null;
+        try {
+            const r = L.takeRestore(root.sessionStorage.getItem(L.RESTORE_KEY), sampleId);
+            if (r) root.sessionStorage.removeItem(L.RESTORE_KEY);
+            return r;
+        } catch (_e) { return null; }
+    }
     function savedOverlays(settings) {
         return root.overlaysFromSettings ? root.overlaysFromSettings(settings || {}) : [];
     }
@@ -160,21 +170,30 @@
             cleanups: [],
         };
         const sid = v.sample.sample_id;
-        // what this sample showed last in this tab, else the saved defaults
-        const kept = keptAdjustments(sid);
-        v.params = Object.assign(L.defaultParams(v.settings), kept ? kept.params : {});
-        v.overlays = kept ? kept.ranges : savedOverlays(v.settings);
+        // v8.2: a report re-opened from the queue: what it was built with;
+        // else what this sample showed last in this tab, else the saved defaults
+        const restore = takeRestore(sid);
+        const kept = restore ? null : keptAdjustments(sid);
+        v.params = Object.assign(L.defaultParams(v.settings), restore ? restore.params : kept ? kept.params : {});
+        v.overlays = restore ? (restore.ranges || savedOverlays(v.settings))
+            : kept ? kept.ranges : savedOverlays(v.settings);
         v.draft = L.draftFrom(v.params, v.overlays);
+        if (restore && restore.conclusion) v.edited[restore.standard] = restore.conclusion;
+        if (restore) rememberView(v);
 
         build(v);
         mounted.add(v);
 
-        // the standard: explicit (lane S calls setStandard) > remembered > best fit
+        // the standard: explicit (the address, a restored report) > remembered
+        // > best fit. v8.2: the address's standard is chosen here, so a
+        // remembered pick can't replace it in the address first.
+        const explicit = restore ? restore.standard : (o.standard || null);
         const remembered = L.recallPick(loadPicks(), sid);
-        const first = L.pickStandard({ remembered, sampleBestFit: v.sample.best_fit, standards: v.standards });
+        const first = L.pickStandard({ explicit, remembered, sampleBestFit: v.sample.best_fit,
+                                       standards: v.standards });
         if (!first) {
             renderEmpty(v, 'No comparison standards yet. An admin adds one from a sample (Settings, Comparison standards).');
-        } else if (first.source === 'remembered' || !bestFitEnabled(v.settings)) {
+        } else if (first.source === 'explicit' || first.source === 'remembered' || !bestFitEnabled(v.settings)) {
             choose(v, first.name, first.source, true);
         } else {
             // wait (briefly) for the best fit, so the first analysis is the right one
@@ -190,7 +209,8 @@
                 if (pick && pick.name !== v.standard) choose(v, pick.name, pick.source, true);
             });
         }
-        if (first && first.source === 'remembered' && bestFitEnabled(v.settings)) fetchBestFit(v);
+        if (first && (first.source === 'remembered' || first.source === 'explicit')
+                && bestFitEnabled(v.settings)) fetchBestFit(v);
 
         const handle = {
             unmount: () => unmount(v),

@@ -87,6 +87,24 @@
         return (items || []).map(it => payloadLib.buildReportItemPayload(it, undefined, undefined));
     }
 
+    // v8.2: a queued report re-opened on the Samples page. Compare takes the
+    // restore once, for its sample (compare_logic.js takeRestore, same key).
+    const RESTORE_KEY = 'gc.compare.restore';
+    /** Where a queue row opens its sample: {url, restore}. Compare on the
+        report's standard, restoring its parameters, its ranges (when it
+        captured any) and its edited conclusion; a report with no comparison
+        opens the sample's Overview (nothing to restore). */
+    function openTarget(item) {
+        const sid = item.sample_id;
+        if (item.no_comparison || !item.standard_name) return { url: '/samples/' + sid, restore: null };
+        const restore = { sample_id: String(sid), standard: item.standard_name,
+                          conclusion: String(item.conclusion || ''),
+                          params: payloadLib.captureReportParams(item.params || {}) };
+        if (Array.isArray(item.ranges)) restore.ranges = payloadLib.rangesForPayload(item.ranges);
+        return { url: '/samples/' + sid + '/compare?standard=' + encodeURIComponent(item.standard_name),
+                 restore };
+    }
+
     function createStore(storage, key) {
         const k = key || STORAGE_KEY;
         const listeners = [];
@@ -315,7 +333,7 @@
         return { needPassword: false, text };
     }
 
-    const pure = { STORAGE_KEY, UPLOAD_KEY, normalizeItem, payloads, createStore, buttonText,
+    const pure = { STORAGE_KEY, UPLOAD_KEY, RESTORE_KEY, normalizeItem, payloads, openTarget, createStore, buttonText,
         addedText, rangesLine, itemLines, statusText, isFinished, progress, overallView, failureLine, latestRows, reconcile,
         retryText, startRefusal };
     if (typeof module !== 'undefined' && module.exports) module.exports = pure;
@@ -538,7 +556,10 @@
                 // ranges on one (all of them on hover), Update beside its note
                 h('div', { className: 'rq-main' },
                     h('div', { className: 'rq-line' },
-                        h('b', { text: nameOf(it) }),
+                        // v8.2: the name opens the sample as this report shows it
+                        h('a', { className: 'rq-open', href: openTarget(it).url, 'data-testid': 'rq-open',
+                                 title: it.no_comparison ? 'Open this sample' : 'Open in Compare as this report shows it',
+                                 onclick: (ev) => openItem(ev, it) }, h('b', { text: nameOf(it) })),
                         h('span', { className: 'caption rq-meta', text: lines.meta, title: lines.meta })),
                     h('span', { className: 'caption rq-ranges', 'data-testid': 'rq-ranges',
                                 text: lines.ranges, title: lines.ranges }),
@@ -1035,6 +1056,30 @@
         up.needCreds = false;
         el.msg.textContent = 'Sent. The upload carries on.';
         render();
+    }
+
+    // v8.2: a queued report's sample, opened as the report shows it. On the
+    // Samples page the address changes in place (its popstate handler opens
+    // the view and keeps the list's filters); from another page, a navigation.
+    function openItem(ev, item) {
+        if (ev && (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button > 0)) return;   // a new tab: the link
+        if (ev) ev.preventDefault();
+        const tgt = openTarget(item);
+        try {
+            if (tgt.restore) session.setItem(RESTORE_KEY, JSON.stringify(tgt.restore));
+            else session.removeItem(RESTORE_KEY);
+        } catch (_e) { /* no storage: the standard still comes from the address */ }
+        if (sheet && sheet.open) sheet.close();
+        const S = root.GCSamples;
+        const R = root.SamplesRouter;
+        if (S && S.ready && S.state && S.state.route && R && typeof R.build === 'function') {
+            history.pushState(null, '', R.build(Object.assign({}, S.state.route, {
+                sampleId: Number(item.sample_id), view: tgt.restore ? 'compare' : 'overview',
+                standard: tgt.restore ? tgt.restore.standard : null })));
+            root.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+        } else {
+            root.location.assign(tgt.url);
+        }
     }
 
     // ── public API ──────────────────────────────────────────────────────────

@@ -1269,9 +1269,17 @@
         return S.standardsReady;
     }
 
+    /** v8.2: a queued report waits to be re-opened on this sample (report_queue.js). */
+    function restorePending(id) {
+        const CL = window.GCCompareLogic;
+        try {
+            return !!(CL && CL.takeRestore(window.sessionStorage.getItem(CL.RESTORE_KEY), id));
+        } catch (_e) { return false; }
+    }
+
     async function mountCompare() {
         const id = S.route.sampleId;
-        if (S.compare && S.compareFor === id) {
+        if (S.compare && S.compareFor === id && !restorePending(id)) {
             if (S.route.standard && S.compare.setStandard) S.compare.setStandard(S.route.standard);
             return;
         }
@@ -1289,6 +1297,7 @@
         try {
             S.compare = window.GCCompare.mount(el, {
                 sample: S.row, standards: S.standards, settings: S.settings,
+                standard: S.route.standard || null,       // v8.2: the address's, before a remembered pick
                 onUrlChange: (change) => {
                     if (!change || S.route.sampleId !== id || S.route.view !== 'compare') return;
                     if ('standard' in change) {
@@ -1546,6 +1555,7 @@
             if (R.filesQuery(before.filters) !== R.filesQuery(S.route.filters)) { S.sel = L.clear(); loadList(); }
             else if (before.filters.sort !== S.route.filters.sort) renderList();
             if (before.sampleId !== S.route.sampleId || before.view !== S.route.view) showDetailSafe();
+            else if (S.route.view === 'compare' && restorePending(S.route.sampleId)) mountCompare();   // v8.2
             else if (S.route.view === 'compare' && S.compare && S.compare.setStandard && S.route.standard && S.route.standard !== before.standard) {
                 S.compare.setStandard(S.route.standard);
             }

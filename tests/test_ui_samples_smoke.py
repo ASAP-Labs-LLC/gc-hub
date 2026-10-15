@@ -654,3 +654,90 @@ def test_back_from_a_missing_sample_shows_the_pick_a_sample_placeholder(page):
         _js(drv, "return document.querySelector('[data-testid=detail-empty]').textContent")
     assert _js(drv, "return document.querySelector('[data-testid=detail-empty]').hidden") is False
     assert _errors(drv, expected=("/api/samples/987654/metadata",)) == []
+
+
+# ── v8.2: a queued report re-opens on the Samples page ──────────────────────
+
+def _second_standard(hub, name="Second Std"):
+    import shutil
+    dst = hub.standards / f"{name}.CDF"
+    if not dst.exists():
+        shutil.copy2(hub.standards / "Diesel.CDF", dst)
+    return name
+
+
+def _compare_ready(drv, standard):
+    return wait_for(drv, lambda: _js(drv, "return !!(window.GCSamples && GCSamples.ready && GCSamples.state.compare)"
+                                          " && GCSamples.state.compare.standard()") == standard)
+
+
+def test_the_address_standard_beats_a_remembered_pick(page):
+    """v8.2: /samples/<id>/compare?standard=B opens B even when this tab
+    remembers a pick of A for the sample (it opened A: the remembered pick
+    was applied during mount and rewrote the address before it was read)."""
+    from urllib.parse import quote
+    drv, base, hub = page
+    sid = hub.ids["final"]
+    other = _second_standard(hub)
+    _open(drv, base, f"/samples/{sid}")
+    _js(drv, "localStorage.setItem('gc.compare.picks', JSON.stringify([[String(arguments[0]), 'Diesel']]));", sid)
+    try:
+        drv.get(f"{base}/samples/{sid}/compare?standard={quote(other)}")
+        assert _compare_ready(drv, other), _js(drv, "return GCSamples.state.compare && GCSamples.state.compare.standard()")
+        assert _path(drv) == f"/samples/{sid}/compare?standard={quote(other)}"
+    finally:
+        _js(drv, "localStorage.removeItem('gc.compare.picks');")
+
+
+def test_a_queued_report_reopens_in_compare_with_what_it_was_built_with(page):
+    """v8.2: a report in the queue is a link: from another page, and on the
+    Samples page with its sample already open, it opens the sample in
+    Compare on the report's standard with the parameters, ranges and edited
+    conclusion it was queued with; the sample's annotations are there too."""
+    from urllib.parse import quote
+    drv, base, hub = page
+    sid = hub.ids["final"]
+    other = _second_standard(hub)
+    _open(drv, base, f"/samples/{sid}")
+    made = drv.execute_async_script("""
+        const done = arguments[arguments.length - 1];
+        fetch('/api/samples/' + arguments[0] + '/comments', {method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({text: 'Shoulder here', t0: 1.2, t1: 1.6})})
+          .then(r => done(r.status)).catch(e => done(String(e)));""", sid)
+    assert made in (200, 201), made
+    item = {"sample_id": sid, "lab_id": "40304", "standard_name": other, "conclusion": "Restored conclusion.",
+            "params": {"thresh_marginal": 123, "x_max_min": 6.5},
+            "ranges": [{"label": "Bio", "c_start": 19, "c_end": 21}]}
+    _js(drv, "GCReportQueue.clear(); GCReportQueue.add(arguments[0], {quiet: true});", item)
+
+    def reopen():
+        _js(drv, "document.getElementById('report-queue-btn').click();")
+        assert wait_for(drv, lambda: _tid(drv, "rq-open") == 1)
+        _js(drv, "document.querySelector('[data-testid=rq-open]').click();")
+        assert _compare_ready(drv, other)
+        assert wait_for(drv, lambda: _path(drv) == f"/samples/{sid}/compare?standard={quote(other)}"), _path(drv)
+        assert _js(drv, "const d = document.querySelector('[data-testid=report-queue-sheet]'); return !d || !d.open;")
+        p = _js(drv, "return GCSamples.state.compare.params();")
+        assert float(p["thresh_marginal"]) == 123 and float(p["x_max_min"]) == 6.5, p
+        q = _js(drv, "return GCSamples.state.compare.queueItem();")
+        assert [r["label"] for r in q["ranges"]] == ["Bio"], q
+        assert wait_for(drv, lambda: _js(drv, "return document.querySelector('[data-testid=compare-conclusion-text]').textContent")
+                        == "Restored conclusion.")
+        assert wait_for(drv, lambda: any("Shoulder here" in (t or "") for t in _js(
+            drv, "const d = document.querySelector('[data-testid=compare-trend]');"
+                 "return d && d.layout ? (d.layout.annotations || []).map(a => a.text) : [];")))
+        assert _js(drv, "return sessionStorage.getItem('gc.compare.restore');") is None
+
+    # from another page (Results): a full navigation
+    drv.get(base + "/results")
+    assert wait_for(drv, lambda: _js(drv, "return !document.getElementById('report-queue-btn').hidden"))
+    reopen()
+    # on the Samples page, the same sample open in Compare on another standard: no reload
+    _js(drv, "GCSamples.state.compare.setStandard('Diesel');")
+    assert _compare_ready(drv, "Diesel")
+    _js(drv, "window.__sameDocument = true;")
+    reopen()
+    assert _js(drv, "return window.__sameDocument === true")
+    _js(drv, "GCReportQueue.clear();")
+    assert _errors(drv) == []
