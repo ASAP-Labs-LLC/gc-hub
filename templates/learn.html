@@ -1,0 +1,172 @@
+{% extends "_layout.html" %}
+{#- v8.2: Learn. Short notes for reading the GC: how a chromatogram reads,
+    what the fuels we test look like, what we see most (from the lab's own
+    runs, limits and reports) and what it means, and click-through tutorials
+    for the everyday steps. learn.js draws the sketches (learn_logic.js:
+    shapes on a carbon axis, not real runs) and plays the tutorials
+    (static/learn/tutorials.json and its screenshots, made by
+    tools/learn_capture.py). -#}
+{% block title %}Learn{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/learn.css') }}?v=1">{% endblock %}
+{% block topbar %}<h1>Learn</h1>{% endblock %}
+{% block content %}
+<main class="content learn" id="main" data-testid="learn-page">
+  <p class="lead">Short notes for reading the GC: how a chromatogram works, what the fuels we test look like,
+    what we see most and what it means, and how to do the everyday steps in the hub.</p>
+  <nav class="learn-toc" aria-label="On this page">
+    <a href="#read">Reading a chromatogram</a><a href="#fuels">The fuels we test</a>
+    <a href="#seen">What we see most</a><a href="#howto">How to</a>
+  </nav>
+
+  <section id="read" aria-labelledby="h-read" data-testid="learn-read">
+    <h2 id="h-read">Reading a chromatogram</h2>
+    <figure class="lc-hero">
+      <div class="lc-fig" data-sketch="diesel2" data-ticks="5" data-bands="5-11:Lighter,19-21:Bio,22-44:Heavier"
+           role="img" aria-label="Sketch of a Diesel #2 chromatogram with the lab's three ranges shaded"></div>
+      <figcaption>A sketch of Diesel #2 with the lab's ranges, drawn against carbon number. In the hub the bottom axis is
+        time and the carbon numbers run along the top; the shape is the same.</figcaption>
+    </figure>
+    <div class="cards">
+      <article class="lcard"><h3>Left is light, right is heavy</h3>
+        <p>The GC separates by boiling point. Time runs left to right and the lightest material comes off first.
+          The first moments are the solvent; the hub skips them.</p></article>
+      <article class="lcard"><h3>Carbon numbers along the top</h3>
+        <p>Each run's calibration (the n-alkane ladder) puts carbon numbers on the top axis, C5 near the start
+          to C44 at the end. No calibration, no carbon labels.</p></article>
+      <article class="lcard"><h3>The hump and the picket fence</h3>
+        <p>Diesel is a broad hump with a tall, thin peak at each carbon: the n-alkanes. Where the hump sits is the
+          boiling range; how wide it is, the cut.</p></article>
+      <article class="lcard"><h3>Shape, not height</h3>
+        <p>How tall the trace is depends on how much was injected. Compare shapes. Best fit compares area-scaled
+          traces for that reason.</p></article>
+      <article class="lcard"><h3>Trend: sample over standard</h3>
+        <p>In Compare the sample is the dark line, the standard the light grey area, the ranges shaded and the
+          carbons along the top.</p></article>
+      <article class="lcard"><h3>Difference: red more, blue less</h3>
+        <p>Sample minus standard. Red where the sample has more, blue where it has less. Marginal from 100,
+          moderate from 500, significant from 2000; sharp peaks are counted on their own.</p></article>
+      <article class="lcard"><h3>Ranges are carbon bands</h3>
+        <p>Ours are Lighter C5–C11, Bio C19–C21 and Heavier C22–C44. Each gets a verdict (higher, lower, or both)
+          and a size (marginal, moderate, significant).</p></article>
+      <article class="lcard"><h3>Screening, not proof</h3>
+        <p>Every conclusion ends: "This is a screening result only. It does not prove what is in the sample."
+          Back it up with flash, distillation and the other tests.</p></article>
+    </div>
+  </section>
+
+  <section id="fuels" aria-labelledby="h-fuels" data-testid="learn-fuels">
+    <h2 id="h-fuels">The fuels we test</h2>
+    <p class="note">Sketches, not real runs: each shape is placed from the lab's standards and limits.</p>
+    <div class="cards">
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="diesel2" role="img" aria-label="Sketch: Diesel #2"></div>
+        <h3>Diesel #2 (ULSD)</h3>
+        <ul><li>A broad hump with a picket fence, about C9–C25.</li>
+          <li>Our standard's 10 / 50 / 90% points: C10.6 / C15.4 / C21.0.</li>
+          <li>Flash at least 52 °C, T90 282–338 °C, cetane at least 40.</li>
+          <li class="often">About half of all our runs best-fit Diesel #2.</li></ul></article>
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="diesel1" role="img" aria-label="Sketch: Diesel #1"></div>
+        <h3>Diesel #1</h3>
+        <ul><li>The same picket fence, narrower and to the left: about C8–C17.</li>
+          <li>Flash at least 38 °C, T90 at most 288 °C.</li>
+          <li class="often">Rare on its own; usually blended into #2.</li></ul></article>
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="renewable" role="img" aria-label="Sketch: renewable diesel"></div>
+        <h3>Renewable diesel (R99, R100, HVO)</h3>
+        <ul><li>One tall, narrow band, mostly C15–C18, with little hump around it.</li>
+          <li>Boils over a narrow range (T50 close to T90). Low density, high cetane, no sulfur, 0% biodiesel.</li>
+          <li>Flash often high: 41375 flashed at 92.5 °C.</li>
+          <li class="often">About 4% of our runs, up to 19% in April 2026.</li></ul></article>
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="biodiesel" data-bands="19-21:Bio" role="img" aria-label="Sketch: biodiesel B100"></div>
+        <h3>Biodiesel, B100 (FAME)</h3>
+        <ul><li>No hump: a few large, separate peaks near C18–C21, in our Bio C19–C21 band.</li>
+          <li>Flash at least 93 °C, cetane at least 47 (ASTM D6751).</li></ul></article>
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="b20" data-std="diesel2" data-bands="19-21:Bio" role="img" aria-label="Sketch: a B20 blend over Diesel #2"></div>
+        <h3>Blends, B5 and B20</h3>
+        <ul><li>A diesel hump with sharp peaks standing up in the Bio band; taller for B20.</li>
+          <li>Up to 5% is allowed in straight diesel. B6–B20 is its own product (ASTM D7467).</li></ul></article>
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="gasoline" role="img" aria-label="Sketch: gasoline"></div>
+        <h3>Gasoline</h3>
+        <ul><li>Everything in the first minutes, about C4–C12: many sharp peaks, no hump.</li>
+          <li>Flash far below 0 °C. D86 final boiling point at most 210 °C.</li></ul></article>
+      <article class="lcard fuel" data-testid="learn-fuel"><div class="lc-fig" data-sketch="jet" role="img" aria-label="Sketch: jet fuel or kerosene"></div>
+        <h3>Jet A and kerosene</h3>
+        <ul><li>A narrow picket fence, about C8–C16. It looks like Diesel #1.</li>
+          <li>Flash at least 38 °C.</li></ul></article>
+    </div>
+  </section>
+
+  <section id="seen" aria-labelledby="h-seen" data-testid="learn-seen">
+    <h2 id="h-seen">What we see most</h2>
+    <p class="note">The grey area is the standard, the line the sample. How often: from the lab's past runs and flash results.</p>
+    <div class="cards">
+      <article class="lcard seen" data-testid="learn-seen-card"><div class="lc-fig" data-sketch="gasInDiesel" data-std="diesel2" data-bands="5-11:Lighter" role="img" aria-label="Sketch: gasoline in diesel"></div>
+        <h3>Gasoline in diesel</h3>
+        <dl><dt>On the GC</dt><dd>Extra sharp peaks in Lighter C5–C11, before the hump starts. Red at the far left of
+            the Difference chart; often an early high-signal flag and a best fit of Mix.</dd>
+          <dt>Why it matters</dt><dd>A little gasoline drops the flash a lot (one #2 and gasoline mix flashed at 19 °C).
+            A fire risk and a fail as diesel.</dd>
+          <dt>How often</dt><dd>About 1 in 70 samples.</dd></dl></article>
+      <article class="lcard seen" data-testid="learn-seen-card"><div class="lc-fig" data-sketch="mix12" data-std="diesel2" data-bands="5-11:Lighter" role="img" aria-label="Sketch: Diesel #1 in Diesel #2"></div>
+        <h3>Low flash, no gasoline</h3>
+        <dl><dt>On the GC</dt><dd>The hump sits wider to the left, around C9–C12, with no sharp early peaks. Best fit:
+            Mix: Diesel #2 + Diesel #1.</dd>
+          <dt>Why it matters</dt><dd>Likely #1, jet or kerosene in #2. It passes as #1 (38 °C) but fails as #2
+            (52 °C). The COA asks for a GC graph when flash is 52 °C or lower.</dd>
+          <dt>How often</dt><dd>About 1 in 90 flash results is 52 °C or lower.</dd></dl></article>
+      <article class="lcard seen" data-testid="learn-seen-card"><div class="lc-fig" data-sketch="renewable" data-std="diesel2" role="img" aria-label="Sketch: renewable diesel over Diesel #2"></div>
+        <h3>High flash</h3>
+        <dl><dt>On the GC</dt><dd>Less in Lighter than the standard (the light ends gone), or renewable's narrow band, or
+            FAME peaks in the Bio band.</dd>
+          <dt>Why it matters</dt><dd>Not a safety fail (flash is a minimum), but above 84 °C it is flagged and the COA
+            needs a graph that explains it.</dd>
+          <dt>How often</dt><dd>About 1 in 90 flash results is above 84 °C.</dd></dl></article>
+      <article class="lcard seen" data-testid="learn-seen-card"><div class="lc-fig" data-sketch="mix12" data-std="diesel1" role="img" aria-label="Sketch: a mix that fits no single standard"></div>
+        <h3>Fuel mixes</h3>
+        <dl><dt>On the GC</dt><dd>The shape fits no one standard. Best fit says "Mix: A + B (80/20)", or just "Mix";
+            a range reads both higher and lower. Stack the standards with Add trace.</dd>
+          <dt>Why it matters</dt><dd>Its properties fall between the parts: check flash, T90, cetane and biodiesel %
+            against what was declared.</dd>
+          <dt>How often</dt><dd>Common: mostly #2 with #1.</dd></dl></article>
+      <article class="lcard seen" data-testid="learn-seen-card"><div class="lc-fig" data-sketch="heavyEnd" data-std="diesel2" data-bands="22-44:Heavier" role="img" aria-label="Sketch: a heavy tail on diesel"></div>
+        <h3>Heavy end, oil</h3>
+        <dl><dt>On the GC</dt><dd>More than the standard in Heavier C22–C44: a tail on the right of the hump.</dd>
+          <dt>Why it matters</dt><dd>Raises T90 and the final boiling point (#2's T90 limit is 338 °C); can cost power
+            and fuel economy.</dd></dl></article>
+      <article class="lcard seen" data-testid="learn-seen-card"><div class="lc-fig" data-sketch="b20" data-std="diesel2" data-bands="19-21:Bio" role="img" aria-label="Sketch: biodiesel in diesel"></div>
+        <h3>Biodiesel in diesel</h3>
+        <dl><dt>On the GC</dt><dd>Sharp peaks above the hump in Bio C19–C21.</dd>
+          <dt>Why it matters</dt><dd>More than 5% in fuel sold as straight diesel means unintended blending; it also
+            brings cold-flow, water and oxidation risks.</dd></dl></article>
+      <article class="lcard seen" data-testid="learn-seen-card"><div class="lc-fig" data-sketch="renewable" data-std="renewable" role="img" aria-label="Sketch: a sample that matches its standard"></div>
+        <h3>Tank bottoms: water and sediment</h3>
+        <dl><dt>On the GC</dt><dd>Nothing: the trace matches its standard. The GC can't see water or dirt.</dd>
+          <dt>Why it matters</dt><dd>Water over 200 ppm is a warning, over 500 critical; water and sediment over
+            0.05% is flagged. Corrosion, bacteria, plugged filters. Say so in the conclusion (41375–41377).</dd></dl></article>
+    </div>
+  </section>
+
+  <section id="howto" aria-labelledby="h-howto" data-testid="learn-howto">
+    <h2 id="h-howto">How to</h2>
+    <p class="note">Short walk-throughs of the everyday steps. Press Watch; it plays by itself, or step through it.</p>
+    <div class="tut-grid" id="learn-tutorials" data-testid="learn-tutorials">
+      <p class="note" id="learn-tut-note">Loading the walk-throughs…</p>
+    </div>
+  </section>
+
+  <dialog class="sheet tut-sheet" id="tut-player" data-testid="tut-player" aria-labelledby="tut-title">
+    <div class="tut-head"><h2 id="tut-title"></h2><span class="tut-count" id="tut-count" data-testid="tut-count"></span>
+      <button type="button" class="icon-btn" id="tut-close" data-testid="tut-close" aria-label="Close" title="Close">✕</button></div>
+    <div class="tut-stage"><img id="tut-img" data-testid="tut-img" alt=""><span class="tut-box" id="tut-box" aria-hidden="true" hidden></span></div>
+    <p class="tut-caption" id="tut-caption" data-testid="tut-caption" aria-live="polite"></p>
+    <div class="tut-controls">
+      <button type="button" class="btn btn-sm" id="tut-prev" data-testid="tut-prev">Back</button>
+      <button type="button" class="btn btn-sm btn-primary" id="tut-play" data-testid="tut-play">Pause</button>
+      <button type="button" class="btn btn-sm" id="tut-next" data-testid="tut-next">Next</button>
+      <span class="tut-dots" id="tut-dots" role="group" aria-label="Steps"></span>
+    </div>
+  </dialog>
+</main>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/learn_logic.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/learn.js') }}?v=1"></script>
+{% endblock %}

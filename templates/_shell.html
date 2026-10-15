@@ -28,6 +28,9 @@
     <a class="nav-item{% if nav == 'instruments' %} active{% endif %}" href="/instruments" data-nav="instruments" title="Instruments"{% if nav == 'instruments' %} aria-current="page"{% endif %}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="6" rx="1.5"/><rect x="3.5" y="13.5" width="17" height="6" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>
       <span class="sb-label">Instruments</span></a>
+    <a class="nav-item{% if nav == 'learn' %} active{% endif %}" href="/learn" data-nav="learn" data-testid="nav-learn" title="Learn"{% if nav == 'learn' %} aria-current="page"{% endif %}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 6.5l9-3.5 9 3.5-9 3.5z"/><path d="M7 8.5v5c0 1.7 2.2 3 5 3s5-1.3 5-3v-5M21 6.5v6"/></svg>
+      <span class="sb-label">Learn</span></a>
     <a class="nav-item{% if nav == 'setup' %} active{% endif %}" href="/setup" id="nav-setup" data-nav="setup" data-testid="nav-setup" title="Setup guide"{% if nav == 'setup' %} aria-current="page"{% else %} hidden{% endif %}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7l2 2 3-4M4 16l2 2 3-4M13 7h7M13 16h7"/></svg>
       <span class="sb-label">Setup guide</span><span class="nav-meta" id="nav-setup-step"></span></a>
