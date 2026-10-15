@@ -149,8 +149,66 @@
             below: v('--dev-below', '#2563eb'), belowFill: v('--dev-below-fill', '#bfdbfe'),
             card: v('--bg-card', '#ffffff'), text: v('--text', '#0f172a'),
             bandText: v('--text-muted-sunken', '#5b6678'),     // AA over a band (test_ui_contrast)
+            warn: v('--warn', '#b45309'), warnSoft: v('--warn-soft', 'rgba(180,83,9,0.10)'),   // v8.3: Patterns
             font: v('--font', 'system-ui, sans-serif'),
         };
+    }
+
+    // ── v8.3: Patterns: the cases we see most, on the Trend chart ──────────
+    // GCLearn's cases (learn_logic.js, shared with the Learn page) applied to
+    // the standard on screen, its times turned into carbons with the run's
+    // own ladder: what this standard would look like with gasoline in it,
+    // a heavy end, water… Hovering a case shows it; a click keeps it.
+    function setPattern(v, id) {
+        v.pattern = id;
+        v.patternHover = null;
+        renderPatterns(v);
+        if (v.result) draw(v);
+    }
+    function hoverPattern(v, id) {
+        if (v.patternHover === id) return;
+        v.patternHover = id;
+        renderPatterns(v);
+        if (v.result) draw(v);
+    }
+    function hasLadder(r) {
+        return !!(r && Array.isArray(r.cal_times) && r.cal_times.length >= 2);
+    }
+    function renderPatterns(v) {
+        const PL = root.GCLearn;
+        const d = v.dom;
+        if (!PL || !d || !d.patBtns) return;
+        const r = v.result;
+        const placed = !r || hasLadder(r);
+        for (const b of d.patBtns) {
+            b.setAttribute('aria-pressed', b.getAttribute('data-pattern') === v.pattern ? 'true' : 'false');
+            b.disabled = !placed;
+        }
+        const id = v.patternHover || v.pattern;
+        const p = id ? PL.patterns().find(q => q.id === id) : null;
+        d.patNote.textContent = !placed ? 'Patterns need this run’s calibration (its carbon numbers) to be placed.'
+            : p ? `${p.see} ${p.check}` : '';
+        if (d.legendPat) {
+            d.legendPat.textContent = p && placed ? p.name + ' (sketch)' : '';
+            d.legendPat.hidden = d.legendPatSw.hidden = !(p && placed);
+        }
+    }
+    /** The shown case as a Trend trace and its band (null: none, or no ladder). */
+    function patternOverlay(v, r, c) {
+        const PL = root.GCLearn;
+        const id = v.patternHover || v.pattern;
+        if (!PL || !id || !r || !r.trend || !hasLadder(r)) return null;
+        const p = PL.patterns().find(q => q.id === id);
+        const cs = PL.carbonsAt(r.trend.standard_x, r.cal_times, r.cal_carbons);
+        if (!p || !cs) return null;
+        const name = p.name + ' (sketch)';
+        const trace = { x: r.trend.standard_x, y: PL.applyPattern(id, { c: cs, y: r.trend.standard_y }),
+            type: 'scatter', mode: 'lines', name: safe(name), line: { color: c.warn, width: 1.6, dash: 'dash' },
+            hovertemplate: '%{y:.0f}<extra>' + safe(name) + '</extra>' };
+        const shape = p.band ? { type: 'rect', xref: 'x', yref: 'paper', y0: 0, y1: 1, layer: 'below',
+            x0: PL.timeAt(p.band[0], r.cal_times, r.cal_carbons), x1: PL.timeAt(p.band[1], r.cal_times, r.cal_carbons),
+            fillcolor: c.warnSoft, line: { color: c.warn, width: 1 } } : null;
+        return { trace, shape };
     }
     const PLOT_CONFIG = { displayModeBar: false, responsive: true, displaylogo: false,
                           doubleClick: 'reset', scrollZoom: false };
@@ -166,6 +224,7 @@
             params: null, overlays: null, draft: null,
             result: null, bestFit: null, seq: 0, timer: null, alive: true,
             edited: {},              // standard -> the operator's conclusion
+            pattern: null, patternHover: null,                  // v8.3: Patterns
             editing: false, annotating: false, drawerOpen: false,
             cleanups: [],
         };
@@ -338,7 +397,9 @@
             h('span', { className: 'spacer' }),
             h('span', { className: 'cmp-legend', 'aria-hidden': 'true' },
                 h('i', { className: 'sw sw-sample' }), h('span', { text: lab }),
-                h('i', { className: 'sw sw-std' }), d.legendStd),
+                h('i', { className: 'sw sw-std' }), d.legendStd,
+                d.legendPatSw = h('i', { className: 'sw sw-pat', hidden: true }),
+                d.legendPat = h('span', { 'data-testid': 'compare-legend-pattern', hidden: true })),
             d.adjustBtn);
 
         // Trend
@@ -471,8 +532,23 @@
                 d.presetBtn, d.conclEdit),
             d.conclText, d.conclNote, d.conclForm, d.notes);
 
+        // v8.3: Patterns (GCLearn, when learn_logic.js is loaded)
+        const PL = root.GCLearn;
+        d.patNote = h('p', { className: 'caption cmp-pat-note', 'data-testid': 'compare-pattern-note', 'aria-live': 'polite' });
+        d.patBtns = PL ? PL.patterns().map(p => h('button', { type: 'button', className: 'cmp-pat',
+            'data-testid': 'compare-pattern-' + p.id, 'data-pattern': p.id, 'aria-pressed': 'false',
+            onclick: () => setPattern(v, v.pattern === p.id ? null : p.id),
+            onmouseenter: () => hoverPattern(v, p.id), onmouseleave: () => hoverPattern(v, null) }, p.name)) : null;
+        const patSec = PL ? h('section', { className: 'cmp-sec', 'data-testid': 'compare-patterns',
+                                           'aria-labelledby': 'cmp-pat-h' },
+            h('div', { className: 'cmp-sec-head' }, h('h3', { id: 'cmp-pat-h', text: 'Patterns' }),
+                h('span', { className: 'spacer' }), h('a', { className: 'caption', href: '/learn#seen', text: 'On Learn' })),
+            h('p', { className: 'caption', text: 'What each case would look like against this standard. Hover or pick one.' }),
+            h('div', { className: 'cmp-pats', role: 'group', 'aria-label': 'Patterns' }, d.patBtns),
+            d.patNote) : null;
+
         const main = h('div', { className: 'cmp-main' }, d.trendCard, d.diffCard);
-        const side = h('div', { className: 'cmp-side' }, findSec, conclSec);
+        const side = h('div', { className: 'cmp-side' }, findSec, patSec, conclSec);
         const wrap = h('div', { className: 'cmp', 'data-testid': 'compare', 'data-sample': String(v.sample.sample_id) },
             toolbar, h('div', { className: 'cmp-body' }, main, side));
 
@@ -613,11 +689,14 @@
                 name: safe(lab), line: { color: c.ink, width: 1.5 },
                 hovertemplate: '%{x:.2f} min · %{y:.0f}<extra>' + safe(lab) + '</extra>' });
         }
+        renderPatterns(v);
+        const pat = patternOverlay(v, r, c);                    // v8.3: Patterns
+        if (pat) trendTraces.push(pat.trace);
         const ticks = L.carbonTicks(r.cal_times, r.cal_carbons);
         const bands = bandShapes(c, r.windows, true);
         const notes = annotationOverlay(v, c);
         const trendLayout = baseLayout(c, {
-            shapes: bands.shapes.concat(notes.shapes),
+            shapes: bands.shapes.concat(notes.shapes, pat && pat.shape ? [pat.shape] : []),
             annotations: bands.labels.concat(notes.labels),
             dragmode: v.annotating ? 'select' : 'zoom', selectdirection: 'h',
         });

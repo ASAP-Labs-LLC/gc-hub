@@ -66,7 +66,7 @@ def test_the_learn_page_in_both_themes_at_every_size(page, theme, size):
     for sec in ("learn-read", "learn-fuels", "learn-seen", "learn-howto"):
         assert _js(drv, f"return !!document.querySelector('[data-testid={sec}]')"), sec
     assert _js(drv, "return document.querySelectorAll('[data-testid=learn-fuel]').length") == 7
-    assert _js(drv, "return document.querySelectorAll('[data-testid=learn-seen-card]').length") == 7
+    assert _js(drv, "return document.querySelectorAll('[data-testid=learn-case]').length") == 7
     if size[0] >= 1000:
         assert _js(drv, "return document.querySelector('[data-testid=nav-learn]').getAttribute('aria-current')") == "page"
     js = CONTRAST_JS
@@ -89,7 +89,8 @@ def test_a_walk_through_plays_and_steps(page):
     drv, base = page
     _open(drv, base, "light", (1440, 900))
     ids = [t["id"] for t in MANIFEST["tutorials"]]
-    assert wait_for(drv, lambda: _js(drv, "return document.querySelectorAll('[data-testid=learn-tutorial]').length") == len(ids))
+    assert wait_for(drv, lambda: _js(drv, "return document.querySelectorAll('[data-testid=learn-tutorial]').length")
+                    == len(ids) + 1)                                   # v8.3: the lesson first
     first = MANIFEST["tutorials"][0]
     n = len(first["steps"])
     _js(drv, f"document.querySelector('[data-testid=learn-watch-{first['id']}]').click();")
@@ -126,3 +127,73 @@ def test_help_sends_readers_to_learn(page):
     drv, base = page
     drv.get(base + "/help")
     assert wait_for(drv, lambda: _js(drv, "return !!document.querySelector('[data-testid=help-page] a[href=\"/learn\"]')"))
+
+
+def test_the_lesson_steps_through_its_parts_of_the_chart(page):
+    """v8.3: Reading a chromatogram is a self-paced lesson: Next / Back / a
+    dot, each step marking its part of the chart; the last step offers to
+    start over; How to lists it first."""
+    drv, base = page
+    _open(drv, base, "light", (1440, 900))
+    count = "return document.querySelector('[data-testid=lesson-count]').textContent"
+    title = "return document.querySelector('[data-testid=lesson-title]').textContent"
+    n = int(_js(drv, count).split(" of ")[1])
+    assert _js(drv, count) == f"Step 1 of {n}" and 8 <= n <= 12
+    assert _js(drv, title) == "Time runs left to right"
+    assert _js(drv, "return document.querySelectorAll('#lesson-chart .lc-focus').length") > 0
+    first = _js(drv, title)
+    _js(drv, "document.querySelector('[data-testid=lesson-next]').click();")
+    assert _js(drv, count) == f"Step 2 of {n}" and _js(drv, title) != first
+    _js(drv, "document.querySelectorAll('#lesson-dots button')[3].click();")       # Find the hump
+    assert _js(drv, title) == "Find the hump"
+    assert _js(drv, "return [...document.querySelectorAll('#lesson-chart text.lc-band-on-label')].map(t => t.textContent)") == ["Hump"]
+    _js(drv, "document.querySelectorAll('#lesson-dots button')[9].click();")       # the difference
+    assert _js(drv, "return !!document.querySelector('#lesson-chart .lc-above') && !!document.querySelector('#lesson-chart .lc-below')")
+    _js(drv, f"document.querySelectorAll('#lesson-dots button')[{n - 1}].click();")
+    assert _js(drv, "return document.querySelector('[data-testid=lesson-next]').textContent") == "Start over"
+    _js(drv, "document.querySelector('[data-testid=lesson-next]').click();")
+    assert _js(drv, count) == f"Step 1 of {n}"
+    assert wait_for(drv, lambda: _js(drv, "return document.querySelector('[data-testid=learn-tutorial] button').dataset.testid")
+                    == "learn-watch-lesson")
+
+
+def test_the_cases_share_one_chart_against_diesel_2(page):
+    """v8.3: What we see most is one chart: Diesel #2 (grey) with every case
+    over it; the picked case is bold with its band and its difference, and
+    its notes are beside it; water is a flat curve."""
+    drv, base = page
+    _open(drv, base, "light", (1440, 900))
+    names = _js(drv, "return [...document.querySelectorAll('[data-testid=learn-case]')].map(b => b.textContent)")
+    assert names[0] == "Gasoline in diesel" and "Water: a flat curve" in names, names
+    assert _js(drv, "return document.querySelector('[data-testid=learn-case]').getAttribute('aria-pressed')") == "true"
+    assert _js(drv, "return document.querySelectorAll('#cases-chart path.lc-case').length") == 6
+    assert _js(drv, "return document.querySelectorAll('#cases-chart path.lc-case-on').length") == 1
+    detail = "return document.querySelector('[data-testid=case-detail]').textContent"
+    assert "Lighter C5–C11" in _js(drv, detail)
+    _js(drv, "[...document.querySelectorAll('[data-testid=learn-case]')].find(b => b.textContent.startsWith('Water')).click();")
+    assert "check the water content" in _js(drv, detail)
+    assert _js(drv, "return [...document.querySelectorAll('[data-testid=learn-case]')].filter(b => b.getAttribute('aria-pressed') === 'true').map(b => b.textContent)") == ["Water: a flat curve"]
+    assert _js(drv, "return document.querySelectorAll('#cases-chart .lc-band-on').length") == 0   # water: the whole curve
+
+
+@pytest.mark.skipif(MANIFEST is None or not any("image_dark" in st for t in MANIFEST["tutorials"] for st in t["steps"]),
+                    reason="no dark screenshots yet")
+def test_the_walk_throughs_follow_the_theme(page):
+    """v8.3: in the dark theme the player shows the dark screenshots, and
+    switching the theme switches them."""
+    drv, base = page
+    _open(drv, base, "dark", (1440, 900))
+    first = MANIFEST["tutorials"][0]
+    assert wait_for(drv, lambda: _js(drv, f"return !!document.querySelector('[data-testid=learn-watch-{first['id']}]')"))
+    _js(drv, f"document.querySelector('[data-testid=learn-watch-{first['id']}]').click();")
+    assert wait_for(drv, lambda: _js(drv, "return document.querySelector('[data-testid=tut-player]').open"))
+    _js(drv, "document.querySelector('[data-testid=tut-play]').click();")          # pause on step 1
+    src = "return document.querySelector('[data-testid=tut-img]').getAttribute('src')"
+    assert _js(drv, src).endswith("/" + first["steps"][0]["image_dark"]), _js(drv, src)
+    assert wait_for(drv, lambda: _js(drv, "const i = document.querySelector('[data-testid=tut-img]'); return i.complete && i.naturalWidth"))
+    if SHOTS:
+        Path(SHOTS).mkdir(parents=True, exist_ok=True)
+        drv.save_screenshot(str(Path(SHOTS) / "learn-player-dark.png"))
+    assert _js(drv, CONTRAST_JS) == []
+    _js(drv, "document.documentElement.setAttribute('data-theme', 'light');")
+    assert wait_for(drv, lambda: _js(drv, src).endswith("/" + first["steps"][0]["image"]))

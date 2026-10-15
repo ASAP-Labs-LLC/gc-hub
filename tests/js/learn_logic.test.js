@@ -70,4 +70,78 @@ module.exports = (t) => {
     bad.tutorials[0].steps[0].box = [0.9, 0.1, 0.2, 0.05];
     bad.tutorials[0].steps[1].image = '../../etc/passwd';
     t.eq(G.checkManifest(bad).length, 2);
+
+    // ── v8.3: the cases as what they do to a reference curve (Learn's chart,
+    // Compare's Patterns): on a carbon axis, any reference
+    const ids = G.patterns().map(p => p.id);
+    t.eq(ids, ['gas', 'light', 'highflash', 'mix', 'heavy', 'bio', 'water']);
+    for (const p of G.patterns()) {
+        t.eq([typeof p.name, typeof p.see, typeof p.why, typeof p.check].every(x => x === 'string'), true);
+        t.eq(p.name.length <= 40 && p.see.length <= 220 && p.why.length <= 220 && p.check.length <= 120, true);
+        t.eq(p.band === null ? p.id === 'water'                         // water: the whole curve
+             : p.band[0] < p.band[1] && p.band[0] >= 4 && p.band[1] <= 44, true);
+        t.eq('apply' in p, false);                                     // data only
+    }
+    const ref = { c: G.sketch('diesel2').x, y: G.sketch('diesel2').y.map(v => v * 5000) };   // any scale
+    const sum = (y, lo, hi) => y.reduce((a, v, i) => a + (ref.c[i] >= lo && ref.c[i] <= hi ? v : 0), 0);
+    const by = {};
+    for (const id of ids) {
+        const y = G.applyPattern(id, ref);
+        t.eq(y.length === ref.y.length && y.every(v => Number.isFinite(v) && v >= 0), true);
+        by[id] = y;
+    }
+    t.eq(sum(by.gas, 5, 11) > 1.5 * sum(ref.y, 5, 11), true);           // gasoline: more light end
+    t.eq(sum(by.light, 8, 13) > 1.2 * sum(ref.y, 8, 13), true);         // #1/jet: a lighter shoulder
+    t.eq(sum(by.highflash, 5, 9) < 0.3 * sum(ref.y, 5, 9), true);       // light ends gone
+    t.eq(Math.abs(sum(by.highflash, 16, 30) - sum(ref.y, 16, 30)) < 1e-6 * sum(ref.y, 16, 30) + 1e-9, true);
+    t.eq(Math.max(...by.mix.filter((_v, i) => ref.c[i] >= 15 && ref.c[i] <= 18))
+         > Math.max(...ref.y.filter((_v, i) => ref.c[i] >= 15 && ref.c[i] <= 18)), true);      // renewable band
+    t.eq(sum(by.heavy, 22, 44) > 1.5 * sum(ref.y, 22, 44), true);       // heavy tail
+    t.eq(Math.max(...by.bio.filter((_v, i) => ref.c[i] >= 19 && ref.c[i] <= 21))
+         > 1.3 * Math.max(...ref.y.filter((_v, i) => ref.c[i] >= 19 && ref.c[i] <= 21)), true); // FAME spikes
+    t.eq(Math.max(...by.water) < 0.12 * Math.max(...ref.y), true);    // water: a flat curve
+    t.eq(G.applyPattern('nope', ref), null);
+    t.eq(G.applyPattern('gas', null), null);
+
+    // time <-> carbon through a run's calibration ladder (Compare's x axis)
+    const calT = [1.0, 2.0, 4.0], calC = [6, 10, 20];
+    t.eq(G.carbonsAt([1.0, 1.5, 3.0, 4.0], calT, calC), [6, 8, 15, 20]);
+    t.eq(G.carbonsAt([0.5, 5.0], calT, calC), [4, 25]);                 // the end slopes beyond the ladder
+    t.eq(G.carbonsAt([1, 2], [1], [6]), null);                          // no ladder, no carbons
+    t.eq(G.timeAt(15, calT, calC), 3);
+    t.eq(G.timeAt(4, calT, calC), 0.5);
+
+    // the difference between two curves, filled: red where b is above a, blue below
+    const dbox = { x: 0, y: 0, w: 40, h: 10 };
+    const two = G.diffD({ x: [4, 24, 44], y: [0.5, 0.5, 0.5] }, { x: [4, 24, 44], y: [0.5, 1, 0] }, dbox, [4, 44]);
+    t.eq(two.above.startsWith('M') && two.above.endsWith('Z') && two.below.endsWith('Z'), true);
+    t.eq(two.above.includes('20.0 0.0'), true);                          // the sample's peak, above
+    t.eq(two.below.includes('40.0 10.0'), true);                         // the sample's dip, below
+
+    // the lesson: steps that name their part of the chart
+    const lesson = G.lesson();
+    t.eq(lesson.length >= 8 && lesson.length <= 12, true);
+    lesson.forEach((st, i) => {
+        t.eq(typeof st.title === 'string' && st.title.length <= 48 && typeof st.text === 'string'
+             && st.text.length >= 40 && st.text.length <= 280, true);
+        if (st.band) t.eq(st.band[0] >= 4 && st.band[1] <= 44 && st.band[0] < st.band[1], true);
+        if (st.sample) t.eq(ids.includes(st.sample), true);
+        t.eq(['axis', 'ticks', 'solvent', null].includes(st.focus || null), true);
+    });
+    t.eq(lesson.some(st => st.diff) && lesson.some(st => st.focus === 'solvent'), true);
+    t.eq(G.sketch('withSolvent').y.every(v => v <= 1), true);
+    // the lesson is self-paced: it starts paused
+    t.eq(G.player(lesson.length, false), { i: 0, n: lesson.length, playing: false });
+
+    // the manifest's dark set (v8.3)
+    const dark = JSON.parse(JSON.stringify(good));
+    dark.tutorials[0].steps[0].image_dark = 'shots/dark/search-1.webp';
+    dark.tutorials[0].steps[0].box_dark = [0.1, 0.1, 0.2, 0.05];
+    t.eq(G.checkManifest(dark), []);
+    dark.tutorials[0].steps[0].image_dark = 'shots/search-1.webp';         // not in shots/dark/
+    dark.tutorials[0].steps[0].box_dark = [0.9, 0.9, 0.2, 0.2];
+    t.eq(G.checkManifest(dark).length, 2);
+    t.eq(G.stepImage(good.tutorials[0].steps[0], 'dark'), { image: 'shots/search-1.webp', box: [0.1, 0.1, 0.2, 0.05] });
+    t.eq(G.stepImage({ image: 'shots/a.webp', box: null, image_dark: 'shots/dark/a.webp', box_dark: [0, 0, 0.5, 0.5] }, 'dark'),
+         { image: 'shots/dark/a.webp', box: [0, 0, 0.5, 0.5] });
 };
